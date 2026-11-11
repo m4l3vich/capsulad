@@ -29,8 +29,24 @@ the implementation is honest about what is verified on real hardware and what is
   brightness, assistant and touch behaviour, microphone and muted indication, device timezone),
   Access (admin password, static API keys, public certificate download), Diagnostics (hardware,
   firmware, software, runs, resources, logs).
-- **Bluetooth facade** through `hciconfig`: adapter presence, power and discoverability, with the
-  vendor stack still owning pairing and profiles.
+- **Media player sample provider**: `apps/media` implements the standard
+  `capsula.contracts.media.v1.MediaPlayerService` over the app bus — unary commands plus a
+  server-streaming `WatchPlayers` whose first event is a snapshot — and plays a synthesized local
+  playlist through the framework audio mixer. The Web UI discovers and controls it like any other
+  provider; no app listens on its own socket.
+- **Framework-owned boot service**: `deploy/rockchip-stock/S60capsulad` starts the daemon after
+  mount, microphone-gate and PulseAudio init, gates on `capsulad -health`, and starts the preserved
+  vendor chain if the daemon cannot become healthy. The stock assistant init scripts are retired on
+  the deployed unit.
+- **In-place daemon upgrades**: `capsula daemon install -binary PATH` proves the replacement runs,
+  stages it beside the live binary, swaps by rename, restarts through the boot service and checks
+  the framework API; any failure restores the previous binary. `capsula daemon rollback` restores
+  the preserved one.
+- **Bounded operational footprint**: the daemon log rotates at 512 KiB and keeps one backup, the
+  negative-training corpus path is configurable and is not a runtime dependency, and new wakeword
+  recordings or training are refused below 2 MiB of free `/data`.
+- **Bluetooth facade** through `hciconfig`: adapter presence, power and discoverability. Pairing
+  and profiles stay with BlueZ and the vendor helpers; the framework does not claim them.
 - **Physical controls**: the circle (play/pause) key is the talk button — hold it past 700 ms to summon
   the assistant, release to end the turn, short taps do nothing. Volume keys step 5 %, ramp while held
   (200 ms decaying to 60 ms) and stop at the bounds; each change plays a synthesized percussive tick at
@@ -65,12 +81,12 @@ the implementation is honest about what is verified on real hardware and what is
 
 - **QuickJS and MicroPython host runners are not implemented.** `ListRuntimes` reports them
   unavailable and the supervisor refuses those packages. No fake interpreter is shipped.
-- **Rockchip vendor LED ABI is recovered and partly validated.** The device tree describes a
-  36-channel WS2812B chain (`/dev/topleds`, 12 RGB ring pixels) and an IS31FL3236
-  (`/dev/led_multi_ctrl`, 30 monochrome display cells); the recovered `GET_COUNT` ioctl returns
-  exactly 36 and 30 on a live unit, which confirms the ioctl family. The `MULTI_SET` frame path,
-  face parity and segment bit order still require visual validation on a unit. Standard Linux
-  `sysfs` LED class devices and evdev remain fallbacks.
+- **Rockchip vendor LED ABI is recovered, measured and partly validated.** The device tree
+  describes a 36-channel WS2812B chain (`/dev/topleds`, 12 RGB ring pixels) and an IS31FL3236
+  (`/dev/led_multi_ctrl`, 30 monochrome display cells); `GET_COUNT` returns exactly 36 and 30 on a
+  live unit, the segment channel map came from `cmd/ledmap`, the clock face renders correctly, and
+  the ring shows pixel 0 at 12 o'clock, travels clockwise and renders RGB correctly. Gamma is
+  unmeasured (no photometer). Standard Linux `sysfs` LED class devices and evdev remain fallbacks.
 - **Amlogic stock/Alpine backends are not implemented.** Selecting those platforms fails explicitly
   instead of pretending to be hardware.
 - **The Web UI certificate is self-signed.** Browsers show a trust warning until the operator
@@ -93,6 +109,7 @@ make all apps
 mkdir -p build/demo
 ./build/bin/capsula -data-dir build/demo app install build/apps/org.capsula.clock
 ./build/bin/capsula -data-dir build/demo app install build/apps/org.capsula.assistant
+./build/bin/capsula -data-dir build/demo app install build/apps/org.capsula.media
 ./build/bin/capsula -data-dir build/demo app install build/apps/org.example.ring-controller
 ./build/bin/capsula -data-dir build/demo auth init -hostname localhost -ip 127.0.0.1
 ./build/bin/capsulad -platform simulator -data-dir build/demo -dev-admin build/demo/run/dev.sock
@@ -125,7 +142,19 @@ The rest of the CLI uses the framework Unix socket as before:
 ./build/bin/capsula -data-dir build/demo dev wakeword            # simulator activation
 ./build/bin/capsula -data-dir build/demo dev state               # virtual display/ring frames
 ./build/bin/capsula -data-dir build/demo app provenance org.capsula.clock
+./build/bin/capsulad -health -socket build/demo/run/hal.sock     # exit 0 when the API answers
 ```
+
+On the device the same CLI performs staged upgrades through the boot service:
+
+```sh
+capsula -data-dir /data/capsdemo daemon install -binary /tmp/capsulad.new
+capsula -data-dir /data/capsdemo daemon rollback
+```
+
+`capsulad -health` is the readiness probe used by the boot service and the upgrade path. Exit 0
+means the framework API answers, exit 1 means it does not, and a pre-upgrade binary without the
+flag exits 2, which the boot service treats as "running but not probeable".
 
 On macOS this project builds with `-linkmode=external` because the local Go linker currently emits
 Mach-O binaries that current dyld rejects (missing `LC_UUID`). The Makefile handles that; Linux
@@ -159,7 +188,8 @@ capsulad -platform rockchip-stock \
 | `internal/provenance` | Sigstore/GitHub attestation verification |
 | `internal/webui` | password/API-key HTML interface |
 | `sdk/go/capsula` | Go SDK (bus, routed calls, presentations, audio, captures) |
-| `apps/{clock,assistant,ring}` | sample supervised applications |
+| `apps/{clock,assistant,media,ring}` | sample supervised applications |
+| `deploy/rockchip-stock` | boot service and bring-up scripts for the RK3308 stock image |
 | `proto/` | draft v0.5 schemas plus the example ring contract (copies add only `go_package` options for codegen) |
 | `docs/` | hardware findings, implementation status, security notes |
 
@@ -171,8 +201,10 @@ make test
 
 Tests cover routing/capture semantics, preset validation, touch delivery/system suppression and
 cancellation, settings CAS and secret redaction, self-signed TLS, password sessions, API-key
-accept/revoke and CSRF, genuine Sigstore fixture verification, and an end-to-end simulator run (supervision, singleton invocation, routed
-unary/streaming calls, touch partial/full capture, crash cleanup, wakeword capture/release, mic
+accept/revoke and CSRF, genuine Sigstore fixture verification, bounded log rotation, and an
+end-to-end simulator run (supervision, singleton invocation, routed unary/streaming calls, the
+media provider's snapshot-first routed streaming, touch partial/full capture, crash cleanup,
+wakeword capture/release, mic
 watchdog and masked settings). The Web UI is additionally tested through login/session, CSRF and
 static API-key flows.
 

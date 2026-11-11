@@ -34,12 +34,16 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 | Talk button (circle key) + volume keys | implemented and exercised on the unit: hold 700 ms activates (manual origins do not require a trained keyword model), release ends the turn, short taps do nothing; volume taps ±5 %, held ramps accelerate 200→60 ms and stop at bounds, with a generated tick and a 1 s percentage overlay | `buttons5.log`: activation → conversation → capture → input released |
 | Microphone key toggle + muted indication | implemented, verified on hardware | one mute per tap (`TestDiscreteKeysActOnPressOnly`), red run pixels 5–7 with fade-in/out |
 | Web UI restructure (overview, settings, access, diagnostics) | implemented and exercised over HTTPS on the unit: all four pages render, volume/settings round-trip, API-key create+revoke works, certificate downloads as PEM | live checks against the daemon |
-| Bluetooth status and discoverability | implemented via `hciconfig` (`hci0`), verified On/Off flips PSCAN; pairing/profiles remain owned by the vendor stack | `hciconfig hci0` before/after the toggle |
+| Bluetooth status and discoverability | implemented via `hciconfig` (`hci0`), verified On/Off flips PSCAN; pairing/profiles stay with BlueZ and the vendor helpers, untested without `voice-agent`/`btctl` | `hciconfig hci0` before/after the toggle |
 | Display/ring brightness: constant or ambient-light | implemented with the **stock mapping** recovered from the light handler: `trunc(log(0.75+0.05*lux)*19.9375)` clamped to [5,95] %, off below 5 lux, full above 32768 lux, with the vendor's 5-point deadband and an animated transition. At 7.3 lux the framework writes 13/255; the stock unit wrote 14/255 at 7.4 lux | disassembly of 0x27ca68-0x27cc24, LED-class brightness cross-check, `TestAmbientBrightnessMatchesStockCurve` |
 | Device timezone (Web UI) with per-app override | implemented, validated end to end | Web UI round-trip restarts boot apps; clock re-reads `TZ` (11:59 MSK ↔ 16:59 Asia/Shanghai) |
 | Rockchip DT key map (volume, mic, play/pause, voice) | implemented | device-tree parser + tests |
 | Rockchip ambient-light and thermal sensors | implemented | IIO/thermal sysfs tests |
 | Web UI pages (all settings, apps, media, diagnostics) | implemented | login/API-key page + CSRF form tests |
+| Media player sample provider (`org.capsula.media`) | implemented and exercised on the unit: the app advertises `capsula.contracts.media.v1.MediaPlayerService`, the Web UI discovers its one player, unary Play/Pause round-trip through the app bus, and `WatchPlayers` streams a snapshot first and updates on every command; the mixer logged stream `pbs_…` opening and closing | `TestMediaProviderRoutedStreaming`; live UI play/pause over HTTPS |
+| Framework boot ownership on the stock image | deployed and verified across two power cycles: `/etc/init.d/S60capsulad` starts the daemon after mount, GPIO 21 and PulseAudio init; `S99btctl.sh` is the pivot-safe hook because rcS expands its script list before S23 pivots into the overlay; the vendor assistant init scripts are retired | `boot.log` start/healthy lines, `capsulad -health`, three apps `APP_READY` after reboot, `/dev/watchdog armed` |
+| In-place daemon upgrade with rollback | implemented and exercised: executable check, staged rename beside the live binary, restart through the boot service, framework-API health gate, previous binary preserved; `capsula daemon rollback` is the inverse | host simulator install+rollback drill, live install on the unit (21,954,712 → 21,889,176 bytes), health after restart |
+| Bounded logs and storage guard | implemented: 512 KiB log file plus one rotated copy, configurable `-wakeword-negatives`, and a 2 MiB free-space floor for new takes and training | `internal/logbus` rotation tests; deployed `/data` at 93 % |
 | Personal wakeword embedding engine and training | implemented: incremental Google/openWakeWord backbone, ARM64 NEON, shared-projection head, on-device training and atomic replacement; strict warm `CNEG0002` corpus with real same-split preroll; legacy models and cold corpora refused | ONNX/kernel parity, gradient checks, real Mini frontend 37.9 ms/output, production loader accepts the 872-stream gzip corpus; `word.personal` installed and selected after full native training (670.6 s; on-device A35 replay 6/6 words, 9/9 backgrounds) and a one-shot 237-clip fresh negative set with zero false activations; personal trial, not field certified; see [WAKEWORD.md](WAKEWORD.md) |
 
 ## Explicitly unavailable
@@ -61,8 +65,6 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   bundled, and zero false activations over 40 minutes is not a daily-rate guarantee. See
   [WAKEWORD.md](WAKEWORD.md).
 - **Vendor system-service control** (`SystemService.ControlUnit`). Returns `UNIMPLEMENTED`.
-- **Media player sample app**. The Web UI can consume the standard contract; no provider sample is
-  bundled.
 
 ## Known design limits in this slice
 
@@ -74,9 +76,10 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   On Rockchip, native packages must declare `aarch64` and a Linux ABI.
 - **LED vendor ABI is recovered, not documented**: ioctl numbers, record layout and physical
   permutations come from the stock `voice-agent` binary for this firmware build. `GET_COUNT` is
-  confirmed on a live unit (36 channels on `/dev/topleds`, 30 on `/dev/led_multi_ctrl`); the
-  `MULTI_SET` frame path, segment-bit order, glyph faces and gamma are still unverified, and the two
-  vendor processes hold both nodes open, so writes race the stock agent.
+  confirmed on a live unit (36 channels on `/dev/topleds`, 30 on `/dev/led_multi_ctrl`); the segment
+  map, ring pitch/order and RGB order are validated on the unit, while gamma is unmeasured (no
+  photometer). The vendor assistant is retired at boot, so concurrent writes to the LED nodes no
+  longer occur.
 - **Play/pause and voice keys are backend-level key events.** The framework input manager
   consumes volume, microphone and primary; `play_pause` and `voice` reach an application only
   while it holds a full input capture.
@@ -90,18 +93,26 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   commands operate on the daemon's security store. API keys are shown once and stored as hashes.
 - **API keys protect the HTTP Web UI/API**, not the local Unix-socket gRPC plane, which remains
   filesystem-local and requires supervised-run identity for app-scoped calls. Revocation is serial-list based, not a CRL/OCSP responder.
+- **Boot ownership is deployed, with one non-obvious ordering constraint.** rcS expands
+  `/etc/init.d/S??*` **before** `S23overlayfs.sh` pivots into the `/data` overlay, so a script that
+  exists only in the overlay is never in that list. The framework is started from the stock
+  `S99btctl.sh` (a vendor no-op) which `exec`s `/etc/init.d/S60capsulad start`; the vendor assistant
+  scripts are whiteouted. `S60capsulad` remains the manual `start|stop|restart|status` entry point
+  and is also what `capsula daemon install` restarts through. If the overlay is wiped (factory
+  reset), the device returns to the stock assistant and the deployment must be repeated. The daemon
+  ignores SIGHUP and is started with `nohup`; the watchdog handoff is unchanged.
+- **Local credential changes are read at daemon start.** `capsula auth …` and the API-key CLI write
+  the same security store the daemon loads at startup. A key created by the CLI is not accepted
+  until the daemon restarts; keys created or revoked in the Web UI go through the running daemon and
+  apply immediately. Restart the daemon after CLI credential changes.
 - **Memory and persistent storage are the binding constraints**: 240 MiB total with no swap, and
-  `/data` is only 78.5 MB (21.9 MB daemon + 18.4 MB apps). The daemon defaults to an 80 MiB soft heap
-  limit (`-mem-limit-mb`). The kernel OOM-killed `capsulad` during the wakeword workflow before that
-  limit. The expanded cold negative corpus (21.7 MB) plus its uncompressed sidecar left 4,292 KiB
-  free. The warm cutover installed a 24.4 MB gzip corpus, a 514 KB gzip sidecar and a 133 KB model;
-  `/data` now has 3,788 KiB free.
-- **The vendor stack is superseded at startup, runtime only**: `-supersede=auto` stops `sysmon` and
-  `voice-agent` (they hold `/dev/input/event0` and `/dev/watchdog`), then any other watchdog holder,
-  and arms the timer itself; a reaper stops respawns. Init scripts are untouched, so boot
-  integration — starting capsulad *instead of* the vendor stack — is still outstanding. The daemon
-  ignores SIGHUP and must be started with `nohup`; killing the vendor watchdog holder by hand resets
-  the board after 21 s.
+  `/data` is only 78.5 MB (21.9 MB daemon, 21.9 MB previous daemon, 27.6 MB apps). The daemon
+  defaults to an 80 MiB soft heap limit (`-mem-limit-mb`). The kernel OOM-killed `capsulad` during
+  the wakeword workflow before that limit. After the boot/upgrade/media deployment the unit has
+  about 5.2 MB free: the 24.4 MB warm corpus, its sidecar and the earlier recordings were moved to
+  the host backup (`_capsula-mini-data-backup/`, git-excluded), and the negative-corpus path is now
+  configurable (`-wakeword-negatives`) because it is training input only. The log is capped at
+  512 KiB plus one rotated copy; new recordings and training are refused below 2 MiB free.
 - **Web UI binds TCP**: set `-web-addr` explicitly and use firewall rules; the UI is not exposed on
   the Unix socket.
 - **Audio master volume** is applied in software by the mixer; the PulseAudio sink is left at unity
@@ -115,23 +126,29 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 
 ## Next gates (in order)
 
-1. ~~Install and run on the RK3308 stock image~~ **done, and the vendor agent is superseded**: the
-   daemon runs on the unit, probes six backends, launches `org.capsula.clock` in a mount-namespace
-   sandbox with a distinct UID, and the clock takes `display.segment.front`. `voice-agent`, `btctl`
-   and `tgclient` are stopped without a reset because `capsulad` takes over `/dev/watchdog` and hands
-   the feed to a detached feeder on graceful stop. The binaries stay installed; only their autostart
-   is retired. The LED ring/segment display, PulseAudio playback/capture through the mixer and the
-   GPIO 21 microphone gate are verified on the unit; boot integration remains separate work.
-2. ~~Calibrate the display channel order~~ **done**: the map is measured (`multiCtrlChannelMap`,
-   digits a–g plus colon), the clock face renders correctly, and the timezone is a clock-app setting.
-   Ring pixel order is verified; gamma on the WS2812B chain remains unmeasured.
+1. ~~Boot ownership, in-place upgrades and bounded storage~~ **done and verified on the unit**: the
+   daemon starts from the boot hook after two power cycles, `capsula daemon install` replaced the
+   binary through the boot service with a health gate, the log is capped, and the corpus moved off
+   `/data`. Remaining: decide the long-term vendor-service boundary (Bluetooth pairing currently has
+   no `btctl`/`voice-agent`; test pairing and profiles without them) and write the restore procedure
+   for the host-backed corpus and recordings into operator docs.
+2. ~~Media-player standard contract~~ **done**: `org.capsula.media` implements the provider side,
+   the routed streaming test covers snapshot-then-update, and the Web UI played and paused it on the
+   unit. Follow-ups are cosmetic (render `PLAYING` as "Playing") and belong to the UI track.
 3. Implement QuickJS and MicroPython host runners with the same bus bindings, in isolated
-   processes and read-only runtime images.
-4. Add a media-player sample app implementing `MediaPlayerService` and a routed streaming test.
-5. Tune watchdog/ducking/volume behavior, then test the Amlogic stock and Alpine targets separately.
-6. Freeze v1 schemas only after generated Go/Rust SDK and script-host parity tests pass.
+   processes and read-only runtime images. The engine strategy is still an owner decision: the
+   daemon is cgo-free, so a separate interpreter runner with a framed host bridge is the
+   architecture-faithful option; a pure-Go engine would be a documented deviation from the runtime
+   names in the manifest.
+4. Test the Amlogic stock and Alpine targets on hardware; do not claim parity with Rockchip until
+   each subsystem is probed. The backends still fail explicitly.
+5. Evaluate the installed personal wakeword model over long real-room audio (false activations and
+   misses beyond the 40-minute trial in WAKEWORD.md); it is a personal detector, not a
+   speaker-independent Russian head.
+6. Freeze v1 schemas only after generated Go/Rust SDK and script-host parity tests pass, including
+   routed streaming and cancellation.
 
-Gate 1 depends on a design decision that the probe forced: with no user, PID, network or IPC
-namespaces and no seccomp on the stock kernel, the sandbox is mount-only. Either accept that and make
-provenance verification the primary control for native apps, or investigate a vendor kernel rebuild —
-it must be stated, not implied.
+Gate 1's design decision stands: with no user, PID, network or IPC namespaces and no seccomp on the
+stock kernel, the sandbox is mount-only. Either accept that and make provenance verification the
+primary control for native apps, or investigate a vendor kernel rebuild — it must be stated, not
+implied.

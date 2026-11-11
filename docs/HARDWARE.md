@@ -157,9 +157,53 @@ INFO watchdog  /dev/watchdog armed, timeout=21s
 ```
 
 `-supersede=off` leaves the vendor stack alone; an explicit comma list replaces the default set. A
-reaper stops any superseded process that respawns. The takeover is **runtime only** — init scripts
-are untouched, so a unit whose capsulad never starts still boots the stock assistant. Making the
-framework the sole boot-time owner is the remaining boot-integration step.
+reaper stops any superseded process that respawns. The takeover was **runtime only** during
+bring-up; the boot integration is now deployed:
+
+- `/etc/init.d/S60capsulad` (repo: `deploy/rockchip-stock/S60capsulad`) starts the daemon after
+  `S02mount-data`, `S50mic-enable` and `S50pulseaudio`, gates on `capsulad -health`, and falls back
+  to the preserved vendor chain (`/data/capsdemo/vendor-init/S97voice-agent.sh`) if the daemon
+  cannot become healthy.
+- **The boot hook is `S99btctl.sh`.** `rcS` expands `/etc/init.d/S??*` once, before
+  `S23overlayfs.sh` pivots into the `/data` overlay, so a script that exists only in the overlay
+  (`S60capsulad`) is never in that list. The stock `S99btctl.sh` is a vendor no-op; its deployed
+  replacement `exec`s `/etc/init.d/S60capsulad start`. The vendor assistant scripts
+  (`S97voice-agent.sh`, `S99sysmon.sh`) are whiteouted in the overlay and copied to
+  `/data/capsdemo/vendor-init/`.
+- Verified across two power cycles on serial `03104B1D40E15C55`: `boot.log` records
+  `starting /data/capsdemo/capsulad` and `daemon healthy`, `capsulad -health` exits 0, clock,
+  assistant and media report `APP_READY`, and `/dev/watchdog armed, timeout=21s` appears.
+- A factory reset wipes the overlay: the device then boots the stock assistant and the deployment
+  must be repeated.
+
+In-place upgrades go through the same service:
+
+```sh
+# on the device, with the new binary staged outside /data (tmpfs has 117 MB)
+capsula -data-dir /data/capsdemo daemon install -binary /tmp/capsulad.new
+capsula -data-dir /data/capsdemo daemon rollback     # restores capsulad.prev
+```
+
+`daemon install` runs `<binary> -version`, stages beside the target, renames the live binary to
+`capsulad.prev`, activates by rename, restarts through `/etc/init.d/S60capsulad`, and requires the
+framework API to answer before it reports success; any failure puts the previous binary back. The
+`.prev` copy costs 21.9 MB on `/data`, so delete it only when the rollback copy is no longer wanted.
+
+Because `/data` is 78.5 MB, the 24.4 MB negative-training corpus, its sidecar and the older
+recordings were moved to the host. `/data` currently has about 5.2 MB free. Restore training input
+before a new enrollment:
+
+```sh
+adb push _capsula-mini-data-backup/wakeword/negatives.bin \
+  /data/capsdemo/wakeword/negatives.bin
+adb push _capsula-mini-data-backup/wakeword/negatives.bin.provenance.json.gz \
+  /data/capsdemo/wakeword/negatives.bin.provenance.json
+adb push _capsula-mini-data-backup/wakeword/samples/. /data/capsdemo/wakeword/samples/
+```
+
+The daemon also accepts `-wakeword-negatives PATH` so the corpus can live on `/tmp` or another
+mounted path during training instead of `/data`. New takes and training are refused below 2 MiB
+free, and the daemon log rotates at 512 KiB plus one backup.
 
 Once superseded, capture is unaffected (a 2 s take recorded after takeover has room-noise RMS 1470
 against 2196 before it). `voice-agent` was also the process that kept `/dev/watchdog` alive, so
@@ -321,7 +365,8 @@ bind-mounted so a scripted or native app can resolve zones.
 1. LED ring/display `MULTI_SET` writes and permutations: both maps are validated on the unit —
    the segment table came from `cmd/ledmap`, and the ring shows pixel 0 at 12 o'clock, travels
    smoothly clockwise with no jumps, and renders `R,G,B=(255,0,0)` as red. What is left is gamma
-   (no photometer) and behaviour while the vendor agent writes concurrently.
+   (no photometer); concurrent vendor writes no longer apply because the vendor assistant init
+   scripts are retired.
 2. ~~Mixer path~~ verified with a scripted app: playback from the app bus reaches `master`
    (1 kHz tone, RMS 4454 on `master.monitor` at 70 % volume and 1908 at 30 %, i.e. exactly the
    source's 6364 × the software volume), a conversation ducks it to 0.25 × (1113 / 477) with a
@@ -337,6 +382,11 @@ bind-mounted so a scripted or native app can resolve zones.
 5. ~~GPIO 21 mute behavior~~ verified with the vendor agent stopped: `gpio21` goes 1→0 with the
    setting, `pactl get-source-mute speex` follows, and an acoustic loop shows the gate cuts the
    microphone (live capture RMS 1977, peak 9420 → RMS 38, peak 222 with PulseAudio unmuted, so the
-   attenuation is the GPIO gate and not the mixer). Remaining: the same check while a vendor daemon
-   holds the GPIO.
-6. Vendor daemon coexistence/ownership rules and boot ordering.
+   attenuation is the GPIO gate and not the mixer). The vendor assistant is now retired at boot, so
+   this is the normal configuration.
+6. ~~Vendor daemon coexistence/ownership rules and boot ordering~~ done: `S99btctl.sh` execs
+   `S60capsulad start`, which health-gates and falls back to the preserved vendor chain; verified
+   across two power cycles with clock, assistant and media `APP_READY`. Remaining: exercise
+   Bluetooth pairing and A2DP/AVRCP without `voice-agent`/`btctl` (`bluetoothd` runs; `btctl` used
+   to be started by `voice-agent`), and decide the boundary for the vendor helpers that still run
+   (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).

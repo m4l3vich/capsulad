@@ -160,8 +160,9 @@ not a sustained loaded-system certification or a detection-quality measurement.
    and enable detection in Settings if it is not already selected.
 
 Training is serialized, cancellable and bounded to 30 minutes by the Web UI. A warm `CNEG0002`
-negative corpus must already exist at `<data-dir>/wakeword/negatives.bin`; it is not an inference
-dependency, and the loader refuses a cold corpus rather than retraining without warm-up.
+negative corpus must already exist at `<data-dir>/wakeword/negatives.bin` (or at the path passed to
+`-wakeword-negatives`); it is not an inference dependency, and the loader refuses a cold corpus
+rather than retraining without warm-up.
 The browser no longer receives features or uploads arbitrary classifier JSON. The old
 `GetWakewordFeatures` and `InstallWakewordClassifier` RPCs have been removed.
 
@@ -269,6 +270,30 @@ still match the protected snapshot. Clock and assistant are ready, the Web UI re
 watchdog is armed with a 21-second timeout. `/data` has 3,788 KiB free, `MemAvailable` is 119,448 kB
 and tmpfs has 85,128 KiB free.
 
+### Post-cutover operations and storage
+
+The daemon was replaced in place through the boot service on the same unit
+(`capsula daemon install`): `/data/capsdemo/capsulad` is now 21,889,176 bytes, SHA-256
+`a01c0c0a398623e71b6ac5f8d7cc199c7345fa5a36089839ee7eeb185e6a78c7`, with the cutover binary kept
+as `capsulad.prev` (b3ec47ef…). The installed model is unchanged (`5f92202f…`), loads on boot and
+detects (`classifier word.personal installed … threshold=0.59`); the assistant, clock and the new
+media provider start after a power cycle.
+
+The 24.4 MB corpus, its gzip sidecar and the 15 recordings were then moved to the host backup
+(`_capsula-mini-data-backup/`, git-excluded) to make room for the daemon upgrade and the media app.
+`/data` has about 5.2 MB free, the log is capped at 512 KiB plus one rotated copy, and new takes or
+training are refused below 2 MiB free. Training therefore needs the corpus restored first, or the
+daemon started with `-wakeword-negatives /tmp/negatives.bin`:
+
+```sh
+adb push _capsula-mini-data-backup/wakeword/negatives.bin /data/capsdemo/wakeword/negatives.bin
+adb push _capsula-mini-data-backup/wakeword/negatives.bin.provenance.json.gz \
+  /data/capsdemo/wakeword/negatives.bin.provenance.json
+adb push _capsula-mini-data-backup/wakeword/samples/. /data/capsdemo/wakeword/samples/
+```
+
+The corpus remains training input only; it is not consulted by detection.
+
 Earlier implementation-path evidence remains valid: the focused wakeword race checks passed
 (`internal/wakeword` 20.514 s), the production loader accepted the actual gzip corpus, a real browser
 exercised streamed progress/cancellation and the six-take guide, and the RPC rejects five word takes
@@ -370,11 +395,13 @@ Ship the sidecar alongside the binary. The current artifact is 24,386,227 bytes 
 `fbdaf9b30a7d4e2b8a83eb1ef85b05e253272b447b259992b1735e09801f88c8`; its gzip sidecar is
 514,451 bytes with SHA-256 `5041ec978799b29477eecad5f66acdd8e3c3c9c5a4a78d3276ba24147c826ced`.
 
-On the connected unit `/data` is a 78.5 MB partition. With the previous expanded corpus installed
-it had only 4,293 KiB free, so the larger warm file cannot be pushed in place. Keep a verified
-backup on the 85 MB tmpfs, remove the old corpus only after the new one is staged and hashed, then
-move the new file and sidecar into place atomically. Never leave a partial `negatives.bin`. This
-swap leaves about 3.34 MB free.
+On the connected unit `/data` is a 78.5 MB partition. The built corpus, sidecar and recordings are
+**not resident** after the 2026-11-11 boot/upgrade deployment: they live in
+`_capsula-mini-data-backup/` on the host, because the daemon and previous-binary rollback copy fill
+the partition. Copy them back only for a training session, or start the daemon with
+`-wakeword-negatives /tmp/negatives.bin` and stage the file on tmpfs instead. Whichever path is
+used, never leave a partial `negatives.bin`: remove the old file, stage `.tmp`, then rename. The
+procedure below is the in-place variant for a unit with enough free space.
 
 ```sh
 adb push /tmp/capsulad-negative-corpus-warm/negatives.bin /tmp/negatives-warm.bin
@@ -411,14 +438,18 @@ exposure sums only the original bodies, so borrowed preroll is not counted twice
 ## Resource and operational limits
 
 The RK3308 exposes 239,840 kB RAM and no swap. A previous workflow exhausted memory and the kernel
-OOM-killed the daemon. Keep the default 80 MiB Go soft heap limit (`-mem-limit-mb`) and supersede the
-stock vendor stack rather than running both stacks together. On-device augmentation is bounded;
+OOM-killed the daemon. Keep the default 80 MiB Go soft heap limit (`-mem-limit-mb`) and let the boot
+service own the device instead of running both stacks together. On-device augmentation is bounded;
 negative embeddings are decoded once into float32 storage and feature windows are views.
 
 The hardware watchdog cannot be assumed disarmable. Use graceful TERM so the daemon hands feeding
 to its detached feeder; start the replacement explicitly with `nohup` and verify the live RPC rather
-than trusting a background shell's exit status. See [HARDWARE.md](HARDWARE.md). Boot integration and
-Amlogic/Alpine compatibility remain separate work.
+than trusting a background shell's exit status. See [HARDWARE.md](HARDWARE.md).
+
+Persistent space is the other hard limit: the daemon log rotates at 512 KiB and keeps one copy, and
+new recordings or training are refused below 2 MiB free, because a full `/data` breaks logging and
+the next in-place upgrade rather than failing one write. The corpus is not an inference dependency,
+so it stays on the host outside training sessions.
 
 `-wakeword-trace` logs score peaks and detection heartbeats; leave it off for normal production use.
 Relevant checks are in `internal/wakeword`, `internal/wakeword/oww`, `internal/audio`,
