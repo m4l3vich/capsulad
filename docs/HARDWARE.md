@@ -261,12 +261,22 @@ call. The self-heal is required because a profile reconnect recreated the module
 after the first fix.
 
 Audio quality was compared directly with the stock stack: the vendor `voice-agent`/`btctl` chain
-sounds clearly better on the same source. The vendor registers its own A2DP endpoint and feeds
-decoded PCM to the device; capsulad receives the PulseAudio bluez5 SBC source, resamples it through
-`module-loopback` into the 48 kHz master sink and then ALSA. The remote negotiates SBC (bitpool 83)
-on this path; the vendor endpoint may negotiate a different codec and/or play at the native 44.1 kHz
-rate. This is an endpoint/transport difference, not a volume-curve problem. Matching it requires a
-native A2DP sink endpoint (or the vendor endpoint) rather than PA's source/loopback.
+sounded clearly better on the same source. The vendor registers its own A2DP endpoint and feeds
+decoded PCM to the device; the old capsulad path received the PulseAudio bluez5 SBC source,
+resampled it through `module-loopback` into the 48 kHz master sink and then ALSA.
+
+capsulad now owns the A2DP sink endpoint instead. It unloads PA's bluez5 modules, exports an
+`org.bluez.MediaEndpoint1` SBC endpoint, and registers it with `Media1.RegisterEndpoint`. On this
+BlueZ 5.65 the endpoint API is `SelectConfiguration(ay) -> ay` and
+`SetConfiguration(o transport, a{sv} properties)`; the transport object has no `Endpoint`
+property, so the transport path returned by `SetConfiguration` is used (UUID/Codec fallback).
+The transport fd is acquired with `MediaTransport1.Acquire`; RTP is depacketized and decoded by
+`/usr/bin/sbcdec`, whose AU output is S16 big-endian at offset 24 and is converted to the mixer's
+S16LE. The selected configuration is 44.1 kHz joint stereo, 16 blocks, 8 subbands, loudness
+allocation, bitpool 2..53. PA still owns app playback and the microphones; the Mac's AVRCP volume
+sync is unchanged. The endpoint negotiation reached CONFIGURED/OPEN and a transport was created in
+hardware testing; end-to-end decode and listening remain to be verified with a playing source, so
+this is not yet a claim of vendor-level quality.
 
 The three numeric stages cannot all equal the master: one of them must be a neutral/trim stage, or
 the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA source (90 %) and loopback

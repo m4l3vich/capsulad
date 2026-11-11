@@ -47,10 +47,9 @@ func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	}()
 }
 
-// applyBluetoothVolume mirrors the framework master onto the Mac's AVRCP
-// volume. This is the single Bluetooth listening gain: the local source and
-// loopback stay neutral, so nothing is attenuated twice. The write timestamp
-// lets the sync loop ignore the echo of its own write.
+// applyBluetoothVolume mirrors the framework master onto the source's AVRCP
+// volume, which the local gain stages complement. The write timestamp lets the
+// sync loop ignore the echo of its own write.
 func (d *Daemon) applyBluetoothVolume(level float64) {
 	if d.bt == nil {
 		return
@@ -64,7 +63,11 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	d.btVolSet = true
 	d.btVolumeAt = time.Now()
 	d.btMu.Unlock()
-	d.setBluetoothPlaybackGain(level)
+	if d.btNative {
+		d.setBluetoothStreamTrim(level)
+	} else {
+		d.setBluetoothPlaybackGain(level)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
 		defer cancel()
@@ -135,10 +138,17 @@ func (d *Daemon) watchBluetooth() {
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.pulseBluetoothRing()
+				d.stopBluetoothStream()
 				d.removeBluetoothAudioRoute(ev.DeviceAddress)
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
-					d.ensureBluetoothAudioRoute(ev.Media.DeviceAddress)
+					if !d.btNative {
+						d.ensureBluetoothAudioRoute(ev.Media.DeviceAddress)
+					} else if ev.Media.Playing {
+						// A source can connect while paused; the transport is
+						// only acquirable once playback starts.
+						d.startBluetoothStream(ev.Media.DeviceAddress)
+					}
 					d.forceBluetoothVolume()
 				}
 			}
@@ -146,8 +156,8 @@ func (d *Daemon) watchBluetooth() {
 	}
 }
 
-// syncBluetoothVolume keeps the Mac and the framework master in step. It also
-// self-heals PulseAudio recreating the device module with the default
+// syncBluetoothVolume keeps the source and the framework master in step. It
+// also self-heals PulseAudio recreating the device module with the default
 // avrcp_absolute_volume=1, which would otherwise mirror the remote volume onto
 // the local source and re-introduce the double/cubic attenuation.
 func (d *Daemon) syncBluetoothVolume() {
@@ -158,14 +168,21 @@ func (d *Daemon) syncBluetoothVolume() {
 	if address == "" {
 		return
 	}
-	if d.ensureDecoupledBluetoothModule(address) {
-		d.removeBluetoothAudioRoute(address)
-		d.ensureBluetoothAudioRoute(address)
+	if d.btNative {
+		// PulseAudio may be restarted and re-register its A2DP endpoints; keep
+		// it out of Bluetooth audio and re-apply the stream curve.
+		d.unloadPulseBluetoothModules()
+		d.setBluetoothStreamTrim(d.user.Get().Values.MasterVolume)
+	} else {
+		if d.ensureDecoupledBluetoothModule(address) {
+			d.removeBluetoothAudioRoute(address)
+			d.ensureBluetoothAudioRoute(address)
+		}
+		// Re-assert the local stages: PulseAudio can recreate/reset them on
+		// profile or source changes, and a lost loopback gain means full scale.
+		d.setBluetoothSourceFixed(address)
+		d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
 	}
-	// Re-assert the local stages: PulseAudio can recreate/reset them on
-	// profile or source changes, and a lost loopback gain means full scale.
-	d.setBluetoothSourceFixed(address)
-	d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
 	d.btMu.Lock()
 	wrote := d.btVolumeAt
 	d.btMu.Unlock()
@@ -203,6 +220,20 @@ func (d *Daemon) syncBluetoothVolume() {
 // loading the audio route. Sources often connect at ACL level only.
 func (d *Daemon) connectBluetoothAudio(address string) {
 	if d.bt == nil || strings.TrimSpace(address) == "" {
+		return
+	}
+	if d.btNative {
+		go func() {
+			ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+			defer cancel()
+			if err := d.bt.ConnectAudio(ctx, address); err != nil {
+				d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
+			} else {
+				d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+			}
+			d.forceBluetoothVolume()
+			d.startBluetoothStream(address)
+		}()
 		return
 	}
 	go func() {

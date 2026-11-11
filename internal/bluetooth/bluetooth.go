@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 )
@@ -25,7 +26,34 @@ var (
 	ErrNoSource = errors.New("no Bluetooth media source is connected")
 	// ErrUnsupported means the connected source exposes no usable control.
 	ErrUnsupported = errors.New("the connected source does not support this operation")
+	// ErrNoTransport means the A2DP endpoint is registered but no transport is
+	// configured yet; callers should retry while the profile comes up.
+	ErrNoTransport = errors.New("no A2DP transport is configured")
 )
+
+// A2DPTransport is an acquired A2DP media transport. The caller owns File and
+// must close it to release the stream; Config is the negotiated SBC media
+// configuration.
+type A2DPTransport struct {
+	File    *os.File
+	ReadMTU uint16
+	Config  []byte
+}
+
+// A2DPSink is implemented by a manager that owns the A2DP sink endpoint and
+// can acquire its transport. It is separate from Manager so the simulator and
+// callers that only need control state do not have to implement it.
+type A2DPSink interface {
+	// RegisterA2DPSink exports and registers the local A2DP SBC endpoint with
+	// BlueZ. It is idempotent.
+	RegisterA2DPSink(ctx context.Context) error
+	// AcquireA2DP acquires the configured transport. It returns ErrNoTransport
+	// until BlueZ has created one.
+	AcquireA2DP(ctx context.Context) (*A2DPTransport, error)
+	// ReleaseA2DP releases the current transport. It is safe to call when none
+	// is acquired.
+	ReleaseA2DP(ctx context.Context) error
+}
 
 // Status is the adapter state a UI can show.
 type Status struct {

@@ -108,16 +108,19 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   ~0.73 × it. The PA source/loopback numbers are gain stages, not the listening volume; making all
   three stages numerically equal would either double-attenuate or, with no local ceiling, allow a
   “5 %” setting to play at full scale.
-- **Bluetooth audio quality is below the stock vendor path.** On the same unit and source the
-  stock `voice-agent`/`btctl` chain sounds audibly better than the framework's PulseAudio route.
-  The vendor stack registers its own A2DP endpoint and hands decoded PCM to the audio device,
-  whereas capsulad uses PulseAudio's bluez5 SBC source, a `module-loopback` resampler (44.1 kHz →
-  the 48 kHz master sink), and the virtual sink. The remote negotiates SBC (bitpool 83) here; the
-  vendor path may use a different codec and/or native-rate PCM. Volume curves and gain staging
-  cannot close this gap. The next architectural step is a native A2DP sink endpoint in the
-  framework (BlueZ `Media1.RegisterEndpoint` with SBC/AAC decode into the mixer/ALSA), or reusing
-  the vendor endpoint alongside the framework, instead of PA's source/loopback. The current
-  Bluetooth media contract is a functional integration, not final audio quality.
+- **Bluetooth audio now uses a native A2DP SBC sink endpoint.** The stock `voice-agent`/`btctl`
+  chain sounded better than the old PulseAudio source + loopback path, which added a resampler and
+  a second volume stage. capsulad now unloads PA's bluez5 Bluetooth modules, registers an
+  `org.bluez.MediaEndpoint1` at `/org/capsula/a2dp/sbc`, and obtains the transport fd through
+  `MediaTransport1.Acquire`. BlueZ 5.65 calls `SelectConfiguration(ay)` and
+  `SetConfiguration(o, a{sv})`; the transport has no `Endpoint` property, so the path from
+  `SetConfiguration` is retained and UUID/Codec is the fallback. RTP is depacketized and decoded by
+  the system `sbcdec` (the same libsbc PulseAudio used), then fed to the mixer at the stream rate.
+  PA still owns app playback and the microphones. End-to-end listening is the remaining gate: the
+  endpoint reached CONFIGURED/OPEN and a transport was created in hardware testing, but the final
+  `Acquire` + decode path has not been exercised with a playing source, and no codec/quality parity
+  is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the
+  Mac's settings.
 - **The earlier flatness was PulseAudio applying the AVRCP value twice.** With the default
   `avrcp_absolute_volume=1`, PA mirrored the transport volume onto the local bluez source; at 34 %
   the cubic source gain was 3.9 % (−28 dB), so the stream sounded thin. The decoupled module and
@@ -176,9 +179,9 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 2. ~~Media-player standard contract~~ **done**: `org.capsula.media` implements the provider side,
    the routed streaming test covers snapshot-then-update, and the Web UI played and paused it on the
    unit. Follow-ups are cosmetic (render `PLAYING` as "Playing") and belong to the UI track.
-3. Implement a native A2DP sink endpoint (or reuse the vendor `btctl` endpoint) so Bluetooth
-   audio quality matches the stock stack; the current PulseAudio source/loopback path is
-   functional but audibly below it.
+3. Verify the native A2DP endpoint by ear with a playing source and compare it with the vendor
+   stack; exercise `MediaTransport1.Acquire`, `sbcdec` and the mixer under dropouts. Do not change
+   the source's volume/settings from tooling.
 4. Implement QuickJS and MicroPython host runners with the same bus bindings, in isolated
    processes and read-only runtime images. The engine strategy is still an owner decision: the
    daemon is cgo-free, so a separate interpreter runner with a framed host bridge is the

@@ -175,19 +175,24 @@ type Daemon struct {
 	lastMuted    bool
 	lastApplied  *settings.UserSettings
 
-	btMu         sync.Mutex
-	btInit       bool
-	btPairable   bool
-	btVolume     float64
-	btVolSet     bool
-	btVolumeAt   time.Time
-	btPulseMu    sync.Mutex
-	btPulseCap   string
-	btPulseGen   uint64
-	btPulseTmr   *time.Timer
-	btRouteMu    sync.Mutex
-	btRoutes     map[string]string
-	sysRingState string
+	btMu          sync.Mutex
+	btInit        bool
+	btPairable    bool
+	btVolume      float64
+	btVolSet      bool
+	btVolumeAt    time.Time
+	btPulseMu     sync.Mutex
+	btPulseCap    string
+	btPulseGen    uint64
+	btPulseTmr    *time.Timer
+	btRouteMu     sync.Mutex
+	btRoutes      map[string]string
+	btNative      bool
+	btStreamMu    sync.Mutex
+	btStream      *a2dpStream
+	btStreamGen   uint64
+	btStreamStart bool
+	sysRingState  string
 
 	lastActivation string
 	lastActMu      sync.Mutex
@@ -486,7 +491,7 @@ func (d *Daemon) Run() error {
 
 	d.applySettings(d.user.Get())
 	d.startBootApps()
-	d.ensurePulseBluetoothModules()
+	d.initBluetoothAudio()
 	go d.watchBluetooth()
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
@@ -572,6 +577,7 @@ func (d *Daemon) shutdown() {
 		d.wake.Close()
 		d.input.Close()
 		d.bus.Close()
+		d.stopBluetoothStream()
 		d.resetBluetoothRoutes()
 		if d.bt != nil {
 			_ = d.bt.Close()

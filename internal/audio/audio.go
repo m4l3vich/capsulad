@@ -300,6 +300,7 @@ type Playback struct {
 	queuedBytes  int
 	framesPlayed uint64
 	gain         float64
+	trim         float64
 	paused       bool
 	inputClosed  bool
 }
@@ -367,6 +368,16 @@ func (p *Playback) CloseInput() {
 	p.mu.Unlock()
 }
 
+// SetTrim applies a stream-specific linear gain on top of the mixer master.
+// It is not touched by ducking, so a caller can implement a product volume
+// curve for one stream while the master remains the single UI value.
+func (p *Playback) SetTrim(v float64) {
+	v = clamp01(v)
+	p.mu.Lock()
+	p.trim = v
+	p.mu.Unlock()
+}
+
 func (p *Playback) Control(cmd string) {
 	select {
 	case p.ctl <- cmd:
@@ -389,7 +400,7 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 		format: format,
 		events: make(chan PlaybackEvent, 16), in: make(chan []byte, playbackQueue),
 		ctl: make(chan string, 4), done: make(chan struct{}),
-		conv: newResampler(format, outFmt()), gain: 1, mgr: m,
+		conv: newResampler(format, outFmt()), gain: 1, trim: 1, mgr: m,
 	}
 	m.mu.Lock()
 	m.playbacks[p.id] = p
@@ -466,6 +477,7 @@ func (m *Manager) mixLoop() {
 				p.gain = math.Max(target, p.gain-fadeStep)
 			}
 			gain := p.gain
+			trim := p.trim
 			p.mu.Unlock()
 
 			starved := queued == 0 && closedInput
@@ -481,7 +493,7 @@ func (m *Manager) mixLoop() {
 			p.framesPlayed += uint64(frames)
 			p.mu.Unlock()
 			for i := range mix {
-				mix[i] += out[i] * float32(gain)
+				mix[i] += out[i] * float32(gain*trim)
 			}
 		}
 

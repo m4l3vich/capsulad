@@ -41,6 +41,11 @@ type BlueZ struct {
 
 	cancel   context.CancelFunc
 	powering atomic.Bool
+
+	endpointMu   sync.Mutex
+	endpointPath dbus.ObjectPath
+	endpoint     *sbcEndpoint
+	transport    dbus.ObjectPath
 }
 
 // Open attaches to the system bus and requires a BlueZ adapter. It returns
@@ -69,6 +74,7 @@ func (b *BlueZ) Close() error {
 	if b.cancel != nil {
 		b.cancel()
 	}
+	b.unregisterA2DP()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
