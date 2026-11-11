@@ -1,0 +1,16 @@
+id = "org.capsula.assistant"
+name = "Assistant (demo)"
+version = "0.1.0"
+description = "Minimal always-running assistant demonstrating activation, ducking and microphone capture."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+provides = ["voice_assistant"]
+
+[entrypoint]
+runtime = "native"
+path = "assistant"
+architecture = "aarch64"
+abi = "linux-musl"
+sdk = "0.5"

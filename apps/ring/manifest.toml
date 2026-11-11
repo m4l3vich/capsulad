@@ -1,0 +1,37 @@
+id = "org.example.ring-controller"
+name = "Ring Controller"
+version = "0.1.0"
+description = "Example LED ring controller with a custom routed interface."
+background = true
+start_on_boot = false
+restart_on_failure = true
+single_instance = true
+provides = ["led_ring_controller"]
+
+[entrypoint]
+runtime = "native"
+path = "controller"
+architecture = "aarch64"
+abi = "linux-musl"
+sdk = "0.5"
+
+[[settings]]
+key = "visualizer_enabled"
+label = "Enable media visualizer"
+type = "boolean"
+default = true
+
+[[settings]]
+key = "media_source"
+label = "Preferred media player"
+type = "text"
+
+[[actions]]
+id = "reload"
+label = "Reload"
+
+[[interfaces]]
+service = "org.example.ring.v1.RingControllerService"
+version = "1.0.0"
+descriptor = "schemas/ring.protoset"
+docs = "docs/ring-api.md"

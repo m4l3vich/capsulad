@@ -1,0 +1,838 @@
+{
+ "layers": [
+  {
+   "b": "conv0.b",
+   "in": 1,
+   "kh": 3,
+   "kw": 3,
+   "op": "conv",
+   "out": 24,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv0.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv3.b",
+   "in": 24,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 24,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv3.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv6.b",
+   "in": 24,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 24,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv6.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "kh": 2,
+   "kw": 2,
+   "op": "maxpool",
+   "sh": 2,
+   "sw": 2
+  },
+  {
+   "b": "conv10.b",
+   "in": 24,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 48,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv10.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv13.b",
+   "in": 48,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 48,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv13.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv16.b",
+   "in": 48,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 48,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv16.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv19.b",
+   "in": 48,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 48,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv19.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "kh": 1,
+   "kw": 2,
+   "op": "maxpool",
+   "sh": 1,
+   "sw": 2
+  },
+  {
+   "b": "conv23.b",
+   "in": 48,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 72,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv23.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv26.b",
+   "in": 72,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 72,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv26.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv29.b",
+   "in": 72,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 72,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv29.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv32.b",
+   "in": 72,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 72,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv32.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "kh": 2,
+   "kw": 2,
+   "op": "maxpool",
+   "sh": 2,
+   "sw": 2
+  },
+  {
+   "b": "conv36.b",
+   "in": 72,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv36.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv39.b",
+   "in": 96,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv39.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv42.b",
+   "in": 96,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv42.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv45.b",
+   "in": 96,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv45.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "kh": 1,
+   "kw": 2,
+   "op": "maxpool",
+   "sh": 1,
+   "sw": 2
+  },
+  {
+   "b": "conv49.b",
+   "in": 96,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv49.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv52.b",
+   "in": 96,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv52.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv55.b",
+   "in": 96,
+   "kh": 1,
+   "kw": 3,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 1,
+   "pr": 1,
+   "pt": 0,
+   "w": "conv55.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "b": "conv58.b",
+   "in": 96,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv58.w"
+  },
+  {
+   "alpha": 0.20000000298023224,
+   "op": "leakyrelu"
+  },
+  {
+   "op": "max",
+   "value": -0.4000000059604645
+  },
+  {
+   "kh": 2,
+   "kw": 2,
+   "op": "maxpool",
+   "sh": 2,
+   "sw": 2
+  },
+  {
+   "in": 96,
+   "kh": 3,
+   "kw": 1,
+   "op": "conv",
+   "out": 96,
+   "pb": 0,
+   "pl": 0,
+   "pr": 0,
+   "pt": 0,
+   "w": "conv62.w"
+  }
+ ],
+ "source": {
+  "embedding_model.onnx": "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+  "melspectrogram.onnx": "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f"
+ },
+ "tensors": [
+  {
+   "count": 8224,
+   "name": "melW",
+   "offset": 0,
+   "shape": [
+    257,
+    32
+   ]
+  },
+  {
+   "count": 216,
+   "name": "conv0.w",
+   "offset": 8224,
+   "shape": [
+    24,
+    1,
+    3,
+    3
+   ]
+  },
+  {
+   "count": 24,
+   "name": "conv0.b",
+   "offset": 8440,
+   "shape": [
+    24
+   ]
+  },
+  {
+   "count": 1728,
+   "name": "conv3.w",
+   "offset": 8464,
+   "shape": [
+    24,
+    24,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 24,
+   "name": "conv3.b",
+   "offset": 10192,
+   "shape": [
+    24
+   ]
+  },
+  {
+   "count": 1728,
+   "name": "conv6.w",
+   "offset": 10216,
+   "shape": [
+    24,
+    24,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 24,
+   "name": "conv6.b",
+   "offset": 11944,
+   "shape": [
+    24
+   ]
+  },
+  {
+   "count": 3456,
+   "name": "conv10.w",
+   "offset": 11968,
+   "shape": [
+    48,
+    24,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 48,
+   "name": "conv10.b",
+   "offset": 15424,
+   "shape": [
+    48
+   ]
+  },
+  {
+   "count": 6912,
+   "name": "conv13.w",
+   "offset": 15472,
+   "shape": [
+    48,
+    48,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 48,
+   "name": "conv13.b",
+   "offset": 22384,
+   "shape": [
+    48
+   ]
+  },
+  {
+   "count": 6912,
+   "name": "conv16.w",
+   "offset": 22432,
+   "shape": [
+    48,
+    48,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 48,
+   "name": "conv16.b",
+   "offset": 29344,
+   "shape": [
+    48
+   ]
+  },
+  {
+   "count": 6912,
+   "name": "conv19.w",
+   "offset": 29392,
+   "shape": [
+    48,
+    48,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 48,
+   "name": "conv19.b",
+   "offset": 36304,
+   "shape": [
+    48
+   ]
+  },
+  {
+   "count": 10368,
+   "name": "conv23.w",
+   "offset": 36352,
+   "shape": [
+    72,
+    48,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 72,
+   "name": "conv23.b",
+   "offset": 46720,
+   "shape": [
+    72
+   ]
+  },
+  {
+   "count": 15552,
+   "name": "conv26.w",
+   "offset": 46792,
+   "shape": [
+    72,
+    72,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 72,
+   "name": "conv26.b",
+   "offset": 62344,
+   "shape": [
+    72
+   ]
+  },
+  {
+   "count": 15552,
+   "name": "conv29.w",
+   "offset": 62416,
+   "shape": [
+    72,
+    72,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 72,
+   "name": "conv29.b",
+   "offset": 77968,
+   "shape": [
+    72
+   ]
+  },
+  {
+   "count": 15552,
+   "name": "conv32.w",
+   "offset": 78040,
+   "shape": [
+    72,
+    72,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 72,
+   "name": "conv32.b",
+   "offset": 93592,
+   "shape": [
+    72
+   ]
+  },
+  {
+   "count": 20736,
+   "name": "conv36.w",
+   "offset": 93664,
+   "shape": [
+    96,
+    72,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv36.b",
+   "offset": 114400,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv39.w",
+   "offset": 114496,
+   "shape": [
+    96,
+    96,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv39.b",
+   "offset": 142144,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv42.w",
+   "offset": 142240,
+   "shape": [
+    96,
+    96,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv42.b",
+   "offset": 169888,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv45.w",
+   "offset": 169984,
+   "shape": [
+    96,
+    96,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv45.b",
+   "offset": 197632,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv49.w",
+   "offset": 197728,
+   "shape": [
+    96,
+    96,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv49.b",
+   "offset": 225376,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv52.w",
+   "offset": 225472,
+   "shape": [
+    96,
+    96,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv52.b",
+   "offset": 253120,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv55.w",
+   "offset": 253216,
+   "shape": [
+    96,
+    96,
+    1,
+    3
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv55.b",
+   "offset": 280864,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv58.w",
+   "offset": 280960,
+   "shape": [
+    96,
+    96,
+    3,
+    1
+   ]
+  },
+  {
+   "count": 96,
+   "name": "conv58.b",
+   "offset": 308608,
+   "shape": [
+    96
+   ]
+  },
+  {
+   "count": 27648,
+   "name": "conv62.w",
+   "offset": 308704,
+   "shape": [
+    96,
+    96,
+    3,
+    1
+   ]
+  }
+ ],
+ "version": 1
+}

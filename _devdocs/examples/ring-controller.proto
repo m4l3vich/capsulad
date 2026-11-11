@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package org.example.ring.v1;
+
+// Example of one third-party ring controller's OWN API; this is deliberately
+// not a mandatory framework-wide contract. It changes the controller's state
+// and uses framework PresentationService to create runtime ring frames.
+// Handlers are served through AppBusService.Connect, not a local app socket.
+service RingControllerService {
+  rpc ListModes(ListModesRequest) returns (ListModesResponse);
+  rpc GetState(GetStateRequest) returns (RingState);
+  rpc SetMode(SetModeRequest) returns (RingState);
+}
+
+message ListModesRequest {}
+message RingMode {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+}
+message ListModesResponse { repeated RingMode modes = 1; }
+message GetStateRequest {}
+message SetModeRequest { string mode_id = 1; }
+message RingState {
+  string current_mode_id = 1;
+  bool presentation_active = 2;
+  // `presentation_active` indicates whether this app is producing its virtual
+  // frames; it does not assert physical visibility or microphone indication.
+}

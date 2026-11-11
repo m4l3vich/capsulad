@@ -1,0 +1,33 @@
+id = "org.capsula.clock"
+name = "Clock"
+version = "0.1.0"
+description = "Bundled default segment display provider."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+provides = ["segment_display_provider"]
+
+[entrypoint]
+runtime = "native"
+path = "clock"
+architecture = "aarch64"
+abi = "linux-musl"
+sdk = "0.5"
+
+[[settings]]
+key = "blink"
+label = "Blink colon"
+type = "boolean"
+default = true
+
+[[settings]]
+key = "timezone"
+label = "Timezone"
+description = "IANA zone name, e.g. Asia/Shanghai. Empty follows the device timezone."
+type = "text"
+default = ""
+
+[[actions]]
+id = "reload"
+label = "Repaint"

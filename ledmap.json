@@ -1,0 +1,153 @@
+{
+  "device": "/dev/led_multi_ctrl",
+  "channels": [
+    {
+      "channel": 0,
+      "digit": 3,
+      "segment": "a"
+    },
+    {
+      "channel": 1,
+      "digit": 1,
+      "segment": "a"
+    },
+    {
+      "channel": 2,
+      "digit": 3,
+      "segment": "b"
+    },
+    {
+      "channel": 3,
+      "digit": 3,
+      "segment": "g"
+    },
+    {
+      "channel": 4,
+      "digit": 3,
+      "segment": "f"
+    },
+    {
+      "channel": 5,
+      "digit": 3,
+      "segment": "d"
+    },
+    {
+      "channel": 6,
+      "digit": 3,
+      "segment": "e"
+    },
+    {
+      "channel": 7,
+      "digit": 3,
+      "segment": "c"
+    },
+    {
+      "channel": 8,
+      "digit": 4,
+      "segment": "f"
+    },
+    {
+      "channel": 9,
+      "digit": 4,
+      "segment": "g"
+    },
+    {
+      "channel": 10,
+      "digit": 4,
+      "segment": "a"
+    },
+    {
+      "channel": 11,
+      "digit": 4,
+      "segment": "c"
+    },
+    {
+      "channel": 12,
+      "digit": 4,
+      "segment": "b"
+    },
+    {
+      "channel": 13,
+      "digit": 4,
+      "segment": "e"
+    },
+    {
+      "channel": 14,
+      "digit": 4,
+      "segment": "d"
+    },
+    {
+      "channel": 15,
+      "segment": "colon-bottom"
+    },
+    {
+      "channel": 16,
+      "segment": "colon-top"
+    },
+    {
+      "channel": 17,
+      "digit": 1,
+      "segment": "d"
+    },
+    {
+      "channel": 18,
+      "digit": 2,
+      "segment": "d"
+    },
+    {
+      "channel": 19,
+      "digit": 2,
+      "segment": "c"
+    },
+    {
+      "channel": 20,
+      "digit": 2,
+      "segment": "g"
+    },
+    {
+      "channel": 21,
+      "digit": 1,
+      "segment": "c"
+    },
+    {
+      "channel": 22,
+      "digit": 1,
+      "segment": "e"
+    },
+    {
+      "channel": 23,
+      "digit": 2,
+      "segment": "e"
+    },
+    {
+      "channel": 24,
+      "digit": 1,
+      "segment": "g"
+    },
+    {
+      "channel": 25,
+      "digit": 2,
+      "segment": "b"
+    },
+    {
+      "channel": 26,
+      "digit": 2,
+      "segment": "a"
+    },
+    {
+      "channel": 27,
+      "digit": 2,
+      "segment": "f"
+    },
+    {
+      "channel": 28,
+      "digit": 1,
+      "segment": "b"
+    },
+    {
+      "channel": 29,
+      "digit": 1,
+      "segment": "f"
+    }
+  ]
+}
