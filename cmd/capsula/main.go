@@ -91,6 +91,8 @@ command:
 		exit(runAuth(args, resolveDataDir(dataDir), securityDir))
 	case "platform":
 		exit(runPlatform(args, jsonOut))
+	case "daemon":
+		exit(runDaemon(args, dataDir, socket))
 	case "dev":
 		exit(runDev(args, dataDir))
 	default:
@@ -114,6 +116,8 @@ Commands:
   app stop RUN_ID                request graceful stop
   app runs [ID]                  list supervised runs
   app provenance ID              computed native-binary provenance status
+  daemon install -binary PATH    atomically replace capsulad and roll back on failed health
+  daemon rollback                restore the binary preserved by the last install
   settings show                  device settings
   settings app APPID [k=v ...]   show or update one application's settings
   logs [-app ID] [-n N]          recent structured logs
