@@ -83,12 +83,12 @@ func TestA2DPSBCPayloadRejectsEmptyAndGarbage(t *testing.T) {
 	if got := A2DPSBCPayload(make([]byte, 12)); got != nil {
 		t.Fatalf("empty payload returned %x", got)
 	}
-	// Header says zero frames.
-	packet := make([]byte, 14)
+	// Header-only payload: zero frames and no frame data.
+	packet := make([]byte, 13)
 	packet[0] = 0x80
 	packet[12] = 0x00
 	if got := A2DPSBCPayload(packet); got != nil {
-		t.Fatalf("zero-frame packet returned %x", got)
+		t.Fatalf("header-only packet returned %x", got)
 	}
 }
 

@@ -226,6 +226,10 @@ func (s *a2dpStream) readTransport() {
 	logged := false
 	for {
 		n, err := s.transport.File.Read(buf)
+		if !logged && n > 0 {
+			logged = true
+			s.d.logs.Infof("bluetooth", "", "A2DP first transport packet: %d bytes head=%x", n, buf[:minInt(n, 16)])
+		}
 		if err != nil {
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
 				select {
@@ -240,12 +244,12 @@ func (s *a2dpStream) readTransport() {
 			return
 		}
 		data, frames := bluetooth.A2DPSBCPayloadFrames(buf[:n])
+		if len(data) == 0 && n > 4 && buf[0] == 0x9c {
+			// Raw SBC frames: no RTP/A2DP headers. Accept the packet as-is.
+			data, frames = buf[:n], 0
+		}
 		if len(data) == 0 {
 			continue
-		}
-		if !logged {
-			logged = true
-			s.d.logs.Infof("bluetooth", "", "A2DP RTP packets arriving for %s (first packet %d bytes, %d frames)", s.address, n, frames)
 		}
 		pkt := a2dpPacket{data: append([]byte(nil), data...), frames: frames}
 		select {
@@ -481,6 +485,13 @@ func sbcFrameSamples(config []byte) int {
 		subbands = 4
 	}
 	return blocks * subbands
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func firstBytes(b []byte, n int) []byte {
