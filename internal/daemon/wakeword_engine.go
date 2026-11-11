@@ -21,8 +21,14 @@ func (d *Daemon) classifierPath() string {
 }
 
 // negativesPath resolves the license-clean negative-training corpus. It ships
-// separately from the daemon: training input, not a runtime requirement.
+// separately from the daemon: training input, not a runtime requirement. The
+// path is configurable because the corpus is large (tens of MiB) and /data is
+// 78.5 MiB on the Mini; it normally lives outside the device until a training
+// session.
 func (d *Daemon) negativesPath() string {
+	if d.cfg.WakewordNegatives != "" {
+		return d.cfg.WakewordNegatives
+	}
 	return filepath.Join(d.cfg.DataDir, "wakeword", "negatives.bin")
 }
 
@@ -71,6 +77,9 @@ func (d *Daemon) TrainWakeword(ctx context.Context, sel trainSelection, progress
 		return nil, fmt.Errorf("training is already running; wait for it to finish")
 	}
 	defer wakeTrainMu.Unlock()
+	if err := d.requireFreeSpace("training"); err != nil {
+		return nil, err
+	}
 	if progress == nil {
 		progress = func(string, float64) {}
 	}

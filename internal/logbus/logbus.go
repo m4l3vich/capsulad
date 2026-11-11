@@ -2,7 +2,9 @@
 //
 // Apps never write framework files directly; supervisor stdout/stderr and the
 // structured Log RPC both land here. Records are bounded in memory and
-// optionally mirrored to a file owned by the daemon.
+// optionally mirrored to a file owned by the daemon. The mirror is bounded on
+// disk too: the RK3308 keeps only 78.5 MiB on /data and an unbounded log file
+// has already blocked a binary deployment.
 package logbus
 
 import (
@@ -53,6 +55,13 @@ type subscriber struct {
 	ch    chan Entry
 }
 
+const (
+	defaultMaxEntries = 4000
+	// defaultMaxLogBytes bounds one mirrored log file. One rotated copy is
+	// kept, so the daemon never owns more than twice this on /data.
+	defaultMaxLogBytes = 512 << 10
+)
+
 type Bus struct {
 	mu     sync.Mutex
 	ring   []Entry
@@ -64,17 +73,22 @@ type Bus struct {
 }
 
 // New creates a log bus retaining at most max entries. If path is non-empty,
-// records are appended there with owner-only permissions.
+// records are appended there with owner-only permissions, rotating once the
+// file reaches defaultMaxLogBytes.
 func New(clock *ids.Clock, max int, path string) (*Bus, error) {
+	return newBus(clock, max, path, defaultMaxLogBytes)
+}
+
+func newBus(clock *ids.Clock, max int, path string, maxBytes int64) (*Bus, error) {
 	if max <= 0 {
-		max = 4000
+		max = defaultMaxEntries
 	}
 	b := &Bus{max: max, subs: map[int]*subscriber{}, clock: clock}
 	if path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, fmt.Errorf("log directory: %w", err)
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		f, err := openLogFile(path, maxBytes)
 		if err != nil {
 			return nil, fmt.Errorf("log file: %w", err)
 		}
@@ -82,6 +96,55 @@ func New(clock *ids.Clock, max int, path string) (*Bus, error) {
 	}
 	return b, nil
 }
+
+// logFile is an append-only file that renames itself to <path>.1 when the
+// current file would exceed max bytes, then starts a fresh file. A rotation
+// failure keeps the existing file open and keeps writing: losing diagnostics
+// is worse than an oversized file.
+type logFile struct {
+	path string
+	max  int64
+	f    *os.File
+	size int64
+}
+
+func openLogFile(path string, max int64) (*logFile, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	l := &logFile{path: path, max: max, f: f}
+	if st, err := f.Stat(); err == nil {
+		l.size = st.Size()
+	}
+	return l, nil
+}
+
+func (l *logFile) Write(p []byte) (int, error) {
+	if l.max > 0 && l.size > 0 && l.size+int64(len(p)) > l.max {
+		l.rotate()
+	}
+	n, err := l.f.Write(p)
+	l.size += int64(n)
+	return n, err
+}
+
+func (l *logFile) rotate() {
+	_ = l.f.Close()
+	_ = os.Remove(l.path + ".1")
+	_ = os.Rename(l.path, l.path+".1")
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_TRUNC, 0o600)
+	if err != nil {
+		// Reopen without truncation where possible so records are not lost.
+		if f, err = os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err != nil {
+			return
+		}
+	}
+	l.f = f
+	l.size = 0
+}
+
+func (l *logFile) Close() error { return l.f.Close() }
 
 func (b *Bus) Close() error {
 	b.mu.Lock()

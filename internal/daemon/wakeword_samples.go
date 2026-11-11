@@ -61,6 +61,9 @@ func (d *Daemon) RecordSample(ctx context.Context, label string, durationMS uint
 	if durationMS < 400 || durationMS > 10000 {
 		return sample{}, fmt.Errorf("duration %d ms out of range 400-10000", durationMS)
 	}
+	if err := d.requireFreeSpace("recording a take"); err != nil {
+		return sample{}, err
+	}
 	if d.audio.Muted() {
 		return sample{}, fmt.Errorf("microphone is muted")
 	}

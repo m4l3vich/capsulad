@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,11 @@ type Config struct {
 	// <data-dir>/wakeword/model.json, and a missing file simply means no
 	// keyword is installed.
 	WakewordModel string
+	// WakewordNegatives overrides the license-clean negative-training corpus.
+	// Empty means <data-dir>/wakeword/negatives.bin. The corpus is training
+	// input only, never an inference dependency, so it can live outside the
+	// device's 78.5 MiB /data partition.
+	WakewordNegatives string
 	// WakewordTrace logs the detector's peak score continuously.
 	WakewordTrace bool
 	// MemLimitMB bounds the daemon's Go heap. The RK3308 has 240 MiB in total
@@ -100,10 +106,11 @@ type Daemon struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clock  *ids.Clock
-	logs   *logbus.Bus
-	bootID string
-	dev    backend.Backend
+	clock   *ids.Clock
+	logs    *logbus.Bus
+	bootID  string
+	pidPath string
+	dev     backend.Backend
 
 	resources map[string]*frameworkv1.ResourceInfo
 	resOrder  []string
@@ -395,9 +402,24 @@ func (d *Daemon) wakeModels() []wakeword.Model {
 	}}
 }
 
+// pidFileName is written into the run directory so the boot service and the
+// upgrade CLI stop exactly the daemon they started rather than any same-named
+// process. A crashed daemon leaves a stale file; readers must check the PID.
+const pidFileName = "capsulad.pid"
+
+func (d *Daemon) writePIDFile() {
+	path := filepath.Join(d.cfg.RunDir, pidFileName)
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		d.logs.Warnf("daemon", "", "pid file: %v", err)
+		return
+	}
+	d.pidPath = path
+}
+
 // Run starts servers, boot applications and background loops; it blocks until
 // the context is cancelled or a fatal server error occurs.
 func (d *Daemon) Run() error {
+	d.writePIDFile()
 	if err := d.launcher.Probe(d.ctx); err != nil {
 		d.logs.Warnf("sandbox", "", "probe: %v", err)
 	}
@@ -522,6 +544,9 @@ func (d *Daemon) shutdown() {
 		d.bus.Close()
 		if d.wd != nil {
 			d.wd.disarm()
+		}
+		if d.pidPath != "" {
+			_ = os.Remove(d.pidPath)
 		}
 		_ = d.dev.Close()
 		d.cancel()

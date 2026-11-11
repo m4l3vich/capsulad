@@ -39,14 +39,19 @@ func main() {
 	fs.StringVar(&cfg.DevAdminSocket, "dev-admin", "", "development-only admin Unix socket (simulator); empty disables")
 	fs.IntVar(&cfg.MemLimitMB, "mem-limit-mb", 80, "soft Go heap limit in MiB (0 disables); keeps the OOM killer away on a 240 MiB board")
 	fs.StringVar(&cfg.WakewordModel, "wakeword-model", "", "trained keyword classifier (default <data-dir>/wakeword/model.json)")
+	fs.StringVar(&cfg.WakewordNegatives, "wakeword-negatives", "", "negative-training corpus (default <data-dir>/wakeword/negatives.bin; training input only)")
 	fs.StringVar(&cfg.Supersede, "supersede", "auto", "vendor processes to replace: auto, off, or a comma-separated list")
 	fs.BoolVar(&cfg.WakewordTrace, "wakeword-trace", false, "log the wakeword detector score twice a second")
 	fs.StringVar(&cfg.Watchdog, "watchdog", "auto", "hardware watchdog owner: auto (arm /dev/watchdog when present), off, or an explicit device path")
 	showVersion := fs.Bool("version", false, "print version and exit")
+	health := fs.Bool("health", false, "check a running daemon and exit 0 when it serves the framework API")
 	fs.Parse(os.Args[1:])
 	if *showVersion {
 		fmt.Printf("capsulad %s (draft %s, sdk %s)\n", version.Version, version.APIDraft, version.SDKVersion)
 		return
+	}
+	if *health {
+		os.Exit(checkHealth(cfg))
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
