@@ -181,6 +181,7 @@ type Daemon struct {
 	btVolume      float64
 	btVolSet      bool
 	btVolumeAt    time.Time
+	btPulseAt     time.Time
 	btPulseMu     sync.Mutex
 	btPulseCap    string
 	btPulseGen    uint64

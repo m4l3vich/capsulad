@@ -19,6 +19,11 @@ import (
 	"capsulad/internal/routing"
 )
 
+const (
+	a2dpChunkBytes    = 8192
+	a2dpChunkInterval = 200 * time.Millisecond
+)
+
 // initBluetoothAudio chooses the audio owner for A2DP. The native endpoint
 // gives the framework the stream fd and bypasses PulseAudio's bluez5 source,
 // loopback and volume coupling. PulseAudio keeps owning app playback and the
@@ -205,6 +210,8 @@ type a2dpStream struct {
 	chunks       chan a2dpPacket
 	done         chan struct{}
 	frameSamples int
+	sbcPath      string
+	auPath       string
 
 	playbackMu sync.Mutex
 	playback   *audio.Playback
@@ -216,6 +223,9 @@ func (s *a2dpStream) start() error {
 	s.done = make(chan struct{})
 	s.chunks = make(chan a2dpPacket, 64)
 	s.frameSamples = sbcFrameSamples(s.transport.Config)
+	base := fmt.Sprintf("%s/capsulad-a2dp-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
+	s.sbcPath = base + ".sbc"
+	s.auPath = base + ".au"
 	go s.readTransport()
 	go s.decodeLoop()
 	return nil
@@ -266,7 +276,7 @@ func (s *a2dpStream) decodeLoop() {
 	prevFrames := 0
 	var lastWarm []byte
 	lastFrames := 0
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(a2dpChunkInterval)
 	defer ticker.Stop()
 
 	flush := func() {
@@ -276,7 +286,11 @@ func (s *a2dpStream) decodeLoop() {
 		input := make([]byte, 0, len(prevWarm)+len(buf))
 		input = append(input, prevWarm...)
 		input = append(input, buf...)
+		started := time.Now()
 		s.decodeChunk(input, prevFrames)
+		if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+			s.d.logs.Warnf("bluetooth", "", "A2DP chunk decode stalled for %v", elapsed)
+		}
 		prevWarm = append(prevWarm[:0], lastWarm...)
 		prevFrames = lastFrames
 		buf = buf[:0]
@@ -290,7 +304,7 @@ func (s *a2dpStream) decodeLoop() {
 			buf = append(buf, pkt.data...)
 			lastWarm = pkt.data
 			lastFrames = pkt.frames
-			if len(buf) >= 4096 {
+			if len(buf) >= a2dpChunkBytes {
 				flush()
 			}
 		case <-ticker.C:
@@ -311,7 +325,7 @@ func (s *a2dpStream) decodeChunk(input []byte, warmFrames int) {
 	if warmFrames > 0 {
 		// The first warmFrames SBC frames are a re-decode of the previous
 		// chunk's tail; discard their PCM so the mixer does not repeat audio.
-		pcm, rate, channels, err := decodeSBCChunk(input)
+		pcm, rate, channels, err := decodeSBCChunk(input, s.sbcPath, s.auPath)
 		if err != nil {
 			s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
 			return
@@ -323,7 +337,7 @@ func (s *a2dpStream) decodeChunk(input []byte, warmFrames int) {
 		s.play(pcm[skip:], rate, channels)
 		return
 	}
-	pcm, rate, channels, err := decodeSBCChunk(input)
+	pcm, rate, channels, err := decodeSBCChunk(input, s.sbcPath, s.auPath)
 	if err != nil {
 		s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
 		return
@@ -409,22 +423,12 @@ func (s *a2dpStream) stopWithRelease(release bool) {
 
 // decodeSBCChunk decodes one bounded run of complete SBC frames with the
 // system libsbc utility and returns S16LE PCM plus the AU header's format.
-func decodeSBCChunk(data []byte) ([]byte, int, int, error) {
-	f, err := os.CreateTemp("", "capsulad-sbc-*.sbc")
-	if err != nil {
+func decodeSBCChunk(data []byte, sbcPath, auPath string) ([]byte, int, int, error) {
+	if err := os.WriteFile(sbcPath, data, 0o600); err != nil {
 		return nil, 0, 0, err
 	}
-	sbcPath := f.Name()
-	auPath := sbcPath + ".au"
-	defer os.Remove(sbcPath)
-	defer os.Remove(auPath)
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return nil, 0, 0, err
-	}
-	if err := f.Close(); err != nil {
-		return nil, 0, 0, err
-	}
+	// A stale AU from the previous chunk must not be mistaken for this one.
+	_ = os.Remove(auPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	out, err := exec.CommandContext(ctx, "sbcdec", "-f", auPath, sbcPath).CombinedOutput()
 	cancel()

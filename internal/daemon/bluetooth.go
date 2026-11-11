@@ -170,8 +170,17 @@ func (d *Daemon) syncBluetoothVolume() {
 	}
 	if d.btNative {
 		// PulseAudio may be restarted and re-register its A2DP endpoints; keep
-		// it out of Bluetooth audio and re-apply the stream curve.
-		d.unloadPulseBluetoothModules()
+		// it out of Bluetooth audio and re-apply the stream curve. The module
+		// scan spawns pactl, so it is not worth doing every 2 s.
+		d.btMu.Lock()
+		checkPulse := time.Since(d.btPulseAt) >= 10*time.Second
+		if checkPulse {
+			d.btPulseAt = time.Now()
+		}
+		d.btMu.Unlock()
+		if checkPulse {
+			d.unloadPulseBluetoothModules()
+		}
 		d.setBluetoothStreamTrim(d.user.Get().Values.MasterVolume)
 		// Retry acquisition while a source is connected: a source can connect
 		// paused, and AVRCP may not deliver a play event in time.

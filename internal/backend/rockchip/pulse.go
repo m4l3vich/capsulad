@@ -44,7 +44,7 @@ func (p *pulseAudio) OpenOutput() (backend.Sink, error) {
 	cmd := exec.Command("pacat", "--playback",
 		"--device="+p.cfg.AudioSink,
 		"--format=s16le", "--rate=48000", "--channels=2", "--raw",
-		"--latency-msec=60")
+		"--latency-msec=120")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
