@@ -23,8 +23,9 @@ var (
 
 // volumeCuePCM returns a short percussive tick: a noise transient, two fast
 // decaying partials and a low thump. It is generated here rather than taken
-// from the stock sound resources, and its peak is below full scale so the
-// mixer's master volume is what the listener actually hears.
+// from the stock sound resources. The synthesized waveform is deliberately
+// quiet: the mixer still applies the master gain, but a near-full-scale
+// transient became painful at mid volume on the Mini's amplifier.
 func volumeCuePCM(format backend.AudioFormat) []byte {
 	volumeCueOnce.Do(func() {
 		rate := format.RateHz
@@ -47,11 +48,14 @@ func volumeCuePCM(format backend.AudioFormat) []byte {
 			body := 0.42 * math.Exp(-t/0.018) * math.Sin(2*math.Pi*420*t)
 			top := 0.22 * math.Exp(-t/0.010) * math.Sin(2*math.Pi*1050*t)
 			thump := 0.30 * math.Exp(-t/0.032) * math.Sin(2*math.Pi*180*t)
-			v := click + body + top + thump
-			if v > 0.95 {
-				v = 0.95
-			} else if v < -0.95 {
-				v = -0.95
+			// A UI cue, not content: keep the peak around -13 dBFS before the
+			// mixer's master gain. At 50 % that is roughly -19 dBFS, audible
+			// without the harsh full-scale click the old 0.95 peak produced.
+			v := (click + body + top + thump) * 0.22
+			if v > 0.22 {
+				v = 0.22
+			} else if v < -0.22 {
+				v = -0.22
 			}
 			s := int16(v * 32767)
 			for c := 0; c < channels; c++ {

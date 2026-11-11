@@ -103,6 +103,17 @@ wait_up() {
 }
 
 start() {
+    # The RK3308 routes the Bluetooth UART interrupt to CPU0, which also runs
+    # the daemon and the wakeword inference. Under load hci_uart reports
+    # framing errors and A2DP drops 100 ms chunks. Move the UART IRQ to CPU3.
+    irq_line=$(grep serial /proc/interrupts 2>/dev/null | head -1)
+    if [ -n "$irq_line" ]; then
+        irq=${irq_line%%:*}
+        irq=$(echo "$irq" | tr -d ' ')
+        if [ -w "/proc/irq/$irq/smp_affinity" ]; then
+            echo 8 > "/proc/irq/$irq/smp_affinity" 2>/dev/null
+        fi
+    fi
     probe
     case $? in
     0)

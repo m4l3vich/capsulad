@@ -83,8 +83,13 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
+		// A 60 ms loopback target was too tight on the 1 GHz A35: the source
+		// buffer swung by hundreds of milliseconds and the adaptive resampler
+		// wobbled audibly. 250 ms absorbs scheduling jitter and keeps the
+		// compensated rate near 44.1 kHz.
 		out, err := exec.Command("pactl", "load-module", "module-loopback",
-			"source="+source, "sink=master", "latency_msec=60").Output()
+			"source="+source, "sink=master",
+			"latency_msec=250", "source_dont_move=true", "sink_dont_move=true").Output()
 		if err != nil {
 			d.logs.Warnf("bluetooth", "", "audio loopback for %s: %v", source, err)
 			d.btRouteMu.Lock()
@@ -103,6 +108,10 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		d.btRoutes[address] = module
 		d.btRouteMu.Unlock()
 		d.logs.Infof("bluetooth", "", "routing source %s to the speaker", source)
+		// The transport exists once the source does; re-apply the framework
+		// level because A2DP setup can reset absolute volume to the source's
+		// cached value.
+		d.forceBluetoothVolume()
 	}()
 }
 
@@ -136,7 +145,7 @@ func (d *Daemon) ensureConnectedBluetoothRoutes() {
 	}
 	for _, dev := range devices {
 		if dev.Connected {
-			d.ensureBluetoothAudioRoute(dev.Address)
+			d.connectBluetoothAudio(dev.Address)
 		}
 	}
 }

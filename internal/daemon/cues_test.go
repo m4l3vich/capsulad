@@ -33,8 +33,8 @@ func TestVolumeCueIsPercussivePCM(t *testing.T) {
 			negative = true
 		}
 	}
-	if peak < 8000 || peak > 32000 {
-		t.Fatalf("cue peak = %d, want a clearly audible but sub-full-scale transient", peak)
+	if peak < 4000 || peak > 12000 {
+		t.Fatalf("cue peak = %d, want an audible but deliberately quiet transient", peak)
 	}
 	if !positive || !negative {
 		t.Fatal("cue is DC, not a sound")

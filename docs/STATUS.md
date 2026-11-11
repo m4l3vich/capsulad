@@ -36,7 +36,8 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 | Web UI restructure (overview, settings, access, diagnostics) | implemented and exercised over HTTPS on the unit: all four pages render, volume/settings round-trip, API-key create+revoke works, certificate downloads as PEM | live checks against the daemon |
 | Bluetooth adapter control (BlueZ D-Bus) | implemented: power, discoverable, pairable (persisted as `bluetooth_pairable`), paired-device list and unpair. The daemon loads PulseAudio's Bluetooth discovery so the adapter advertises A2DP Sink (0x110B) and Headset (0x1108); the old `hciconfig piscan` error was an adapter nobody powered, and the framework now powers it at startup and after a BlueZ restart | live unit: `hciconfig` UP RUNNING, `PSCAN ISCAN` after the Web UI toggle, BlueZ Pairable toggled/persisted, paired MacBook listed |
 | Bluetooth media through the app contract | implemented: AVRCP play/pause/next/previous and absolute volume to the source, metadata when the source exposes it; the media app publishes a `bluetooth` player only while a source is connected | live MacBook: Play/Next accepted and playback state changed; 50 % master volume set transport `Volume=64` of 127; UI showed `PLAYBACK_PLAYING`; `TestMediaProviderRoutedStreaming` |
-| Bluetooth audio routing and ring cue | implemented: connect loads `module-loopback` from `bluez_source.<addr>.a2dp_source` to `master` and disconnect unloads it; a blue ring pulse reuses the framework fallback presentation and restores it | live logs: route added/removed, loopback module present while connected; cold boot re-registered endpoints and powered the adapter |
+| Bluetooth audio routing and ring cue | implemented: connect loads `module-loopback` from `bluez_source.<addr>.a2dp_source` to `master` with a 250 ms buffer and disconnect unloads it; a blue ring pulse reuses the framework fallback presentation and restores it | live logs: route added/removed, loopback module present while connected; source latency settled at 72 ms against a 68 ms target with the loopback rate at ~44.1 kHz after the 60 → 250 ms change; cold boot re-registered endpoints and powered the adapter |
+| Master volume and system cues | software mixer applies the master gain (measured 0 % → silence, 1 % → peak 58, 5 % → 294, 10 % → 589, 20 % → 1179); PulseAudio sinks stay at unity by design; the source volume follows through AVRCP (10 % → 13/127, 50 % → 64/127). The volume tick was synthesized at 0.95 full scale and was painful at mid volume; it now peaks at 0.22 | `TestVolumeCueIsPercussivePCM`, live `master.monitor` captures, transport property reads |
 | Display/ring brightness: constant or ambient-light | implemented with the **stock mapping** recovered from the light handler: `trunc(log(0.75+0.05*lux)*19.9375)` clamped to [5,95] %, off below 5 lux, full above 32768 lux, with the vendor's 5-point deadband and an animated transition. At 7.3 lux the framework writes 13/255; the stock unit wrote 14/255 at 7.4 lux | disassembly of 0x27ca68-0x27cc24, LED-class brightness cross-check, `TestAmbientBrightnessMatchesStockCurve` |
 | Device timezone (Web UI) with per-app override | implemented, validated end to end | Web UI round-trip restarts boot apps; clock re-reads `TZ` (11:59 MSK ↔ 16:59 Asia/Shanghai) |
 | Rockchip DT key map (volume, mic, play/pause, voice) | implemented | device-tree parser + tests |
@@ -101,7 +102,17 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   Sink and AVRCP.
 - **Bluetooth audio bypasses the framework mixer.** A connected source is routed by PulseAudio
   directly to `master`; framework ducking and software master volume do not apply to it. The volume
-  keys change the source's own level through AVRCP absolute volume (verified: 50 % → transport 64).
+  keys change the source's own level through AVRCP absolute volume (verified: 10 % → 13, 50 % → 64).
+  PulseAudio sinks are intentionally held at 100 %: the daemon's mixer applies the master in
+  software, so `pactl`/ALSA levels staying at 100 % is not a drift. The framework never writes a
+  sink volume; if a sink is seen above 100 %, it was not changed by capsulad.
+- **A2DP jitter needed buffer and IRQ tuning.** The first loopback target was 60 ms; the source
+  buffer swung by hundreds of milliseconds, the adaptive resampler moved between 44.03 and 44.4 kHz,
+  and short gaps appeared. With 250 ms the source latency settles at 57–111 ms (target 68 ms) and
+  the loopback rate at ~44.10–44.13 kHz. Separately, `hci_uart` reported
+  `Unexpected start frame` errors (2 in one 30 s window) while the Bluetooth UART IRQ shared CPU0
+  with the daemon; the boot service now moves that IRQ to CPU3. Long captures are confounded by the
+  source pausing, so sustained field listening is still the acceptance test.
 - **PulseAudio Bluetooth modules are loaded by the daemon at startup.** If PulseAudio is restarted
   while the daemon runs, the A2DP endpoints disappear until the daemon restarts (or the modules are
   loaded by hand).

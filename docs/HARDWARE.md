@@ -236,6 +236,29 @@ Live verification with the paired MacBook (2026-11-11):
 - `Pairable` and `Discoverable` toggled from the Web UI showed up in BlueZ and survived a reboot
   (`bluetooth_pairable` is a typed setting); the paired MacBook is listed in the UI.
 
+### Bluetooth volume and A2DP jitter
+
+The framework master volume is applied by the daemon's software mixer, not by PulseAudio. On the
+unit `alsa_playback`, `master` and every sink input sit at 100 % / 0.00 dB; that is intentional, not
+a drift. A captured `master.monitor` with the local media player confirms the digital gain is exact:
+0 % → silence, 1 % → peak 58, 5 % → 294, 10 % → 589, 20 % → 1179. The source's AVRCP absolute volume
+tracks the same setting (10 % → 13/127, 50 % → 64/127).
+
+The volume-change tick used to be synthesized at 0.95 of full scale, i.e. ~5× louder than content
+at the same setting and −6 dBFS at 50 % — painful on the Mini's amplifier. It is now generated at
+0.22 peak; `TestVolumeCueIsPercussivePCM` pins the quieter range. The daemon never writes a
+PulseAudio sink volume, so a `pactl` level changing independently would come from another process.
+
+A2DP initially jittered. The loopback target was 60 ms: PulseAudio's source buffer swung between
+0 and 400 ms and the adaptive resampler ran between 44.03 and 44.4 kHz, producing audible wobble.
+With `latency_msec=250` the source settles at 57–111 ms against its 68 ms target and the loopback
+rate sits at 44.10–44.13 kHz. The kernel also logged `hci_uart: Unexpected start frame` (two in a
+30 s capture) while the Bluetooth UART IRQ was handled on CPU0 together with the daemon and
+wakeword inference; `S60capsulad` now moves that IRQ to CPU3 (`/proc/irq/12/smp_affinity`). After
+that change no new frame errors appeared in a 30 s window, though the source pausing makes long
+silence-based captures inconclusive; sustained listening remains the acceptance test. HSP/HFP
+telephony is still not implemented.
+
 Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
 supervised app callers by run ID and by sandbox UID; the rest of the Bluetooth surface is
 app-facing. Unpair itself was exercised against the simulator manager, not against the user's
