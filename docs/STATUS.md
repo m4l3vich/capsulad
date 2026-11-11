@@ -117,16 +117,16 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   `SetConfiguration` is retained and UUID/Codec is the fallback. Only a `pending` or `active`
   transport is acquired: an idle transport is configured but silent, and blocking on its fd was
   observed as a silent stream followed by `EOF` while the source played on a different transport.
-  RTP is depacketized and decoded by the system `sbcdec` (the same libsbc PulseAudio used) in
-  bounded, frame-aligned chunks, then fed to the mixer at the stream rate; `sbcdec` needs a regular
-  input file, not a FIFO. The A2DP media header stores the frame count in bits 3-0 (bits 7/6/5 are
-  F/S/L); a one-frame packet has a zero high nibble, so reading the high nibble silently discarded
-  the stream. The first packet observed here was `... 05 9c bd 35`, i.e. five frames. A raw-SBC
-  packet with no RTP headers is also accepted. The first transport packet is logged in hex so a
-  silent source can be distinguished from a parse fault. To absorb scheduler/source jitter on the
-  1 GHz A35, chunks are 8 KiB / 200 ms (about five `sbcdec` invocations per second), the temp
-  files are reused, the `pacat` output latency is 120 ms, and the PA Bluetooth-module scan is
-  throttled to 10 s. Chunk decodes slower than 150 ms are logged. PA still owns app playback and the microphones. End-to-end listening is
+  RTP is depacketized and decoded in-process by `internal/sbc`, a pure-Go 8-subband SBC decoder
+  (Apache-2.0 Android reference, with attribution). It is fed every A2DP payload, keeps its
+  synthesis history across packets, and writes directly to the mixer, so there is no decoder
+  subprocess, temp file, chunk boundary or warm-up. The A2DP media header stores the frame count
+  in bits 3-0 (bits 7/6/5 are F/S/L); a one-frame packet has a zero high nibble, which previously
+  discarded the stream. A raw-SBC packet with no RTP headers is also accepted. The first transport
+  packet is logged in hex so a silent source can be distinguished from a parse fault. The decoder
+  matches both the system `sbcdec` and the Android reference sample-for-sample on the 172-frame
+  fixture. The `pacat` output latency is 120 ms and the PA Bluetooth-module scan is throttled to
+  10 s. The stripped daemon binary is unchanged in size (22,479,000 bytes). PA still owns app playback and the microphones. End-to-end listening is
   the remaining gate: the endpoint reached CONFIGURED/OPEN and a transport was created, but no
   listening test with the corrected transport selection has completed, so no codec/quality parity
   is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the

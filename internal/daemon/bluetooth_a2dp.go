@@ -2,11 +2,8 @@ package daemon
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"math"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -17,11 +14,7 @@ import (
 	"capsulad/internal/backend"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/routing"
-)
-
-const (
-	a2dpChunkBytes    = 8192
-	a2dpChunkInterval = 200 * time.Millisecond
+	"capsulad/internal/sbc"
 )
 
 // initBluetoothAudio chooses the audio owner for A2DP. The native endpoint
@@ -195,23 +188,15 @@ func (d *Daemon) setBluetoothStreamTrim(level float64) {
 	}
 }
 
-// a2dpPacket is one RTP payload plus the A2DP media header's SBC frame count.
-type a2dpPacket struct {
-	data   []byte
-	frames int
-}
-
-// a2dpStream is one acquired transport plus its decoder and mixer stream.
+// a2dpStream is one acquired transport plus its persistent decoder and mixer
+// stream. The decoder keeps its synthesis history across RTP packets, so there
+// are no chunk boundaries and no decoder subprocess.
 type a2dpStream struct {
 	d         *Daemon
 	address   string
 	transport *bluetooth.A2DPTransport
-
-	chunks       chan a2dpPacket
-	done         chan struct{}
-	frameSamples int
-	sbcPath      string
-	auPath       string
+	decoder   *sbc.Decoder
+	done      chan struct{}
 
 	playbackMu sync.Mutex
 	playback   *audio.Playback
@@ -221,13 +206,8 @@ type a2dpStream struct {
 
 func (s *a2dpStream) start() error {
 	s.done = make(chan struct{})
-	s.chunks = make(chan a2dpPacket, 64)
-	s.frameSamples = sbcFrameSamples(s.transport.Config)
-	base := fmt.Sprintf("%s/capsulad-a2dp-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
-	s.sbcPath = base + ".sbc"
-	s.auPath = base + ".au"
+	s.decoder = sbc.NewDecoder()
 	go s.readTransport()
-	go s.decodeLoop()
 	return nil
 }
 
@@ -236,9 +216,9 @@ func (s *a2dpStream) readTransport() {
 	logged := false
 	for {
 		n, err := s.transport.File.Read(buf)
-		if !logged && n > 0 {
+		if n > 0 && !logged {
 			logged = true
-			s.d.logs.Infof("bluetooth", "", "A2DP first transport packet: %d bytes head=%x", n, buf[:minInt(n, 16)])
+			s.d.logs.Infof("bluetooth", "", "A2DP first transport packet: %d bytes head=%x", n, buf[:min(n, 16)])
 		}
 		if err != nil {
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
@@ -253,96 +233,22 @@ func (s *a2dpStream) readTransport() {
 			s.stop()
 			return
 		}
-		data, frames := bluetooth.A2DPSBCPayloadFrames(buf[:n])
+		data, _ := bluetooth.A2DPSBCPayloadFrames(buf[:n])
 		if len(data) == 0 && n > 4 && buf[0] == 0x9c {
-			// Raw SBC frames: no RTP/A2DP headers. Accept the packet as-is.
-			data, frames = buf[:n], 0
+			// Raw SBC frames: no RTP/A2DP headers.
+			data = buf[:n]
 		}
 		if len(data) == 0 {
 			continue
 		}
-		pkt := a2dpPacket{data: append([]byte(nil), data...), frames: frames}
-		select {
-		case s.chunks <- pkt:
-		case <-s.done:
-			return
+		pcm, rate, channels, derr := s.decoder.Decode(data)
+		if len(pcm) > 0 {
+			s.play(pcm, rate, channels)
+		}
+		if derr != nil {
+			s.d.logs.Debugf("bluetooth", "", "SBC decode: %v", derr)
 		}
 	}
-}
-
-func (s *a2dpStream) decodeLoop() {
-	var buf []byte
-	var prevWarm []byte
-	prevFrames := 0
-	var lastWarm []byte
-	lastFrames := 0
-	ticker := time.NewTicker(a2dpChunkInterval)
-	defer ticker.Stop()
-
-	flush := func() {
-		if len(buf) == 0 {
-			return
-		}
-		input := make([]byte, 0, len(prevWarm)+len(buf))
-		input = append(input, prevWarm...)
-		input = append(input, buf...)
-		started := time.Now()
-		s.decodeChunk(input, prevFrames)
-		if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
-			s.d.logs.Warnf("bluetooth", "", "A2DP chunk decode stalled for %v", elapsed)
-		}
-		prevWarm = append(prevWarm[:0], lastWarm...)
-		prevFrames = lastFrames
-		buf = buf[:0]
-		lastWarm = nil
-		lastFrames = 0
-	}
-
-	for {
-		select {
-		case pkt := <-s.chunks:
-			buf = append(buf, pkt.data...)
-			lastWarm = pkt.data
-			lastFrames = pkt.frames
-			if len(buf) >= a2dpChunkBytes {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		case <-s.done:
-			return
-		}
-	}
-}
-
-// decodeChunk decodes a run of complete SBC frames. sbcdec needs a regular
-// input file, so each bounded chunk is written to tmpfs, decoded once, and
-// removed; this also reaps the child instead of leaving zombies.
-func (s *a2dpStream) decodeChunk(input []byte, warmFrames int) {
-	if len(input) == 0 {
-		return
-	}
-	if warmFrames > 0 {
-		// The first warmFrames SBC frames are a re-decode of the previous
-		// chunk's tail; discard their PCM so the mixer does not repeat audio.
-		pcm, rate, channels, err := decodeSBCChunk(input, s.sbcPath, s.auPath)
-		if err != nil {
-			s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
-			return
-		}
-		skip := warmFrames * s.frameSamples * channels * 2
-		if skip >= len(pcm) {
-			return
-		}
-		s.play(pcm[skip:], rate, channels)
-		return
-	}
-	pcm, rate, channels, err := decodeSBCChunk(input, s.sbcPath, s.auPath)
-	if err != nil {
-		s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
-		return
-	}
-	s.play(pcm, rate, channels)
 }
 
 func (s *a2dpStream) play(pcm []byte, rate, channels int) {
@@ -419,88 +325,4 @@ func (s *a2dpStream) stopWithRelease(release bool) {
 		}
 		s.d.btStreamMu.Unlock()
 	})
-}
-
-// decodeSBCChunk decodes one bounded run of complete SBC frames with the
-// system libsbc utility and returns S16LE PCM plus the AU header's format.
-func decodeSBCChunk(data []byte, sbcPath, auPath string) ([]byte, int, int, error) {
-	if err := os.WriteFile(sbcPath, data, 0o600); err != nil {
-		return nil, 0, 0, err
-	}
-	// A stale AU from the previous chunk must not be mistaken for this one.
-	_ = os.Remove(auPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	out, err := exec.CommandContext(ctx, "sbcdec", "-f", auPath, sbcPath).CombinedOutput()
-	cancel()
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("sbcdec: %w (%s)", err, strings.TrimSpace(string(out)))
-	}
-	b, err := os.ReadFile(auPath)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	if len(b) < 24 || string(b[:4]) != ".snd" {
-		return nil, 0, 0, fmt.Errorf("decoder returned %q, not an AU stream", firstBytes(b, 4))
-	}
-	offset := int(binary.BigEndian.Uint32(b[4:8]))
-	if offset < 24 {
-		offset = 24
-	}
-	if offset > len(b) {
-		return nil, 0, 0, fmt.Errorf("decoder AU offset %d exceeds %d bytes", offset, len(b))
-	}
-	encoding := binary.BigEndian.Uint32(b[12:16])
-	rate := int(binary.BigEndian.Uint32(b[16:20]))
-	channels := int(binary.BigEndian.Uint32(b[20:24]))
-	if encoding != 3 {
-		return nil, 0, 0, fmt.Errorf("decoder AU encoding %d is not 16-bit linear PCM", encoding)
-	}
-	if rate <= 0 || channels <= 0 {
-		return nil, 0, 0, fmt.Errorf("decoder reported %d Hz/%d channels", rate, channels)
-	}
-	be := b[offset:]
-	be = be[:len(be)&^1]
-	pcm := make([]byte, len(be))
-	for i := 0; i < len(be); i += 2 {
-		pcm[i] = be[i+1]
-		pcm[i+1] = be[i]
-	}
-	return pcm, rate, channels, nil
-}
-
-func sbcFrameSamples(config []byte) int {
-	blockMask, subMask := byte(0x15), byte(0x15)
-	if len(config) >= 7 {
-		blockMask, subMask = config[2], config[3]
-	} else if len(config) >= 2 {
-		blockMask, subMask = config[1], config[1]
-	}
-	blocks := 16
-	switch {
-	case blockMask&0x20 != 0:
-		blocks = 12
-	case blockMask&0x40 != 0:
-		blocks = 8
-	case blockMask&0x80 != 0:
-		blocks = 4
-	}
-	subbands := 8
-	if subMask&0x08 != 0 {
-		subbands = 4
-	}
-	return blocks * subbands
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func firstBytes(b []byte, n int) []byte {
-	if len(b) < n {
-		return b
-	}
-	return b[:n]
 }

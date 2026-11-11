@@ -1,0 +1,7 @@
+The SBC bit-allocation, dequantisation and synthesis constants in this package
+are a Go translation of the Android Open Source Project's SBC decoder:
+
+  Copyright 2014 The Android Open Source Project
+  Copyright 2003-2004 Open Interface North America, Inc.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
