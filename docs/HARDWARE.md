@@ -245,11 +245,13 @@ output at its minimum, the transport volume read ~6/127 yet the captured stream 
 scale, and the speaker was ~90–100 % loud. The AVRCP slider had moved without attenuating the
 stream.
 
-The loopback therefore carries the master as a local safety gain (cube-root compensated, because
-PulseAudio sink-input volume is cubic), while the source is held at a fixed 90 % trim. The audible
-Bluetooth level is bounded by the master and is at most about 0.73 × it; the Mac's own attenuation,
-when it does apply, makes it quieter still. This is the only arrangement that is safe with a source
-that may ignore AVRCP.
+The loopback therefore carries a local safety gain of master^1.5 (cube-root compensated, because
+PulseAudio sink-input volume is cubic), while the source is held at a fixed 90 % trim. A linear
+master was still too hot at 5–7 % on this amplifier. The local gain and source trim are re-asserted
+every 2 s, so a PulseAudio reset cannot leave the path at full scale. The audible Bluetooth level is
+bounded by master^1.5 and is at most about 0.73 × it; the Mac's own attenuation, when it does apply,
+makes it quieter still. This is the only arrangement that is safe with a source that may ignore
+AVRCP.
 
 PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on connect, and a 2 s
 guard reloads it whenever PulseAudio recreates it with the default (1). The default mirrored the

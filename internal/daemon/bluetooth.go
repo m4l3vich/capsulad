@@ -162,6 +162,10 @@ func (d *Daemon) syncBluetoothVolume() {
 		d.removeBluetoothAudioRoute(address)
 		d.ensureBluetoothAudioRoute(address)
 	}
+	// Re-assert the local stages: PulseAudio can recreate/reset them on
+	// profile or source changes, and a lost loopback gain means full scale.
+	d.setBluetoothSourceFixed(address)
+	d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
 	d.btMu.Lock()
 	wrote := d.btVolumeAt
 	d.btMu.Unlock()

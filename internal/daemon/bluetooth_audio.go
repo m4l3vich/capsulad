@@ -226,7 +226,11 @@ func (d *Daemon) setBluetoothPlaybackGain(level float64) {
 	if level > 1 {
 		level = 1
 	}
-	pct := int(math.Round(math.Cbrt(level) * 100))
+	// Perceptual/safety curve: a linear master is still too hot at the low
+	// end on this amplifier, and the Mac may not attenuate AVRCP at all. The
+	// 1.5 exponent keeps the low end quiet while 40 % stays usable.
+	effective := math.Pow(level, 1.5)
+	pct := int(math.Round(math.Cbrt(effective) * 100))
 	if level <= 0.01 {
 		pct = 0
 	}
