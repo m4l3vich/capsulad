@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -109,7 +111,7 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		d.btRouteMu.Unlock()
 		d.logs.Infof("bluetooth", "", "routing source %s to the speaker", source)
 		d.setBluetoothSourceFixed(address)
-		d.setLoopbackNeutral()
+		d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
 		// The transport exists once the source does; re-apply the framework
 		// level because A2DP setup can reset absolute volume to the source's
 		// cached value.
@@ -207,16 +209,38 @@ func (d *Daemon) setBluetoothSourceFixed(address string) {
 	_ = exec.Command("pactl", "set-source-volume", source, "90%").Run()
 }
 
-// setLoopbackNeutral keeps the Bluetooth loopback at 0 dB. The listening gain
-// lives on the AVRCP transport (mirrored by the master), so the loopback must
-// not attenuate again.
-func (d *Daemon) setLoopbackNeutral() {
+// setBluetoothPlaybackGain applies the framework master to the Bluetooth
+// loopback as a local safety gain. It is needed because the Mac's AVRCP
+// volume is not a reliable attenuation: the slider can move while the stream
+// stays near full scale. PulseAudio sink-input volume is cubic, so the cube
+// root yields the requested linear gain. The Bluetooth listening level is
+// therefore bounded by the master, and the Mac/AVRCP value is the synced
+// display and, when honored, an additional attenuation.
+func (d *Daemon) setBluetoothPlaybackGain(level float64) {
 	if d.dev.Platform() == backend.PlatformSimulator {
 		return
 	}
+	if level < 0 {
+		level = 0
+	}
+	if level > 1 {
+		level = 1
+	}
+	pct := int(math.Round(math.Cbrt(level) * 100))
+	if level <= 0.01 {
+		pct = 0
+	}
 	go func() {
-		if index := loopbackSinkInputIndex(); index != "" {
-			_ = exec.Command("pactl", "set-sink-input-volume", index, "100%").Run()
+		for attempt := 0; attempt < 6; attempt++ {
+			if index := loopbackSinkInputIndex(); index != "" {
+				_ = exec.Command("pactl", "set-sink-input-volume", index, fmt.Sprintf("%d%%", pct)).Run()
+				return
+			}
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
 	}()
 }

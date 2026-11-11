@@ -64,6 +64,7 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	d.btVolSet = true
 	d.btVolumeAt = time.Now()
 	d.btMu.Unlock()
+	d.setBluetoothPlaybackGain(level)
 	go func() {
 		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
 		defer cancel()

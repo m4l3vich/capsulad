@@ -238,22 +238,29 @@ Live verification with the paired MacBook (2026-11-11):
 
 ### Bluetooth volume and A2DP jitter
 
-The user-facing Bluetooth volume is the Mac's AVRCP volume and the Capsula master, kept equal in
-both directions. A 2 s loop reads the transport volume and updates the settings when the Mac slider
-moves; a master change writes the transport immediately. PulseAudio must not apply the same level
-again: `module-bluez5-device` defaults to `avrcp_absolute_volume=1`, which mirrors the transport
-onto the local bluez source and attenuates it a second time through PA's cubic curve. At master
-30 % / Mac 50 % the source mirrored 47 % (cubic 10.4 %) and, with the old local loopback gain, the
-audible level collapsed to about 1.5 % — the “phone call” sound. The device module is therefore
-reloaded with `avrcp_absolute_volume=0`, and a 2 s guard reloads it again whenever PulseAudio
-recreates it with defaults (it did after a profile reconnect, which is how the bug returned).
+The Mac's AVRCP volume and the Capsula master are kept equal in both directions: a master change
+writes the transport, and a 2 s loop adopts the Mac's value when its slider moves. The Mac is **not**
+trusted as the only attenuation. Observed on the unit: with the Capsula master at 5 % and the Mac
+output at its minimum, the transport volume read ~6/127 yet the captured stream was near full
+scale, and the speaker was ~90–100 % loud. The AVRCP slider had moved without attenuating the
+stream.
 
-The local stages are neutral: the bluez source is held at a fixed 90 % capture trim (−2.75 dB) and
-the loopback sink input at 0 dB. The effective Bluetooth level is therefore about 0.73 × the
-displayed Mac/Capsula value. Setting the PA source numerically equal to the master (or to the Mac
-volume) would attenuate a second time; there is no configuration where all three stages read the
-same number and only one of them applies gain. The Capsula master and the Mac are the synced pair;
-the PA numbers are gain stages.
+The loopback therefore carries the master as a local safety gain (cube-root compensated, because
+PulseAudio sink-input volume is cubic), while the source is held at a fixed 90 % trim. The audible
+Bluetooth level is bounded by the master and is at most about 0.73 × it; the Mac's own attenuation,
+when it does apply, makes it quieter still. This is the only arrangement that is safe with a source
+that may ignore AVRCP.
+
+PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on connect, and a 2 s
+guard reloads it whenever PulseAudio recreates it with the default (1). The default mirrored the
+transport onto the local source and applied a cubic second attenuation; at master 30 / Mac 50 the
+source mirrored 47 % (10.4 % cubic) and the audio collapsed to ~1.5 %, which sounded like a phone
+call. The self-heal is required because a profile reconnect recreated the module with defaults
+after the first fix.
+
+The three numeric stages cannot all equal the master: one of them must be a neutral/trim stage, or
+the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA source (90 %) and loopback
+(cube-root of the master) are the gain stages.
 
 The volume cue peaks at 0.22 of full scale, about five times quieter than the original 0.95.
 
@@ -263,7 +270,7 @@ settles at 57–111 ms against its 68 ms target at ~44.1 kHz. The Bluetooth UART
 by `S60capsulad`, because `hci_uart` logged `Unexpected start frame` errors while the IRQ shared
 CPU0 with the daemon and wakeword inference.
 
-Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
+Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
 supervised app callers by run ID and by sandbox UID; the rest of the Bluetooth surface is
 app-facing. Unpair itself was exercised against the simulator manager, not against the user's
 paired MacBook.
