@@ -375,9 +375,8 @@ func A2DPSBCPayloadFrames(packet []byte) ([]byte, int) {
 	if len(payload) < 2 {
 		return nil, 0
 	}
-	// The high nibble is the frame count in the common encoding, but some
-	// sources put it in another field. The count is only a decoder warm-up
-	// hint: never discard a packet just because this nibble is zero.
-	frames := int(payload[0] >> 4)
+	// A2DP SBC media header: bits 3-0 are the number of frames; bits 7/6/5
+	// are F/S/L. A one-frame packet therefore has a zero high nibble.
+	frames := int(payload[0] & 0x0f)
 	return payload[1:], frames
 }

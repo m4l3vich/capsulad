@@ -48,7 +48,7 @@ func TestSelectSBCConfigDefaultsOnShortCapabilities(t *testing.T) {
 
 func TestA2DPSBCPayloadStripsHeaders(t *testing.T) {
 	sbc := []byte{0x9c, 0x21, 0x15, 0x02, 0x35, 0xaa, 0xbb}
-	payload := append([]byte{0x20}, sbc...) // two frames (nibble high)
+	payload := append([]byte{0x02}, sbc...) // two frames in bits 3-0 (nibble high)
 	packet := make([]byte, 12+len(payload))
 	packet[0] = 0x80 // RTP v2, no CSRC/extension/padding
 	packet[1] = 96
@@ -64,7 +64,7 @@ func TestA2DPSBCPayloadStripsHeaders(t *testing.T) {
 
 func TestA2DPSBCPayloadHandlesCSRCAndPadding(t *testing.T) {
 	sbc := []byte{0x9c, 0x21, 0x15, 0x02, 0x35}
-	payload := append([]byte{0x10}, sbc...)
+	payload := append([]byte{0x01}, sbc...)
 	packet := make([]byte, 12+8+len(payload)+4)
 	packet[0] = 0x80 | 0x02 | 0x20 // two CSRC words + padding
 	packet[1] = 96
@@ -152,7 +152,7 @@ func TestFindA2DPTransportSkipsOtherEndpoints(t *testing.T) {
 
 func TestA2DPSBCPayloadFrames(t *testing.T) {
 	sbc := []byte{0x9c, 0xbd, 0x35, 0x03}
-	payload := append([]byte{0x30}, sbc...) // three frames
+	payload := append([]byte{0x03}, sbc...) // three frames in bits 3-0
 	packet := make([]byte, 12+len(payload))
 	packet[0] = 0x80
 	copy(packet[12:], payload)

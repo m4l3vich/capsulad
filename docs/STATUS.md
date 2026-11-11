@@ -119,9 +119,11 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   observed as a silent stream followed by `EOF` while the source played on a different transport.
   RTP is depacketized and decoded by the system `sbcdec` (the same libsbc PulseAudio used) in
   bounded, frame-aligned chunks, then fed to the mixer at the stream rate; `sbcdec` needs a regular
-  input file, not a FIFO. The A2DP media header's frame nibble is only a warm-up hint and must not
-  discard a packet when it is zero; a raw-SBC packet (no RTP headers) is also accepted. The first
-  transport packet is logged in hex so a silent source can be distinguished from a parse fault. PA still owns app playback and the microphones. End-to-end listening is
+  input file, not a FIFO. The A2DP media header stores the frame count in bits 3-0 (bits 7/6/5 are
+  F/S/L); a one-frame packet has a zero high nibble, so reading the high nibble silently discarded
+  the stream. The first packet observed here was `... 05 9c bd 35`, i.e. five frames. A raw-SBC
+  packet with no RTP headers is also accepted. The first transport packet is logged in hex so a
+  silent source can be distinguished from a parse fault. PA still owns app playback and the microphones. End-to-end listening is
   the remaining gate: the endpoint reached CONFIGURED/OPEN and a transport was created, but no
   listening test with the corrected transport selection has completed, so no codec/quality parity
   is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the

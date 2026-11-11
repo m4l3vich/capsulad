@@ -282,8 +282,11 @@ may not deliver a play event. The selected configuration is 44.1 kHz joint stere
 allocation, bitpool 2..53. PA still owns app playback and the microphones; the Mac's AVRCP volume
 sync is unchanged. The endpoint negotiation reached CONFIGURED/OPEN and a transport was created in
 hardware testing. The first full attempt showed that a FIFO/stdin driven `sbcdec` exits without
-audio; the chunked file decoder replaced it. End-to-end listening remains to be verified with a
-playing source, so this is not yet a claim of vendor-level quality.
+audio; the chunked file decoder replaced it. The next attempt exposed the A2DP media header
+bitfield: the frame count is bits 3-0, so a five-frame packet (`05 9c bd 35`) has a zero high
+nibble; the old high-nibble check discarded every packet. With the correct extraction the decoder
+produced PCM and a 44.1 kHz/two-channel mixer stream; the corrected warm-up count is deployed, and
+the listening/quality comparison remains.
 
 The three numeric stages cannot all equal the master: one of them must be a neutral/trim stage, or
 the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA source (90 %) and loopback
