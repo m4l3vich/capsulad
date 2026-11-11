@@ -273,20 +273,16 @@ property, so the transport path returned by `SetConfiguration` is used (UUID/Cod
 The transport fd is acquired with `MediaTransport1.Acquire` only while the transport is
 `pending` or `active`; an `idle` transport is silent (the source is paused) and reading its fd
 blocks while BlueZ streams on a real active transport, which was observed as a silent stream and
-then `EOF`. RTP is depacketized and decoded by `/usr/bin/sbcdec`, whose AU output is S16
-big-endian at offset 24 and is converted to the mixer's S16LE. `sbcdec` only decodes a regular input file, so audio is decoded in bounded frame-aligned
-chunks (tmpfs input, one process per chunk, child reaped); the last packet of a chunk is re-decoded
-as warm-up and its PCM discarded at the next chunk to hide the filter reset. The periodic sync
-retries acquisition while a source is connected, because a source may connect paused and AVRCP
-may not deliver a play event. The selected configuration is 44.1 kHz joint stereo, 16 blocks, 8 subbands, loudness
-allocation, bitpool 2..53. PA still owns app playback and the microphones; the Mac's AVRCP volume
-sync is unchanged. The endpoint negotiation reached CONFIGURED/OPEN and a transport was created in
-hardware testing. The first full attempt showed that a FIFO/stdin driven `sbcdec` exits without
-audio; the chunked file decoder replaced it. The next attempt exposed the A2DP media header
-bitfield: the frame count is bits 3-0, so a five-frame packet (`05 9c bd 35`) has a zero high
-nibble; the old high-nibble check discarded every packet. With the correct extraction the decoder
-produced PCM and a 44.1 kHz/two-channel mixer stream; the corrected warm-up count is deployed, and
-the listening/quality comparison remains.
+then `EOF`. RTP is depacketized and decoded in-process by `internal/sbc`, a pure-Go
+8-subband SBC decoder ported from the Apache-2.0 Android reference (attribution in
+`internal/sbc/NOTICE`). It keeps its synthesis filter history across A2DP packets and writes S16LE
+directly to the mixer, so there is no `sbcdec` process, temp file, chunk boundary or warm-up. The
+port matches the system `sbcdec` and the Android reference sample-for-sample on the 172-frame
+fixture (correlation 1.0, RMS 6936). The selected configuration is 44.1 kHz joint stereo,
+16 blocks, 8 subbands, loudness allocation, bitpool 2..53. PA still owns app playback and the
+microphones; the Mac's AVRCP volume sync is unchanged. The endpoint negotiation reached
+CONFIGURED/OPEN and a transport was created in hardware testing. Listening and the freeze
+comparison with the previous chunked decoder remain the end-to-end gate.
 
 The three numeric stages cannot all equal the master: one of them must be a neutral/trim stage, or
 the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA source (90 %) and loopback
