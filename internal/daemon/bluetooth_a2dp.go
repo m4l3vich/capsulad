@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"capsulad/internal/audio"
@@ -89,8 +90,15 @@ func (d *Daemon) startBluetoothStream(address string) {
 		var transport *bluetooth.A2DPTransport
 		var err error
 		for i := 0; i < 50; i++ {
+			if !d.bluetoothGen(gen) {
+				return
+			}
 			transport, err = sink.AcquireA2DP(ctx)
 			if err == nil {
+				if !d.bluetoothGen(gen) {
+					_ = transport.File.Close()
+					return
+				}
 				break
 			}
 			if !errors.Is(err, bluetooth.ErrNoTransport) {
@@ -128,7 +136,10 @@ func (d *Daemon) startBluetoothStream(address string) {
 		d.btStreamMu.Lock()
 		if d.btStreamGen != gen {
 			d.btStreamMu.Unlock()
-			stream.stop()
+			// This acquire belongs to an older connection; close it without
+			// releasing whatever transport the current stream owns.
+			_ = transport.File.Close()
+			stream.stopWithoutRelease()
 			return
 		}
 		if d.btStream != nil {
@@ -141,6 +152,12 @@ func (d *Daemon) startBluetoothStream(address string) {
 		d.btStreamMu.Unlock()
 		d.logs.Infof("bluetooth", "", "A2DP stream started for %s (fd mtu=%d config=%x)", address, transport.ReadMTU, transport.Config)
 	}()
+}
+
+func (d *Daemon) bluetoothGen(gen uint64) bool {
+	d.btStreamMu.Lock()
+	defer d.btStreamMu.Unlock()
+	return d.btStreamGen == gen
 }
 
 func (d *Daemon) stopBluetoothStream() {
@@ -206,15 +223,29 @@ func (s *a2dpStream) start() error {
 
 func (s *a2dpStream) readTransport() {
 	buf := make([]byte, 4096)
+	logged := false
 	for {
 		n, err := s.transport.File.Read(buf)
 		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+				select {
+				case <-s.done:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				continue
+			}
+			s.d.logs.Warnf("bluetooth", "", "A2DP transport read for %s: %v", s.address, err)
 			s.stop()
 			return
 		}
 		data, frames := bluetooth.A2DPSBCPayloadFrames(buf[:n])
 		if len(data) == 0 {
 			continue
+		}
+		if !logged {
+			logged = true
+			s.d.logs.Infof("bluetooth", "", "A2DP RTP packets arriving for %s (first packet %d bytes, %d frames)", s.address, n, frames)
 		}
 		pkt := a2dpPacket{data: append([]byte(nil), data...), frames: frames}
 		select {
@@ -323,6 +354,7 @@ func (s *a2dpStream) ensurePlayback(rate, channels int) (*audio.Playback, error)
 	}
 	p.SetTrim(math.Sqrt(s.d.user.Get().Values.MasterVolume))
 	s.playback = p
+	s.d.logs.Infof("bluetooth", "", "A2DP mixer stream opened at %d Hz/%d channels", rate, channels)
 	return p, nil
 }
 
@@ -336,6 +368,14 @@ func (s *a2dpStream) setTrim(v float64) {
 }
 
 func (s *a2dpStream) stop() {
+	s.stopWithRelease(true)
+}
+
+func (s *a2dpStream) stopWithoutRelease() {
+	s.stopWithRelease(false)
+}
+
+func (s *a2dpStream) stopWithRelease(release bool) {
 	s.stopOnce.Do(func() {
 		close(s.done)
 		if s.transport != nil {
@@ -348,10 +388,12 @@ func (s *a2dpStream) stop() {
 		if p != nil {
 			p.CloseInput()
 		}
-		if sink, ok := s.d.bt.(bluetooth.A2DPSink); ok {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = sink.ReleaseA2DP(ctx)
-			cancel()
+		if release {
+			if sink, ok := s.d.bt.(bluetooth.A2DPSink); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = sink.ReleaseA2DP(ctx)
+				cancel()
+			}
 		}
 		s.d.btStreamMu.Lock()
 		if s.d.btStream == s {
