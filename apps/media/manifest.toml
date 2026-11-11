@@ -1,0 +1,21 @@
+id = "org.capsula.media"
+name = "Media Player"
+version = "0.1.0"
+description = "Sample provider for the standard media-player contract: one local player driven through the framework audio mixer."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+provides = ["media_player"]
+
+[entrypoint]
+runtime = "native"
+path = "media"
+architecture = "aarch64"
+abi = "linux-musl"
+sdk = "0.5"
+
+[[interfaces]]
+service = "capsula.contracts.media.v1.MediaPlayerService"
+version = "1.0.0"
+descriptor = "schemas/media.protoset"

@@ -17,7 +17,7 @@ capsulad:
 capsula:
 	$(GOBUILD) -o $(BINDIR)/capsula ./cmd/capsula
 
-apps: $(APPDIR)/org.capsula.clock/clock $(APPDIR)/org.capsula.assistant/assistant $(APPDIR)/org.example.ring-controller/controller
+apps: $(APPDIR)/org.capsula.clock/clock $(APPDIR)/org.capsula.assistant/assistant $(APPDIR)/org.capsula.media/media $(APPDIR)/org.example.ring-controller/controller
 
 $(APPDIR)/org.capsula.clock/clock: apps/clock/main.go apps/clock/manifest.toml
 	mkdir -p $(APPDIR)/org.capsula.clock
@@ -36,10 +36,17 @@ $(APPDIR)/org.example.ring-controller/controller: apps/ring/main.go apps/ring/ma
 	cp apps/ring/schemas/ring.protoset $(APPDIR)/org.example.ring-controller/schemas/
 	cp apps/ring/docs/ring-api.md $(APPDIR)/org.example.ring-controller/docs/
 
+$(APPDIR)/org.capsula.media/media: apps/media/main.go apps/media/manifest.toml apps/media/schemas/media.protoset
+	mkdir -p $(APPDIR)/org.capsula.media/schemas
+	$(GOBUILD) -o $@ ./apps/media
+	cp apps/media/manifest.toml $(APPDIR)/org.capsula.media/manifest.toml
+	cp apps/media/schemas/media.protoset $(APPDIR)/org.capsula.media/schemas/
+
 demo: all apps
 	@echo "Run:"
 	@echo "  $(BINDIR)/capsula -data-dir build/demo app install $(APPDIR)/org.capsula.clock"
 	@echo "  $(BINDIR)/capsula -data-dir build/demo app install $(APPDIR)/org.capsula.assistant"
+	@echo "  $(BINDIR)/capsula -data-dir build/demo app install $(APPDIR)/org.capsula.media"
 	@echo "  $(BINDIR)/capsula -data-dir build/demo app install $(APPDIR)/org.example.ring-controller"
 	@echo "  $(BINDIR)/capsula -data-dir build/demo auth init -hostname localhost -ip 127.0.0.1"
 	@echo "  $(BINDIR)/capsulad -platform simulator -data-dir build/demo -web-addr 127.0.0.1:8443 -dev-admin build/demo/run/dev.sock"

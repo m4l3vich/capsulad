@@ -46,6 +46,24 @@ func buildProbe(t *testing.T) string {
 	return out
 }
 
+// buildModuleApp builds one of the repository's sample applications for the
+// host so tests can exercise the real provider instead of a stand-in.
+func buildModuleApp(t *testing.T, pkg string) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), filepath.Base(pkg))
+	args := []string{"build"}
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-ldflags", "-linkmode=external")
+	}
+	args = append(args, "-o", out, "./"+pkg)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = moduleRoot(t)
+	if outBytes, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build %s: %v\n%s", pkg, err, outBytes)
+	}
+	return out
+}
+
 const clockManifest = `
 id = "test.clock"
 name = "Test clock"
@@ -134,14 +152,59 @@ func installApp(t *testing.T, root, id, binaryName, binaryPath, manifest string)
 	}
 }
 
+// appInstall is an extra real package for tests that need a provider app
+// rather than the generic probe.
+type appInstall struct {
+	id         string
+	binaryName string
+	binaryPath string
+	manifest   []byte
+	files      map[string][]byte
+}
+
 func newTestDaemon(t *testing.T) (*Daemon, context.CancelFunc, <-chan error) {
+	return newTestDaemonWith(t)
+}
+
+func newTestDaemonWith(t *testing.T, extras ...appInstall) (*Daemon, context.CancelFunc, <-chan error) {
 	t.Helper()
 	bin := buildProbe(t)
-	base := t.TempDir()
+	// The Unix socket path must fit in sun_path (104 bytes on macOS), so the
+	// test root cannot include the long test name that t.TempDir() adds.
+	base, err := os.MkdirTemp("", "capsulad-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	apps := filepath.Join(base, "apps")
 	installApp(t, apps, "test.clock", "clock", bin, clockManifest)
 	installApp(t, apps, "test.assistant", "assistant", bin, assistantManifest)
 	installApp(t, apps, "test.probe", "probe", bin, probeManifest)
+	for _, extra := range extras {
+		dir := filepath.Join(apps, extra.id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "manifest.toml"), extra.manifest, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(extra.binaryPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, extra.binaryName), data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range extra.files {
+			path := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	cfg := DefaultConfig()
 	cfg.DataDir = base
