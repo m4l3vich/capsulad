@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -100,6 +101,8 @@ func (b *BlueZ) SetDiscoverable(ctx context.Context, on bool) error {
 	if err := b.refresh(ctx); err != nil {
 		return err
 	}
+	// Pairing visibility is separate from connectability on this stack.
+	b.ensurePageScan()
 	return nil
 }
 
@@ -123,13 +126,29 @@ func (b *BlueZ) EnsurePowered(ctx context.Context) error {
 	b.mu.Lock()
 	powered := b.status.Powered
 	b.mu.Unlock()
-	if powered {
-		return nil
+	if !powered {
+		if err := b.setAdapterProperty(ctx, "Powered", true); err != nil {
+			return err
+		}
+		if err := b.refresh(ctx); err != nil {
+			return err
+		}
 	}
-	if err := b.setAdapterProperty(ctx, "Powered", true); err != nil {
-		return err
+	b.ensurePageScan()
+	return nil
+}
+
+// ensurePageScan keeps the adapter connectable while hidden. BlueZ 5.65 on
+// this kernel clears page scan when the adapter is made non-discoverable, so a
+// paired device cannot reconnect. The legacy ioctl restores it and persists
+// until the next adapter state change; non-Linux platforms simply ignore the
+// missing tool.
+func (b *BlueZ) ensurePageScan() {
+	name := adapterName(b.adapterPath())
+	if name == "" {
+		return
 	}
-	return b.refresh(ctx)
+	_ = exec.Command("hciconfig", name, "pscan").Run()
 }
 
 func (b *BlueZ) PairedDevices(ctx context.Context) ([]Device, error) {
@@ -172,6 +191,28 @@ func (b *BlueZ) Unpair(ctx context.Context, address string) error {
 	if err := b.conn.Object(bluezService, b.adapterPath()).CallWithContext(ctx,
 		"org.bluez.Adapter1.RemoveDevice", 0, path).Err; err != nil {
 		return fmt.Errorf("remove device: %w", err)
+	}
+	return b.refresh(ctx)
+}
+
+// ConnectAudio asks the source to connect its Audio Source and AVRCP profiles.
+// macOS and some phones otherwise leave the link at ACL/HFP and the A2DP sink
+// never appears as an audio output.
+func (b *BlueZ) ConnectAudio(ctx context.Context, address string) error {
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return err
+	}
+	path := findDevicePath(objs, address)
+	if path == "" {
+		return ErrNoSource
+	}
+	for _, uuid := range []string{
+		"0000110a-0000-1000-8000-00805f9b34fb", // Audio Source
+		"0000110e-0000-1000-8000-00805f9b34fb", // A/V Remote Control
+	} {
+		// Already-connected profiles return an error; only the effect matters.
+		_ = b.conn.Object(bluezService, path).CallWithContext(ctx, "org.bluez.Device1.ConnectProfile", 0, uuid).Err
 	}
 	return b.refresh(ctx)
 }
@@ -431,6 +472,7 @@ func (b *BlueZ) reconcilePower(ctx context.Context) {
 		return
 	}
 	_ = b.refresh(callCtx)
+	b.ensurePageScan()
 }
 
 // watchOnce installs the match rules and refreshes on any relevant signal. A

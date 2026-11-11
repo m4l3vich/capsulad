@@ -117,6 +117,9 @@ type Manager interface {
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
 	Media(ctx context.Context) (MediaState, error)
+	// ConnectAudio asks a connected source to bring up its audio profiles
+	// (A2DP source and AVRCP). Sources do not always do this on their own.
+	ConnectAudio(ctx context.Context, address string) error
 	Command(ctx context.Context, cmd Command) error
 	SetAbsoluteVolume(ctx context.Context, level float64) error
 	Watch(ctx context.Context) <-chan Event
@@ -213,6 +216,8 @@ func (m *Memory) Unpair(_ context.Context, address string) error {
 	}
 	return fmt.Errorf("unknown device %s", address)
 }
+
+func (m *Memory) ConnectAudio(context.Context, string) error { return nil }
 
 func (m *Memory) Media(context.Context) (MediaState, error) {
 	m.mu.Lock()

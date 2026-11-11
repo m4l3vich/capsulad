@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -117,7 +118,7 @@ func (d *Daemon) watchBluetooth() {
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.pulseBluetoothRing()
 				d.forceBluetoothVolume()
-				d.ensureBluetoothAudioRoute(ev.DeviceAddress)
+				d.connectBluetoothAudio(ev.DeviceAddress)
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.pulseBluetoothRing()
@@ -125,10 +126,32 @@ func (d *Daemon) watchBluetooth() {
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
 					d.forceBluetoothVolume()
+					d.ensureBluetoothAudioRoute(ev.Media.DeviceAddress)
 				}
 			}
 		}
 	}
+}
+
+// connectBluetoothAudio brings up the source's A2DP/AVRCP profiles before
+// loading the audio route. Sources often connect at ACL level only.
+func (d *Daemon) connectBluetoothAudio(address string) {
+	if d.bt == nil || strings.TrimSpace(address) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(d.ctx, 12*time.Second)
+		defer cancel()
+		if err := d.bt.ConnectAudio(ctx, address); err != nil {
+			d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
+		} else {
+			d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+			// The transport exists now; apply the framework level instead of
+			// inheriting whatever absolute volume the source had cached.
+			d.forceBluetoothVolume()
+		}
+		d.ensureBluetoothAudioRoute(address)
+	}()
 }
 
 // pulseBluetoothRing runs a short blue pulse on the ring for a source
