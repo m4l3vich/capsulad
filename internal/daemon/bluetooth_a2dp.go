@@ -5,15 +5,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"capsulad/internal/audio"
@@ -21,8 +17,6 @@ import (
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/routing"
 )
-
-var a2dpFIFOSeq uint64
 
 // initBluetoothAudio chooses the audio owner for A2DP. The native endpoint
 // gives the framework the stream fd and bypasses PulseAudio's bluez5 source,
@@ -71,7 +65,9 @@ func (d *Daemon) unloadPulseBluetoothModules() {
 
 // startBluetoothStream waits for BlueZ to configure the transport and then
 // owns it: RTP -> SBC decode -> framework mixer. The wait covers the profile
-// handshake after a source connects.
+// handshake after a source connects. The periodic sync also retries this while
+// a source is connected, so a paused source that starts later does not depend
+// on an AVRCP event that may be unavailable.
 func (d *Daemon) startBluetoothStream(address string) {
 	sink, ok := d.bt.(bluetooth.A2DPSink)
 	if !ok {
@@ -88,11 +84,11 @@ func (d *Daemon) startBluetoothStream(address string) {
 	d.btStreamMu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 		defer cancel()
 		var transport *bluetooth.A2DPTransport
 		var err error
-		for i := 0; i < 75; i++ {
+		for i := 0; i < 50; i++ {
 			transport, err = sink.AcquireA2DP(ctx)
 			if err == nil {
 				break
@@ -112,7 +108,7 @@ func (d *Daemon) startBluetoothStream(address string) {
 				d.btStreamStart = false
 			}
 			d.btStreamMu.Unlock()
-			d.logs.Warnf("bluetooth", "", "A2DP transport for %s: %v", address, err)
+			d.logs.Debugf("bluetooth", "", "A2DP transport for %s not ready: %v", address, err)
 			return
 		}
 		stream := &a2dpStream{d: d, address: address, transport: transport}
@@ -172,9 +168,15 @@ func (d *Daemon) setBluetoothStreamTrim(level float64) {
 	d.btStreamMu.Lock()
 	stream := d.btStream
 	d.btStreamMu.Unlock()
-	if stream != nil && stream.playback != nil {
-		stream.playback.SetTrim(math.Sqrt(level))
+	if stream != nil {
+		stream.setTrim(math.Sqrt(level))
 	}
+}
+
+// a2dpPacket is one RTP payload plus the A2DP media header's SBC frame count.
+type a2dpPacket struct {
+	data   []byte
+	frames int
 }
 
 // a2dpStream is one acquired transport plus its decoder and mixer stream.
@@ -183,87 +185,22 @@ type a2dpStream struct {
 	address   string
 	transport *bluetooth.A2DPTransport
 
-	playback  *audio.Playback
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	pcm       *os.File
-	fifo      string
-	frameByte int
+	chunks       chan a2dpPacket
+	done         chan struct{}
+	frameSamples int
+
+	playbackMu sync.Mutex
+	playback   *audio.Playback
 
 	stopOnce sync.Once
 }
 
 func (s *a2dpStream) start() error {
-	fifo := filepath.Join(os.TempDir(), fmt.Sprintf("capsulad-a2dp-%d-%d.pcm", os.Getpid(), atomic.AddUint64(&a2dpFIFOSeq, 1)))
-	_ = os.Remove(fifo)
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		return fmt.Errorf("create decoder fifo: %w", err)
-	}
-	s.fifo = fifo
-	cmd := exec.Command("sbcdec", "-f", fifo)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		_ = os.Remove(fifo)
-		return fmt.Errorf("sbcdec stdin: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		_ = os.Remove(fifo)
-		return fmt.Errorf("start sbcdec: %w", err)
-	}
-	s.cmd, s.stdin = cmd, stdin
-
-	// sbcdec opens the FIFO for writing; this open blocks until it does.
-	pcm, err := os.Open(fifo)
-	if err != nil {
-		s.stop()
-		return fmt.Errorf("open decoder fifo: %w", err)
-	}
-	s.pcm = pcm
-
-	// Start the transport reader before waiting for the decoder header: the
-	// decoder only emits the AU header after it has seen the first frames.
+	s.done = make(chan struct{})
+	s.chunks = make(chan a2dpPacket, 64)
+	s.frameSamples = sbcFrameSamples(s.transport.Config)
 	go s.readTransport()
-
-	header := make([]byte, 24)
-	if _, err := io.ReadFull(pcm, header); err != nil {
-		s.stop()
-		return fmt.Errorf("read decoder header: %w", err)
-	}
-	if string(header[:4]) != ".snd" {
-		s.stop()
-		return fmt.Errorf("decoder returned %q, not an AU stream", header[:4])
-	}
-	offset := int(binary.BigEndian.Uint32(header[4:8]))
-	if offset < 24 {
-		offset = 24
-	}
-	if offset > 24 {
-		if _, err := io.CopyN(io.Discard, pcm, int64(offset-24)); err != nil {
-			s.stop()
-			return fmt.Errorf("skip decoder header: %w", err)
-		}
-	}
-	encoding := binary.BigEndian.Uint32(header[12:16])
-	rate := int(binary.BigEndian.Uint32(header[16:20]))
-	channels := int(binary.BigEndian.Uint32(header[20:24]))
-	if encoding != 3 {
-		s.stop()
-		return fmt.Errorf("decoder AU encoding %d is not 16-bit linear PCM", encoding)
-	}
-	if rate <= 0 || channels <= 0 {
-		s.stop()
-		return fmt.Errorf("decoder reported %d Hz/%d channels", rate, channels)
-	}
-	s.frameByte = channels * 2
-	playback, err := s.d.audio.OpenPlayback(routing.SystemAppID, "", "audio.output.speaker",
-		backend.AudioFormat{Format: backend.S16LE, RateHz: rate, Channels: channels}, "")
-	if err != nil {
-		s.stop()
-		return fmt.Errorf("open mixer stream: %w", err)
-	}
-	s.playback = playback
-	playback.SetTrim(math.Sqrt(s.d.user.Get().Values.MasterVolume))
-	go s.readPCM()
+	go s.decodeLoop()
 	return nil
 }
 
@@ -275,69 +212,141 @@ func (s *a2dpStream) readTransport() {
 			s.stop()
 			return
 		}
-		payload := bluetooth.A2DPSBCPayload(buf[:n])
-		if len(payload) == 0 {
+		data, frames := bluetooth.A2DPSBCPayloadFrames(buf[:n])
+		if len(data) == 0 {
 			continue
 		}
-		if _, err := s.stdin.Write(payload); err != nil {
-			s.stop()
+		pkt := a2dpPacket{data: append([]byte(nil), data...), frames: frames}
+		select {
+		case s.chunks <- pkt:
+		case <-s.done:
 			return
 		}
 	}
 }
 
-func (s *a2dpStream) readPCM() {
-	buf := make([]byte, 8192)
-	var carry []byte
-	for {
-		n, err := s.pcm.Read(buf)
-		if n > 0 {
-			data := append(carry, buf[:n]...)
-			usable := len(data) - len(data)%s.frameByte
-			if usable > 0 {
-				// sbcdec emits AU S16 big-endian; the mixer consumes LE.
-				le := make([]byte, usable)
-				for i := 0; i < usable; i += 2 {
-					le[i] = data[i+1]
-					le[i+1] = data[i]
-				}
-				if err := s.playback.Write(le); err != nil {
-					s.stop()
-					return
-				}
-				data = data[usable:]
-			}
-			carry = append(carry[:0], data...)
-		}
-		if err != nil {
-			s.stop()
+func (s *a2dpStream) decodeLoop() {
+	var buf []byte
+	var prevWarm []byte
+	prevFrames := 0
+	var lastWarm []byte
+	lastFrames := 0
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	flush := func() {
+		if len(buf) == 0 {
 			return
 		}
+		input := make([]byte, 0, len(prevWarm)+len(buf))
+		input = append(input, prevWarm...)
+		input = append(input, buf...)
+		s.decodeChunk(input, prevFrames)
+		prevWarm = append(prevWarm[:0], lastWarm...)
+		prevFrames = lastFrames
+		buf = buf[:0]
+		lastWarm = nil
+		lastFrames = 0
+	}
+
+	for {
+		select {
+		case pkt := <-s.chunks:
+			buf = append(buf, pkt.data...)
+			lastWarm = pkt.data
+			lastFrames = pkt.frames
+			if len(buf) >= 4096 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// decodeChunk decodes a run of complete SBC frames. sbcdec needs a regular
+// input file, so each bounded chunk is written to tmpfs, decoded once, and
+// removed; this also reaps the child instead of leaving zombies.
+func (s *a2dpStream) decodeChunk(input []byte, warmFrames int) {
+	if len(input) == 0 {
+		return
+	}
+	if warmFrames > 0 {
+		// The first warmFrames SBC frames are a re-decode of the previous
+		// chunk's tail; discard their PCM so the mixer does not repeat audio.
+		pcm, rate, channels, err := decodeSBCChunk(input)
+		if err != nil {
+			s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
+			return
+		}
+		skip := warmFrames * s.frameSamples * channels * 2
+		if skip >= len(pcm) {
+			return
+		}
+		s.play(pcm[skip:], rate, channels)
+		return
+	}
+	pcm, rate, channels, err := decodeSBCChunk(input)
+	if err != nil {
+		s.d.logs.Warnf("bluetooth", "", "SBC decode: %v", err)
+		return
+	}
+	s.play(pcm, rate, channels)
+}
+
+func (s *a2dpStream) play(pcm []byte, rate, channels int) {
+	if len(pcm) == 0 {
+		return
+	}
+	p, err := s.ensurePlayback(rate, channels)
+	if err != nil {
+		s.d.logs.Warnf("bluetooth", "", "A2DP playback: %v", err)
+		return
+	}
+	if err := p.Write(pcm); err != nil {
+		s.stop()
+	}
+}
+
+func (s *a2dpStream) ensurePlayback(rate, channels int) (*audio.Playback, error) {
+	s.playbackMu.Lock()
+	defer s.playbackMu.Unlock()
+	if s.playback != nil {
+		return s.playback, nil
+	}
+	p, err := s.d.audio.OpenPlayback(routing.SystemAppID, "", "audio.output.speaker",
+		backend.AudioFormat{Format: backend.S16LE, RateHz: rate, Channels: channels}, "")
+	if err != nil {
+		return nil, err
+	}
+	p.SetTrim(math.Sqrt(s.d.user.Get().Values.MasterVolume))
+	s.playback = p
+	return p, nil
+}
+
+func (s *a2dpStream) setTrim(v float64) {
+	s.playbackMu.Lock()
+	p := s.playback
+	s.playbackMu.Unlock()
+	if p != nil {
+		p.SetTrim(v)
 	}
 }
 
 func (s *a2dpStream) stop() {
 	s.stopOnce.Do(func() {
-		if s.stdin != nil {
-			_ = s.stdin.Close()
-		}
+		close(s.done)
 		if s.transport != nil {
 			_ = s.transport.File.Close()
 		}
-		if s.pcm != nil {
-			_ = s.pcm.Close()
-		}
-		if s.cmd != nil && s.cmd.Process != nil {
-			_ = s.cmd.Process.Kill()
-		}
-		if s.cmd != nil {
-			_ = s.cmd.Wait()
-		}
-		if s.playback != nil {
-			s.playback.CloseInput()
-		}
-		if s.fifo != "" {
-			_ = os.Remove(s.fifo)
+		s.playbackMu.Lock()
+		p := s.playback
+		s.playback = nil
+		s.playbackMu.Unlock()
+		if p != nil {
+			p.CloseInput()
 		}
 		if sink, ok := s.d.bt.(bluetooth.A2DPSink); ok {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -350,4 +359,91 @@ func (s *a2dpStream) stop() {
 		}
 		s.d.btStreamMu.Unlock()
 	})
+}
+
+// decodeSBCChunk decodes one bounded run of complete SBC frames with the
+// system libsbc utility and returns S16LE PCM plus the AU header's format.
+func decodeSBCChunk(data []byte) ([]byte, int, int, error) {
+	f, err := os.CreateTemp("", "capsulad-sbc-*.sbc")
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	sbcPath := f.Name()
+	auPath := sbcPath + ".au"
+	defer os.Remove(sbcPath)
+	defer os.Remove(auPath)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return nil, 0, 0, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, 0, 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	out, err := exec.CommandContext(ctx, "sbcdec", "-f", auPath, sbcPath).CombinedOutput()
+	cancel()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("sbcdec: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	b, err := os.ReadFile(auPath)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if len(b) < 24 || string(b[:4]) != ".snd" {
+		return nil, 0, 0, fmt.Errorf("decoder returned %q, not an AU stream", firstBytes(b, 4))
+	}
+	offset := int(binary.BigEndian.Uint32(b[4:8]))
+	if offset < 24 {
+		offset = 24
+	}
+	if offset > len(b) {
+		return nil, 0, 0, fmt.Errorf("decoder AU offset %d exceeds %d bytes", offset, len(b))
+	}
+	encoding := binary.BigEndian.Uint32(b[12:16])
+	rate := int(binary.BigEndian.Uint32(b[16:20]))
+	channels := int(binary.BigEndian.Uint32(b[20:24]))
+	if encoding != 3 {
+		return nil, 0, 0, fmt.Errorf("decoder AU encoding %d is not 16-bit linear PCM", encoding)
+	}
+	if rate <= 0 || channels <= 0 {
+		return nil, 0, 0, fmt.Errorf("decoder reported %d Hz/%d channels", rate, channels)
+	}
+	be := b[offset:]
+	be = be[:len(be)&^1]
+	pcm := make([]byte, len(be))
+	for i := 0; i < len(be); i += 2 {
+		pcm[i] = be[i+1]
+		pcm[i+1] = be[i]
+	}
+	return pcm, rate, channels, nil
+}
+
+func sbcFrameSamples(config []byte) int {
+	blockMask, subMask := byte(0x15), byte(0x15)
+	if len(config) >= 7 {
+		blockMask, subMask = config[2], config[3]
+	} else if len(config) >= 2 {
+		blockMask, subMask = config[1], config[1]
+	}
+	blocks := 16
+	switch {
+	case blockMask&0x20 != 0:
+		blocks = 12
+	case blockMask&0x40 != 0:
+		blocks = 8
+	case blockMask&0x80 != 0:
+		blocks = 4
+	}
+	subbands := 8
+	if subMask&0x08 != 0 {
+		subbands = 4
+	}
+	return blocks * subbands
+}
+
+func firstBytes(b []byte, n int) []byte {
+	if len(b) < n {
+		return b
+	}
+	return b[:n]
 }

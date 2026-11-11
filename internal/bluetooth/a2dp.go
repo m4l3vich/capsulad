@@ -335,20 +335,27 @@ func selectSBCConfig(caps []byte) []byte {
 // A2DPSBCPayload strips the RTP and A2DP media headers and returns the SBC
 // frames. It returns nil for malformed or empty packets.
 func A2DPSBCPayload(packet []byte) []byte {
+	data, _ := A2DPSBCPayloadFrames(packet)
+	return data
+}
+
+// A2DPSBCPayloadFrames is A2DPSBCPayload plus the A2DP media header's frame
+// count, which a chunked decoder needs to discard a warm-up frame.
+func A2DPSBCPayloadFrames(packet []byte) ([]byte, int) {
 	if len(packet) < 13 || packet[0]>>6 != 2 {
-		return nil
+		return nil, 0
 	}
 	cc := int(packet[0] & 0x0f)
 	off := 12 + cc*4
 	if packet[0]&0x10 != 0 {
 		if len(packet) < off+4 {
-			return nil
+			return nil, 0
 		}
 		ext := int(binary.BigEndian.Uint16(packet[off+2 : off+4]))
 		off += 4 + ext*4
 	}
 	if off >= len(packet) {
-		return nil
+		return nil, 0
 	}
 	if packet[0]&0x20 != 0 {
 		pad := int(packet[len(packet)-1])
@@ -358,10 +365,11 @@ func A2DPSBCPayload(packet []byte) []byte {
 	}
 	payload := packet[off:]
 	if len(payload) < 2 {
-		return nil
+		return nil, 0
 	}
-	if payload[0]>>4 == 0 {
-		return nil
+	frames := int(payload[0] >> 4)
+	if frames == 0 {
+		return nil, 0
 	}
-	return payload[1:]
+	return payload[1:], frames
 }

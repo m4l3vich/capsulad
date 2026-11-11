@@ -117,9 +117,10 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   `SetConfiguration` is retained and UUID/Codec is the fallback. RTP is depacketized and decoded by
   the system `sbcdec` (the same libsbc PulseAudio used), then fed to the mixer at the stream rate.
   PA still owns app playback and the microphones. End-to-end listening is the remaining gate: the
-  endpoint reached CONFIGURED/OPEN and a transport was created in hardware testing, but the final
-  `Acquire` + decode path has not been exercised with a playing source, and no codec/quality parity
-  is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the
+  endpoint reached CONFIGURED/OPEN and a transport was created in hardware testing. The first
+  end-to-end attempt exposed that `sbcdec` cannot be driven through a FIFO (the decoder exited and
+  no audio reached the mixer); that path was replaced with chunked file decoding. A listening test
+  with a playing source is still required, and no codec/quality parity is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the
   Mac's settings.
 - **The earlier flatness was PulseAudio applying the AVRCP value twice.** With the default
   `avrcp_absolute_volume=1`, PA mirrored the transport volume onto the local bluez source; at 34 %

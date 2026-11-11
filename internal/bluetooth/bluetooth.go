@@ -40,6 +40,12 @@ type A2DPTransport struct {
 	Config  []byte
 }
 
+// TrustSetter marks a paired source trusted so BlueZ authorizes AVRCP. It does
+// not change any setting on the source device.
+type TrustSetter interface {
+	SetTrusted(ctx context.Context, address string, trusted bool) error
+}
+
 // A2DPSink is implemented by a manager that owns the A2DP sink endpoint and
 // can acquire its transport. It is separate from Manager so the simulator and
 // callers that only need control state do not have to implement it.

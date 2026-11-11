@@ -147,3 +147,18 @@ func TestFindA2DPTransportSkipsOtherEndpoints(t *testing.T) {
 		t.Fatalf("path = %q, want empty", got)
 	}
 }
+
+func TestA2DPSBCPayloadFrames(t *testing.T) {
+	sbc := []byte{0x9c, 0xbd, 0x35, 0x03}
+	payload := append([]byte{0x30}, sbc...) // three frames
+	packet := make([]byte, 12+len(payload))
+	packet[0] = 0x80
+	copy(packet[12:], payload)
+	data, frames := A2DPSBCPayloadFrames(packet)
+	if frames != 3 {
+		t.Fatalf("frames = %d, want 3", frames)
+	}
+	if !bytes.Equal(data, sbc) {
+		t.Fatalf("data = %x, want %x", data, sbc)
+	}
+}

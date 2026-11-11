@@ -223,6 +223,30 @@ func (b *BlueZ) ConnectAudio(ctx context.Context, address string) error {
 	return b.refresh(ctx)
 }
 
+// SetTrusted marks a paired device trusted in the local BlueZ bond. Source
+// devices then authorize AVRCP without an interactive agent. This is local
+// state: it does not write any property on the remote device.
+func (b *BlueZ) SetTrusted(ctx context.Context, address string, trusted bool) error {
+	address = strings.ToUpper(strings.TrimSpace(address))
+	if address == "" {
+		return fmt.Errorf("device address is required")
+	}
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return err
+	}
+	path := findDevicePath(objs, address)
+	if path == "" {
+		return fmt.Errorf("unknown device %s", address)
+	}
+	if err := b.conn.Object(bluezService, path).CallWithContext(ctx,
+		"org.freedesktop.DBus.Properties.Set", 0,
+		"org.bluez.Device1", "Trusted", dbus.MakeVariant(trusted)).Err; err != nil {
+		return fmt.Errorf("set trusted: %w", err)
+	}
+	return b.refresh(ctx)
+}
+
 // SetTransportVolume writes the AVRCP absolute volume of the active transport.
 // With avrcp_absolute_volume=0 in PulseAudio this changes only the remote
 // volume, not the local source gain.

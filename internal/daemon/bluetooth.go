@@ -173,6 +173,9 @@ func (d *Daemon) syncBluetoothVolume() {
 		// it out of Bluetooth audio and re-apply the stream curve.
 		d.unloadPulseBluetoothModules()
 		d.setBluetoothStreamTrim(d.user.Get().Values.MasterVolume)
+		// Retry acquisition while a source is connected: a source can connect
+		// paused, and AVRCP may not deliver a play event in time.
+		d.startBluetoothStream(address)
 	} else {
 		if d.ensureDecoupledBluetoothModule(address) {
 			d.removeBluetoothAudioRoute(address)
@@ -226,6 +229,11 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 		go func() {
 			ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
 			defer cancel()
+			if trust, ok := d.bt.(bluetooth.TrustSetter); ok {
+				if err := trust.SetTrusted(ctx, address, true); err != nil {
+					d.logs.Debugf("bluetooth", "", "trust %s: %v", address, err)
+				}
+			}
 			if err := d.bt.ConnectAudio(ctx, address); err != nil {
 				d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
 			} else {
