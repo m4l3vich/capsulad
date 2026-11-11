@@ -114,13 +114,15 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   `org.bluez.MediaEndpoint1` at `/org/capsula/a2dp/sbc`, and obtains the transport fd through
   `MediaTransport1.Acquire`. BlueZ 5.65 calls `SelectConfiguration(ay)` and
   `SetConfiguration(o, a{sv})`; the transport has no `Endpoint` property, so the path from
-  `SetConfiguration` is retained and UUID/Codec is the fallback. RTP is depacketized and decoded by
-  the system `sbcdec` (the same libsbc PulseAudio used), then fed to the mixer at the stream rate.
-  PA still owns app playback and the microphones. End-to-end listening is the remaining gate: the
-  endpoint reached CONFIGURED/OPEN and a transport was created in hardware testing. The first
-  end-to-end attempt exposed that `sbcdec` cannot be driven through a FIFO (the decoder exited and
-  no audio reached the mixer); that path was replaced with chunked file decoding. A listening test
-  with a playing source is still required, and no codec/quality parity is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the
+  `SetConfiguration` is retained and UUID/Codec is the fallback. Only a `pending` or `active`
+  transport is acquired: an idle transport is configured but silent, and blocking on its fd was
+  observed as a silent stream followed by `EOF` while the source played on a different transport.
+  RTP is depacketized and decoded by the system `sbcdec` (the same libsbc PulseAudio used) in
+  bounded, frame-aligned chunks, then fed to the mixer at the stream rate; `sbcdec` needs a regular
+  input file, not a FIFO. PA still owns app playback and the microphones. End-to-end listening is
+  the remaining gate: the endpoint reached CONFIGURED/OPEN and a transport was created, but no
+  listening test with the corrected transport selection has completed, so no codec/quality parity
+  is claimed. The Mac ↔ Capsula AVRCP volume sync is unchanged; manual tooling must not alter the
   Mac's settings.
 - **The earlier flatness was PulseAudio applying the AVRCP value twice.** With the default
   `avrcp_absolute_volume=1`, PA mirrored the transport volume onto the local bluez source; at 34 %

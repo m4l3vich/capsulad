@@ -202,16 +202,24 @@ func (b *BlueZ) ReleaseA2DP(ctx context.Context) error {
 }
 
 func (b *BlueZ) findA2DPTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, endpointPath, transportPath dbus.ObjectPath) (dbus.ObjectPath, map[string]dbus.Variant) {
+	// Only a pending/active transport carries the A2DP stream. An idle one is
+	// created for the configured stream but stays silent while the source is
+	// paused; acquiring it blocks forever and the real active transport is
+	// never read.
+	usable := func(props map[string]dbus.Variant) bool {
+		state := strProp(props, "State")
+		return state == "pending" || state == "active"
+	}
 	// BlueZ 5.65's MediaTransport1 has no Endpoint property, but
 	// SetConfiguration gives us the exact path it will use.
 	if transportPath != "" {
-		if props, ok := objs[transportPath]["org.bluez.MediaTransport1"]; ok {
+		if props, ok := objs[transportPath]["org.bluez.MediaTransport1"]; ok && usable(props) {
 			return transportPath, props
 		}
 	}
 	for path, ifaces := range objs {
 		props, ok := ifaces["org.bluez.MediaTransport1"]
-		if !ok {
+		if !ok || !usable(props) {
 			continue
 		}
 		if strProp(props, "UUID") != a2dpSinkUUID {

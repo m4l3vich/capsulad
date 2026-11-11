@@ -270,9 +270,11 @@ capsulad now owns the A2DP sink endpoint instead. It unloads PA's bluez5 modules
 BlueZ 5.65 the endpoint API is `SelectConfiguration(ay) -> ay` and
 `SetConfiguration(o transport, a{sv} properties)`; the transport object has no `Endpoint`
 property, so the transport path returned by `SetConfiguration` is used (UUID/Codec fallback).
-The transport fd is acquired with `MediaTransport1.Acquire`; RTP is depacketized and decoded by
-`/usr/bin/sbcdec`, whose AU output is S16 big-endian at offset 24 and is converted to the mixer's
-S16LE. `sbcdec` only decodes a regular input file, so audio is decoded in bounded frame-aligned
+The transport fd is acquired with `MediaTransport1.Acquire` only while the transport is
+`pending` or `active`; an `idle` transport is silent (the source is paused) and reading its fd
+blocks while BlueZ streams on a real active transport, which was observed as a silent stream and
+then `EOF`. RTP is depacketized and decoded by `/usr/bin/sbcdec`, whose AU output is S16
+big-endian at offset 24 and is converted to the mixer's S16LE. `sbcdec` only decodes a regular input file, so audio is decoded in bounded frame-aligned
 chunks (tmpfs input, one process per chunk, child reaped); the last packet of a chunk is re-decoded
 as warm-up and its PCM discarded at the next chunk to hide the filter reset. The periodic sync
 retries acquisition while a source is connected, because a source may connect paused and AVRCP

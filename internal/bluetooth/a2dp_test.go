@@ -99,7 +99,7 @@ func TestFindA2DPTransportUsesConfiguredPathWithoutEndpointProperty(t *testing.T
 			"org.bluez.MediaTransport1": {
 				"UUID":  dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
 				"Codec": dbus.MakeVariant(byte(0)),
-				"State": dbus.MakeVariant("idle"),
+				"State": dbus.MakeVariant("active"),
 			},
 		},
 	}
@@ -120,6 +120,7 @@ func TestFindA2DPTransportFallsBackToUUIDAndCodec(t *testing.T) {
 			"org.bluez.MediaTransport1": {
 				"UUID":  dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
 				"Codec": dbus.MakeVariant(byte(0)),
+				"State": dbus.MakeVariant("pending"),
 			},
 		},
 	}
@@ -137,6 +138,7 @@ func TestFindA2DPTransportSkipsOtherEndpoints(t *testing.T) {
 			"org.bluez.MediaTransport1": {
 				"UUID":     dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
 				"Codec":    dbus.MakeVariant(byte(0)),
+				"State":    dbus.MakeVariant("active"),
 				"Endpoint": dbus.MakeVariant("/MediaEndpoint/A2DPSink/sbc"),
 			},
 		},
@@ -160,5 +162,49 @@ func TestA2DPSBCPayloadFrames(t *testing.T) {
 	}
 	if !bytes.Equal(data, sbc) {
 		t.Fatalf("data = %x, want %x", data, sbc)
+	}
+}
+
+func TestFindA2DPTransportRejectsIdleStoredPath(t *testing.T) {
+	stored := dbus.ObjectPath("/org/bluez/hci0/dev_BC_D0_74_32_51_DC/sep2/fd0")
+	active := dbus.ObjectPath("/org/bluez/hci0/dev_BC_D0_74_32_51_DC/sep2/fd1")
+	objs := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
+		stored: {
+			"org.bluez.MediaTransport1": {
+				"UUID":  dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
+				"Codec": dbus.MakeVariant(byte(0)),
+				"State": dbus.MakeVariant("idle"),
+			},
+		},
+		active: {
+			"org.bluez.MediaTransport1": {
+				"UUID":  dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
+				"Codec": dbus.MakeVariant(byte(0)),
+				"State": dbus.MakeVariant("active"),
+			},
+		},
+	}
+	b := &BlueZ{}
+	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", stored)
+	if got != active {
+		t.Fatalf("path = %q, want active %q", got, active)
+	}
+}
+
+func TestFindA2DPTransportReturnsNothingWhileIdle(t *testing.T) {
+	path := dbus.ObjectPath("/org/bluez/hci0/dev_BC_D0_74_32_51_DC/sep2/fd0")
+	objs := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
+		path: {
+			"org.bluez.MediaTransport1": {
+				"UUID":  dbus.MakeVariant("0000110b-0000-1000-8000-00805f9b34fb"),
+				"Codec": dbus.MakeVariant(byte(0)),
+				"State": dbus.MakeVariant("idle"),
+			},
+		},
+	}
+	b := &BlueZ{}
+	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", path)
+	if got != "" {
+		t.Fatalf("path = %q, want empty while idle", got)
 	}
 }
