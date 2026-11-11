@@ -247,6 +247,29 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	return nil
 }
 
+// TransportVolume reads the active AVRCP transport volume.
+func (b *BlueZ) TransportVolume(ctx context.Context) (uint16, error) {
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return 0, err
+	}
+	path, props := findVolumeTransport(objs)
+	if path == "" {
+		return 0, ErrUnsupported
+	}
+	value, ok := props["Volume"]
+	if !ok {
+		return 0, ErrUnsupported
+	}
+	switch v := value.Value().(type) {
+	case uint16:
+		return v, nil
+	case uint32:
+		return uint16(v), nil
+	}
+	return 0, ErrUnsupported
+}
+
 func (b *BlueZ) Media(ctx context.Context) (MediaState, error) {
 	if err := b.refresh(ctx); err != nil {
 		return MediaState{}, err

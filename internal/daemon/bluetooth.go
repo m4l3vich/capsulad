@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"math"
 	"strings"
 	"time"
 
@@ -46,10 +47,10 @@ func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	}()
 }
 
-// applyBluetoothVolume maps the framework master onto the Bluetooth
-// loopback's local gain. It never writes the AVRCP transport volume: PulseAudio
-// couples the transport and source volumes, so any AVRCP write would also move
-// the Mac's volume and re-create the double/cubic attenuation.
+// applyBluetoothVolume mirrors the framework master onto the Mac's AVRCP
+// volume. This is the single Bluetooth listening gain: the local source and
+// loopback stay neutral, so nothing is attenuated twice. The write timestamp
+// lets the sync loop ignore the echo of its own write.
 func (d *Daemon) applyBluetoothVolume(level float64) {
 	if d.bt == nil {
 		return
@@ -61,8 +62,15 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	}
 	d.btVolume = level
 	d.btVolSet = true
+	d.btVolumeAt = time.Now()
 	d.btMu.Unlock()
-	d.setBluetoothPlaybackGain(level)
+	go func() {
+		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
+		defer cancel()
+		if err := d.bt.SetTransportVolume(ctx, level); err != nil {
+			d.logs.Debugf("bluetooth", "", "transport volume: %v", err)
+		}
+	}()
 }
 
 // forceBluetoothVolume re-applies the current level after a loopback appears.
@@ -106,10 +114,14 @@ func (d *Daemon) watchBluetooth() {
 	// seeds its state without emitting a connect event.
 	d.ensureConnectedBluetoothRoutes()
 	events := d.bt.Watch(d.ctx)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-d.ctx.Done():
 			return
+		case <-ticker.C:
+			d.syncBluetoothVolume()
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -133,6 +145,55 @@ func (d *Daemon) watchBluetooth() {
 	}
 }
 
+// syncBluetoothVolume keeps the Mac and the framework master in step. It also
+// self-heals PulseAudio recreating the device module with the default
+// avrcp_absolute_volume=1, which would otherwise mirror the remote volume onto
+// the local source and re-introduce the double/cubic attenuation.
+func (d *Daemon) syncBluetoothVolume() {
+	if d.bt == nil {
+		return
+	}
+	address := d.currentBluetoothAddress()
+	if address == "" {
+		return
+	}
+	if d.ensureDecoupledBluetoothModule(address) {
+		d.removeBluetoothAudioRoute(address)
+		d.ensureBluetoothAudioRoute(address)
+	}
+	d.btMu.Lock()
+	wrote := d.btVolumeAt
+	d.btMu.Unlock()
+	if time.Since(wrote) < 3*time.Second {
+		return
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
+	volume, err := d.bt.TransportVolume(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	level := float64(volume) / 127
+	if level > 1 {
+		level = 1
+	}
+	current := d.user.Get().Values.MasterVolume
+	diff := level - current
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff <= 0.01 {
+		return
+	}
+	if err := d.writeUserSettings([]string{"master_volume"}, func(v *settings.UserSettings) {
+		v.MasterVolume = level
+	}); err != nil {
+		d.logs.Debugf("bluetooth", "", "sync master volume: %v", err)
+		return
+	}
+	d.logs.Infof("bluetooth", "", "master volume synced from the source: %d%%", int(math.Round(level*100)))
+}
+
 // connectBluetoothAudio brings up the source's A2DP/AVRCP profiles before
 // loading the audio route. Sources often connect at ACL level only.
 func (d *Daemon) connectBluetoothAudio(address string) {
@@ -152,12 +213,9 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 		} else {
 			d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
 		}
-		// Fixed line-level reference: the Mac's own volume stays high, and the
-		// framework master is the only listening control. 90 % is deliberate
-		// headroom, not unity.
-		if err := d.bt.SetTransportVolume(ctx, 0.90); err != nil {
-			d.logs.Debugf("bluetooth", "", "transport reference volume: %v", err)
-		}
+		// The Mac's AVRCP volume is the single Bluetooth gain and mirrors the
+		// framework master.
+		d.forceBluetoothVolume()
 		d.ensureBluetoothAudioRoute(address)
 	}()
 }

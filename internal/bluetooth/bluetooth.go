@@ -117,9 +117,11 @@ type Manager interface {
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
 	Media(ctx context.Context) (MediaState, error)
-	// SetTransportVolume writes the AVRCP transport volume. It is used once as
-	// a fixed line-level reference, never as the user-facing volume.
+	// SetTransportVolume writes the AVRCP transport volume; it is the single
+	// Bluetooth listening gain, mirrored by the framework master.
 	SetTransportVolume(ctx context.Context, level float64) error
+	// TransportVolume reads the current AVRCP transport volume (0..127).
+	TransportVolume(ctx context.Context) (uint16, error)
 	// ConnectAudio asks a connected source to bring up its audio profiles
 	// (A2DP source and AVRCP). Sources do not always do this on their own.
 	ConnectAudio(ctx context.Context, address string) error
@@ -221,6 +223,8 @@ func (m *Memory) Unpair(_ context.Context, address string) error {
 func (m *Memory) ConnectAudio(context.Context, string) error { return nil }
 
 func (m *Memory) SetTransportVolume(context.Context, float64) error { return nil }
+
+func (m *Memory) TransportVolume(context.Context) (uint16, error) { return 0, nil }
 
 func (m *Memory) Media(context.Context) (MediaState, error) {
 	m.mu.Lock()

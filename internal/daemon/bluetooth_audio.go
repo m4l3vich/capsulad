@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
-	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -111,6 +109,7 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		d.btRouteMu.Unlock()
 		d.logs.Infof("bluetooth", "", "routing source %s to the speaker", source)
 		d.setBluetoothSourceFixed(address)
+		d.setLoopbackNeutral()
 		// The transport exists once the source does; re-apply the framework
 		// level because A2DP setup can reset absolute volume to the source's
 		// cached value.
@@ -124,16 +123,16 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 // the same percentage attenuates twice and low settings sound thin. The module
 // is recreated with defaults on each new connection, so this is checked on
 // every source connect.
-func (d *Daemon) ensureDecoupledBluetoothModule(address string) {
+func (d *Daemon) ensureDecoupledBluetoothModule(address string) bool {
 	if d.dev.Platform() == backend.PlatformSimulator || strings.TrimSpace(address) == "" {
-		return
+		return false
 	}
 	pathAddr := "dev_" + strings.ReplaceAll(strings.ToUpper(address), ":", "_")
 	for attempt := 0; attempt < 8; attempt++ {
 		out, err := exec.Command("pactl", "list", "short", "modules").Output()
 		if err != nil {
 			d.logs.Warnf("bluetooth", "", "pulse modules: %v", err)
-			return
+			return false
 		}
 		var index, modulePath, args string
 		for _, line := range strings.Split(string(out), "\n") {
@@ -157,13 +156,13 @@ func (d *Daemon) ensureDecoupledBluetoothModule(address string) {
 			// PulseAudio has not created the device module yet.
 			select {
 			case <-d.ctx.Done():
-				return
+				return false
 			case <-time.After(300 * time.Millisecond):
 			}
 			continue
 		}
 		if strings.Contains(args, "avrcp_absolute_volume=0") {
-			return
+			return false
 		}
 		if modulePath == "" {
 			modulePath = "/org/bluez/hci0/" + pathAddr
@@ -171,29 +170,30 @@ func (d *Daemon) ensureDecoupledBluetoothModule(address string) {
 		_ = exec.Command("pactl", "unload-module", index).Run()
 		select {
 		case <-d.ctx.Done():
-			return
+			return false
 		case <-time.After(150 * time.Millisecond):
 		}
 		loaded, loadErr := exec.Command("pactl", "load-module", "module-bluez5-device",
 			"path="+modulePath, "avrcp_absolute_volume=0").CombinedOutput()
 		if loadErr != nil {
 			d.logs.Warnf("bluetooth", "", "decouple PA device module: %v (%s)", loadErr, strings.TrimSpace(string(loaded)))
-			return
+			return false
 		}
 		d.logs.Infof("bluetooth", "", "decoupled AVRCP volume for %s (module %s)", pathAddr, strings.TrimSpace(string(loaded)))
 		source := bluezSourceName(address)
 		for i := 0; i < 20; i++ {
 			if pulseSourceExists(source) {
-				return
+				return true
 			}
 			select {
 			case <-d.ctx.Done():
-				return
+				return true
 			case <-time.After(150 * time.Millisecond):
 			}
 		}
-		return
+		return true
 	}
+	return false
 }
 
 // setBluetoothSourceFixed holds the local bluez source at a fixed 90 %. The
@@ -207,30 +207,17 @@ func (d *Daemon) setBluetoothSourceFixed(address string) {
 	_ = exec.Command("pactl", "set-source-volume", source, "90%").Run()
 }
 
-// setBluetoothPlaybackGain applies the framework master to the Bluetooth
-// loopback sink input, not to the source/AVRCP. PulseAudio sink-input volume is
-// cubic, so the cube root yields the requested linear gain. The source stays at
-// its fixed trim and the remote volume is untouched.
-func (d *Daemon) setBluetoothPlaybackGain(level float64) {
+// setLoopbackNeutral keeps the Bluetooth loopback at 0 dB. The listening gain
+// lives on the AVRCP transport (mirrored by the master), so the loopback must
+// not attenuate again.
+func (d *Daemon) setLoopbackNeutral() {
 	if d.dev.Platform() == backend.PlatformSimulator {
 		return
 	}
-	if level < 0 {
-		level = 0
-	}
-	if level > 1 {
-		level = 1
-	}
-	pct := int(math.Round(math.Cbrt(level) * 100))
-	if level <= 0.01 {
-		pct = 0
-	}
 	go func() {
-		index := loopbackSinkInputIndex()
-		if index == "" {
-			return
+		if index := loopbackSinkInputIndex(); index != "" {
+			_ = exec.Command("pactl", "set-sink-input-volume", index, "100%").Run()
 		}
-		_ = exec.Command("pactl", "set-sink-input-volume", index, fmt.Sprintf("%d%%", pct)).Run()
 	}()
 }
 

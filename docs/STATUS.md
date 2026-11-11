@@ -37,7 +37,7 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 | Bluetooth adapter control (BlueZ D-Bus) | implemented: power, discoverable, pairable (persisted as `bluetooth_pairable`), paired-device list and unpair. The daemon loads PulseAudio's Bluetooth discovery so the adapter advertises A2DP Sink (0x110B) and Headset (0x1108); the old `hciconfig piscan` error was an adapter nobody powered, and the framework now powers it at startup and after a BlueZ restart | live unit: `hciconfig` UP RUNNING, `PSCAN ISCAN` after the Web UI toggle, BlueZ Pairable toggled/persisted, paired MacBook listed |
 | Bluetooth media through the app contract | implemented: AVRCP play/pause/next/previous and absolute volume to the source, metadata when the source exposes it; the media app publishes a `bluetooth` player only while a source is connected | live MacBook: Play/Next accepted and playback state changed; 50 % master volume set transport `Volume=64` of 127; UI showed `PLAYBACK_PLAYING`; `TestMediaProviderRoutedStreaming` |
 | Bluetooth audio routing and ring cue | implemented: connect loads `module-loopback` from `bluez_source.<addr>.a2dp_source` to `master` with a 250 ms buffer and disconnect unloads it; a blue ring pulse reuses the framework fallback presentation and restores it | live logs: route added/removed, loopback module present while connected; source latency settled at 72 ms against a 68 ms target with the loopback rate at ~44.1 kHz after the 60 → 250 ms change; cold boot re-registered endpoints and powered the adapter |
-| Master volume and system cues | software mixer applies the master gain (measured 0 % → silence, 1 % → peak 58, 5 % → 294, 10 % → 589, 20 % → 1179). Bluetooth is decoupled: PA's bluez5 device loads with `avrcp_absolute_volume=0`, the source is held at a fixed 90 % capture trim, the AVRCP transport is pinned once at 90 % as a line-level reference, and the master is applied to the loopback sink input with a cube-root mapping so the listening gain is linear. Audible level ≈ 0.66 × master, with no AVRCP writes as the user turns the knob. The volume tick was synthesized at 0.95 full scale and was painful at mid volume; it now peaks at 0.22 | `TestVolumeCueIsPercussivePCM`, live `master.monitor` captures, decoupling check (source 58 % left transport 114 unchanged), deployed source 90 % / loopback 37 % at master 5 % |
+| Master volume and system cues | software mixer applies the master gain (measured 0 % → silence, 1 % → peak 58, 5 % → 294, 10 % → 589, 20 % → 1179). Bluetooth uses the Mac's AVRCP volume as the single listening gain: the Capsula master writes it on change, and a 2 s loop adopts the Mac's volume when the user moves it there, so the two controls follow each other. PA is decoupled (`avrcp_absolute_volume=0`, self-healed every 2 s because the discover module recreates it with defaults), the source stays at a fixed 90 % trim and the loopback at 0 dB, so nothing attenuates twice. The volume tick peaks at 0.22 | `TestVolumeCueIsPercussivePCM`, live captures, decoupling check (source 58 % left transport 114 unchanged), live module recreation caught and reloaded |
 | Display/ring brightness: constant or ambient-light | implemented with the **stock mapping** recovered from the light handler: `trunc(log(0.75+0.05*lux)*19.9375)` clamped to [5,95] %, off below 5 lux, full above 32768 lux, with the vendor's 5-point deadband and an animated transition. At 7.3 lux the framework writes 13/255; the stock unit wrote 14/255 at 7.4 lux | disassembly of 0x27ca68-0x27cc24, LED-class brightness cross-check, `TestAmbientBrightnessMatchesStockCurve` |
 | Device timezone (Web UI) with per-app override | implemented, validated end to end | Web UI round-trip restarts boot apps; clock re-reads `TZ` (11:59 MSK ↔ 16:59 Asia/Shanghai) |
 | Rockchip DT key map (volume, mic, play/pause, voice) | implemented | device-tree parser + tests |
@@ -100,14 +100,13 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   MacBook, but that source exposed no `Track` attributes, so title/artist stayed empty. The reader
   parses BlueZ `MediaPlayer1.Track` when present. HSP/HFP telephony is not implemented; only A2DP
   Sink and AVRCP.
-- **Bluetooth volume is local, not AVRCP pass-through.** A connected source is routed by PulseAudio
-  to `master`; the framework master is applied to the loopback sink input (cube-root compensated,
-  because PA's percentage is cubic). The AVRCP transport volume is set once to 90 % as a line-level
-  reference and is never written when the user changes the speaker volume, so the Mac's own volume
-  no longer moves with it. The audible level is roughly 0.66 × the framework master. PulseAudio
-  sinks remain at 100 % by design; the daemon's mixer applies the software master to non-Bluetooth
-  streams. This trades the earlier "volume forwarded to the source" requirement for a single,
-  linear speaker volume without the double/cubic attenuation.
+- **Bluetooth volume: two user-facing controls, neutral PA stages.** The Mac's AVRCP volume and the
+  Capsula master are kept equal in both directions. The PulseAudio bluez source is held at a fixed
+  90 % capture trim and the loopback at 0 dB, because a third gain stage at the same numeric value
+  would attenuate a second time. The effective Bluetooth level is therefore about 0.73 × the
+  displayed master. Making the PA source numerically equal to the master would re-create the
+  double/cubic attenuation that made the audio sound like a phone call. PulseAudio sinks remain at
+  100 % by design; the software mixer applies the master to non-Bluetooth streams.
 - **The earlier flatness was PulseAudio applying the AVRCP value twice.** With the default
   `avrcp_absolute_volume=1`, PA mirrored the transport volume onto the local bluez source; at 34 %
   the cubic source gain was 3.9 % (−28 dB), so the stream sounded thin. The decoupled module and
