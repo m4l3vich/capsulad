@@ -253,6 +253,22 @@ func runApp(args []string, dataDir, socket string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("usage: capsula app remove ID")
 		}
+		// A running app keeps its binary mapped: deleting the package would not
+		// free the space until the run exits, and an immediate reinstall then
+		// fails with ENOSPC. Require an explicit stop first.
+		if conn, err := dial(resolveSocket(dataDir, socket)); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			runs, runErr := frameworkv1.NewApplicationServiceClient(conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{})
+			cancel()
+			conn.Close()
+			if runErr == nil {
+				for _, run := range runs.GetRuns() {
+					if run.AppId == args[0] {
+						return fmt.Errorf("app %s is running (run %s); stop it before removing", args[0], run.RunId)
+					}
+				}
+			}
+		}
 		root := filepath.Join(resolveDataDir(dataDir), "apps")
 		logs, _ := logbus.New(ids.NewClock(), 100, "")
 		reg, err := registry.Open(root, logs)

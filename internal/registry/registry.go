@@ -238,6 +238,9 @@ func (r *Registry) Install(src string) (*App, error) {
 		return nil, fmt.Errorf("app %s is already installed; remove %s first", m.ID, dst)
 	}
 	if err := copyTree(src, dst); err != nil {
+		// A partial package must not survive a failed install: on the 78.5 MiB
+		// data partition it would silently consume the space a retry needs.
+		_ = os.RemoveAll(dst)
 		return nil, err
 	}
 	if err := r.Rescan(); err != nil {
