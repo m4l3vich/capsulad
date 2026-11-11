@@ -2521,6 +2521,9 @@ const (
 	SystemService_GetStatus_FullMethodName                = "/capsula.framework.v1.SystemService/GetStatus"
 	SystemService_GetBluetoothStatus_FullMethodName       = "/capsula.framework.v1.SystemService/GetBluetoothStatus"
 	SystemService_SetBluetoothDiscoverable_FullMethodName = "/capsula.framework.v1.SystemService/SetBluetoothDiscoverable"
+	SystemService_SetBluetoothPairable_FullMethodName     = "/capsula.framework.v1.SystemService/SetBluetoothPairable"
+	SystemService_ListPairedDevices_FullMethodName        = "/capsula.framework.v1.SystemService/ListPairedDevices"
+	SystemService_UnpairDevice_FullMethodName             = "/capsula.framework.v1.SystemService/UnpairDevice"
 	SystemService_GetWebUiSecurity_FullMethodName         = "/capsula.framework.v1.SystemService/GetWebUiSecurity"
 	SystemService_ListUnits_FullMethodName                = "/capsula.framework.v1.SystemService/ListUnits"
 	SystemService_ControlUnit_FullMethodName              = "/capsula.framework.v1.SystemService/ControlUnit"
@@ -2535,6 +2538,13 @@ type SystemServiceClient interface {
 	// backend cannot drive or observe an adapter.
 	GetBluetoothStatus(ctx context.Context, in *GetBluetoothStatusRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
 	SetBluetoothDiscoverable(ctx context.Context, in *SetBluetoothDiscoverableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
+	// Pairable allows new devices to pair while the adapter is not
+	// discoverable. Already-paired devices may always connect while powered.
+	SetBluetoothPairable(ctx context.Context, in *SetBluetoothPairableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
+	// Paired-device management is a local administrator operation: the daemon
+	// rejects it for supervised application callers.
+	ListPairedDevices(ctx context.Context, in *ListPairedDevicesRequest, opts ...grpc.CallOption) (*ListPairedDevicesResponse, error)
+	UnpairDevice(ctx context.Context, in *UnpairDeviceRequest, opts ...grpc.CallOption) (*UnpairDeviceResponse, error)
 	// Read-only Web UI ingress state. Certificate provisioning/renewal is a
 	// local administrator CLI/bootstrap responsibility, not an app RPC.
 	GetWebUiSecurity(ctx context.Context, in *GetWebUiSecurityRequest, opts ...grpc.CallOption) (*WebUiSecurityStatus, error)
@@ -2581,6 +2591,36 @@ func (c *systemServiceClient) SetBluetoothDiscoverable(ctx context.Context, in *
 	return out, nil
 }
 
+func (c *systemServiceClient) SetBluetoothPairable(ctx context.Context, in *SetBluetoothPairableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BluetoothStatus)
+	err := c.cc.Invoke(ctx, SystemService_SetBluetoothPairable_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *systemServiceClient) ListPairedDevices(ctx context.Context, in *ListPairedDevicesRequest, opts ...grpc.CallOption) (*ListPairedDevicesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPairedDevicesResponse)
+	err := c.cc.Invoke(ctx, SystemService_ListPairedDevices_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *systemServiceClient) UnpairDevice(ctx context.Context, in *UnpairDeviceRequest, opts ...grpc.CallOption) (*UnpairDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnpairDeviceResponse)
+	err := c.cc.Invoke(ctx, SystemService_UnpairDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *systemServiceClient) GetWebUiSecurity(ctx context.Context, in *GetWebUiSecurityRequest, opts ...grpc.CallOption) (*WebUiSecurityStatus, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WebUiSecurityStatus)
@@ -2620,6 +2660,13 @@ type SystemServiceServer interface {
 	// backend cannot drive or observe an adapter.
 	GetBluetoothStatus(context.Context, *GetBluetoothStatusRequest) (*BluetoothStatus, error)
 	SetBluetoothDiscoverable(context.Context, *SetBluetoothDiscoverableRequest) (*BluetoothStatus, error)
+	// Pairable allows new devices to pair while the adapter is not
+	// discoverable. Already-paired devices may always connect while powered.
+	SetBluetoothPairable(context.Context, *SetBluetoothPairableRequest) (*BluetoothStatus, error)
+	// Paired-device management is a local administrator operation: the daemon
+	// rejects it for supervised application callers.
+	ListPairedDevices(context.Context, *ListPairedDevicesRequest) (*ListPairedDevicesResponse, error)
+	UnpairDevice(context.Context, *UnpairDeviceRequest) (*UnpairDeviceResponse, error)
 	// Read-only Web UI ingress state. Certificate provisioning/renewal is a
 	// local administrator CLI/bootstrap responsibility, not an app RPC.
 	GetWebUiSecurity(context.Context, *GetWebUiSecurityRequest) (*WebUiSecurityStatus, error)
@@ -2644,6 +2691,15 @@ func (UnimplementedSystemServiceServer) GetBluetoothStatus(context.Context, *Get
 }
 func (UnimplementedSystemServiceServer) SetBluetoothDiscoverable(context.Context, *SetBluetoothDiscoverableRequest) (*BluetoothStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetBluetoothDiscoverable not implemented")
+}
+func (UnimplementedSystemServiceServer) SetBluetoothPairable(context.Context, *SetBluetoothPairableRequest) (*BluetoothStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetBluetoothPairable not implemented")
+}
+func (UnimplementedSystemServiceServer) ListPairedDevices(context.Context, *ListPairedDevicesRequest) (*ListPairedDevicesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListPairedDevices not implemented")
+}
+func (UnimplementedSystemServiceServer) UnpairDevice(context.Context, *UnpairDeviceRequest) (*UnpairDeviceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnpairDevice not implemented")
 }
 func (UnimplementedSystemServiceServer) GetWebUiSecurity(context.Context, *GetWebUiSecurityRequest) (*WebUiSecurityStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetWebUiSecurity not implemented")
@@ -2729,6 +2785,60 @@ func _SystemService_SetBluetoothDiscoverable_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SystemService_SetBluetoothPairable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetBluetoothPairableRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).SetBluetoothPairable(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_SetBluetoothPairable_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).SetBluetoothPairable(ctx, req.(*SetBluetoothPairableRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SystemService_ListPairedDevices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPairedDevicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).ListPairedDevices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_ListPairedDevices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).ListPairedDevices(ctx, req.(*ListPairedDevicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SystemService_UnpairDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnpairDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).UnpairDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_UnpairDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).UnpairDevice(ctx, req.(*UnpairDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SystemService_GetWebUiSecurity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetWebUiSecurityRequest)
 	if err := dec(in); err != nil {
@@ -2803,6 +2913,18 @@ var SystemService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SystemService_SetBluetoothDiscoverable_Handler,
 		},
 		{
+			MethodName: "SetBluetoothPairable",
+			Handler:    _SystemService_SetBluetoothPairable_Handler,
+		},
+		{
+			MethodName: "ListPairedDevices",
+			Handler:    _SystemService_ListPairedDevices_Handler,
+		},
+		{
+			MethodName: "UnpairDevice",
+			Handler:    _SystemService_UnpairDevice_Handler,
+		},
+		{
 			MethodName: "GetWebUiSecurity",
 			Handler:    _SystemService_GetWebUiSecurity_Handler,
 		},
@@ -2816,6 +2938,198 @@ var SystemService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
+	Metadata: "capsula/framework/v1/framework.proto",
+}
+
+const (
+	BluetoothMediaService_GetState_FullMethodName   = "/capsula.framework.v1.BluetoothMediaService/GetState"
+	BluetoothMediaService_WatchState_FullMethodName = "/capsula.framework.v1.BluetoothMediaService/WatchState"
+	BluetoothMediaService_Command_FullMethodName    = "/capsula.framework.v1.BluetoothMediaService/Command"
+)
+
+// BluetoothMediaServiceClient is the client API for BluetoothMediaService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// BluetoothMediaService exposes the connected A2DP source's AVRCP state to
+// apps. Media control and metadata travel through the standard app-provided
+// media-player contract; this service is the framework side of that bridge.
+type BluetoothMediaServiceClient interface {
+	GetState(ctx context.Context, in *GetBluetoothMediaStateRequest, opts ...grpc.CallOption) (*BluetoothMediaState, error)
+	// First message is the current state, then one per change.
+	WatchState(ctx context.Context, in *WatchBluetoothMediaStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BluetoothMediaState], error)
+	Command(ctx context.Context, in *BluetoothMediaCommandRequest, opts ...grpc.CallOption) (*BluetoothMediaState, error)
+}
+
+type bluetoothMediaServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewBluetoothMediaServiceClient(cc grpc.ClientConnInterface) BluetoothMediaServiceClient {
+	return &bluetoothMediaServiceClient{cc}
+}
+
+func (c *bluetoothMediaServiceClient) GetState(ctx context.Context, in *GetBluetoothMediaStateRequest, opts ...grpc.CallOption) (*BluetoothMediaState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BluetoothMediaState)
+	err := c.cc.Invoke(ctx, BluetoothMediaService_GetState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bluetoothMediaServiceClient) WatchState(ctx context.Context, in *WatchBluetoothMediaStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BluetoothMediaState], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &BluetoothMediaService_ServiceDesc.Streams[0], BluetoothMediaService_WatchState_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchBluetoothMediaStateRequest, BluetoothMediaState]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BluetoothMediaService_WatchStateClient = grpc.ServerStreamingClient[BluetoothMediaState]
+
+func (c *bluetoothMediaServiceClient) Command(ctx context.Context, in *BluetoothMediaCommandRequest, opts ...grpc.CallOption) (*BluetoothMediaState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BluetoothMediaState)
+	err := c.cc.Invoke(ctx, BluetoothMediaService_Command_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BluetoothMediaServiceServer is the server API for BluetoothMediaService service.
+// All implementations must embed UnimplementedBluetoothMediaServiceServer
+// for forward compatibility.
+//
+// BluetoothMediaService exposes the connected A2DP source's AVRCP state to
+// apps. Media control and metadata travel through the standard app-provided
+// media-player contract; this service is the framework side of that bridge.
+type BluetoothMediaServiceServer interface {
+	GetState(context.Context, *GetBluetoothMediaStateRequest) (*BluetoothMediaState, error)
+	// First message is the current state, then one per change.
+	WatchState(*WatchBluetoothMediaStateRequest, grpc.ServerStreamingServer[BluetoothMediaState]) error
+	Command(context.Context, *BluetoothMediaCommandRequest) (*BluetoothMediaState, error)
+	mustEmbedUnimplementedBluetoothMediaServiceServer()
+}
+
+// UnimplementedBluetoothMediaServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedBluetoothMediaServiceServer struct{}
+
+func (UnimplementedBluetoothMediaServiceServer) GetState(context.Context, *GetBluetoothMediaStateRequest) (*BluetoothMediaState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetState not implemented")
+}
+func (UnimplementedBluetoothMediaServiceServer) WatchState(*WatchBluetoothMediaStateRequest, grpc.ServerStreamingServer[BluetoothMediaState]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchState not implemented")
+}
+func (UnimplementedBluetoothMediaServiceServer) Command(context.Context, *BluetoothMediaCommandRequest) (*BluetoothMediaState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Command not implemented")
+}
+func (UnimplementedBluetoothMediaServiceServer) mustEmbedUnimplementedBluetoothMediaServiceServer() {}
+func (UnimplementedBluetoothMediaServiceServer) testEmbeddedByValue()                               {}
+
+// UnsafeBluetoothMediaServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to BluetoothMediaServiceServer will
+// result in compilation errors.
+type UnsafeBluetoothMediaServiceServer interface {
+	mustEmbedUnimplementedBluetoothMediaServiceServer()
+}
+
+func RegisterBluetoothMediaServiceServer(s grpc.ServiceRegistrar, srv BluetoothMediaServiceServer) {
+	// If the following call pancis, it indicates UnimplementedBluetoothMediaServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&BluetoothMediaService_ServiceDesc, srv)
+}
+
+func _BluetoothMediaService_GetState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBluetoothMediaStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BluetoothMediaServiceServer).GetState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BluetoothMediaService_GetState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BluetoothMediaServiceServer).GetState(ctx, req.(*GetBluetoothMediaStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BluetoothMediaService_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchBluetoothMediaStateRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(BluetoothMediaServiceServer).WatchState(m, &grpc.GenericServerStream[WatchBluetoothMediaStateRequest, BluetoothMediaState]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BluetoothMediaService_WatchStateServer = grpc.ServerStreamingServer[BluetoothMediaState]
+
+func _BluetoothMediaService_Command_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BluetoothMediaCommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BluetoothMediaServiceServer).Command(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BluetoothMediaService_Command_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BluetoothMediaServiceServer).Command(ctx, req.(*BluetoothMediaCommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// BluetoothMediaService_ServiceDesc is the grpc.ServiceDesc for BluetoothMediaService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var BluetoothMediaService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "capsula.framework.v1.BluetoothMediaService",
+	HandlerType: (*BluetoothMediaServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetState",
+			Handler:    _BluetoothMediaService_GetState_Handler,
+		},
+		{
+			MethodName: "Command",
+			Handler:    _BluetoothMediaService_Command_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchState",
+			Handler:       _BluetoothMediaService_WatchState_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "capsula/framework/v1/framework.proto",
 }
 

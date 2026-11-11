@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/settings"
 	"capsulad/internal/version"
 )
 
@@ -87,29 +88,83 @@ type systemService struct {
 }
 
 func (s *systemService) GetBluetoothStatus(ctx context.Context, _ *frameworkv1.GetBluetoothStatusRequest) (*frameworkv1.BluetoothStatus, error) {
-	return s.bluetoothProto(), nil
+	return s.bluetoothProto(ctx), nil
 }
 
 func (s *systemService) SetBluetoothDiscoverable(ctx context.Context, req *frameworkv1.SetBluetoothDiscoverableRequest) (*frameworkv1.BluetoothStatus, error) {
-	bt := s.d.dev.Bluetooth()
-	if bt == nil {
-		return nil, status.Error(codes.FailedPrecondition, "no Bluetooth adapter on this platform")
+	if s.d.bt == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
 	}
-	if err := bt.SetDiscoverable(req.Discoverable); err != nil {
+	if err := s.d.bt.SetDiscoverable(ctx, req.Discoverable); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	return s.bluetoothProto(), nil
+	return s.bluetoothProto(ctx), nil
 }
 
-func (s *systemService) bluetoothProto() *frameworkv1.BluetoothStatus {
-	bt := s.d.dev.Bluetooth()
-	if bt == nil {
-		return &frameworkv1.BluetoothStatus{Present: false, Detail: "no Bluetooth adapter on this platform"}
+// SetBluetoothPairable controls whether new devices may pair while the adapter
+// is not discoverable. It is app-facing; the paired-device list is not.
+func (s *systemService) SetBluetoothPairable(ctx context.Context, req *frameworkv1.SetBluetoothPairableRequest) (*frameworkv1.BluetoothStatus, error) {
+	if s.d.bt == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
 	}
-	st := bt.Status()
+	if err := s.d.bt.SetPairable(ctx, req.Pairable); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err := s.d.writeUserSettings([]string{"bluetooth_pairable"}, func(v *settings.UserSettings) {
+		v.BluetoothPairable = req.Pairable
+	}); err != nil {
+		return nil, status.Error(codes.Internal, "adapter changed but the setting could not be persisted: "+err.Error())
+	}
+	return s.bluetoothProto(ctx), nil
+}
+
+func (s *systemService) ListPairedDevices(ctx context.Context, _ *frameworkv1.ListPairedDevicesRequest) (*frameworkv1.ListPairedDevicesResponse, error) {
+	if err := s.d.requireLocalAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if s.d.bt == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
+	}
+	devices, err := s.d.bt.PairedDevices(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	out := make([]*frameworkv1.PairedDevice, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, &frameworkv1.PairedDevice{
+			Address: d.Address, Name: d.Name, Connected: d.Connected, Trusted: d.Trusted,
+		})
+	}
+	return &frameworkv1.ListPairedDevicesResponse{Devices: out}, nil
+}
+
+func (s *systemService) UnpairDevice(ctx context.Context, req *frameworkv1.UnpairDeviceRequest) (*frameworkv1.UnpairDeviceResponse, error) {
+	if err := s.d.requireLocalAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if s.d.bt == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
+	}
+	if strings.TrimSpace(req.Address) == "" {
+		return nil, status.Error(codes.InvalidArgument, "device address is required")
+	}
+	if err := s.d.bt.Unpair(ctx, req.Address); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	return &frameworkv1.UnpairDeviceResponse{Removed: true}, nil
+}
+
+func (s *systemService) bluetoothProto(ctx context.Context) *frameworkv1.BluetoothStatus {
+	if s.d.bt == nil {
+		return &frameworkv1.BluetoothStatus{Present: false, Detail: "BlueZ is unavailable"}
+	}
+	st, err := s.d.bt.Status(ctx)
+	if err != nil {
+		return &frameworkv1.BluetoothStatus{Present: false, Detail: err.Error()}
+	}
 	return &frameworkv1.BluetoothStatus{
 		Present: st.Present, Powered: st.Powered, Discoverable: st.Discoverable,
-		Adapter: st.Adapter, Detail: st.Detail,
+		Pairable: st.Pairable, Adapter: st.Adapter, Detail: st.Detail,
 	}
 }
 
@@ -230,6 +285,7 @@ func (d *Daemon) registerServices(srv *grpc.Server) {
 	frameworkv1.RegisterDeviceServiceServer(srv, &deviceService{d: d})
 	frameworkv1.RegisterSettingsServiceServer(srv, &settingsService{d: d})
 	frameworkv1.RegisterSystemServiceServer(srv, &systemService{d: d})
+	frameworkv1.RegisterBluetoothMediaServiceServer(srv, &bluetoothMediaService{d: d})
 	frameworkv1.RegisterSensorServiceServer(srv, &sensorService{d: d})
 	frameworkv1.RegisterAssetServiceServer(srv, &assetService{d: d})
 	d.registerApplicationServices(srv)

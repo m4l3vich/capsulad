@@ -126,6 +126,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /settings", s.settingsPage)
 	mux.HandleFunc("POST /settings", s.updateSettings)
 	mux.HandleFunc("POST /bluetooth", s.bluetoothToggle)
+	mux.HandleFunc("POST /bluetooth/pairable", s.bluetoothPairable)
+	mux.HandleFunc("POST /bluetooth/unpair", s.bluetoothUnpair)
 	mux.HandleFunc("GET /access", s.accessPage)
 	mux.HandleFunc("POST /access/password", s.changePassword)
 	mux.HandleFunc("POST /access/keys", s.createAPIKey)

@@ -175,6 +175,9 @@ message UserSettings {
   // Per display/ring resource: "const" uses display_brightness, "auto"
   // follows the ambient-light sensor. Missing means "const".
   map<string, string> brightness_mode = 11;
+  // Allow new Bluetooth devices to pair while the adapter is not
+  // discoverable. Already-paired devices may connect while powered.
+  bool bluetooth_pairable = 12;
 }
 // Only controls how long the microphone-MUTED visual indication remains.
 // It does not change the mute state or capture/watchdog indication policy.
@@ -1055,6 +1058,13 @@ service SystemService {
   // backend cannot drive or observe an adapter.
   rpc GetBluetoothStatus(GetBluetoothStatusRequest) returns (BluetoothStatus);
   rpc SetBluetoothDiscoverable(SetBluetoothDiscoverableRequest) returns (BluetoothStatus);
+  // Pairable allows new devices to pair while the adapter is not
+  // discoverable. Already-paired devices may always connect while powered.
+  rpc SetBluetoothPairable(SetBluetoothPairableRequest) returns (BluetoothStatus);
+  // Paired-device management is a local administrator operation: the daemon
+  // rejects it for supervised application callers.
+  rpc ListPairedDevices(ListPairedDevicesRequest) returns (ListPairedDevicesResponse);
+  rpc UnpairDevice(UnpairDeviceRequest) returns (UnpairDeviceResponse);
   // Read-only Web UI ingress state. Certificate provisioning/renewal is a
   // local administrator CLI/bootstrap responsibility, not an app RPC.
   rpc GetWebUiSecurity(GetWebUiSecurityRequest)
@@ -1065,12 +1075,59 @@ service SystemService {
 }
 message GetBluetoothStatusRequest {}
 message SetBluetoothDiscoverableRequest { bool discoverable = 1; }
+message SetBluetoothPairableRequest { bool pairable = 1; }
 message BluetoothStatus {
   bool present = 1;
   bool powered = 2;
   bool discoverable = 3;
   string adapter = 4;   // e.g. hci0
   string detail = 5;    // backend explanation, never a false success
+  bool pairable = 6;
+}
+message ListPairedDevicesRequest {}
+message PairedDevice {
+  string address = 1;   // e.g. BC:D0:74:32:51:DC
+  string name = 2;      // alias or address when unnamed
+  bool connected = 3;
+  bool trusted = 4;
+}
+message ListPairedDevicesResponse { repeated PairedDevice devices = 1; }
+message UnpairDeviceRequest { string address = 1; }
+message UnpairDeviceResponse { bool removed = 1; }
+
+// BluetoothMediaService exposes the connected A2DP source's AVRCP state to
+// apps. Media control and metadata travel through the standard app-provided
+// media-player contract; this service is the framework side of that bridge.
+service BluetoothMediaService {
+  rpc GetState(GetBluetoothMediaStateRequest) returns (BluetoothMediaState);
+  // First message is the current state, then one per change.
+  rpc WatchState(WatchBluetoothMediaStateRequest)
+      returns (stream BluetoothMediaState);
+  rpc Command(BluetoothMediaCommandRequest) returns (BluetoothMediaState);
+}
+message GetBluetoothMediaStateRequest {}
+message WatchBluetoothMediaStateRequest {}
+enum BluetoothMediaCommand {
+  BLUETOOTH_MEDIA_COMMAND_UNSPECIFIED = 0;
+  BLUETOOTH_MEDIA_PLAY = 1;
+  BLUETOOTH_MEDIA_PAUSE = 2;
+  BLUETOOTH_MEDIA_TOGGLE = 3;
+  BLUETOOTH_MEDIA_NEXT = 4;
+  BLUETOOTH_MEDIA_PREVIOUS = 5;
+}
+message BluetoothMediaCommandRequest { BluetoothMediaCommand command = 1; }
+message BluetoothMediaState {
+  bool present = 1;          // a remote source is connected
+  bool playing = 2;
+  string device_address = 3;
+  string device_name = 4;
+  string title = 5;
+  string artist = 6;
+  string album = 7;
+  uint64 duration_ms = 8;
+  uint64 position_ms = 9;
+  uint64 revision = 10;      // monotonic across this daemon's lifetime
+  string detail = 11;        // why metadata/control is unavailable, if so
 }
 message GetWebUiSecurityRequest {}
 message WebUiSecurityStatus {

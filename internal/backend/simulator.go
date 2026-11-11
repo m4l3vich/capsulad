@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -11,16 +10,15 @@ import (
 // and test mode. It has no physical side effects and exposes injection hooks
 // for tests and the local development admin socket.
 type Simulator struct {
-	mu        sync.Mutex
-	info      DeviceInfo
-	segment   *simSegment
-	ring      *simRing
-	audio     *simAudio
-	touch     *simTouch
-	sensors   *simSensors
-	bluetooth *simBluetooth
-	caps      []SubsystemStatus
-	closed    bool
+	mu      sync.Mutex
+	info    DeviceInfo
+	segment *simSegment
+	ring    *simRing
+	audio   *simAudio
+	touch   *simTouch
+	sensors *simSensors
+	caps    []SubsystemStatus
+	closed  bool
 }
 
 func NewSimulator(opts SimulatorOptions) *Simulator {
@@ -37,19 +35,17 @@ func NewSimulator(opts SimulatorOptions) *Simulator {
 			Firmware: "capsula-simulator",
 			Platform: PlatformSimulator,
 		},
-		segment:   newSimSegment(),
-		ring:      newSimRing(),
-		audio:     newSimAudio(),
-		touch:     newSimTouch(),
-		sensors:   newSimSensors(),
-		bluetooth: &simBluetooth{powered: true},
+		segment: newSimSegment(),
+		ring:    newSimRing(),
+		audio:   newSimAudio(),
+		touch:   newSimTouch(),
+		sensors: newSimSensors(),
 	}
 	if opts.DeviceID == "" {
 		s.info.DeviceID = "simulator-0001"
 	}
 	s.caps = []SubsystemStatus{
 		{Subsystem: "segment", BackendID: "sim.segment", Status: Available, Detail: "4-digit 7-segment virtual display"},
-		{Subsystem: "bluetooth", BackendID: "sim.bluetooth", Status: Available, Detail: "simulated adapter"},
 		{Subsystem: "ring", BackendID: "sim.ring", Status: Available, Detail: "12-pixel RGB virtual ring"},
 		{Subsystem: "touch", BackendID: "sim.evdev", Status: Available, Detail: "virtual contact/gesture surface"},
 		{Subsystem: "audio", BackendID: "sim.audio", Status: Available, Detail: "virtual 16 kHz capture / 48 kHz stereo playback"},
@@ -74,7 +70,6 @@ func (s *Simulator) Ring() RingDevice       { return s.ring }
 func (s *Simulator) Audio() AudioDevice     { return s.audio }
 func (s *Simulator) Touch() TouchDevice     { return s.touch }
 func (s *Simulator) Sensors() Sensors       { return s.sensors }
-func (s *Simulator) Bluetooth() Bluetooth   { return s.bluetooth }
 
 func (s *Simulator) Close() error {
 	s.mu.Lock()
@@ -377,31 +372,4 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
-}
-
-// simBluetooth is an in-memory adapter so development and tests can exercise the
-// UI and RPC surface without hardware.
-type simBluetooth struct {
-	mu           sync.Mutex
-	powered      bool
-	discoverable bool
-}
-
-func (b *simBluetooth) Status() BluetoothStatus {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return BluetoothStatus{
-		Present: true, Powered: b.powered, Discoverable: b.discoverable,
-		Adapter: "hci-sim", Detail: "simulated adapter",
-	}
-}
-
-func (b *simBluetooth) SetDiscoverable(on bool) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.powered {
-		return fmt.Errorf("bluetooth adapter is powered off")
-	}
-	b.discoverable = on
-	return nil
 }

@@ -1,8 +1,10 @@
 // Media player is a sample provider for the standard MediaPlayerService
-// contract. It publishes one player, synthesizes a short local playlist through
-// the framework audio mixer, and serves the contract over the reverse-RPC bus:
-// the app never listens on its own socket, and the daemon never assumes media
-// semantics beyond the contract.
+// contract. It publishes a local synthesized playlist and, when a Bluetooth
+// audio source is connected, a second player driven through the framework's
+// app-facing BluetoothMediaService (AVRCP commands and track metadata).
+//
+// The app never listens on its own socket and never touches Bluetooth or ALSA
+// directly; the daemon owns the hardware and relays both contracts.
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"log"
 	"math"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,11 +24,13 @@ import (
 )
 
 const (
-	service    = "capsula.contracts.media.v1.MediaPlayerService"
-	playerID   = "local.player"
-	sampleRate = 48000
-	channels   = 2
-	chunkMS    = 20
+	service        = "capsula.contracts.media.v1.MediaPlayerService"
+	localPlayerID  = "local.player"
+	btPlayerID     = "bluetooth"
+	sampleRate     = 48000
+	channels       = 2
+	chunkMS        = 20
+	framesPerChunk = sampleRate * chunkMS / 1000
 )
 
 // track is one synthesized piece: a short melody repeated on skip.
@@ -39,23 +44,20 @@ type track struct {
 
 func (t track) frames() int { return len(t.notesHz) * t.noteMS * sampleRate / 1000 }
 
-var (
-	tracks = []track{
-		{
-			id: "aurora", title: "Aurora", artist: "Capsula", noteMS: 320,
-			notesHz: []float64{440.00, 493.88, 554.37, 659.25, 554.37, 493.88, 440.00, 392.00},
-		},
-		{
-			id: "harbor", title: "Harbor Lights", artist: "Capsula", noteMS: 280,
-			notesHz: []float64{329.63, 392.00, 440.00, 392.00, 523.25, 440.00, 392.00, 329.63},
-		},
-		{
-			id: "drift", title: "Drift", artist: "Capsula", noteMS: 400,
-			notesHz: []float64{261.63, 311.13, 349.23, 392.00, 349.23, 311.13},
-		},
-	}
-	framesPerChunk = sampleRate * chunkMS / 1000
-)
+var tracks = []track{
+	{
+		id: "aurora", title: "Aurora", artist: "Capsula", noteMS: 320,
+		notesHz: []float64{440.00, 493.88, 554.37, 659.25, 554.37, 493.88, 440.00, 392.00},
+	},
+	{
+		id: "harbor", title: "Harbor Lights", artist: "Capsula", noteMS: 280,
+		notesHz: []float64{329.63, 392.00, 440.00, 392.00, 523.25, 440.00, 392.00, 329.63},
+	},
+	{
+		id: "drift", title: "Drift", artist: "Capsula", noteMS: 400,
+		notesHz: []float64{261.63, 311.13, 349.23, 392.00, 349.23, 311.13},
+	},
+}
 
 type provider struct {
 	client *capsula.Client
@@ -73,15 +75,14 @@ type provider struct {
 	changed  chan struct{}
 	feedStop context.CancelFunc
 	pcmBuf   []byte
+	bt       *frameworkv1.BluetoothMediaState
 }
 
 func newProvider(ctx context.Context, client *capsula.Client) *provider {
 	return &provider{ctx: ctx, client: client, changed: make(chan struct{})}
 }
 
-func (p *provider) status() *mediav1.PlayerStatus {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *provider) localStatusLocked() *mediav1.PlayerStatus {
 	tr := tracks[p.trackIdx]
 	state := mediav1.PlaybackState_PLAYBACK_STOPPED
 	if p.started {
@@ -91,7 +92,7 @@ func (p *provider) status() *mediav1.PlayerStatus {
 		state = mediav1.PlaybackState_PLAYBACK_PLAYING
 	}
 	return &mediav1.PlayerStatus{
-		PlayerId:      playerID,
+		PlayerId:      localPlayerID,
 		PlaybackState: state,
 		SupportedActions: []mediav1.MediaAction{
 			mediav1.MediaAction_MEDIA_PLAY,
@@ -109,6 +110,75 @@ func (p *provider) status() *mediav1.PlayerStatus {
 		PositionMs: proto.Uint64(p.frame * 1000 / sampleRate),
 		Revision:   p.revision,
 	}
+}
+
+// bluetoothStatusLocked maps the framework's AVRCP view onto the standard
+// contract. Only present when a source is connected.
+func (p *provider) bluetoothStatusLocked() *mediav1.PlayerStatus {
+	if p.bt == nil || !p.bt.GetPresent() {
+		return nil
+	}
+	state := mediav1.PlaybackState_PLAYBACK_PAUSED
+	if p.bt.GetPlaying() {
+		state = mediav1.PlaybackState_PLAYBACK_PLAYING
+	}
+	st := &mediav1.PlayerStatus{
+		PlayerId:      btPlayerID,
+		PlaybackState: state,
+		SupportedActions: []mediav1.MediaAction{
+			mediav1.MediaAction_MEDIA_PLAY,
+			mediav1.MediaAction_MEDIA_PAUSE,
+			mediav1.MediaAction_MEDIA_SKIP_NEXT,
+			mediav1.MediaAction_MEDIA_SKIP_PREVIOUS,
+		},
+		AppName:    "Bluetooth",
+		SourceName: p.bt.GetDeviceName(),
+		DurationMs: proto.Uint64(p.bt.GetDurationMs()),
+		PositionMs: proto.Uint64(p.bt.GetPositionMs()),
+		Revision:   p.bt.GetRevision(),
+	}
+	name := strings.TrimSpace(p.bt.GetTitle())
+	if name != "" && p.bt.GetArtist() != "" {
+		name += " — " + p.bt.GetArtist()
+	}
+	if name == "" {
+		name = p.bt.GetDeviceName()
+	}
+	if name != "" {
+		st.MediaName = proto.String(name)
+	}
+	if p.bt.GetTitle() != "" {
+		st.Title = proto.String(p.bt.GetTitle())
+	}
+	if p.bt.GetArtist() != "" {
+		st.Artist = proto.String(p.bt.GetArtist())
+	}
+	if p.bt.GetAlbum() != "" {
+		st.Album = proto.String(p.bt.GetAlbum())
+	}
+	return st
+}
+
+func (p *provider) statuses() []*mediav1.PlayerStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := []*mediav1.PlayerStatus{p.localStatusLocked()}
+	if bt := p.bluetoothStatusLocked(); bt != nil {
+		out = append(out, bt)
+	}
+	return out
+}
+
+func (p *provider) status(playerID string) *mediav1.PlayerStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if playerID == btPlayerID {
+		if st := p.bluetoothStatusLocked(); st != nil {
+			return st
+		}
+		return &mediav1.PlayerStatus{PlayerId: btPlayerID}
+	}
+	return p.localStatusLocked()
 }
 
 func (p *provider) notifyLocked() {
@@ -260,47 +330,138 @@ func (p *provider) nextChunk() []byte {
 	return out
 }
 
+// startBluetooth mirrors the framework's AVRCP state into a second player.
+// A failure only means this build has no Bluetooth source; the local player
+// keeps working.
+func (p *provider) startBluetooth(ctx context.Context) {
+	stream, err := p.client.WatchBluetoothMedia(ctx)
+	if err != nil {
+		log.Printf("media: bluetooth media unavailable: %v", err)
+		return
+	}
+	go func() {
+		for state := range stream.C {
+			p.mu.Lock()
+			p.bt = state
+			p.notifyLocked()
+			p.mu.Unlock()
+		}
+	}()
+}
+
+func (p *provider) bluetoothCommand(ctx context.Context, cmd frameworkv1.BluetoothMediaCommand) *mediav1.PlayerCommandResult {
+	p.mu.Lock()
+	present := p.bt != nil && p.bt.GetPresent()
+	p.mu.Unlock()
+	if !present {
+		return &mediav1.PlayerCommandResult{Accepted: false, Detail: "no Bluetooth source is connected"}
+	}
+	if _, err := p.client.BluetoothMediaCommand(ctx, cmd); err != nil {
+		return &mediav1.PlayerCommandResult{Accepted: false, Detail: err.Error()}
+	}
+	return &mediav1.PlayerCommandResult{Accepted: true, Detail: "bluetooth"}
+}
+
+// playerRequest reads the optional unary request (player_id) from a routed
+// call. An absent request defaults to the local player.
+func playerRequest(call *capsula.ServerCall) *mediav1.PlayerRequest {
+	data, err := call.Recv()
+	if err != nil {
+		return &mediav1.PlayerRequest{}
+	}
+	var req mediav1.PlayerRequest
+	if err := proto.Unmarshal(data, &req); err != nil {
+		return &mediav1.PlayerRequest{}
+	}
+	return &req
+}
+
 func (p *provider) register(client *capsula.Client) {
 	client.Handle(service, "ListPlayers", func(ctx context.Context, call *capsula.ServerCall) {
-		_ = call.Send(marshal(&mediav1.ListPlayersResponse{Players: []*mediav1.PlayerStatus{p.status()}}))
+		_ = call.Send(marshal(&mediav1.ListPlayersResponse{Players: p.statuses()}))
 	})
 	client.Handle(service, "GetStatus", func(ctx context.Context, call *capsula.ServerCall) {
-		_ = call.Send(marshal(p.status()))
+		req := playerRequest(call)
+		_ = call.Send(marshal(p.status(req.GetPlayerId())))
 	})
 	client.Handle(service, "WatchPlayers", p.watch)
 	client.Handle(service, "Play", func(ctx context.Context, call *capsula.ServerCall) {
+		req := playerRequest(call)
+		if req.GetPlayerId() == btPlayerID {
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_PLAY)))
+			return
+		}
 		p.play()
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "playing"}))
 	})
 	client.Handle(service, "Pause", func(ctx context.Context, call *capsula.ServerCall) {
+		req := playerRequest(call)
+		if req.GetPlayerId() == btPlayerID {
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_PAUSE)))
+			return
+		}
 		p.pause()
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "paused"}))
 	})
 	client.Handle(service, "SkipNext", func(ctx context.Context, call *capsula.ServerCall) {
+		req := playerRequest(call)
+		if req.GetPlayerId() == btPlayerID {
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_NEXT)))
+			return
+		}
 		p.skip(1)
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "next"}))
 	})
 	client.Handle(service, "SkipPrevious", func(ctx context.Context, call *capsula.ServerCall) {
+		req := playerRequest(call)
+		if req.GetPlayerId() == btPlayerID {
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_PREVIOUS)))
+			return
+		}
 		p.skip(-1)
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "previous"}))
 	})
 }
 
-// watch emits the required snapshot first, then one update per state change.
+// watch emits the required snapshot first, then updates. A Bluetooth player
+// that disappears is reported as PlayerRemoved.
 func (p *provider) watch(ctx context.Context, call *capsula.ServerCall) {
 	first := true
+	lastBluetooth := false
 	for {
 		changed := p.watchChan()
-		event := &mediav1.PlayerEvent{Event: &mediav1.PlayerEvent_Updated{Updated: p.status()}}
+		players := p.statuses()
+		bluetooth := false
+		for _, player := range players {
+			if player.GetPlayerId() == btPlayerID {
+				bluetooth = true
+			}
+		}
 		if first {
-			event = &mediav1.PlayerEvent{Event: &mediav1.PlayerEvent_Snapshot{
-				Snapshot: &mediav1.ListPlayersResponse{Players: []*mediav1.PlayerStatus{p.status()}},
+			event := &mediav1.PlayerEvent{Event: &mediav1.PlayerEvent_Snapshot{
+				Snapshot: &mediav1.ListPlayersResponse{Players: players},
 			}}
+			if err := call.Send(marshal(event)); err != nil {
+				return
+			}
 			first = false
+		} else {
+			if lastBluetooth && !bluetooth {
+				removed := &mediav1.PlayerEvent{Event: &mediav1.PlayerEvent_Removed{
+					Removed: &mediav1.PlayerRemoved{PlayerId: btPlayerID},
+				}}
+				if err := call.Send(marshal(removed)); err != nil {
+					return
+				}
+			}
+			for _, player := range players {
+				event := &mediav1.PlayerEvent{Event: &mediav1.PlayerEvent_Updated{Updated: player}}
+				if err := call.Send(marshal(event)); err != nil {
+					return
+				}
+			}
 		}
-		if err := call.Send(marshal(event)); err != nil {
-			return
-		}
+		lastBluetooth = bluetooth
 		select {
 		case <-ctx.Done():
 			return
@@ -353,7 +514,8 @@ func main() {
 	case <-ctx.Done():
 		return
 	}
-	log.Printf("media: provider ready player=%s tracks=%d", playerID, len(tracks))
+	p.startBluetooth(ctx)
+	log.Printf("media: provider ready local=%s bluetooth=%s", localPlayerID, btPlayerID)
 	<-ctx.Done()
 	p.shutdown()
 }

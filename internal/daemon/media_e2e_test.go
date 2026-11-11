@@ -11,6 +11,7 @@ import (
 
 	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/bluetooth"
 )
 
 const mediaService = "capsula.contracts.media.v1.MediaPlayerService"
@@ -157,4 +158,70 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(mediav1.PlaybackState_PLAYBACK_PAUSED)
+
+	// A connected Bluetooth source appears as a second player through the same
+	// contract, with AVRCP metadata and commands relayed by the framework.
+	mem, ok := d.bt.(*bluetooth.Memory)
+	if !ok {
+		t.Fatalf("simulator Bluetooth manager is %T", d.bt)
+	}
+	mem.SimulateConnect(bluetooth.Device{Address: "AA:BB:CC:DD:EE:FF", Name: "Test source"}, bluetooth.MediaState{
+		Present: true, Playing: true, Title: "Scarlet Fire", Artist: "Otis McDonald",
+		Album: "Single", DurationMS: 215000, PositionMS: 42000,
+	})
+	listPlayers := func() []*mediav1.PlayerStatus {
+		t.Helper()
+		req, _ := proto.Marshal(&mediav1.ListPlayersRequest{})
+		reply := routedCall(t, conn, "org.capsula.media", mediaService, "ListPlayers", [][]byte{req})
+		if len(reply) != 1 {
+			t.Fatalf("ListPlayers returned %d messages", len(reply))
+		}
+		var list mediav1.ListPlayersResponse
+		if err := proto.Unmarshal(reply[0], &list); err != nil {
+			t.Fatal(err)
+		}
+		return list.GetPlayers()
+	}
+	var btPlayer *mediav1.PlayerStatus
+	waitFor(t, 5*time.Second, "bluetooth player", func() bool {
+		for _, player := range listPlayers() {
+			if player.GetPlayerId() == "bluetooth" {
+				btPlayer = player
+				return true
+			}
+		}
+		return false
+	})
+	if btPlayer.GetTitle() != "Scarlet Fire" || btPlayer.GetArtist() != "Otis McDonald" {
+		t.Fatalf("bluetooth metadata = %+v", btPlayer)
+	}
+	if btPlayer.GetPlaybackState() != mediav1.PlaybackState_PLAYBACK_PLAYING {
+		t.Fatalf("bluetooth state = %v", btPlayer.GetPlaybackState())
+	}
+
+	btReq, _ := proto.Marshal(&mediav1.PlayerRequest{PlayerId: "bluetooth"})
+	raw = routedCall(t, conn, "org.capsula.media", mediaService, "Pause", [][]byte{btReq})
+	if err := proto.Unmarshal(raw[0], &accepted); err != nil {
+		t.Fatal(err)
+	}
+	if !accepted.GetAccepted() {
+		t.Fatalf("bluetooth pause rejected: %s", accepted.GetDetail())
+	}
+	state, err := mem.Media(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Playing {
+		t.Fatal("bluetooth pause did not reach the source")
+	}
+
+	mem.SimulateDisconnect("AA:BB:CC:DD:EE:FF")
+	waitFor(t, 5*time.Second, "bluetooth player removal", func() bool {
+		for _, player := range listPlayers() {
+			if player.GetPlayerId() == "bluetooth" {
+				return false
+			}
+		}
+		return true
+	})
 }

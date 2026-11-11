@@ -21,12 +21,14 @@ import (
 )
 
 type overviewData struct {
-	Info      *frameworkv1.DeviceInfo
-	Audio     *frameworkv1.AudioState
-	Bluetooth *frameworkv1.BluetoothStatus
-	Providers []mediaProvider
-	Apps      []*frameworkv1.InstalledApplication
-	Runs      []*frameworkv1.AppRun
+	Info         *frameworkv1.DeviceInfo
+	Audio        *frameworkv1.AudioState
+	Bluetooth    *frameworkv1.BluetoothStatus
+	Paired       []*frameworkv1.PairedDevice
+	BluetoothErr string
+	Providers    []mediaProvider
+	Apps         []*frameworkv1.InstalledApplication
+	Runs         []*frameworkv1.AppRun
 }
 
 type settingsPageData struct {
@@ -89,6 +91,11 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	data.Info, _ = dev.GetInfo(ctx, &frameworkv1.GetInfoRequest{})
 	data.Audio, _ = frameworkv1.NewAudioServiceClient(s.Conn).GetAudioState(ctx, &frameworkv1.GetAudioStateRequest{})
 	data.Bluetooth, _ = frameworkv1.NewSystemServiceClient(s.Conn).GetBluetoothStatus(ctx, &frameworkv1.GetBluetoothStatusRequest{})
+	if paired, err := frameworkv1.NewSystemServiceClient(s.Conn).ListPairedDevices(ctx, &frameworkv1.ListPairedDevicesRequest{}); err != nil {
+		data.BluetoothErr = err.Error()
+	} else {
+		data.Paired = paired.GetDevices()
+	}
 	if runs, err := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{}); err == nil {
 		data.Runs = runs.Runs
 	}
@@ -519,6 +526,42 @@ func (s *Server) bluetoothToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirect(w, r, "/", "Bluetooth advertising disabled", "")
+}
+
+// bluetoothPairable toggles whether new devices may pair while the adapter is
+// hidden. Paired devices can always reconnect while Bluetooth is powered.
+func (s *Server) bluetoothPairable(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r)
+	defer cancel()
+	on := r.PostFormValue("pairable") == "1"
+	if _, err := frameworkv1.NewSystemServiceClient(s.Conn).SetBluetoothPairable(ctx,
+		&frameworkv1.SetBluetoothPairableRequest{Pairable: on}); err != nil {
+		s.redirect(w, r, "/", "", err.Error())
+		return
+	}
+	if on {
+		s.redirect(w, r, "/", "Incoming pairing enabled", "")
+		return
+	}
+	s.redirect(w, r, "/", "Incoming pairing disabled", "")
+}
+
+// bluetoothUnpair forgets one bond. This is deliberately Web-UI-only: the
+// daemon rejects the RPC for supervised applications.
+func (s *Server) bluetoothUnpair(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r)
+	defer cancel()
+	address := strings.TrimSpace(r.PostFormValue("address"))
+	if address == "" {
+		s.redirect(w, r, "/", "", "device address is required")
+		return
+	}
+	if _, err := frameworkv1.NewSystemServiceClient(s.Conn).UnpairDevice(ctx,
+		&frameworkv1.UnpairDeviceRequest{Address: address}); err != nil {
+		s.redirect(w, r, "/", "", err.Error())
+		return
+	}
+	s.redirect(w, r, "/", "Device "+address+" unpaired", "")
 }
 
 func (s *Server) accessPage(w http.ResponseWriter, r *http.Request) {

@@ -51,6 +51,9 @@ type UserSettings struct {
 	// BrightnessMode maps a display/ring resource to "const" or "auto". Auto
 	// follows the ambient-light sensor; a missing entry means "const".
 	BrightnessMode map[string]string `json:"brightness_mode"`
+	// BluetoothPairable allows new devices to pair while the adapter is not
+	// discoverable. Paired devices may connect whenever the adapter is powered.
+	BluetoothPairable bool `json:"bluetooth_pairable"`
 }
 
 const (
@@ -195,6 +198,8 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 				next.Timezone = patch.Timezone
 			case "brightness_mode":
 				next.BrightnessMode = cloneMap(patch.BrightnessMode)
+			case "bluetooth_pairable":
+				next.BluetoothPairable = patch.BluetoothPairable
 			default:
 				return UserSnapshot{}, fmt.Errorf("unknown update field %q", f)
 			}

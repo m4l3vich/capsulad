@@ -197,24 +197,6 @@ type SensorInfo struct {
 	Unit string
 }
 
-// BluetoothStatus is the adapter state a UI can show. Present=false means the
-// backend can neither observe nor drive an adapter; it is never a guess.
-type BluetoothStatus struct {
-	Present      bool
-	Powered      bool
-	Discoverable bool
-	Adapter      string
-	Detail       string
-}
-
-// Bluetooth is an optional adapter facade. Toggling discoverability is
-// best-effort: a backend that cannot do it returns an error rather than
-// pretending the state changed.
-type Bluetooth interface {
-	Status() BluetoothStatus
-	SetDiscoverable(bool) error
-}
-
 type Sensors interface {
 	List() []SensorInfo
 	Read(id string) (float64, bool)
@@ -232,7 +214,6 @@ type Backend interface {
 	Audio() AudioDevice
 	Touch() TouchDevice
 	Sensors() Sensors
-	Bluetooth() Bluetooth
 	Close() error
 }
 

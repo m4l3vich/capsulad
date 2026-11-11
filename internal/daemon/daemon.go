@@ -22,6 +22,7 @@ import (
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 	"capsulad/internal/backend/rockchip"
+	"capsulad/internal/bluetooth"
 	"capsulad/internal/bus"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
@@ -111,6 +112,7 @@ type Daemon struct {
 	bootID  string
 	pidPath string
 	dev     backend.Backend
+	bt      bluetooth.Manager
 
 	resources map[string]*frameworkv1.ResourceInfo
 	resOrder  []string
@@ -172,6 +174,18 @@ type Daemon struct {
 	micTimer     *time.Timer
 	lastMuted    bool
 	lastApplied  *settings.UserSettings
+
+	btMu         sync.Mutex
+	btInit       bool
+	btPairable   bool
+	btVolume     float64
+	btVolSet     bool
+	btPulseMu    sync.Mutex
+	btPulseCap   string
+	btPulseGen   uint64
+	btPulseTmr   *time.Timer
+	btRouteMu    sync.Mutex
+	btRoutes     map[string]string
 	sysRingState string
 
 	lastActivation string
@@ -289,6 +303,19 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		logs.Close()
 		cancel()
 		return nil, fmt.Errorf("unknown platform %q (simulator, rockchip-stock, amlogic-stock, amlogic-alpine)", cfg.Platform)
+	}
+
+	if cfg.Platform == "simulator" {
+		d.bt = bluetooth.NewMemory()
+	} else {
+		btCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		bt, err := bluetooth.Open(btCtx)
+		cancel()
+		if err != nil {
+			logs.Warnf("bluetooth", "", "unavailable: %v", err)
+		} else {
+			d.bt = bt
+		}
 	}
 
 	d.buildResources()
@@ -458,6 +485,8 @@ func (d *Daemon) Run() error {
 
 	d.applySettings(d.user.Get())
 	d.startBootApps()
+	d.ensurePulseBluetoothModules()
+	go d.watchBluetooth()
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
 	go d.outputLoop()
@@ -542,6 +571,10 @@ func (d *Daemon) shutdown() {
 		d.wake.Close()
 		d.input.Close()
 		d.bus.Close()
+		d.resetBluetoothRoutes()
+		if d.bt != nil {
+			_ = d.bt.Close()
+		}
 		if d.wd != nil {
 			d.wd.disarm()
 		}

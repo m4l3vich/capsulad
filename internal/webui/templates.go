@@ -85,7 +85,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <div class="cards">
 <div class="card"><div class="k">Device</div><div class="v">{{with .Data.Info}}{{.Model}}{{end}}</div><div class="muted mono">{{with .Data.Info}}{{.DeviceId}}{{end}}</div></div>
 <div class="card"><div class="k">Bluetooth</div><div class="v">{{with .Data.Bluetooth}}{{if .Present}}{{if .Powered}}On{{else}}Off{{end}}{{else}}No adapter{{end}}{{end}}</div>
-<div class="muted">{{with .Data.Bluetooth}}{{if .Present}}{{if .Discoverable}}discoverable{{else}}not discoverable{{end}} · {{.Adapter}}{{else}}{{.Detail}}{{end}}{{end}}</div></div>
+<div class="muted">{{with .Data.Bluetooth}}{{if .Present}}{{if .Discoverable}}discoverable{{else}}not discoverable{{end}}{{if .Pairable}} · pairable{{end}} · {{.Adapter}}{{else}}{{.Detail}}{{end}}{{end}}</div></div>
 <div class="card"><div class="k">Microphone</div><div class="v">{{with .Data.Audio}}{{if .MicrophoneMuted}}<span class="err">Muted</span>{{else}}<span class="ok">Live</span>{{end}}{{end}}</div>
 <div class="muted">{{with .Data.Audio}}{{if .MicrophoneMuteIsHardware}}hardware gate{{else}}software mute only{{end}}{{end}}</div></div>
 <div class="card"><div class="k">Volume</div><div class="v">{{with .Data.Audio}}{{pct .MasterVolume}}%{{end}}</div>
@@ -96,7 +96,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 </div>
 
 {{with .Data.Bluetooth}}{{if .Present}}
-<h2>Bluetooth discoverability</h2>
+<h2>Bluetooth</h2>
 <form method="post" action="/bluetooth" class="row">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <input type="hidden" name="back" value="/">
@@ -104,7 +104,31 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <div><strong>{{if .Discoverable}}Discoverable{{else}}Hidden{{end}}</strong>
 <div class="muted">{{.Detail}}</div></div>
 <button>{{if .Discoverable}}Stop advertising{{else}}Make discoverable{{end}}</button>
-</form>{{end}}{{end}}
+</form>
+<form method="post" action="/bluetooth/pairable" class="row">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="back" value="/">
+<input type="hidden" name="pairable" value="{{if .Pairable}}0{{else}}1{{end}}">
+<div><strong>{{if .Pairable}}Accepting new devices{{else}}Not accepting new devices{{end}}</strong>
+<div class="muted">Paired devices reconnect while Bluetooth is on. This switch lets new devices pair while {{if .Discoverable}}discoverable{{else}}hidden{{end}}.</div></div>
+<button>{{if .Pairable}}Block new pairings{{else}}Allow new pairings{{end}}</button>
+</form>
+<h3>Paired devices</h3>
+{{if $.Data.BluetoothErr}}<p class="err">{{$.Data.BluetoothErr}}</p>{{end}}
+{{if $.Data.Paired}}
+<table>
+<tr><th>Device</th><th>Address</th><th>State</th><th></th></tr>
+{{range $.Data.Paired}}
+<tr><td>{{.Name}}</td><td class="mono">{{.Address}}</td>
+<td>{{if .Connected}}<span class="ok">connected</span>{{else}}<span class="muted">paired</span>{{end}}</td>
+<td><form method="post" action="/bluetooth/unpair" class="row">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<button class="secondary">Unpair</button></form></td></tr>
+{{end}}
+</table>
+{{else}}<p class="muted">No paired devices.</p>{{end}}
+{{end}}{{end}}
 
 <h2>Now playing</h2>
 {{if .Data.Providers}}{{range .Data.Providers}}

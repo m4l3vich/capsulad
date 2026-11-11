@@ -61,7 +61,6 @@ type Backend struct {
 	audio   backend.AudioDevice
 	touch   backend.TouchDevice
 	sensors backend.Sensors
-	bt      backend.Bluetooth
 }
 
 func New(cfg Config) (*Backend, error) {
@@ -188,16 +187,10 @@ func New(cfg Config) (*Backend, error) {
 	}
 
 	if cfg.RootPrefix == "" {
-		if bt := probeBluetooth("hci0"); bt != nil {
-			b.bt = bt
-			status := bt.Status()
-			capStatus := backend.Partial
-			if status.Powered {
-				capStatus = backend.Partial
-			}
+		if nodeExists(cfg.RootPrefix, "/sys/class/bluetooth/hci0") {
 			b.caps = append(b.caps, backend.SubsystemStatus{
-				Subsystem: "bluetooth", BackendID: "rockchip.hci", Status: capStatus,
-				Detail: status.Detail,
+				Subsystem: "bluetooth", BackendID: "bluez", Status: backend.Partial,
+				Detail: "adapter node present; BlueZ owns profiles and media",
 			})
 		} else {
 			b.caps = append(b.caps, backend.SubsystemStatus{
@@ -251,7 +244,6 @@ func (b *Backend) Ring() backend.RingDevice       { return b.ring }
 func (b *Backend) Audio() backend.AudioDevice     { return b.audio }
 func (b *Backend) Touch() backend.TouchDevice     { return b.touch }
 func (b *Backend) Sensors() backend.Sensors       { return b.sensors }
-func (b *Backend) Bluetooth() backend.Bluetooth   { return b.bt }
 
 func (b *Backend) Close() error {
 	if c, ok := b.ring.(interface{ Close() error }); ok {

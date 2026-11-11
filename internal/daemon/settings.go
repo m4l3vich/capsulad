@@ -103,6 +103,8 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	timezoneChanged := d.lastApplied != nil && d.lastApplied.Timezone != v.Timezone
 	d.audio.SetMasterVolume(v.MasterVolume)
 	d.audio.SetMuted(v.MicrophoneMuted)
+	d.applyBluetoothSettings(v)
+	d.applyBluetoothVolume(v.MasterVolume)
 	d.wake.SetEnabled(v.WakewordEnabled)
 	d.wake.SetMuted(v.MicrophoneMuted)
 
