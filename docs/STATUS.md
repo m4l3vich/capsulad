@@ -108,6 +108,16 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   ~0.73 × it. The PA source/loopback numbers are gain stages, not the listening volume; making all
   three stages numerically equal would either double-attenuate or, with no local ceiling, allow a
   “5 %” setting to play at full scale.
+- **Bluetooth audio quality is below the stock vendor path.** On the same unit and source the
+  stock `voice-agent`/`btctl` chain sounds audibly better than the framework's PulseAudio route.
+  The vendor stack registers its own A2DP endpoint and hands decoded PCM to the audio device,
+  whereas capsulad uses PulseAudio's bluez5 SBC source, a `module-loopback` resampler (44.1 kHz →
+  the 48 kHz master sink), and the virtual sink. The remote negotiates SBC (bitpool 83) here; the
+  vendor path may use a different codec and/or native-rate PCM. Volume curves and gain staging
+  cannot close this gap. The next architectural step is a native A2DP sink endpoint in the
+  framework (BlueZ `Media1.RegisterEndpoint` with SBC/AAC decode into the mixer/ALSA), or reusing
+  the vendor endpoint alongside the framework, instead of PA's source/loopback. The current
+  Bluetooth media contract is a functional integration, not final audio quality.
 - **The earlier flatness was PulseAudio applying the AVRCP value twice.** With the default
   `avrcp_absolute_volume=1`, PA mirrored the transport volume onto the local bluez source; at 34 %
   the cubic source gain was 3.9 % (−28 dB), so the stream sounded thin. The decoupled module and
@@ -166,17 +176,20 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 2. ~~Media-player standard contract~~ **done**: `org.capsula.media` implements the provider side,
    the routed streaming test covers snapshot-then-update, and the Web UI played and paused it on the
    unit. Follow-ups are cosmetic (render `PLAYING` as "Playing") and belong to the UI track.
-3. Implement QuickJS and MicroPython host runners with the same bus bindings, in isolated
+3. Implement a native A2DP sink endpoint (or reuse the vendor `btctl` endpoint) so Bluetooth
+   audio quality matches the stock stack; the current PulseAudio source/loopback path is
+   functional but audibly below it.
+4. Implement QuickJS and MicroPython host runners with the same bus bindings, in isolated
    processes and read-only runtime images. The engine strategy is still an owner decision: the
    daemon is cgo-free, so a separate interpreter runner with a framed host bridge is the
    architecture-faithful option; a pure-Go engine would be a documented deviation from the runtime
    names in the manifest.
-4. Test the Amlogic stock and Alpine targets on hardware; do not claim parity with Rockchip until
+5. Test the Amlogic stock and Alpine targets on hardware; do not claim parity with Rockchip until
    each subsystem is probed. The backends still fail explicitly.
-5. Evaluate the installed personal wakeword model over long real-room audio (false activations and
+6. Evaluate the installed personal wakeword model over long real-room audio (false activations and
    misses beyond the 40-minute trial in WAKEWORD.md); it is a personal detector, not a
    speaker-independent Russian head.
-6. Freeze v1 schemas only after generated Go/Rust SDK and script-host parity tests pass, including
+7. Freeze v1 schemas only after generated Go/Rust SDK and script-host parity tests pass, including
    routed streaming and cancellation.
 
 Gate 1's design decision stands: with no user, PID, network or IPC namespaces and no seccomp on the

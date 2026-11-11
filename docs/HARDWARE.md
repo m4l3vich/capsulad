@@ -260,6 +260,14 @@ source mirrored 47 % (10.4 % cubic) and the audio collapsed to ~1.5 %, which sou
 call. The self-heal is required because a profile reconnect recreated the module with defaults
 after the first fix.
 
+Audio quality was compared directly with the stock stack: the vendor `voice-agent`/`btctl` chain
+sounds clearly better on the same source. The vendor registers its own A2DP endpoint and feeds
+decoded PCM to the device; capsulad receives the PulseAudio bluez5 SBC source, resamples it through
+`module-loopback` into the 48 kHz master sink and then ALSA. The remote negotiates SBC (bitpool 83)
+on this path; the vendor endpoint may negotiate a different codec and/or play at the native 44.1 kHz
+rate. This is an endpoint/transport difference, not a volume-curve problem. Matching it requires a
+native A2DP sink endpoint (or the vendor endpoint) rather than PA's source/loopback.
+
 The three numeric stages cannot all equal the master: one of them must be a neutral/trim stage, or
 the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA source (90 %) and loopback
 (cube-root of the master) are the gain stages.
