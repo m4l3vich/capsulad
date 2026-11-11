@@ -34,7 +34,9 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 | Talk button (circle key) + volume keys | implemented and exercised on the unit: hold 700 ms activates (manual origins do not require a trained keyword model), release ends the turn, short taps do nothing; volume taps ±5 %, held ramps accelerate 200→60 ms and stop at bounds, with a generated tick and a 1 s percentage overlay | `buttons5.log`: activation → conversation → capture → input released |
 | Microphone key toggle + muted indication | implemented, verified on hardware | one mute per tap (`TestDiscreteKeysActOnPressOnly`), red run pixels 5–7 with fade-in/out |
 | Web UI restructure (overview, settings, access, diagnostics) | implemented and exercised over HTTPS on the unit: all four pages render, volume/settings round-trip, API-key create+revoke works, certificate downloads as PEM | live checks against the daemon |
-| Bluetooth status and discoverability | implemented via `hciconfig` (`hci0`), verified On/Off flips PSCAN; pairing/profiles stay with BlueZ and the vendor helpers, untested without `voice-agent`/`btctl` | `hciconfig hci0` before/after the toggle |
+| Bluetooth adapter control (BlueZ D-Bus) | implemented: power, discoverable, pairable (persisted as `bluetooth_pairable`), paired-device list and unpair. The daemon loads PulseAudio's Bluetooth discovery so the adapter advertises A2DP Sink (0x110B) and Headset (0x1108); the old `hciconfig piscan` error was an adapter nobody powered, and the framework now powers it at startup and after a BlueZ restart | live unit: `hciconfig` UP RUNNING, `PSCAN ISCAN` after the Web UI toggle, BlueZ Pairable toggled/persisted, paired MacBook listed |
+| Bluetooth media through the app contract | implemented: AVRCP play/pause/next/previous and absolute volume to the source, metadata when the source exposes it; the media app publishes a `bluetooth` player only while a source is connected | live MacBook: Play/Next accepted and playback state changed; 50 % master volume set transport `Volume=64` of 127; UI showed `PLAYBACK_PLAYING`; `TestMediaProviderRoutedStreaming` |
+| Bluetooth audio routing and ring cue | implemented: connect loads `module-loopback` from `bluez_source.<addr>.a2dp_source` to `master` and disconnect unloads it; a blue ring pulse reuses the framework fallback presentation and restores it | live logs: route added/removed, loopback module present while connected; cold boot re-registered endpoints and powered the adapter |
 | Display/ring brightness: constant or ambient-light | implemented with the **stock mapping** recovered from the light handler: `trunc(log(0.75+0.05*lux)*19.9375)` clamped to [5,95] %, off below 5 lux, full above 32768 lux, with the vendor's 5-point deadband and an animated transition. At 7.3 lux the framework writes 13/255; the stock unit wrote 14/255 at 7.4 lux | disassembly of 0x27ca68-0x27cc24, LED-class brightness cross-check, `TestAmbientBrightnessMatchesStockCurve` |
 | Device timezone (Web UI) with per-app override | implemented, validated end to end | Web UI round-trip restarts boot apps; clock re-reads `TZ` (11:59 MSK ↔ 16:59 Asia/Shanghai) |
 | Rockchip DT key map (volume, mic, play/pause, voice) | implemented | device-tree parser + tests |
@@ -93,6 +95,19 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   commands operate on the daemon's security store. API keys are shown once and stored as hashes.
 - **API keys protect the HTTP Web UI/API**, not the local Unix-socket gRPC plane, which remains
   filesystem-local and requires supervised-run identity for app-scoped calls. Revocation is serial-list based, not a CRL/OCSP responder.
+- **Bluetooth media is source-dependent.** Control and transport state worked against the test
+  MacBook, but that source exposed no `Track` attributes, so title/artist stayed empty. The reader
+  parses BlueZ `MediaPlayer1.Track` when present. HSP/HFP telephony is not implemented; only A2DP
+  Sink and AVRCP.
+- **Bluetooth audio bypasses the framework mixer.** A connected source is routed by PulseAudio
+  directly to `master`; framework ducking and software master volume do not apply to it. The volume
+  keys change the source's own level through AVRCP absolute volume (verified: 50 % → transport 64).
+- **PulseAudio Bluetooth modules are loaded by the daemon at startup.** If PulseAudio is restarted
+  while the daemon runs, the A2DP endpoints disappear until the daemon restarts (or the modules are
+  loaded by hand).
+- **Unpairing is administrator-only and simulator-tested.** The Web UI and local CLI pass; the RPC
+  rejects supervised app callers by run ID and sandbox UID. The live test deliberately did not
+  unpair the user's MacBook, so real `Adapter1.RemoveDevice` remains a hardware gate.
 - **Boot ownership is deployed, with one non-obvious ordering constraint.** rcS expands
   `/etc/init.d/S??*` **before** `S23overlayfs.sh` pivots into the `/data` overlay, so a script that
   exists only in the overlay is never in that list. The framework is started from the stock
@@ -106,10 +121,10 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
   until the daemon restarts; keys created or revoked in the Web UI go through the running daemon and
   apply immediately. Restart the daemon after CLI credential changes.
 - **Memory and persistent storage are the binding constraints**: 240 MiB total with no swap, and
-  `/data` is only 78.5 MB (21.9 MB daemon, 21.9 MB previous daemon, 27.6 MB apps). The daemon
+  `/data` is only 78.5 MB (22.3 MB daemon, 22.3 MB previous daemon, 27.6 MB apps). The daemon
   defaults to an 80 MiB soft heap limit (`-mem-limit-mb`). The kernel OOM-killed `capsulad` during
-  the wakeword workflow before that limit. After the boot/upgrade/media deployment the unit has
-  about 5.2 MB free: the 24.4 MB warm corpus, its sidecar and the earlier recordings were moved to
+  the wakeword workflow before that limit. After the boot/upgrade/media/Bluetooth deployment the unit has
+  about 4.3 MB free: the 24.4 MB warm corpus, its sidecar and the earlier recordings were moved to
   the host backup (`_capsula-mini-data-backup/`, git-excluded), and the negative-corpus path is now
   configurable (`-wakeword-negatives`) because it is training input only. The log is capped at
   512 KiB plus one rotated copy; new recordings and training are refused below 2 MiB free.
@@ -129,9 +144,8 @@ ring contract). Generated Go bindings are committed under `gen/go`. The wire API
 1. ~~Boot ownership, in-place upgrades and bounded storage~~ **done and verified on the unit**: the
    daemon starts from the boot hook after two power cycles, `capsula daemon install` replaced the
    binary through the boot service with a health gate, the log is capped, and the corpus moved off
-   `/data`. Remaining: decide the long-term vendor-service boundary (Bluetooth pairing currently has
-   no `btctl`/`voice-agent`; test pairing and profiles without them) and write the restore procedure
-   for the host-backed corpus and recordings into operator docs.
+   `/data`. Remaining: exercise pairing and unpair with a throwaway device, and write the restore
+   procedure for the host-backed corpus and recordings into operator docs.
 2. ~~Media-player standard contract~~ **done**: `org.capsula.media` implements the provider side,
    the routed streaming test covers snapshot-then-update, and the Web UI played and paused it on the
    unit. Follow-ups are cosmetic (render `PLAYING` as "Playing") and belong to the UI track.

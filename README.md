@@ -45,8 +45,14 @@ the implementation is honest about what is verified on real hardware and what is
 - **Bounded operational footprint**: the daemon log rotates at 512 KiB and keeps one backup, the
   negative-training corpus path is configurable and is not a runtime dependency, and new wakeword
   recordings or training are refused below 2 MiB of free `/data`.
-- **Bluetooth facade** through `hciconfig`: adapter presence, power and discoverability. Pairing
-  and profiles stay with BlueZ and the vendor helpers; the framework does not claim them.
+- **Bluetooth through BlueZ**: the daemon owns adapter power, discoverability and pairability over
+  the system D-Bus, lists paired devices and unpairs them from the Web UI (an administrator-only
+  operation, refused for supervised apps). It loads PulseAudio's Bluetooth discovery so the adapter
+  advertises A2DP Sink and accepts an audio source, then routes that source to the speaker.
+- **Bluetooth media mode**: AVRCP play/pause/next/previous and absolute volume go to the connected
+  source, and its track metadata is read when the source exposes it. A provider app publishes this
+  through the standard `MediaPlayerService`, so the Web UI and other apps see a normal
+  `bluetooth` player; a blue ring pulse marks connect and disconnect.
 - **Physical controls**: the circle (play/pause) key is the talk button — hold it past 700 ms to summon
   the assistant, release to end the turn, short taps do nothing. Volume keys step 5 %, ramp while held
   (200 ms decaying to 60 ms) and stop at the bounds; each change plays a synthesized percussive tick at
@@ -181,6 +187,7 @@ capsulad -platform rockchip-stock \
 | `internal/bus` | reverse-RPC app bus |
 | `internal/presentations`, `internal/routing` | dynamic outputs and capture stack |
 | `internal/audio`, `internal/input`, `internal/wakeword` | realtime services |
+| `internal/bluetooth` | BlueZ D-Bus facade (power, pairing, AVRCP, absolute volume) |
 | `internal/backend/simulator.go` | complete virtual backend |
 | `internal/backend/rockchip` | RK3308 stock-firmware backend (vendor LED ABI recovered) |
 | `internal/sandbox` | Linux read-only namespace launcher + seccomp |
@@ -203,9 +210,8 @@ Tests cover routing/capture semantics, preset validation, touch delivery/system 
 cancellation, settings CAS and secret redaction, self-signed TLS, password sessions, API-key
 accept/revoke and CSRF, genuine Sigstore fixture verification, bounded log rotation, and an
 end-to-end simulator run (supervision, singleton invocation, routed unary/streaming calls, the
-media provider's snapshot-first routed streaming, touch partial/full capture, crash cleanup,
-wakeword capture/release, mic
-watchdog and masked settings). The Web UI is additionally tested through login/session, CSRF and
+media provider's snapshot-first routed streaming, Bluetooth player and admin gating, touch
+partial/full capture, crash cleanup, wakeword capture/release, mic watchdog and masked settings). The Web UI is additionally tested through login/session, CSRF and
 static API-key flows.
 
 ## Status

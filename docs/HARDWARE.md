@@ -205,6 +205,44 @@ The daemon also accepts `-wakeword-negatives PATH` so the corpus can live on `/t
 mounted path during training instead of `/data`. New takes and training are refused below 2 MiB
 free, and the daemon log rotates at 512 KiB plus one backup.
 
+### Bluetooth (deployed)
+
+The framework no longer uses `hciconfig` for anything; it talks to BlueZ 5.65 over the system bus.
+The original `hciconfig hci0 piscan` failure (`Can't set scan mode on hci0: Network is down (100)`)
+was an adapter that nobody powered after the vendor stack was retired. The daemon now sets
+`Adapter1.Powered`, `Discoverable` and `Pairable` through D-Bus, powers the adapter at startup and
+reconciles it every 5 s after a BlueZ restart.
+
+The vendor `btctl` was also the component that registered A2DP endpoints. Without it the adapter
+advertised only AVRCP (0x110C/0x110E) and no Audio Sink, so a source refused to connect with
+`br-connection-profile-unavailable`. The daemon now loads PulseAudio's standard
+`module-bluetooth-discover` at startup (the modules ship in `/usr/lib/pulse-16.1/modules`); the
+adapter then advertises Audio Sink (0x110B), Headset (0x1108) and Audio Source (0x110A), and the
+source's audio appears as `bluez_source.<ADDR>.a2dp_source`. On connect the daemon loads
+`module-loopback source=… sink=master latency_msec=60`; on disconnect it unloads it.
+
+Live verification with the paired MacBook (2026-11-11):
+
+- after `Device1.ConnectProfile(0x110A)` and the AVRCP profile, `Device1.Connected=true`,
+  `MediaControl1.Connected=true`, and `MediaPlayer1`/`MediaTransport1` objects exist;
+- AVRCP Play/Pause/Next/Previous calls returned success and the player state moved to `playing`
+  after Play and Next; the Web UI showed the `bluetooth` player as `PLAYBACK_PLAYING`;
+- setting the framework volume to 50 % wrote `Volume=64` (of 127) on the idle A2DP transport;
+  restoring 80 % wrote `102`;
+- the MacBook's `MediaPlayer1` exposes `Device` and `Position` but **no `Status` or `Track`** at
+  rest, so title/artist stayed empty. Control still works; metadata is read when a source
+  publishes it. macOS only fills those attributes for some players, so this is a source limitation,
+  not a parse fallback;
+- `Pairable` and `Discoverable` toggled from the Web UI showed up in BlueZ and survived a reboot
+  (`bluetooth_pairable` is a typed setting); the paired MacBook is listed in the UI.
+
+Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
+supervised app callers by run ID and by sandbox UID; the rest of the Bluetooth surface is
+app-facing. Unpair itself was exercised against the simulator manager, not against the user's
+paired MacBook.
+
+HSP/HFP (telephony) is not implemented. Only A2DP Sink plus AVRCP CT are exposed.
+
 Once superseded, capture is unaffected (a 2 s take recorded after takeover has room-noise RMS 1470
 against 2196 before it). `voice-agent` was also the process that kept `/dev/watchdog` alive, so
 killing it by hand without giving the timer a new owner resets the board after the 21 s timeout
@@ -386,7 +424,9 @@ bind-mounted so a scripted or native app can resolve zones.
    this is the normal configuration.
 6. ~~Vendor daemon coexistence/ownership rules and boot ordering~~ done: `S99btctl.sh` execs
    `S60capsulad start`, which health-gates and falls back to the preserved vendor chain; verified
-   across two power cycles with clock, assistant and media `APP_READY`. Remaining: exercise
-   Bluetooth pairing and A2DP/AVRCP without `voice-agent`/`btctl` (`bluetoothd` runs; `btctl` used
-   to be started by `voice-agent`), and decide the boundary for the vendor helpers that still run
-   (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).
+   across power cycles with clock, assistant and media `APP_READY`. Bluetooth connect, AVRCP
+   control and absolute volume are verified with a paired source without `voice-agent`/`btctl`.
+   Remaining: pair and unpair a throwaway device through the Web UI (unpair was deliberately not
+   run against the user's MacBook), exercise a source that publishes AVRCP track metadata, and
+   decide the boundary for the vendor helpers that still run (`okcall`, `stereoctl`, `telemetryd`,
+   `snapclient`).
