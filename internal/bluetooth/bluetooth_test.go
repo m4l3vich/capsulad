@@ -118,9 +118,6 @@ func TestMemoryManagerEventsAndCommands(t *testing.T) {
 	if state.Playing {
 		t.Fatal("pause did not change state")
 	}
-	if err := m.SetAbsoluteVolume(ctx, 0.5); err != nil {
-		t.Fatal(err)
-	}
 	devices, _ := m.PairedDevices(ctx)
 	if len(devices) != 1 {
 		t.Fatalf("paired devices = %+v", devices)

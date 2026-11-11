@@ -217,6 +217,36 @@ func (b *BlueZ) ConnectAudio(ctx context.Context, address string) error {
 	return b.refresh(ctx)
 }
 
+// SetTransportVolume writes the AVRCP absolute volume of the active transport.
+// With avrcp_absolute_volume=0 in PulseAudio this changes only the remote
+// volume, not the local source gain.
+func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
+	if level < 0 {
+		level = 0
+	}
+	if level > 1 {
+		level = 1
+	}
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return err
+	}
+	path, props := findVolumeTransport(objs)
+	if path == "" {
+		return ErrUnsupported
+	}
+	if _, ok := props["Volume"]; !ok {
+		return ErrUnsupported
+	}
+	value := uint16(math.Round(level * 127))
+	if err := b.conn.Object(bluezService, path).CallWithContext(ctx,
+		"org.freedesktop.DBus.Properties.Set", 0,
+		"org.bluez.MediaTransport1", "Volume", dbus.MakeVariant(value)).Err; err != nil {
+		return fmt.Errorf("set transport volume: %w", err)
+	}
+	return nil
+}
+
 func (b *BlueZ) Media(ctx context.Context) (MediaState, error) {
 	if err := b.refresh(ctx); err != nil {
 		return MediaState{}, err
@@ -263,34 +293,6 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	// resulting state. Refresh once so the immediate reply is as fresh as BlueZ
 	// allows.
 	return b.refresh(ctx)
-}
-
-func (b *BlueZ) SetAbsoluteVolume(ctx context.Context, level float64) error {
-	if level < 0 {
-		level = 0
-	}
-	if level > 1 {
-		level = 1
-	}
-	objs, err := b.objects(ctx)
-	if err != nil {
-		return err
-	}
-	path, props := findVolumeTransport(objs)
-	if path == "" {
-		return ErrUnsupported
-	}
-	value := uint16(math.Round(level * 127))
-	if _, ok := props["Volume"]; !ok {
-		return ErrUnsupported
-	}
-	err = b.conn.Object(bluezService, path).CallWithContext(ctx,
-		"org.freedesktop.DBus.Properties.Set", 0,
-		"org.bluez.MediaTransport1", "Volume", dbus.MakeVariant(value)).Err
-	if err != nil {
-		return fmt.Errorf("set absolute volume: %w", err)
-	}
-	return nil
 }
 
 // Watch subscribes to connect/disconnect and media changes.

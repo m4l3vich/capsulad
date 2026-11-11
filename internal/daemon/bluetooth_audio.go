@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -108,11 +110,142 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		d.btRoutes[address] = module
 		d.btRouteMu.Unlock()
 		d.logs.Infof("bluetooth", "", "routing source %s to the speaker", source)
+		d.setBluetoothSourceFixed(address)
 		// The transport exists once the source does; re-apply the framework
 		// level because A2DP setup can reset absolute volume to the source's
 		// cached value.
 		d.forceBluetoothVolume()
 	}()
+}
+
+// ensureDecoupledBluetoothModule reloads PulseAudio's bluez5 device module
+// with avrcp_absolute_volume=0. With the default (1) PA mirrors the AVRCP
+// transport volume onto the source and applies it again with a cubic curve, so
+// the same percentage attenuates twice and low settings sound thin. The module
+// is recreated with defaults on each new connection, so this is checked on
+// every source connect.
+func (d *Daemon) ensureDecoupledBluetoothModule(address string) {
+	if d.dev.Platform() == backend.PlatformSimulator || strings.TrimSpace(address) == "" {
+		return
+	}
+	pathAddr := "dev_" + strings.ReplaceAll(strings.ToUpper(address), ":", "_")
+	for attempt := 0; attempt < 8; attempt++ {
+		out, err := exec.Command("pactl", "list", "short", "modules").Output()
+		if err != nil {
+			d.logs.Warnf("bluetooth", "", "pulse modules: %v", err)
+			return
+		}
+		var index, modulePath, args string
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || fields[1] != "module-bluez5-device" {
+				continue
+			}
+			rest := strings.Join(fields[2:], " ")
+			if !strings.Contains(rest, pathAddr) {
+				continue
+			}
+			index, args = fields[0], rest
+			for _, field := range fields[2:] {
+				if strings.HasPrefix(field, "path=") {
+					modulePath = strings.TrimPrefix(field, "path=")
+				}
+			}
+			break
+		}
+		if index == "" {
+			// PulseAudio has not created the device module yet.
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+			continue
+		}
+		if strings.Contains(args, "avrcp_absolute_volume=0") {
+			return
+		}
+		if modulePath == "" {
+			modulePath = "/org/bluez/hci0/" + pathAddr
+		}
+		_ = exec.Command("pactl", "unload-module", index).Run()
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
+		loaded, loadErr := exec.Command("pactl", "load-module", "module-bluez5-device",
+			"path="+modulePath, "avrcp_absolute_volume=0").CombinedOutput()
+		if loadErr != nil {
+			d.logs.Warnf("bluetooth", "", "decouple PA device module: %v (%s)", loadErr, strings.TrimSpace(string(loaded)))
+			return
+		}
+		d.logs.Infof("bluetooth", "", "decoupled AVRCP volume for %s (module %s)", pathAddr, strings.TrimSpace(string(loaded)))
+		source := bluezSourceName(address)
+		for i := 0; i < 20; i++ {
+			if pulseSourceExists(source) {
+				return
+			}
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+		return
+	}
+}
+
+// setBluetoothSourceFixed holds the local bluez source at a fixed 90 %. The
+// source is decoupled from AVRCP, so this is a stable capture gain rather than
+// a mirrored remote volume; 90 % avoids unity while keeping full-band audio.
+func (d *Daemon) setBluetoothSourceFixed(address string) {
+	if d.dev.Platform() == backend.PlatformSimulator || strings.TrimSpace(address) == "" {
+		return
+	}
+	source := bluezSourceName(address)
+	_ = exec.Command("pactl", "set-source-volume", source, "90%").Run()
+}
+
+// setBluetoothPlaybackGain applies the framework master to the Bluetooth
+// loopback sink input, not to the source/AVRCP. PulseAudio sink-input volume is
+// cubic, so the cube root yields the requested linear gain. The source stays at
+// its fixed trim and the remote volume is untouched.
+func (d *Daemon) setBluetoothPlaybackGain(level float64) {
+	if d.dev.Platform() == backend.PlatformSimulator {
+		return
+	}
+	if level < 0 {
+		level = 0
+	}
+	if level > 1 {
+		level = 1
+	}
+	pct := int(math.Round(math.Cbrt(level) * 100))
+	if level <= 0.01 {
+		pct = 0
+	}
+	go func() {
+		index := loopbackSinkInputIndex()
+		if index == "" {
+			return
+		}
+		_ = exec.Command("pactl", "set-sink-input-volume", index, fmt.Sprintf("%d%%", pct)).Run()
+	}()
+}
+
+func loopbackSinkInputIndex() string {
+	out, err := exec.Command("pactl", "list", "short", "sink-inputs").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 4 && fields[3] == "module-loopback.c" {
+			return fields[0]
+		}
+	}
+	return ""
 }
 
 func (d *Daemon) removeBluetoothAudioRoute(address string) {

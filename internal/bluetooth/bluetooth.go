@@ -117,11 +117,13 @@ type Manager interface {
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
 	Media(ctx context.Context) (MediaState, error)
+	// SetTransportVolume writes the AVRCP transport volume. It is used once as
+	// a fixed line-level reference, never as the user-facing volume.
+	SetTransportVolume(ctx context.Context, level float64) error
 	// ConnectAudio asks a connected source to bring up its audio profiles
 	// (A2DP source and AVRCP). Sources do not always do this on their own.
 	ConnectAudio(ctx context.Context, address string) error
 	Command(ctx context.Context, cmd Command) error
-	SetAbsoluteVolume(ctx context.Context, level float64) error
 	Watch(ctx context.Context) <-chan Event
 	Close() error
 }
@@ -136,7 +138,6 @@ type Memory struct {
 	devices  []Device
 	media    MediaState
 	revision uint64
-	volume   float64
 	subs     map[int]chan Event
 	nextID   int
 	closed   bool
@@ -219,6 +220,8 @@ func (m *Memory) Unpair(_ context.Context, address string) error {
 
 func (m *Memory) ConnectAudio(context.Context, string) error { return nil }
 
+func (m *Memory) SetTransportVolume(context.Context, float64) error { return nil }
+
 func (m *Memory) Media(context.Context) (MediaState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -249,22 +252,6 @@ func (m *Memory) Command(_ context.Context, cmd Command) error {
 	event := Event{Kind: EventMedia, Media: m.media}
 	m.mu.Unlock()
 	m.broadcast(event)
-	return nil
-}
-
-func (m *Memory) SetAbsoluteVolume(_ context.Context, level float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.media.Present {
-		return ErrNoSource
-	}
-	if level < 0 {
-		level = 0
-	}
-	if level > 1 {
-		level = 1
-	}
-	m.volume = level
 	return nil
 }
 

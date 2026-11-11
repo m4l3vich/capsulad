@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -47,9 +46,10 @@ func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	}()
 }
 
-// applyBluetoothVolume forwards the framework master volume to the connected
-// source through AVRCP absolute volume, when the source supports it. The last
-// sent value is remembered so unrelated settings changes do not spam D-Bus.
+// applyBluetoothVolume maps the framework master onto the Bluetooth
+// loopback's local gain. It never writes the AVRCP transport volume: PulseAudio
+// couples the transport and source volumes, so any AVRCP write would also move
+// the Mac's volume and re-create the double/cubic attenuation.
 func (d *Daemon) applyBluetoothVolume(level float64) {
 	if d.bt == nil {
 		return
@@ -62,41 +62,42 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	d.btVolume = level
 	d.btVolSet = true
 	d.btMu.Unlock()
-	d.pushBluetoothVolume(level)
+	d.setBluetoothPlaybackGain(level)
 }
 
-// forceBluetoothVolume re-sends the current level after a transport appears.
+// forceBluetoothVolume re-applies the current level after a loopback appears.
 func (d *Daemon) forceBluetoothVolume() {
 	if d.bt == nil {
 		return
 	}
 	d.btMu.Lock()
 	d.btVolSet = false
-	level := d.btVolume
 	d.btMu.Unlock()
-	if level == 0 {
-		level = d.user.Get().Values.MasterVolume
-	}
-	d.applyBluetoothVolume(level)
-}
-
-func (d *Daemon) pushBluetoothVolume(level float64) {
-	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
-		defer cancel()
-		err := d.bt.SetAbsoluteVolume(ctx, level)
-		switch {
-		case err == nil:
-		case errors.Is(err, bluetooth.ErrUnsupported), errors.Is(err, bluetooth.ErrNoSource):
-			// The source has no absolute-volume control; master volume still
-			// applies inside the mixer.
-		default:
-			d.logs.Debugf("bluetooth", "", "absolute volume: %v", err)
-		}
-	}()
+	d.applyBluetoothVolume(d.user.Get().Values.MasterVolume)
 }
 
 // watchBluetooth owns the connect/disconnect ring cue and volume resync.
+// currentBluetoothAddress returns the connected source reported by the last
+// media state or the paired-device list, if any.
+func (d *Daemon) currentBluetoothAddress() string {
+	if d.bt == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Second)
+	defer cancel()
+	if state, err := d.bt.Media(ctx); err == nil && state.DeviceAddress != "" {
+		return state.DeviceAddress
+	}
+	if devices, err := d.bt.PairedDevices(ctx); err == nil {
+		for _, dev := range devices {
+			if dev.Connected {
+				return dev.Address
+			}
+		}
+	}
+	return ""
+}
+
 func (d *Daemon) watchBluetooth() {
 	if d.bt == nil {
 		return
@@ -117,7 +118,6 @@ func (d *Daemon) watchBluetooth() {
 			case bluetooth.EventConnected:
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.pulseBluetoothRing()
-				d.forceBluetoothVolume()
 				d.connectBluetoothAudio(ev.DeviceAddress)
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
@@ -125,8 +125,8 @@ func (d *Daemon) watchBluetooth() {
 				d.removeBluetoothAudioRoute(ev.DeviceAddress)
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
-					d.forceBluetoothVolume()
 					d.ensureBluetoothAudioRoute(ev.Media.DeviceAddress)
+					d.forceBluetoothVolume()
 				}
 			}
 		}
@@ -140,15 +140,23 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 12*time.Second)
+		// Reloading the PulseAudio device module recreates the source/card,
+		// so drop the route before it and let the loader wait for the new
+		// source.
+		d.removeBluetoothAudioRoute(address)
+		d.ensureDecoupledBluetoothModule(address)
+		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
 		defer cancel()
 		if err := d.bt.ConnectAudio(ctx, address); err != nil {
 			d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
 		} else {
 			d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
-			// The transport exists now; apply the framework level instead of
-			// inheriting whatever absolute volume the source had cached.
-			d.forceBluetoothVolume()
+		}
+		// Fixed line-level reference: the Mac's own volume stays high, and the
+		// framework master is the only listening control. 90 % is deliberate
+		// headroom, not unity.
+		if err := d.bt.SetTransportVolume(ctx, 0.90); err != nil {
+			d.logs.Debugf("bluetooth", "", "transport reference volume: %v", err)
 		}
 		d.ensureBluetoothAudioRoute(address)
 	}()

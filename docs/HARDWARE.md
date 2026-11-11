@@ -238,28 +238,37 @@ Live verification with the paired MacBook (2026-11-11):
 
 ### Bluetooth volume and A2DP jitter
 
-The framework master volume is applied by the daemon's software mixer, not by PulseAudio. On the
-unit `alsa_playback`, `master` and every sink input sit at 100 % / 0.00 dB; that is intentional, not
-a drift. A captured `master.monitor` with the local media player confirms the digital gain is exact:
-0 % → silence, 1 % → peak 58, 5 % → 294, 10 % → 589, 20 % → 1179. The source's AVRCP absolute volume
-tracks the same setting (10 % → 13/127, 50 % → 64/127).
+The framework master is applied by the daemon's software mixer to app audio and cues, and to the
+Bluetooth loopback as a local gain. PulseAudio sinks stay at 100 % by design. The Bluetooth path was
+initially wrong: `module-bluez5-device` defaults to `avrcp_absolute_volume=1`, which mirrors the
+AVRCP transport volume onto the local bluez source and applies the same percentage a second time
+through PA's cubic curve. At master 34 % the local gain was 3.9 % (−28 dB), so full-band audio
+sounded thin; forcing the source to unity (100 %) restored the timbre but also raised the Mac's
+volume, which is why it got loud.
 
-The volume-change tick used to be synthesized at 0.95 of full scale, i.e. ~5× louder than content
-at the same setting and −6 dBFS at 50 % — painful on the Mini's amplifier. It is now generated at
-0.22 peak; `TestVolumeCueIsPercussivePCM` pins the quieter range. The daemon never writes a
-PulseAudio sink volume, so a `pactl` level changing independently would come from another process.
+The deployed fix decouples the two:
 
-A2DP initially jittered. The loopback target was 60 ms: PulseAudio's source buffer swung between
-0 and 400 ms and the adaptive resampler ran between 44.03 and 44.4 kHz, producing audible wobble.
-With `latency_msec=250` the source settles at 57–111 ms against its 68 ms target and the loopback
-rate sits at 44.10–44.13 kHz. The kernel also logged `hci_uart: Unexpected start frame` (two in a
-30 s capture) while the Bluetooth UART IRQ was handled on CPU0 together with the daemon and
-wakeword inference; `S60capsulad` now moves that IRQ to CPU3 (`/proc/irq/12/smp_affinity`). After
-that change no new frame errors appeared in a 30 s window, though the source pausing makes long
-silence-based captures inconclusive; sustained listening remains the acceptance test. HSP/HFP
-telephony is still not implemented.
+- `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on connect (the discover module
+  creates it with defaults each time).
+- The bluez source is held at a fixed **90 %** capture trim (not 100 %), so full-band audio is not
+  squashed.
+- The AVRCP transport volume is pinned once at **90 %** as a line-level reference. It is not written
+  when the speaker volume changes, so the Mac's volume is independent.
+- The framework master is applied to the loopback sink input. PA sink-input percentages are cubic,
+  so the daemon writes the cube root of the requested linear gain. Audible level is therefore
+  roughly `0.9 (reference) × 0.73 (source trim) × master ≈ 0.66 × master`.
+- The volume cue peaks at 0.22 of full scale, about five times quieter than the original 0.95.
 
-Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
+The trade-off is explicit: the speaker volume is no longer forwarded to the source; the source's
+own volume is a separate control. Changing it on the Mac still changes the audible level.
+
+A2DP jitter was tuned separately: the original 60 ms loopback target let the source buffer swing by
+hundreds of milliseconds and the resampler move between 44.03 and 44.4 kHz. With 250 ms the source
+settles at 57–111 ms against its 68 ms target at ~44.1 kHz. The Bluetooth UART IRQ is moved to CPU3
+by `S60capsulad`, because `hci_uart` logged `Unexpected start frame` errors while the IRQ shared
+CPU0 with the daemon and wakeword inference.
+
+Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
 supervised app callers by run ID and by sandbox UID; the rest of the Bluetooth surface is
 app-facing. Unpair itself was exercised against the simulator manager, not against the user's
 paired MacBook.
