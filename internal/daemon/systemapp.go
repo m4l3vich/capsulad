@@ -12,6 +12,7 @@ import (
 	"capsulad/internal/ids"
 	"capsulad/internal/manifest"
 	"capsulad/internal/registry"
+	"capsulad/internal/supervisor"
 )
 
 // SystemApp is an application compiled into capsulad. It has a normal app
@@ -123,7 +124,10 @@ func (d *Daemon) startSystemApp(appID string) (string, error) {
 		return "", fmt.Errorf("application %s is not installed", appID)
 	}
 	runID := d.SystemAppRunID(appID)
-	if _, running := d.sup.Get(runID); running {
+	if run, running := d.sup.Get(runID); running {
+		if run.State == supervisor.Stopping {
+			return "", status.Errorf(codes.FailedPrecondition, "application %s is stopping", appID)
+		}
 		return runID, nil
 	}
 	// The run and bus endpoint must exist before Start: a system app now opens

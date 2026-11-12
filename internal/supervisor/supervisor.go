@@ -64,6 +64,10 @@ type Run struct {
 	Virtual bool
 
 	cmd *exec.Cmd
+	// restartAfterStop marks a run the framework terminated because it lost its
+	// bus connection (a crash). A deliberate Stop leaves it false: only a
+	// failure restarts, so an explicitly stopped app stays stopped.
+	restartAfterStop bool
 }
 
 func (r *Run) clone() Run {
@@ -125,6 +129,9 @@ func (s *Supervisor) notifyState(r Run) {
 // Start spawns an app process. invocationID is recorded so the daemon can
 // deliver the initial AppLaunchInvocation after the app reports READY.
 func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, error) {
+	if s.ctx.Err() != nil {
+		return nil, fmt.Errorf("supervisor is shutting down")
+	}
 	runID := ids.New("run")
 	cmd, err := s.spawner.Command(m, m.Dir, runID, m.ID)
 	if err != nil {
@@ -215,7 +222,7 @@ func (s *Supervisor) wait(run *Run, m *manifest.Manifest) {
 		run.Detail = detail
 	}
 	run.ExitCode = code
-	shouldRestart := prev != Stopping && m.RestartOnFailure && s.ctx.Err() == nil
+	shouldRestart := (prev != Stopping || run.restartAfterStop) && m.RestartOnFailure && s.ctx.Err() == nil
 	delete(s.runs, run.RunID)
 	list := s.byApp[run.AppID]
 	for i, id := range list {
@@ -249,7 +256,14 @@ func (s *Supervisor) restart(m *manifest.Manifest) {
 	if exp > 5 {
 		exp = 5
 	}
-	delay := time.Duration(1<<uint(exp-1)) * time.Second
+	// The first failure after a healthy run restarts at once: a default
+	// provider that was killed mid-operation must be usable again without a
+	// visible outage. Repeated failures still back off so a crash loop cannot
+	// spin the process table.
+	delay := time.Duration(0)
+	if exp > 1 {
+		delay = time.Duration(1<<uint(exp-2)) * time.Second
+	}
 	if delay > 30*time.Second {
 		delay = 30 * time.Second
 	}
@@ -262,7 +276,11 @@ func (s *Supervisor) restart(m *manifest.Manifest) {
 	if s.ctx.Err() != nil {
 		return
 	}
-	s.logs.Infof("supervisor", m.ID, "restarting after failure in %s", delay)
+	if delay == 0 {
+		s.logs.Infof("supervisor", m.ID, "restarting after failure immediately")
+	} else {
+		s.logs.Infof("supervisor", m.ID, "restarting after failure in %s", delay)
+	}
 	if _, err := s.Start(m, ids.New("inv")); err != nil {
 		s.logs.Errorf("supervisor", m.ID, "restart failed: %v", err)
 	}
@@ -379,6 +397,19 @@ func (s *Supervisor) BindBuiltinStop(runID string, stop func()) {
 
 // Stop requests graceful termination and escalates to SIGKILL after timeout.
 func (s *Supervisor) Stop(runID string) bool {
+	return s.stop(runID, false)
+}
+
+// StopCrashed terminates a run that lost its framework connection. It is a
+// deliberate stop from the process's point of view, but the exit is treated as
+// a failure: a restart_on_failure application is started again immediately
+// instead of remaining unavailable. A compiled-in app has no process to
+// restart, so it is stopped like Stop.
+func (s *Supervisor) StopCrashed(runID string) bool {
+	return s.stop(runID, true)
+}
+
+func (s *Supervisor) stop(runID string, crashed bool) bool {
 	s.mu.Lock()
 	run, ok := s.runs[runID]
 	if !ok {
@@ -420,6 +451,7 @@ func (s *Supervisor) Stop(runID string) bool {
 		return true
 	}
 	run.State = Stopping
+	run.restartAfterStop = run.restartAfterStop || crashed
 	proc := run.cmd.Process
 	appID := run.AppID
 	cmd := run.cmd
@@ -445,8 +477,11 @@ func (s *Supervisor) StopApp(appID string) int {
 	return len(runs)
 }
 
-// Shutdown stops all processes and waits for exit.
+// Shutdown stops all processes and waits for exit. The supervisor context is
+// cancelled first: a bus disconnect during shutdown must not be mistaken for a
+// crash and restart an app while the daemon is going away.
 func (s *Supervisor) Shutdown(timeout time.Duration) {
+	s.cancel()
 	s.mu.Lock()
 	ids := make([]string, 0, len(s.runs))
 	for id := range s.runs {
@@ -471,7 +506,6 @@ func (s *Supervisor) Shutdown(timeout time.Duration) {
 		}
 		s.mu.Unlock()
 	}
-	s.cancel()
 }
 
 // RunCount returns the number of live processes.

@@ -206,7 +206,6 @@ func (d *Daemon) onAppReady(runID, appID string) {
 	d.sup.MarkReady(runID)
 	d.sendAppSettings(appID)
 	d.flushPending(runID)
-	d.broadcastRun(runID)
 }
 
 func (d *Daemon) sendAppSettings(appID string) {
@@ -229,8 +228,12 @@ func (d *Daemon) onAppDisconnect(runID, appID string) {
 	d.logs.Warnf("daemon", appID, "bus disconnected for run=%s", runID)
 	d.cleanupRun(runID)
 	if run, ok := d.sup.Get(runID); ok && run.State != supervisor.Stopping {
-		d.logs.Warnf("daemon", appID, "stopping run=%s because its framework connection was lost", runID)
-		d.sup.Stop(runID)
+		// A lost framework connection is a failure, not a user stop: stop the
+		// orphaned process but keep restart_on_failure semantics. A provider
+		// killed mid-operation is otherwise left unavailable for the rest of
+		// the boot with no way to activate it.
+		d.logs.Warnf("daemon", appID, "stopping run=%s because its framework connection was lost; it will restart if the app allows it", runID)
+		d.sup.StopCrashed(runID)
 	}
 }
 
@@ -254,13 +257,12 @@ func (d *Daemon) onActionResult(runID string, res *frameworkv1.AppActionResult) 
 }
 
 func (d *Daemon) onRunState(run supervisor.Run) {
-	d.broadcastRun(run.RunID)
+	d.broadcastRun(run)
 }
 
 func (d *Daemon) onRunExit(run supervisor.Run) {
 	d.logs.Infof("daemon", run.AppID, "run=%s exited state=%s code=%d", run.RunID, run.State, run.ExitCode)
 	d.cleanupRun(run.RunID)
-	d.broadcastRun(run.RunID)
 }
 
 // cleanupRun releases everything owned by a terminated process.
@@ -274,13 +276,7 @@ func (d *Daemon) cleanupRun(runID string) {
 	d.launcher.CleanupRun(runID)
 }
 
-func (d *Daemon) broadcastRun(runID string) {
-	var snapshot supervisor.Run
-	if run, ok := d.sup.Get(runID); ok {
-		snapshot = run
-	} else {
-		return
-	}
+func (d *Daemon) broadcastRun(snapshot supervisor.Run) {
 	d.runMu.Lock()
 	defer d.runMu.Unlock()
 	for _, ch := range d.runSubs {

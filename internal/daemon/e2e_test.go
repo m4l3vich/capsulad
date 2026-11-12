@@ -611,3 +611,21 @@ func (d *Daemon) ownerOfCapture(captureID string) string {
 	}
 	return ""
 }
+
+// A default provider killed mid-operation must be started again by the
+// framework. A lost framework connection was treated as a deliberate stop,
+// which suppressed restart_on_failure and left the app unavailable until
+// reboot. Drive the disconnect path directly so the race with process reaping
+// cannot hide the regression; a SIGKILL produces the same callback.
+func TestDefaultAppRestartsAfterLostConnection(t *testing.T) {
+	d, _, _ := newTestDaemonWith(t)
+	first := string(waitReady(t, d, "test.clock", 10*time.Second))
+	d.onAppDisconnect(first, "test.clock")
+	waitFor(t, 5*time.Second, "app restarts after its connection was lost", func() bool {
+		next, ok := d.sup.ReadyRun("test.clock")
+		return ok && next.RunID != first
+	})
+	waitFor(t, 3*time.Second, "restart is logged", func() bool {
+		return strings.Contains(logText(d), "restarting after failure")
+	})
+}

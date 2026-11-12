@@ -86,6 +86,9 @@ func (s *applicationService) Launch(ctx context.Context, req *frameworkv1.Launch
 	}
 	runID, invID, spawned, err := s.d.Launch(req.AppId, args)
 	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	return &frameworkv1.LaunchResult{RunId: runID, SpawnedNewProcess: spawned, InvocationId: invID}, nil
@@ -104,13 +107,13 @@ func (s *applicationService) ListRuns(ctx context.Context, req *frameworkv1.List
 }
 
 func (s *applicationService) WatchRuns(req *frameworkv1.WatchRunsRequest, stream frameworkv1.ApplicationService_WatchRunsServer) error {
+	ch, cancel := s.d.subscribeRuns()
+	defer cancel()
 	for _, run := range s.d.sup.List(req.AppId) {
 		if err := stream.Send(&frameworkv1.AppRunEvent{Run: runProto(run)}); err != nil {
 			return err
 		}
 	}
-	ch, cancel := s.d.subscribeRuns()
-	defer cancel()
 	for {
 		select {
 		case <-stream.Context().Done():
