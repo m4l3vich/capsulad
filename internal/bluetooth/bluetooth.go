@@ -146,6 +146,13 @@ const (
 	// active). Callers acquire the stream when they see it instead of polling
 	// for the transport.
 	EventTransport
+	// EventResync reports that the watcher fell behind and at least one
+	// lifecycle event was coalesced away. Media is the newest snapshot the
+	// manager had when the queue overflowed. Consumers must reconcile their
+	// session (active stream, routes) against the manager instead of assuming
+	// the missing transition happened; the queue keeps emitting a fresh marker
+	// for as long as it stays full.
+	EventResync
 )
 
 // Event carries the state after a change. Media is set for EventMedia and on
@@ -157,6 +164,65 @@ type Event struct {
 	Media         MediaState
 	// Volume is the AVRCP absolute volume (0..127) for EventVolume.
 	Volume uint16
+}
+
+// watchEventBuffer is the per-subscriber queue depth. A watcher can fall behind
+// (a slow app stream, or the daemon blocked while tearing an audio route down),
+// so the queue is a conflation window: it must retain the newest transitions,
+// never the oldest ones.
+const watchEventBuffer = 16
+
+// deliverEvent publishes one event to a watcher without blocking the manager.
+// The manager is the only sender of a watcher channel; the consumer only
+// receives.
+//
+// The queue is a conflation window, not a lossy tail: on overflow the OLDEST
+// queued state is dropped and an EventResync marker carrying this event's media
+// snapshot is appended instead of the plain event. A watcher that has fallen
+// behind therefore learns that at least one transition was coalesced and
+// reconciles its session against the manager (the marker is newer than
+// everything it replaced). While the consumer stays behind, every further
+// publish leaves another marker, so the tail is always the newest snapshot and
+// no stale connect/disconnect can be acted on as if it were current.
+func deliverEvent(ch chan Event, event Event) {
+	select {
+	case ch <- event:
+		return
+	default:
+	}
+	marker := Event{
+		Kind: EventResync, DeviceAddress: event.DeviceAddress,
+		DeviceName: event.DeviceName, Media: event.Media,
+	}
+	// Removing the oldest queued state is safe: the consumer may drain it
+	// first, in which case this receive takes the next-oldest one, and the
+	// marker below still fits. A closed channel means the watcher ended while
+	// this publish was in flight.
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			return
+		}
+	default:
+	}
+	select {
+	case ch <- marker:
+		return
+	default:
+	}
+	// A concurrent publisher (the in-memory manager used by tests and the
+	// simulator) refilled the freed slot. Evict once more; the marker must not
+	// be lost behind a burst.
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- marker:
+	default:
+		// Still full under concurrent publishers; the next overflow carries a
+		// newer snapshot anyway.
+	}
 }
 
 // Manager is the Bluetooth facade. A nil Manager means the subsystem is absent.
@@ -259,17 +325,36 @@ func (m *Memory) PairedDevices(context.Context) ([]Device, error) {
 
 func (m *Memory) Unpair(_ context.Context, address string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for i := range m.devices {
-		if m.devices[i].Address == address {
-			if !m.devices[i].Paired {
-				return fmt.Errorf("device %s is not paired", address)
-			}
-			m.devices[i].Paired = false
-			m.devices[i].Connected = false
-			return nil
+		if m.devices[i].Address != address {
+			continue
 		}
+		if !m.devices[i].Paired {
+			m.mu.Unlock()
+			return fmt.Errorf("device %s is not paired", address)
+		}
+		wasConnected, name := m.devices[i].Connected, m.devices[i].Name
+		m.devices[i].Paired = false
+		m.devices[i].Connected = false
+		var event Event
+		if wasConnected {
+			// The real manager disconnects a connected device before removing
+			// the bond, so consumers see the same disconnect transition.
+			if m.media.DeviceAddress == address {
+				m.media = MediaState{}
+			}
+			m.hasVolume, m.volume = false, 0
+			m.revision++
+			m.media.Revision = m.revision
+			event = Event{Kind: EventDisconnected, DeviceAddress: address, DeviceName: name, Media: m.media}
+		}
+		m.mu.Unlock()
+		if wasConnected {
+			m.broadcast(event)
+		}
+		return nil
 	}
+	m.mu.Unlock()
 	return fmt.Errorf("unknown device %s", address)
 }
 
@@ -342,8 +427,13 @@ func (m *Memory) SubscriberCount() int {
 }
 
 func (m *Memory) Watch(ctx context.Context) <-chan Event {
-	ch := make(chan Event, 16)
+	ch := make(chan Event, watchEventBuffer)
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		close(ch)
+		return ch
+	}
 	m.nextID++
 	id := m.nextID
 	m.subs[id] = ch
@@ -453,9 +543,6 @@ func (m *Memory) broadcast(event Event) {
 	}
 	m.mu.Unlock()
 	for _, ch := range subs {
-		select {
-		case ch <- event:
-		default:
-		}
+		deliverEvent(ch, event)
 	}
 }

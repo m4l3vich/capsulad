@@ -55,6 +55,11 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 		return status.Error(codes.Unavailable, "Bluetooth is unavailable on this platform")
 	}
 	ctx := stream.Context()
+	// Subscribe before reading the snapshot. A change between the read and the
+	// subscription would otherwise be lost and the watcher would show a stale
+	// source forever; events already reflected in the snapshot are skipped by
+	// revision below.
+	events := s.d.bt.Watch(ctx)
 	initial, err := s.d.bt.Media(ctx)
 	if err != nil {
 		return bluetoothStatusError(err)
@@ -63,7 +68,6 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 		return err
 	}
 	last := initial.Revision
-	events := s.d.bt.Watch(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -74,7 +78,9 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 			}
 			// Connect/disconnect events carry the post-change state; the
 			// manager may also emit a media event with the same revision.
-			if ev.Media.Revision == last {
+			// Revisions only grow, so an event queued before the snapshot is
+			// old state and is skipped too.
+			if ev.Media.Revision <= last {
 				continue
 			}
 			last = ev.Media.Revision

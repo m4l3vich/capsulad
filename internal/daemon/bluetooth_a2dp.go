@@ -182,8 +182,21 @@ func (d *Daemon) bluetoothGen(gen uint64) bool {
 }
 
 func (d *Daemon) stopBluetoothStream() {
+	d.stopBluetoothStreamFor("")
+}
+
+// stopBluetoothStreamFor stops the acquired stream only when it belongs to the
+// disconnecting source. A second paired device (a phone that connects for the
+// call profile, or the user's laptop) leaving must not silence the source that
+// is actually streaming: the single-stream sink has no event to reacquire its
+// transport until that source pauses or resumes.
+func (d *Daemon) stopBluetoothStreamFor(address string) {
 	d.btStreamMu.Lock()
 	stream := d.btStream
+	if stream != nil && address != "" && stream.address != "" && !strings.EqualFold(stream.address, address) {
+		d.btStreamMu.Unlock()
+		return
+	}
 	d.btStream = nil
 	d.btStreamGen++
 	d.btStreamStart = false

@@ -116,8 +116,11 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		}
 		module := strings.TrimSpace(string(out))
 		d.btRouteMu.Lock()
-		if d.btRoutes[address] != "" {
-			// A disconnect removed the reservation while the module loaded.
+		// The reservation is the map entry itself (its value is empty until
+		// the module is known). A disconnect or resync removes the entry while
+		// the module loads; a missing key must unload it, not resurrect a route
+		// for a source that is gone.
+		if _, reserved := d.btRoutes[address]; !reserved {
 			d.btRouteMu.Unlock()
 			_ = unloadPulseModule(module)
 			return
@@ -279,19 +282,20 @@ func loopbackSinkInputIndex() string {
 }
 
 func (d *Daemon) removeBluetoothAudioRoute(address string) {
-	if d.dev.Platform() == backend.PlatformSimulator {
-		return
-	}
 	d.btRouteMu.Lock()
 	module, ok := d.btRoutes[address]
 	if ok {
 		delete(d.btRoutes, address)
 	}
 	d.btRouteMu.Unlock()
-	if ok && module != "" {
-		_ = unloadPulseModule(module)
-		d.logs.Infof("bluetooth", "", "removed audio route for %s", address)
+	if !ok || module == "" {
+		return
 	}
+	if d.dev.Platform() == backend.PlatformSimulator {
+		return
+	}
+	_ = unloadPulseModule(module)
+	d.logs.Infof("bluetooth", "", "removed audio route for %s", address)
 }
 
 // ensureConnectedBluetoothRoutes covers a daemon restart while a source is
@@ -308,6 +312,12 @@ func (d *Daemon) ensureConnectedBluetoothRoutes() {
 	}
 	for _, dev := range devices {
 		if dev.Connected {
+			// No connect event is emitted for state that already existed, so
+			// say it explicitly: otherwise a source that reconnected before
+			// the daemon started appears with no "source connected" log while
+			// its audio route is being restored.
+			d.logs.Infof("bluetooth", "", "source already connected at startup name=%q address=%s; restoring its audio route",
+				dev.Name, dev.Address)
 			d.connectBluetoothAudio(dev.Address)
 		}
 	}

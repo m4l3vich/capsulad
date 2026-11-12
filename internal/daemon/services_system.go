@@ -107,6 +107,14 @@ func (s *systemService) SetBluetoothPairable(ctx context.Context, req *framework
 	if s.d.bt == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
 	}
+	// Same invariant as the persisted settings path: do not accept a new source
+	// before the A2DP sink profile it needs is advertised, or the link is
+	// dropped with "profile unavailable" after it bonds.
+	if req.Pairable {
+		if err := s.d.ensureBluetoothAdvertisement(); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, "audio profile advertisement: "+err.Error())
+		}
+	}
 	if err := s.d.bt.SetPairable(ctx, req.Pairable); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}

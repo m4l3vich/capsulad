@@ -130,10 +130,14 @@ func (d *Daemon) watchBluetooth() {
 	if d.bt == nil {
 		return
 	}
+	// Subscribe before reading existing state: a source that connects between
+	// the state read and the subscription would otherwise be invisible until
+	// its next event, leaving it connected with no audio route. Seeding is
+	// idempotent with the connect event that may also arrive.
+	events := d.bt.Watch(d.ctx)
 	// A source may already be connected when the daemon starts; the manager
 	// seeds its state without emitting a connect event.
 	d.ensureConnectedBluetoothRoutes()
-	events := d.bt.Watch(d.ctx)
 	ring := &bluetoothNotice{}
 	display := &bluetoothNotice{}
 	defer func() {
@@ -159,16 +163,49 @@ func (d *Daemon) watchBluetooth() {
 			if !ok {
 				return
 			}
+			if ev.Kind == bluetooth.EventResync {
+				// Collapse a backlog of markers: only the newest snapshot is
+				// worth one reconciliation. A real event that follows is
+				// handled normally after the session is back in sync. The
+				// drain is capped so a sustained flood cannot pin this loop.
+				newest := ev
+				var following *bluetooth.Event
+				for range 64 {
+					select {
+					case next, ok := <-events:
+						if !ok {
+							return
+						}
+						if next.Kind == bluetooth.EventResync {
+							newest = next
+							continue
+						}
+						following = &next
+					default:
+					}
+					break
+				}
+				d.reconcileBluetoothSession(newest.Media)
+				if following == nil {
+					continue
+				}
+				ev = *following
+			}
 			switch ev.Kind {
 			case bluetooth.EventConnected:
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
-				d.showBluetoothPulse(ring)
+				d.showBluetoothPulse(ring, bluetoothPulseCount)
 				d.showBluetoothIndicator(display)
 				d.connectBluetoothAudio(ev.DeviceAddress)
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
-				d.showBluetoothPulse(ring)
-				d.stopBluetoothStream()
+				// Disconnect is a single pulse and no glyph: any connect
+				// glyph still on screen is cleared at once, the display shows
+				// the selected baseline, and only the ring acknowledges the
+				// loss once.
+				display.close(d)
+				d.showBluetoothPulse(ring, 1)
+				d.stopBluetoothStreamFor(ev.DeviceAddress)
 				d.removeBluetoothAudioRoute(ev.DeviceAddress)
 			case bluetooth.EventVolume:
 				d.applyBluetoothSourceVolume(ev.Volume)
@@ -206,21 +243,36 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 	}
 	if d.btNative {
 		go func() {
+			start := time.Now()
 			ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
 			defer cancel()
-			// PulseAudio may have been restarted since startup and registered
-			// its own A2DP endpoints; it must not compete for this source's
-			// transport. This is a single check per connect, not a poll.
-			d.unloadPulseBluetoothModules()
+			// The sink endpoint is registered at startup. If BlueZ restarted or
+			// power-cycled the adapter since then it forgot the registration,
+			// and the source would connect without an audio profile. Re-arm it
+			// now; PulseAudio's discovery modules are unloaded only in this
+			// repair path, never on a healthy connect, because unloading them
+			// while a source is connected can tear the card down.
+			if registrar, ok := d.bt.(bluetooth.A2DPRegistrar); ok && !registrar.SinkRegistered() {
+				d.unloadPulseBluetoothModules()
+				if sink, ok := d.bt.(bluetooth.A2DPSink); ok {
+					if err := sink.RegisterA2DPSink(ctx); err != nil {
+						d.logs.Warnf("bluetooth", "", "re-register A2DP sink before connecting %s: %v", address, err)
+					} else {
+						d.logs.Infof("bluetooth", "", "A2DP sink re-registered before connecting %s", address)
+					}
+				}
+			}
 			if trust, ok := d.bt.(bluetooth.TrustSetter); ok {
 				if err := trust.SetTrusted(ctx, address, true); err != nil {
 					d.logs.Debugf("bluetooth", "", "trust %s: %v", address, err)
 				}
 			}
 			if err := d.bt.ConnectAudio(ctx, address); err != nil {
-				d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
+				d.logs.Warnf("bluetooth", "", "audio profiles for %s failed after %s: %v",
+					address, time.Since(start).Round(time.Millisecond), err)
 			} else {
-				d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+				d.logs.Infof("bluetooth", "", "A2DP source profile connected for %s in %s",
+					address, time.Since(start).Round(time.Millisecond))
 			}
 			d.forceBluetoothVolume()
 			d.startBluetoothStream(address)
@@ -278,8 +330,11 @@ func bluetoothIndicatorCells(digitCount int) []uint16 {
 }
 
 // bluetoothPulseContent returns the blue whole-ring pulse and how long its
-// presentation must live to complete exactly three fade-in/out cycles.
-func bluetoothPulseContent() (presentations.Content, time.Duration, error) {
+// presentation must live to complete exactly count fade-in/out cycles.
+func bluetoothPulseContent(count int) (presentations.Content, time.Duration, error) {
+	if count < 1 {
+		count = 1
+	}
 	params, err := presets.ValidateParams(mustPreset("system.ring.pulse"), presets.Params{
 		"speed": bluetoothPulseSpeed, "color": rgb(0, 136, 255), "min_intensity": 0.0,
 	})
@@ -288,7 +343,7 @@ func bluetoothPulseContent() (presentations.Content, time.Duration, error) {
 	}
 	period := time.Duration(float64(time.Second) / bluetoothPulseSpeed)
 	return presentations.RingEffect("system.ring.pulse", params),
-		time.Duration(bluetoothPulseCount)*period + bluetoothPulseGuard, nil
+		time.Duration(count)*period + bluetoothPulseGuard, nil
 }
 
 // bluetoothNotice is one transient system presentation plus its capture and
@@ -343,9 +398,10 @@ func (n *bluetoothNotice) close(d *Daemon) {
 	}
 }
 
-// showBluetoothPulse runs the three-pulse connect/disconnect animation.
-func (d *Daemon) showBluetoothPulse(n *bluetoothNotice) {
-	content, life, err := bluetoothPulseContent()
+// showBluetoothPulse runs the connect (three pulses) or disconnect (one
+// pulse) animation.
+func (d *Daemon) showBluetoothPulse(n *bluetoothNotice, count int) {
+	content, life, err := bluetoothPulseContent(count)
 	if err != nil {
 		d.logs.Warnf("bluetooth", "", "pulse cue: %v", err)
 		return
@@ -379,6 +435,81 @@ func (d *Daemon) segmentDisplayResourceID() string {
 		}
 	}
 	return ""
+}
+
+// reconcileBluetoothSession converges the audio session after the manager
+// coalesced at least one watcher event (EventResync). The connected-device list,
+// not a single transition, is authoritative: a source that disconnected while
+// the watcher was behind is gone from it, and a source that appeared is in it.
+// This is what makes a coalesced-away EventDisconnected harmless: the native
+// stream and the fallback route are cleaned from state, not from the lost
+// transition.
+func (d *Daemon) reconcileBluetoothSession(media bluetooth.MediaState) {
+	if d.bt == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
+	devices, err := d.bt.PairedDevices(ctx)
+	cancel()
+	if err != nil {
+		// Without the device list, only "no source at all" is provable: a
+		// single selected address cannot prove another source's stream is
+		// gone. Clean everything only when the snapshot reports nothing left.
+		if !media.Present {
+			d.stopBluetoothStream()
+			d.resetBluetoothRoutes()
+		}
+	} else {
+		connected := make(map[string]bool, len(devices))
+		for _, dev := range devices {
+			if dev.Connected {
+				connected[strings.ToUpper(dev.Address)] = true
+			}
+		}
+
+		d.btStreamMu.Lock()
+		stream := d.btStream
+		d.btStreamMu.Unlock()
+		if stream != nil && stream.address != "" && !connected[strings.ToUpper(stream.address)] {
+			d.logs.Infof("bluetooth", "", "resync: stream for %s has no connected source", stream.address)
+			d.stopBluetoothStreamFor(stream.address)
+		}
+
+		d.btRouteMu.Lock()
+		stale := make([]string, 0, len(d.btRoutes))
+		for address := range d.btRoutes {
+			if !connected[strings.ToUpper(address)] {
+				stale = append(stale, address)
+			}
+		}
+		d.btRouteMu.Unlock()
+		for _, address := range stale {
+			d.removeBluetoothAudioRoute(address)
+		}
+	}
+
+	// A source-side AVRCP volume change can be coalesced away too. The
+	// transport is the same authority an EventVolume would have applied; the
+	// mirror is a no-op when the framework level is already current.
+	volCtx, volCancel := context.WithTimeout(d.ctx, 5*time.Second)
+	volume, volErr := d.bt.TransportVolume(volCtx)
+	volCancel()
+	if volErr == nil && d.user != nil {
+		d.applyBluetoothSourceVolume(volume)
+	}
+
+	// A present, audible source with nothing carrying it lost its
+	// connect/transport event to the queue. Both acquisition paths are already
+	// guarded against a second start, so a burst of markers starts audio once.
+	if media.Present {
+		if d.btNative {
+			if media.Playing {
+				d.startBluetoothStream(media.DeviceAddress)
+			}
+		} else {
+			d.ensureBluetoothAudioRoute(media.DeviceAddress)
+		}
+	}
 }
 
 // requireLocalAdmin rejects paired-device management from supervised apps.

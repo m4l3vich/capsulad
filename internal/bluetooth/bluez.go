@@ -227,7 +227,10 @@ func (b *BlueZ) Unpair(ctx context.Context, address string) error {
 
 // ConnectAudio asks the source to connect its Audio Source and AVRCP profiles.
 // macOS and some phones otherwise leave the link at ACL/HFP and the A2DP sink
-// never appears as an audio output.
+// never appears. The two profiles are connected concurrently: sequentially they
+// added ~3 s of latency on a source that was already streaming, and one slow
+// profile must not delay the other. The watcher publishes the resulting
+// transport through signals, so no object-tree refresh is forced here.
 func (b *BlueZ) ConnectAudio(ctx context.Context, address string) error {
 	objs, err := b.objects(ctx)
 	if err != nil {
@@ -237,14 +240,64 @@ func (b *BlueZ) ConnectAudio(ctx context.Context, address string) error {
 	if path == "" {
 		return ErrNoSource
 	}
-	for _, uuid := range []string{
-		"0000110a-0000-1000-8000-00805f9b34fb", // Audio Source
-		"0000110e-0000-1000-8000-00805f9b34fb", // A/V Remote Control
-	} {
-		// Already-connected profiles return an error; only the effect matters.
-		_ = b.conn.Object(bluezService, path).CallWithContext(ctx, "org.bluez.Device1.ConnectProfile", 0, uuid).Err
+	profiles := [2]struct{ name, uuid string }{
+		{"a2dp-source", "0000110a-0000-1000-8000-00805f9b34fb"},
+		{"avrcp", "0000110e-0000-1000-8000-00805f9b34fb"},
 	}
-	return b.refresh(ctx)
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var failures []string
+	for _, profile := range profiles {
+		wg.Add(1)
+		go func(name, uuid string) {
+			defer wg.Done()
+			var last error
+			// An already-connected profile reports an error that is not a
+			// failure. A real failure is retried once: on the first connection
+			// after a bond the remote's profile handler is sometimes not ready
+			// when BlueZ asks, and giving up left the source with no audio
+			// profile until it reconnected.
+			for attempt := 0; attempt < 2; attempt++ {
+				callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				err := b.conn.Object(bluezService, path).CallWithContext(callCtx,
+					"org.bluez.Device1.ConnectProfile", 0, uuid).Err
+				cancel()
+				if err == nil || isAlreadyConnected(err) {
+					return
+				}
+				last = err
+				if attempt == 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(250 * time.Millisecond):
+					}
+				}
+			}
+			errMu.Lock()
+			failures = append(failures, fmt.Sprintf("%s: %v", name, last))
+			errMu.Unlock()
+		}(profile.name, profile.uuid)
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		return fmt.Errorf("connect audio profiles: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// isAlreadyConnected recognizes the benign errors BlueZ returns for a profile
+// that is up or being connected by the source itself.
+func isAlreadyConnected(err error) bool {
+	var dbusErr dbus.Error
+	if !errors.As(err, &dbusErr) {
+		return false
+	}
+	detail := strings.ToLower(dbusErr.Name + " " + fmt.Sprint(dbusErr.Body))
+	return strings.Contains(detail, "already") ||
+		strings.Contains(detail, "inprogress") ||
+		strings.Contains(detail, "in progress")
 }
 
 // SetTrusted marks a paired device trusted in the local BlueZ bond. Source
@@ -344,7 +397,7 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 		return err
 	}
 	b.mu.Lock()
-	present, playing := b.media.Present, b.media.Playing
+	present, playing, device := b.media.Present, b.media.Playing, b.media.DeviceAddress
 	b.mu.Unlock()
 	if !present {
 		return ErrNoSource
@@ -353,7 +406,7 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	if err != nil {
 		return err
 	}
-	if path := findPlayerPath(objs, playing); path != "" {
+	if path := findPlayerPath(objs, device); path != "" {
 		method := playerMethod(cmd, playing)
 		if method == "" {
 			return ErrUnsupported
@@ -380,7 +433,7 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 
 // Watch subscribes to connect/disconnect and media changes.
 func (b *BlueZ) Watch(ctx context.Context) <-chan Event {
-	ch := make(chan Event, 16)
+	ch := make(chan Event, watchEventBuffer)
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -547,10 +600,7 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 
 	for _, event := range events {
 		for _, ch := range subs {
-			select {
-			case ch <- event:
-			default:
-			}
+			deliverEvent(ch, event)
 		}
 	}
 	return nil
@@ -758,18 +808,71 @@ func mediaFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) Medi
 			return state
 		}
 	}
+
+	// A source is connected before BlueZ publishes a player, control or
+	// transport (an ACL-only connect, or a paused source whose player object is
+	// gone). Present means a source is connected, not that it is playing, so a
+	// device that exposes an audio-source or AVRCP service still counts. It must
+	// not disappear from the framework and the UI just because it paused.
+	for _, ifaces := range objs {
+		props, ok := ifaces["org.bluez.Device1"]
+		if !ok || !boolProp(props, "Connected") || !audioSourceDevice(props) {
+			continue
+		}
+		name := strProp(props, "Alias")
+		if name == "" {
+			name = strProp(props, "Name")
+		}
+		return MediaState{
+			Present: true, DeviceAddress: strProp(props, "Address"), DeviceName: name,
+			Detail: "source connected; it exposes no media player",
+		}
+	}
 	return MediaState{Detail: "no Bluetooth source connected"}
 }
 
+// audioSourceUUIDs are the remote services that make a connected device an
+// audio source for this sink: Audio Source, AVRCP Target and AVRCP Controller.
+// A keyboard or a gamepad exposes none of them and is not reported as media.
+var audioSourceUUIDs = []string{
+	"0000110a-0000-1000-8000-00805f9b34fb",
+	"0000110c-0000-1000-8000-00805f9b34fb",
+	"0000110e-0000-1000-8000-00805f9b34fb",
+}
+
+func audioSourceDevice(props map[string]dbus.Variant) bool {
+	v, ok := props["UUIDs"]
+	if !ok {
+		return false
+	}
+	uuids, _ := v.Value().([]string)
+	for _, uuid := range uuids {
+		for _, want := range audioSourceUUIDs {
+			if strings.EqualFold(uuid, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findPlayer picks the player the framework shows. Object maps have no order,
+// so candidates are sorted by path: with two connected sources and neither
+// playing, repeated refreshes must not flap between their metadata and device.
+// A playing player still wins over a paused one.
 func findPlayer(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (dbus.ObjectPath, map[string]dbus.Variant) {
+	paths := make([]dbus.ObjectPath, 0, len(objs))
+	for path, ifaces := range objs {
+		if _, ok := ifaces["org.bluez.MediaPlayer1"]; ok {
+			paths = append(paths, path)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
 	var best dbus.ObjectPath
 	var bestProps map[string]dbus.Variant
 	bestPlaying := false
-	for path, ifaces := range objs {
-		props, ok := ifaces["org.bluez.MediaPlayer1"]
-		if !ok {
-			continue
-		}
+	for _, path := range paths {
+		props := objs[path]["org.bluez.MediaPlayer1"]
 		playing := strProp(props, "Status") == "playing"
 		if best == "" || (playing && !bestPlaying) {
 			best, bestProps, bestPlaying = path, props, playing
@@ -778,9 +881,44 @@ func findPlayer(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (db
 	return best, bestProps
 }
 
-func findPlayerPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, playing bool) dbus.ObjectPath {
-	path, _ := findPlayer(objs)
-	return path
+// findPlayerPath picks the player a transport command targets: the one already
+// playing, else one belonging to the source the framework is showing (so a
+// play command after a source switch reaches the source the user sees), else
+// the deterministic first player.
+func findPlayerPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, preferredAddress string) dbus.ObjectPath {
+	best, props := findPlayer(objs)
+	if best != "" && strProp(props, "Status") == "playing" {
+		return best
+	}
+	if preferredAddress != "" {
+		paths := make([]dbus.ObjectPath, 0, len(objs))
+		for path, ifaces := range objs {
+			if _, ok := ifaces["org.bluez.MediaPlayer1"]; ok {
+				paths = append(paths, path)
+			}
+		}
+		sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+		for _, path := range paths {
+			if strings.EqualFold(playerDeviceAddress(objs, objs[path]["org.bluez.MediaPlayer1"]), preferredAddress) {
+				return path
+			}
+		}
+	}
+	return best
+}
+
+// playerDeviceAddress resolves a MediaPlayer1 object's Device property to the
+// remote device address without falling back to any connected device.
+func playerDeviceAddress(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, playerProps map[string]dbus.Variant) string {
+	dev := objectPathProp(playerProps, "Device")
+	if dev == "" {
+		return ""
+	}
+	ifaces, ok := objs[dev]
+	if !ok {
+		return ""
+	}
+	return strProp(ifaces["org.bluez.Device1"], "Address")
 }
 
 func findControlPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) dbus.ObjectPath {
