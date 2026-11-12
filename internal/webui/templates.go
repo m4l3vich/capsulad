@@ -249,6 +249,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <datalist id="tz-zones"><option value="UTC"><option value="Europe/Moscow"><option value="Asia/Shanghai"><option value="Europe/Berlin"><option value="America/New_York"></datalist></label>
 <label>Master volume: <strong>{{pct .Data.Settings.Values.MasterVolume}}%</strong>
 <input type="range" name="master_volume" min="0" max="100" value="{{pct .Data.Settings.Values.MasterVolume}}"></label>
+<label><input type="checkbox" name="startup_sound_enabled" {{if .Data.Settings.Values.StartupSoundEnabled}}checked{{end}}> Play the startup sound on every boot</label>
 <button>Save device settings</button></form>
 {{template "foot" .}}{{end}}
 

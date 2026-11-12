@@ -495,7 +495,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		v, _ := strconv.ParseFloat(r.PostFormValue("master_volume"), 64)
 		patch.MasterVolume = float32(v / 100)
 		patch.Timezone = strings.TrimSpace(r.PostFormValue("timezone"))
-		fields = append(fields, "master_volume", "timezone")
+		patch.StartupSoundEnabled = r.PostFormValue("startup_sound_enabled") == "on"
+		fields = append(fields, "master_volume", "timezone", "startup_sound_enabled")
 	default:
 		s.redirect(w, r, back, "", "unknown settings group")
 		return

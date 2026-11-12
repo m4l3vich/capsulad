@@ -178,6 +178,9 @@ message UserSettings {
   // Allow new Bluetooth devices to pair while the adapter is not
   // discoverable. Already-paired devices may connect while powered.
   bool bluetooth_pairable = 12;
+  // Replay the startup cue on every boot. Off by default; installation plays
+  // the cue once regardless of this value.
+  bool startup_sound_enabled = 13;
 }
 // Only controls how long the microphone-MUTED visual indication remains.
 // It does not change the mute state or capture/watchdog indication policy.

@@ -596,6 +596,7 @@ func (d *Daemon) Run() error {
 	// adapter and the settings pass never races endpoint registration.
 	d.initBluetoothAudio()
 	d.applySettings(d.user.Get())
+	d.maybePlayStartupCue()
 	d.startSystemApps()
 	d.startBootApps()
 	go d.watchBluetooth()

@@ -13,6 +13,7 @@ import (
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
+	"capsulad/internal/sounds"
 )
 
 // seedDefaults selects an installed provider on first run without overriding
@@ -164,6 +165,17 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	if muteChanged || (indicatorChanged && v.MicrophoneMuted) {
 		d.lastMuted = v.MicrophoneMuted
 		d.updateMicIndicator(v.MicrophoneMuted)
+	}
+	// The cue follows the durable transition, not the boot snapshot: restoring a
+	// muted device at startup is not a user action and stays silent. Both the
+	// physical key and the RPC/Web UI paths arrive here through the watcher, so
+	// one toggle makes exactly one sound.
+	if prev != nil && prev.MicrophoneMuted != v.MicrophoneMuted {
+		if v.MicrophoneMuted {
+			d.playUISound(sounds.MicrophoneMuted())
+		} else {
+			d.playUISound(sounds.MicrophoneLive())
+		}
 	}
 	d.updateSystemRing()
 	// A cached sensor level belongs to the mode it was sampled in. Dropping it

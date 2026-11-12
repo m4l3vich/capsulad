@@ -54,6 +54,10 @@ type UserSettings struct {
 	// BluetoothPairable allows new devices to pair while the adapter is not
 	// discoverable. Paired devices may connect whenever the adapter is powered.
 	BluetoothPairable bool `json:"bluetooth_pairable"`
+	// StartupSoundEnabled replays the installation startup cue on every boot.
+	// Off by default: the cue plays exactly once on installation regardless,
+	// and afterwards only when the user opts in.
+	StartupSoundEnabled bool `json:"startup_sound_enabled"`
 }
 
 const (
@@ -201,6 +205,8 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 				next.BrightnessMode = cloneMap(patch.BrightnessMode)
 			case "bluetooth_pairable":
 				next.BluetoothPairable = patch.BluetoothPairable
+			case "startup_sound_enabled":
+				next.StartupSoundEnabled = patch.StartupSoundEnabled
 			default:
 				return UserSnapshot{}, fmt.Errorf("unknown update field %q", f)
 			}

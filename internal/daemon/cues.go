@@ -1,89 +1,118 @@
 package daemon
 
 import (
-	"encoding/binary"
-	"math"
-	"sync"
+	"os"
+	"path/filepath"
 	"time"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"
+	"capsulad/internal/sounds"
 )
 
-// --- volume cue -------------------------------------------------------------
+// --- framework UI cues ------------------------------------------------------
 
-// volumeCueOnce caches the synthesized cue; it is deterministic so only the
-// sample format decides the buffer.
-var (
-	volumeCueOnce sync.Once
-	volumeCueData []byte
-)
+// uiSoundTrim attenuates the authored cues before the mixer's master gain.
+// The ubuntu-sounds set peaks around -3 dBFS (the startup jingle at -1 dBFS);
+// at full master that is a near-full-scale transient, which was painful on the
+// Mini's amplifier. -8 dB keeps every cue clearly audible at mid volume without
+// making a volume step or a mute toggle startling.
+const uiSoundTrim = 0.4
 
-// volumeCuePCM returns a short percussive tick: a noise transient, two fast
-// decaying partials and a low thump. It is generated here rather than taken
-// from the stock sound resources. The synthesized waveform is deliberately
-// quiet: the mixer still applies the master gain, but a near-full-scale
-// transient became painful at mid volume on the Mini's amplifier.
-func volumeCuePCM(format backend.AudioFormat) []byte {
-	volumeCueOnce.Do(func() {
-		rate := format.RateHz
-		if rate <= 0 {
-			rate = 48000
+// uiSoundChunk bounds one write so a long clip (the startup jingle is over ten
+// seconds) streams through the mixer's bounded queue instead of being copied
+// whole into the resampler.
+const uiSoundChunk = 16 << 10
+
+// playUISound plays one embedded cue through the mixer, so its loudness follows
+// the selected master volume. It owns no presentation and releases the
+// playback stream on every path; the caller must not block on the clip.
+func (d *Daemon) playUISound(clip sounds.Clip) { d.playUISoundWhen(clip, nil) }
+
+// playUISoundWhen is playUISound with an optional acknowledgement that runs
+// once the playback stream is open, so a one-shot cue is recorded as delivered
+// only after it actually reached the mixer.
+func (d *Daemon) playUISoundWhen(clip sounds.Clip, onStart func()) {
+	if len(clip.PCM) == 0 || d.dev.Audio() == nil {
+		return
+	}
+	format := backend.AudioFormat{Format: backend.S16LE, RateHz: clip.RateHz, Channels: clip.Channels}
+	go func() {
+		p, err := d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
+		if err != nil {
+			d.logs.Warnf("audio", "", "ui sound: %v", err)
+			return
 		}
-		channels := format.Channels
-		if channels <= 0 {
-			channels = 2
+		if onStart != nil {
+			onStart()
 		}
-		const seconds = 0.09
-		frames := int(float64(rate) * seconds)
-		out := make([]byte, frames*channels*2)
-		noise := uint32(0x2545F491)
-		for i := 0; i < frames; i++ {
-			t := float64(i) / float64(rate)
-			noise = noise*1664525 + 1013904223
-			n := float64(int32(noise)>>8) / float64(1<<23) // [-1,1)
-			click := n * 0.55 * math.Exp(-t/0.0025)
-			body := 0.42 * math.Exp(-t/0.018) * math.Sin(2*math.Pi*420*t)
-			top := 0.22 * math.Exp(-t/0.010) * math.Sin(2*math.Pi*1050*t)
-			thump := 0.30 * math.Exp(-t/0.032) * math.Sin(2*math.Pi*180*t)
-			// A UI cue, not content: keep the peak around -13 dBFS before the
-			// mixer's master gain. At 50 % that is roughly -19 dBFS, audible
-			// without the harsh full-scale click the old 0.95 peak produced.
-			v := (click + body + top + thump) * 0.22
-			if v > 0.22 {
-				v = 0.22
-			} else if v < -0.22 {
-				v = -0.22
+		p.SetTrim(uiSoundTrim)
+		defer p.CloseInput()
+		frameBytes := clip.Channels * 2
+		for off := 0; off < len(clip.PCM); off += uiSoundChunk {
+			end := off + uiSoundChunk
+			if end > len(clip.PCM) {
+				end = len(clip.PCM)
 			}
-			s := int16(v * 32767)
-			for c := 0; c < channels; c++ {
-				binary.LittleEndian.PutUint16(out[(i*channels+c)*2:], uint16(s))
+			end -= (end - off) % frameBytes
+			if err := p.Write(clip.PCM[off:end]); err != nil {
+				d.logs.Warnf("audio", "", "ui sound: %v", err)
+				return
 			}
 		}
-		volumeCueData = out
-	})
-	return volumeCueData
+	}()
 }
 
-// playVolumeCue plays the tick through the mixer, so its loudness follows the
-// volume that was just selected.
-func (d *Daemon) playVolumeCue() {
-	dev := d.dev.Audio()
-	if dev == nil {
-		return
-	}
-	format := dev.PlaybackFormat()
-	p, err := d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
+// playVolumeCue plays the volume-step cue, so its loudness follows the volume
+// that was just selected.
+func (d *Daemon) playVolumeCue() { d.playUISound(sounds.Volume()) }
+
+// startupSoundMarker records that the installation startup cue has already
+// played. Its absence is what defines the first boot of this daemon on a data
+// directory, so an upgraded device plays the cue once and then follows the
+// persisted setting.
+const startupSoundMarker = "startup-sound.played"
+
+// maybePlayStartupCue plays the jingle on the first boot after installation,
+// then only when the user enabled the startup sound. The cue never blocks
+// startup: the clip is over ten seconds long and streams through the mixer.
+func (d *Daemon) maybePlayStartupCue() {
+	due, installation, err := d.startupCueDue()
 	if err != nil {
-		d.logs.Warnf("audio", "", "volume cue: %v", err)
+		d.logs.Warnf("audio", "", "startup cue marker: %v", err)
 		return
 	}
-	if err := p.Write(volumeCuePCM(format)); err != nil {
-		d.logs.Warnf("audio", "", "volume cue: %v", err)
+	if !due {
+		return
 	}
-	p.CloseInput()
+	var delivered func()
+	if installation {
+		marker := filepath.Join(d.cfg.DataDir, startupSoundMarker)
+		delivered = func() {
+			if err := os.WriteFile(marker, []byte("startup cue played\n"), 0o644); err != nil {
+				d.logs.Warnf("audio", "", "startup cue marker: %v", err)
+			}
+		}
+	}
+	d.playUISoundWhen(sounds.Startup(), delivered)
+}
+
+// startupCueDue reports whether the boot cue should play and whether this boot
+// is the installation boot that records the marker. A missing marker is the
+// installation definition: the cue plays once and is then governed by the
+// persisted setting.
+func (d *Daemon) startupCueDue() (due, installation bool, err error) {
+	_, err = os.Stat(filepath.Join(d.cfg.DataDir, startupSoundMarker))
+	switch {
+	case err == nil:
+		return d.user.Get().Values.StartupSoundEnabled, false, nil
+	case os.IsNotExist(err):
+		return true, true, nil
+	default:
+		return false, false, err
+	}
 }
 
 // --- volume percentage on the segment display -------------------------------
@@ -114,6 +143,10 @@ func volumeCells(pct int) []uint16 {
 	}
 	return cells
 }
+
+// volumeOSDTimeout is how long the percentage stays on the segment display
+// after the last volume step.
+const volumeOSDTimeout = 900 * time.Millisecond
 
 // showVolumeOSD overlays the new percentage on the segment display for a
 // moment. It is a system capture like the muted-microphone indication, so the
@@ -149,18 +182,28 @@ func (d *Daemon) showVolumeOSD(pct int) {
 	if d.osdTimer != nil {
 		d.osdTimer.Stop()
 	}
-	d.osdTimer = time.AfterFunc(900*time.Millisecond, func() {
-		d.osdMu.Lock()
-		defer d.osdMu.Unlock()
-		if d.osdCapture != "" {
-			d.releaseAppCapture(routing.SystemAppID, "", d.osdCapture)
-			d.osdCapture = ""
-		}
-		if d.osdPres != nil {
-			_ = d.updateAppPresentation(routing.SystemAppID, "", d.osdPres, presentations.Blank())
-			d.closeAppPresentation(routing.SystemAppID, "", d.osdPres)
-			d.osdPres = nil
-		}
-		d.osdTimer = nil
-	})
+	var timer *time.Timer
+	timer = time.AfterFunc(volumeOSDTimeout, func() { d.expireVolumeOSD(timer) })
+	d.osdTimer = timer
+}
+
+// expireVolumeOSD releases the overlay only while timer still owns it: the
+// callback may already have been running when the next volume step replaced
+// the timer, and it must not blank the fresh percentage.
+func (d *Daemon) expireVolumeOSD(timer *time.Timer) {
+	d.osdMu.Lock()
+	defer d.osdMu.Unlock()
+	if d.osdTimer != timer {
+		return
+	}
+	d.osdTimer = nil
+	if d.osdCapture != "" {
+		d.releaseAppCapture(routing.SystemAppID, "", d.osdCapture)
+		d.osdCapture = ""
+	}
+	if d.osdPres != nil {
+		_ = d.updateAppPresentation(routing.SystemAppID, "", d.osdPres, presentations.Blank())
+		d.closeAppPresentation(routing.SystemAppID, "", d.osdPres)
+		d.osdPres = nil
+	}
 }

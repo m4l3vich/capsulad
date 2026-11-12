@@ -23,6 +23,7 @@ func (d *Daemon) settingsSnapshot(s settings.UserSnapshot) *frameworkv1.Settings
 		Timezone:              v.Timezone,
 		BrightnessMode:        map[string]string{},
 		BluetoothPairable:     v.BluetoothPairable,
+		StartupSoundEnabled:   v.StartupSoundEnabled,
 		TouchHoldMode:         frameworkv1.TouchHoldMode(v.TouchHoldMode),
 		MutedMicrophoneIndicator: &frameworkv1.MutedMicrophoneIndicator{
 			Mode: frameworkv1.MutedIndicatorMode(v.MutedIndicator), DelayMs: v.MutedIndicatorDelayMS,
@@ -56,6 +57,7 @@ func userSettingsFromProto(v *frameworkv1.UserSettings) settings.UserSettings {
 		TouchHoldMode:         settings.TouchHoldMode(v.TouchHoldMode),
 		BrightnessMode:        map[string]string{},
 		BluetoothPairable:     v.BluetoothPairable,
+		StartupSoundEnabled:   v.StartupSoundEnabled,
 	}
 	for k, val := range v.DefaultAppByResource {
 		out.DefaultAppByResource[k] = val

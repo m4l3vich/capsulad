@@ -446,6 +446,7 @@ func runSettings(args []string, socket string, jsonOut bool) error {
 	}
 	fmt.Printf("timezone          %s\n", tz)
 	fmt.Printf("microphone        %v\n", map[bool]string{true: "muted", false: "live"}[v.MicrophoneMuted])
+	fmt.Printf("startup sound      %v\n", map[bool]string{true: "on", false: "off"}[v.StartupSoundEnabled])
 	fmt.Printf("assistant          %s\n", v.DefaultAssistantAppId)
 	fmt.Printf("wakeword           %v (%s)\n", v.WakewordEnabled, v.WakewordModelId)
 	for id, app := range v.DefaultAppByResource {
