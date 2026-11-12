@@ -415,6 +415,8 @@ func (s *routingService) Capture(req *frameworkv1.CaptureRequest, stream framewo
 		select {
 		case <-stream.Context().Done():
 			return nil
+		case <-cap.Done():
+			return nil
 		case ev, ok := <-events:
 			if !ok {
 				return nil

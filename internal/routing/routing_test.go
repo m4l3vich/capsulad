@@ -75,6 +75,17 @@ func TestDisplayRoutingAndCaptures(t *testing.T) {
 	if got := r.Current("display.segment.front"); got.SelectedPresentation != clock.ID || got.SelectedCaptureID == cap2.ID {
 		t.Fatalf("closed presentation capture survived: %+v", got)
 	}
+	_, captures := r.State("display.segment.front")
+	for _, capture := range captures {
+		if capture.ID == cap2.ID {
+			t.Fatal("closed presentation retained a phantom capture")
+		}
+	}
+	select {
+	case <-cap2.Done():
+	default:
+		t.Fatal("closed presentation did not end its capture lifetime")
+	}
 }
 
 func TestTouchModesAndLastCaptureWins(t *testing.T) {

@@ -49,7 +49,11 @@ type Capture struct {
 	PresentationID string
 	TouchMode      TouchMode
 	AcquiredNS     uint64
+	done           chan struct{}
 }
+
+// Done closes when ownership is released or its presentation/run disappears.
+func (c *Capture) Done() <-chan struct{} { return c.done }
 
 type CaptureView struct {
 	Capture
@@ -184,6 +188,7 @@ func (r *Router) Acquire(resourceID, appID, runID, presentationID string, mode T
 	c := &Capture{
 		ID: ids.New("cap"), ResourceID: resourceID, AppID: appID, RunID: runID,
 		PresentationID: presentationID, TouchMode: mode, AcquiredNS: r.clock.NowNS(),
+		done: make(chan struct{}),
 	}
 	r.mu.Lock()
 	r.captures[resourceID] = append(r.captures[resourceID], c)
@@ -210,6 +215,7 @@ func (r *Router) Release(captureID, appID, runID string) bool {
 				return false
 			}
 			r.captures[resourceID] = append(list[:i], list[i+1:]...)
+			close(c.done)
 			r.mu.Unlock()
 			r.Recompute(resourceID, "capture released")
 			return true
@@ -232,6 +238,7 @@ func (r *Router) RemovePresentation(presentationID string) {
 		kept := list[:0]
 		for _, c := range list {
 			if c.PresentationID == presentationID {
+				close(c.done)
 				affected[resourceID] = true
 				continue
 			}
@@ -253,6 +260,7 @@ func (r *Router) RemoveRun(runID string) {
 		kept := list[:0]
 		for _, c := range list {
 			if c.RunID == runID {
+				close(c.done)
 				affected[resourceID] = true
 				continue
 			}
@@ -340,6 +348,22 @@ func (r *Router) recomputeSelection(resourceID string) Selection {
 // capture selection changes.
 func (r *Router) Recompute(resourceID, reason string) {
 	r.mu.Lock()
+	// A closed presentation is no longer an eligible output or a live
+	// capture. Prune ownership, not merely selection, so clients and
+	// diagnostics cannot retain a phantom capture indefinitely.
+	list := r.captures[resourceID]
+	kept := list[:0]
+	for _, c := range list {
+		if c.PresentationID != "" {
+			p, exists := r.pres.Get(c.PresentationID)
+			if !exists || p.Closed() {
+				close(c.done)
+				continue
+			}
+		}
+		kept = append(kept, c)
+	}
+	r.captures[resourceID] = kept
 	prev := r.selected[resourceID]
 	next := r.recomputeSelection(resourceID)
 	r.revision++
@@ -395,13 +419,20 @@ func (r *Router) Recompute(resourceID, reason string) {
 func (r *Router) Current(resourceID string) Selection {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.selected[resourceID]
+	sel, computed := r.selected[resourceID]
+	if !computed {
+		sel = r.recomputeSelection(resourceID)
+	}
+	return sel
 }
 
 // State returns a full routing snapshot including capture list and readiness.
 func (r *Router) State(resourceID string) (Selection, []CaptureView) {
 	r.mu.Lock()
 	sel := r.selected[resourceID]
+	if sel.ResourceID == "" {
+		sel = r.recomputeSelection(resourceID)
+	}
 	list := append([]*Capture(nil), r.captures[resourceID]...)
 	r.mu.Unlock()
 	views := make([]CaptureView, 0, len(list))
