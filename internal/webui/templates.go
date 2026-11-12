@@ -17,6 +17,8 @@ h1{font-size:24px;margin:0 0 18px}h2{font-size:17px;margin:28px 0 10px}h3{font-s
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
 th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
 tr:last-child td{border-bottom:0}
+td form{border:0;padding:0;margin:0;background:none}td form button{margin:0}
+td .row{gap:8px}
 code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
 pre{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto;font-size:12.5px;line-height:1.45;max-height:420px}
 form{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin:10px 0}
@@ -41,6 +43,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 .wakeword .record-status{margin:14px 0 0}.wakeword details{margin:14px 0}.wakeword summary{cursor:pointer}
 .wakeword .table-scroll{overflow-x:auto}.wakeword td form{border:0;padding:0;margin:0;background:none}.wakeword td button{margin:0}
 .wakeword [hidden]{display:none}.wakeword .setup-prompt{font-size:20px;font-weight:600;overflow-wrap:anywhere}.wakeword .setup-actions{margin:16px 0}
+.days{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}.days label{display:inline-flex;gap:4px;align-items:center;margin:0}
 </style>{{end}}
 
 
@@ -151,26 +154,30 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 </div>{{end}}{{else}}<p class="muted">No application publishes the media contract.</p>{{end}}
 
 <h2>Installed applications</h2>
-<table><tr><th>Application</th><th>Version</th><th>State</th><th></th></tr>
+<p class="muted">Built-in system apps are packaged with capsulad. They use the same application bus, lifecycle and settings surface as installed packages; only packaging and uninstall rules differ.</p>
+<table><tr><th>Application</th><th>Version</th><th>Kind</th><th>State</th><th></th></tr>
 {{range .Data.Apps}}{{$app := .}}
 <tr><td><a href="/applications/{{.AppId}}">{{.DisplayName}}</a><div class="muted mono">{{.AppId}}</div></td>
 <td class="mono">{{.Version}}</td>
+<td>{{if .SystemApp}}<span class="pill ok">built-in</span>{{else}}<span class="pill">installed</span>{{end}}</td>
 <td>{{range $.Data.Runs}}{{if eq .AppId $app.AppId}}<span class="pill ok">{{.State}}</span> {{end}}{{end}}</td>
 <td><a href="/applications/{{.AppId}}">Open</a></td></tr>
-{{else}}<tr><td colspan=4 class="muted">No applications installed.</td></tr>{{end}}
+{{else}}<tr><td colspan=5 class="muted">No applications installed.</td></tr>{{end}}
 </table>
 {{template "foot" .}}{{end}}
 
 {{define "settings"}}{{template "head" .}}{{template "flash" .}}
 <h1>Settings</h1>
 <p class="muted">Changes apply immediately. Brightness "auto" follows the ambient-light sensor{{if not .Data.AmbientAvailable}} (no sensor on this device — auto falls back to the constant value){{end}}.</p>
+<p class="muted">Built-in system apps: {{range .Data.Apps}}{{if .SystemApp}}<a href="/applications/{{.AppId}}">{{.DisplayName}}</a> {{end}}{{else}}none{{end}}</p>
 
 {{with .Data.Display}}<h2>Segment display</h2>
 <form method="post" action="/settings">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="group" value="display"><input type="hidden" name="back" value="/settings">
+<input type="hidden" name="resource_id" value="{{$.Data.Display.ResourceId}}">
 <input type="hidden" name="revision" value="{{$.Data.Settings.Revision}}">
 <label>Default application
-<select name="default_app">{{range $.Data.Apps}}<option value="{{.AppId}}" {{if eq .AppId $.Data.DisplayDefault}}selected{{end}}>{{.DisplayName}}</option>{{end}}
+<select name="default_app">{{range $.Data.Apps}}<option value="{{.AppId}}" {{if eq .AppId $.Data.DisplayDefault}}selected{{end}}>{{.DisplayName}}{{if .SystemApp}} (built-in){{end}}</option>{{end}}
 <option value="" {{if eq $.Data.DisplayDefault ""}}selected{{end}}>— none —</option></select></label>
 <label>Brightness source
 <select name="brightness_mode">
@@ -179,14 +186,15 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 </select></label>
 <label>Constant brightness: <strong>{{$.Data.DisplayPct}}%</strong>
 <input type="range" name="brightness" min="0" max="100" value="{{$.Data.DisplayPct}}"></label>
-<button>Save display settings</button></form>{{end}}
+<button>Save display settings</button>{{if $.Data.DisplayDefault}} <a href="/applications/{{$.Data.DisplayDefault}}">Configure {{$.Data.DisplayDefault}}</a>{{end}}</form>{{end}}
 
 {{with .Data.Ring}}<h2>LED ring</h2>
+<p class="muted">Hardware brightness follows the source selected here. The selected ring app owns effect, palette, effect brightness and speed; open its application page to change them.</p>
 <form method="post" action="/settings">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="group" value="ring"><input type="hidden" name="back" value="/settings">
-<input type="hidden" name="revision" value="{{$.Data.Settings.Revision}}">
-<label>Default application
-<select name="default_app">{{range $.Data.Apps}}<option value="{{.AppId}}" {{if eq .AppId $.Data.RingDefault}}selected{{end}}>{{.DisplayName}}</option>{{end}}
+<input type="hidden" name="resource_id" value="{{$.Data.Ring.ResourceId}}">
+<input type="hidden" name="revision" value="{{$.Data.Settings.Revision}}"><label>Default application
+<select name="default_app">{{range $.Data.Apps}}<option value="{{.AppId}}" {{if eq .AppId $.Data.RingDefault}}selected{{end}}>{{.DisplayName}}{{if .SystemApp}} (built-in){{end}}</option>{{end}}
 <option value="" {{if eq $.Data.RingDefault ""}}selected{{end}}>— none —</option></select></label>
 <label>Brightness source
 <select name="brightness_mode">
@@ -195,14 +203,16 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 </select></label>
 <label>Constant brightness: <strong>{{$.Data.RingPct}}%</strong>
 <input type="range" name="brightness" min="0" max="100" value="{{$.Data.RingPct}}"></label>
-<button>Save ring settings</button></form>{{end}}
+<button>Save ring settings</button>{{if $.Data.RingDefault}} <a href="/applications/{{$.Data.RingDefault}}">Configure {{$.Data.RingDefault}}</a>{{end}}</form>{{end}}
 
 <h2>Voice assistant</h2>
 <form method="post" action="/settings">
 <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="group" value="assistant"><input type="hidden" name="back" value="/settings">
 <input type="hidden" name="revision" value="{{.Data.Settings.Revision}}">
 <label>Default assistant
-<select name="default_assistant_app">{{range .Data.Apps}}<option value="{{.AppId}}">{{.DisplayName}}</option>{{end}}</select></label>
+<select name="default_assistant_app">
+<option value="" {{if eq .Data.Settings.Values.DefaultAssistantAppId ""}}selected{{end}}>— none —</option>
+{{range .Data.Apps}}<option value="{{.AppId}}" {{if eq .AppId $.Data.Settings.Values.DefaultAssistantAppId}}selected{{end}}>{{.DisplayName}}{{if .SystemApp}} (built-in){{end}}</option>{{end}}</select></label>
 <label><input type="checkbox" name="wakeword_enabled" {{if .Data.Settings.Values.WakewordEnabled}}checked{{end}}> Wakeword enabled</label>
 <label>Wakeword model
 <select name="wakeword_model">{{range .Data.Models}}<option value="{{.ModelId}}" {{if eq .ModelId $.Data.Settings.Values.WakewordModelId}}selected{{end}}>{{.DisplayName}} — {{if .Available}}available{{else}}unavailable{{end}}</option>{{end}}</select></label>
@@ -211,7 +221,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <option value="summon" {{if eq (printf "%s" .Data.Settings.Values.TouchHoldMode) "TOUCH_HOLD_SUMMON"}}selected{{end}}>Hold to summon (conversation may outlive the hold)</option>
 <option value="talk" {{if eq (printf "%s" .Data.Settings.Values.TouchHoldMode) "TOUCH_HOLD_TO_TALK"}}selected{{end}}>Hold to talk (release ends input)</option>
 </select></label>
-<button>Save assistant settings</button></form>
+<button>Save assistant settings</button>{{if .Data.Settings.Values.DefaultAssistantAppId}} <a href="/applications/{{.Data.Settings.Values.DefaultAssistantAppId}}">Configure {{.Data.Settings.Values.DefaultAssistantAppId}}</a>{{end}}</form>
 
 <h2>Microphone</h2>
 <form method="post" action="/settings">
@@ -390,24 +400,115 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 {{define "application"}}{{template "head" .}}{{template "flash" .}}
 {{$app := .Data.App}}<h1>{{$app.DisplayName}}</h1>
 <p class="muted mono">{{$app.AppId}} · v{{$app.Version}} · {{$app.Entrypoint.Runtime}} {{$app.Entrypoint.CpuArchitecture}} {{$app.Entrypoint.BinaryAbi}}</p>
+{{if $app.SystemApp}}<p><span class="pill ok">built-in system app</span> <span class="muted">Packaged with capsulad and managed through the normal application bus, lifecycle and settings. It has no external package to uninstall; stop or restart it with the controls below.</span></p>{{end}}
 <div class="cards">
 <div class="card"><div class="k">Lifecycle</div><div class="v">{{if $app.Background}}background{{else}}on demand{{end}}</div><div class="muted">{{if $app.SingleInstance}}single instance{{else}}multi instance{{end}} · {{if $app.StartOnBoot}}starts at boot{{end}} {{if $app.RestartOnFailure}}restart on failure{{end}}</div></div>
 <div class="card"><div class="k">Provides</div><div class="v mono">{{range $app.Provides}}{{.}} {{else}}—{{end}}</div></div>
-<div class="card"><div class="k">Entrypoint</div><div class="v mono">{{$app.Entrypoint.RelativePath}}</div><div class="muted mono">sdk {{$app.Entrypoint.FrameworkSdkVersion}}</div></div>
+{{if $app.SystemApp}}<div class="card"><div class="k">Packaging</div><div class="v">Built into capsulad</div><div class="muted mono">no package directory</div></div>{{else}}<div class="card"><div class="k">Entrypoint</div><div class="v mono">{{$app.Entrypoint.RelativePath}}</div><div class="muted mono">sdk {{$app.Entrypoint.FrameworkSdkVersion}}</div></div>{{end}}
 </div>
 
-{{with .Data.Provenance}}<h2>Build provenance</h2>
+{{with .Data.ClockService}}<h2 id="clock">Clock controls</h2>
+<p class="muted">These controls call the application's published clock service over the application bus; every value shown is the app's state. <a href="/applications/{{$app.AppId}}">Refresh</a></p>
+{{if $.Data.ClockErr}}<div class="flash err">Clock service: {{$.Data.ClockErr}}</div>
+{{else}}{{with $.Data.Clock}}
+<div class="cards">
+<div class="card"><div class="k">Local time</div><div class="v mono">{{.LocalTimeRFC3339}}</div><div class="muted">{{if .Timezone}}{{.Timezone}}{{else}}device timezone{{end}}</div></div>
+{{with .Stopwatch}}<div class="card"><div class="k">Stopwatch</div><div class="v mono">{{clockDur .ElapsedMS}}</div>
+<div class="muted"><span class="pill">{{clockStatus .State}}</span></div>
+<div class="row">
+{{if eq .State "STOPWATCH_STATUS_IDLE"}}
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="stopwatch_start"><button>Start</button></form>
+{{else if eq .State "STOPWATCH_STATUS_RUNNING"}}
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="stopwatch_pause"><button>Pause</button></form>
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="stopwatch_reset"><button class="secondary">Reset</button></form>
+{{else}}
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="stopwatch_resume"><button>Resume</button></form>
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="stopwatch_reset"><button class="secondary">Reset</button></form>
+{{end}}
+</div></div>{{end}}
+</div>
+
+<h3>Timers</h3>
+<form method="post" action="/applications/{{$app.AppId}}/clock">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="timer_start">
+<div class="row"><label>Duration (seconds)<input type="number" name="duration_s" min="1" max="2592000" value="300" required></label>
+<label>Label (optional)<input type="text" name="label" maxlength="64"></label></div>
+<button>Start timer</button></form>
+{{if .Timers}}<table><tr><th>Timer</th><th>Remaining</th><th>Status</th><th>Started</th><th></th></tr>
+{{range .Timers}}<tr><td>{{if .Label}}{{.Label}}{{else}}<span class="muted">{{.TimerID}}</span>{{end}}</td>
+<td class="mono">{{clockDur .RemainingMS}}</td><td><span class="pill">{{clockStatus .Status}}</span></td>
+<td class="mono">{{if .StartedUnixMS}}{{.StartedUnixMS}}{{else}}—{{end}}</td>
+<td>{{if eq .Status "TIMER_STATUS_RUNNING"}}<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="timer_cancel"><input type="hidden" name="timer_id" value="{{.TimerID}}"><button class="secondary">Cancel</button></form>{{end}}</td></tr>
+{{end}}</table>{{else}}<p class="muted">No timers.</p>{{end}}
+
+<h3>Alarms</h3>
+{{$form := $.Data.AlarmForm}}
+<form method="post" action="/applications/{{$app.AppId}}/clock">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="alarm_set">
+<input type="hidden" name="alarm_id" value="{{$form.AlarmID}}">
+<label>Alarm label<input type="text" name="label" maxlength="64" value="{{$form.Label}}"></label>
+<div class="row"><label>Hour<input type="number" name="hour" min="0" max="23" value="{{$form.Hour}}" required></label>
+<label>Minute<input type="number" name="minute" min="0" max="59" value="{{$form.Minute}}" required></label>
+<label>Alarm timezone<input type="text" name="alarm_timezone" value="{{$form.Timezone}}" placeholder="empty follows the device timezone" list="tz-zones-clock"></label></div>
+<datalist id="tz-zones-clock"><option value="UTC"><option value="Europe/Moscow"><option value="Asia/Shanghai"><option value="Europe/Berlin"><option value="America/New_York"></datalist>
+<div class="days"><span class="muted">Repeat</span>
+<label><input type="checkbox" name="day_0" value="1" {{if clockHasDay $form.Days 0}}checked{{end}}> Mon</label>
+<label><input type="checkbox" name="day_1" value="1" {{if clockHasDay $form.Days 1}}checked{{end}}> Tue</label>
+<label><input type="checkbox" name="day_2" value="1" {{if clockHasDay $form.Days 2}}checked{{end}}> Wed</label>
+<label><input type="checkbox" name="day_3" value="1" {{if clockHasDay $form.Days 3}}checked{{end}}> Thu</label>
+<label><input type="checkbox" name="day_4" value="1" {{if clockHasDay $form.Days 4}}checked{{end}}> Fri</label>
+<label><input type="checkbox" name="day_5" value="1" {{if clockHasDay $form.Days 5}}checked{{end}}> Sat</label>
+<label><input type="checkbox" name="day_6" value="1" {{if clockHasDay $form.Days 6}}checked{{end}}> Sun</label></div>
+<p class="muted">No days selected means one-shot: the alarm fires at its next occurrence and then disables itself.</p>
+<label><input type="checkbox" name="enabled" {{if $form.Enabled}}checked{{end}}> Enabled</label>
+<button>{{if $form.AlarmID}}Save alarm{{else}}Add alarm{{end}}</button>
+{{if $form.AlarmID}}<a href="/applications/{{$app.AppId}}">Cancel edit</a>{{end}}
+</form>
+{{if .Alarms}}<table><tr><th>Alarm</th><th>Time</th><th>Repeat</th><th>Timezone</th><th>Next trigger</th><th>State</th><th></th></tr>
+{{range .Alarms}}<tr><td>{{if .Label}}{{.Label}}{{else}}<span class="muted">{{.AlarmID}}</span>{{end}}</td>
+<td class="mono">{{printf "%02d" .Hour}}:{{printf "%02d" .Minute}}</td><td>{{clockDays .DaysOfWeek}}</td>
+<td class="mono">{{if .EffectiveTimezone}}{{.EffectiveTimezone}}{{else}}device{{end}}</td>
+<td class="mono">{{if .NextTriggerRFC3339}}{{.NextTriggerRFC3339}}{{else}}—{{end}}</td>
+<td>{{if .Enabled}}<span class="pill ok">enabled</span>{{else}}<span class="pill">disabled</span>{{end}}</td>
+<td><div class="row">
+<a href="/applications/{{$app.AppId}}?edit={{.AlarmID}}">Edit</a>
+{{if .Enabled}}<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="alarm_disable"><input type="hidden" name="alarm_id" value="{{.AlarmID}}"><button class="secondary">Disable</button></form>
+{{else}}<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="alarm_enable"><input type="hidden" name="alarm_id" value="{{.AlarmID}}"><button class="secondary">Enable</button></form>{{end}}
+<form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="alarm_delete"><input type="hidden" name="alarm_id" value="{{.AlarmID}}"><button class="danger">Delete</button></form>
+</div></td></tr>
+{{end}}</table>{{else}}<p class="muted">No alarms.</p>{{end}}
+
+{{if .ActiveAlerts}}<h3>Active alerts</h3>
+<table><tr><th>Kind</th><th>Label</th><th>Source</th><th></th></tr>
+{{range .ActiveAlerts}}<tr><td><span class="pill err">{{clockStatus .Kind}}</span></td><td>{{.Label}}</td><td class="mono">{{.SourceID}}</td>
+<td><form method="post" action="/applications/{{$app.AppId}}/clock"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="action" value="alert_dismiss"><input type="hidden" name="alert_id" value="{{.AlertID}}"><button class="secondary">Dismiss</button></form></td></tr>
+{{end}}</table>{{end}}
+{{end}}{{end}}{{end}}
+
+{{with .Data.RingService}}<h2>Ring output</h2>
+{{if $.Data.RingErr}}<div class="flash err">Ring service: {{$.Data.RingErr}}</div>
+{{else}}{{with $.Data.Ring}}
+<div class="cards">
+<div class="card"><div class="k">Effect</div><div class="v">{{.Effect}}</div></div>
+<div class="card"><div class="k">Palette</div><div class="v">{{.Palette}}</div></div>
+<div class="card"><div class="k">Brightness</div><div class="v">{{printf "%.2f" .Brightness}}</div></div>
+<div class="card"><div class="k">Speed</div><div class="v">{{printf "%.2f" .Speed}}</div></div>
+</div>
+<p class="muted">These are the values the running ring app is rendering. Change effect, palette, brightness or speed in <a href="#configuration">Configuration</a> below; the app applies them to its normal ring presentation.</p>
+{{end}}{{end}}{{end}}
+
+{{if not $app.SystemApp}}{{with .Data.Provenance}}<h2>Build provenance</h2>
 <div class="card"><div class="k">{{.Status}}</div><p>{{.Detail}}</p>
 <dl><dt>Subject SHA-256</dt><dd class="mono">{{.SubjectSha256Hex}}</dd>
 <dt>Repository</dt><dd class="mono">{{.VerifiedRepository}}</dd>
 <dt>Workflow</dt><dd class="mono">{{.VerifiedWorkflow}}</dd>
 <dt>Commit</dt><dd class="mono">{{.VerifiedCommitSha}}</dd></dl>
-<p class="muted">Verified provenance attests build origin and integrity under the configured trust policy. It is not a promise that the software is safe.</p></div>{{end}}
+<p class="muted">Verified provenance attests build origin and integrity under the configured trust policy. It is not a promise that the software is safe.</p></div>{{end}}{{end}}
 
 <h2>Runs</h2>
 <table><tr><th>Run</th><th>State</th><th>PID</th><th>Started</th><th>Detail</th><th></th></tr>
 {{range .Data.Runs}}<tr><td class="mono">{{.RunId}}</td><td>{{.State}}</td><td>{{.Pid}}</td><td class="mono">{{.StartedMonotonicNs}}</td><td class="muted">{{.StatusDetail}}</td>
-<td><form method="post" action="/applications/{{$app.AppId}}/stop"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.RunId}}"><button class="danger">Stop</button></form></td></tr>
+<td>{{if $app.CanStop}}<form method="post" action="/applications/{{$app.AppId}}/stop"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.RunId}}"><button class="danger">Stop</button></form>{{else}}<span class="muted">server-managed</span>{{end}}</td></tr>
 {{else}}<tr><td colspan=6 class="muted">Not running.</td></tr>{{end}}
 </table>
 
@@ -419,11 +520,11 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <button>Launch / send invocation</button>
 </form>
 
-{{with .Data.Schema}}{{if or .Settings .Actions}}<h2>Configuration</h2>
+{{with .Data.Schema}}{{if or .Settings .Actions}}<h2 id="configuration">Configuration</h2>
 <form method="post" action="/applications/{{$app.AppId}}/settings">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{$.Data.Snapshot.Revision}}">
 {{range .Settings}}{{$def := .}}{{$state := index $.Data.Values .Key}}
-<label>{{.Label}}{{if .Description}} <small>{{.Description}}</small>{{end}}
+<label>{{.Label}}{{if .Description}} <small>{{.Description}}</small>{{end}}{{if .RestartRequired}} <small>Restart the application to apply.</small>{{end}}
 {{if eq (printf "%s" .Type) "SETTING_TEXT_MASKED"}}
 <input type="password" name="set_{{.Key}}" value="" placeholder="{{if $state}}{{if $state.HasValue}}configured — leave empty to keep{{else}}not set{{end}}{{end}}" autocomplete="new-password">
 <small><input type="checkbox" name="clear_{{.Key}}" value="1"> Clear the stored value</small>

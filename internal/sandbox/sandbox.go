@@ -128,18 +128,28 @@ func (l *Launcher) Timezone() string {
 // it as a duplicate entry.
 func (l *Launcher) env() []string {
 	env := baseEnv()
-	tz := l.Timezone()
-	if tz == "" {
+	out := make([]string, 0, len(env)+2)
+	if tz := l.Timezone(); tz != "" {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, "TZ=") {
+				continue
+			}
+			out = append(out, entry)
+		}
+		env = append(out, "TZ="+tz)
+		out = env
+	}
+	// CAPSULA_ASSETS is the app-facing read-only asset store. Namespace modes
+	// bind it at /assets; uid/none modes receive the host path so the same
+	// contract works without a mount namespace.
+	assets := l.cfg.AssetsDir
+	if assets != "" && namespaceMode(l.Mode()) {
+		assets = "/assets"
+	}
+	if assets == "" {
 		return env
 	}
-	out := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "TZ=") {
-			continue
-		}
-		out = append(out, entry)
-	}
-	return append(out, "TZ="+tz)
+	return append(env, "CAPSULA_ASSETS="+assets)
 }
 
 // Seccomp reports whether the kernel accepted the deny-list filter. It is only

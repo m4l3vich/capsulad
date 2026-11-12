@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -125,6 +126,12 @@ type Daemon struct {
 	builtins *builtinProviders
 	router   *routing.Router
 
+	systemMu       sync.Mutex
+	systemApps     map[string]*SystemApp
+	systemRunMu    sync.Mutex
+	appValidatorMu sync.RWMutex
+	appValidators  map[string]func(values map[string]json.RawMessage) error
+
 	user       *settings.UserStore
 	autoMu     sync.Mutex
 	autoLvl    map[string]float64
@@ -183,12 +190,6 @@ type Daemon struct {
 	btPairable    bool
 	btVolume      float64
 	btVolSet      bool
-	btVolumeAt    time.Time
-	btPulseAt     time.Time
-	btPulseMu     sync.Mutex
-	btPulseCap    string
-	btPulseGen    uint64
-	btPulseTmr    *time.Timer
 	btRouteMu     sync.Mutex
 	btRoutes      map[string]string
 	btNative      bool
@@ -353,8 +354,6 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if err := d.websec.Load(); err != nil {
 		return nil, err
 	}
-	d.migrateLegacyState()
-	d.seedDefaults()
 	d.pres = presentations.NewManager(clock, logs, func(resourceID string) {
 		d.router.Recompute(resourceID, "presentation changed")
 	})
@@ -376,8 +375,6 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 			d.router.SetResourceClass(resourceID, "sensor")
 		}
 	}
-	d.builtins = newBuiltins(d)
-
 	d.launcher = sandbox.New(sandbox.Config{
 		Mode: cfg.SandboxMode, SocketPath: cfg.SocketPath, AssetsDir: cfg.AssetsDir,
 		UIDBase: cfg.SandboxUIDBase, Seccomp: true, LibraryDir: cfg.NativeLibDir,
@@ -396,6 +393,15 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		OnActionResult:     d.onActionResult,
 	})
 	d.sup.SetCallbacks(d.onRunState, d.onRunExit)
+	// System apps share the registry, supervisor and app-bus routing table with
+	// supervised packages. They are constructed here, after those exist, and
+	// started by Run before external boot applications.
+	d.builtins = newBuiltins(d)
+	d.appCfg.SetValidator(d.validateAppSettings)
+	d.registerAssistantSettingsValidator()
+	// Migration validates persisted default IDs against the registry, so it
+	// must run after the compiled-in apps are registered.
+	d.migrateLegacyState()
 
 	d.audio = audio.NewManager(ctx, clock, logs, d.dev.Audio(), audio.Options{
 		IndicationActive: d.indicationActive,
@@ -497,10 +503,14 @@ func (d *Daemon) Run() error {
 		d.adminSrv = d.startAdmin(d.cfg.DevAdminSocket)
 	}
 
-	d.applySettings(d.user.Get())
-	d.builtins.start()
-	d.startBootApps()
+	d.seedDefaults()
+	// Register the A2DP sink endpoint and start Bluetooth audio before applying
+	// pairable/volume settings, so no source can observe a half-initialized
+	// adapter and the settings pass never races endpoint registration.
 	d.initBluetoothAudio()
+	d.applySettings(d.user.Get())
+	d.startSystemApps()
+	d.startBootApps()
 	go d.watchBluetooth()
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
@@ -778,9 +788,6 @@ func (d *Daemon) installedApp(appID string) (*registry.App, bool) {
 }
 
 func (d *Daemon) manifestSchema(appID string) (*settings.ManifestSchema, bool) {
-	if schema, ok := builtinManifestSchema(appID); ok {
-		return schema, true
-	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return nil, false

@@ -20,7 +20,6 @@ import (
 	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
-	"capsulad/internal/settings"
 )
 
 // callerIdentity resolves an app connection to a supervised run.
@@ -85,8 +84,11 @@ func (s *presentationService) Open(stream frameworkv1.PresentationService_OpenSe
 	if !ok {
 		return status.Errorf(codes.NotFound, "resource %s does not accept presentations", open.ResourceId)
 	}
-	p := s.d.pres.Open(open.ResourceId, appID, runID, kind)
-	defer s.d.pres.Close(p)
+	p, err := s.d.openAppPresentation(appID, runID, open.ResourceId)
+	if err != nil {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
+	defer s.d.closeAppPresentation(appID, runID, p)
 	sub := p.Subscribe(16)
 	defer sub.Close()
 
@@ -157,7 +159,7 @@ func (s *presentationService) Open(stream frameworkv1.PresentationService_OpenSe
 			if err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
 			}
-			if err := s.d.pres.Update(p, content); err != nil {
+			if err := s.d.updateAppPresentation(appID, runID, p, content); err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
 			}
 		case *frameworkv1.PresentationRequest_Close:
@@ -399,14 +401,14 @@ func (s *routingService) Capture(req *frameworkv1.CaptureRequest, stream framewo
 			return status.Error(codes.FailedPrecondition, "this touch backend provides no semantic gestures")
 		}
 	}
-	cap, err := s.d.router.Acquire(req.ResourceId, appID, runID, req.PresentationId, mode)
+	cap, err := s.d.acquireAppCapture(appID, runID, req.ResourceId, req.PresentationId, mode)
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	view, events, closeSub := s.d.router.SubscribeCapture(cap)
 	defer func() {
 		closeSub()
-		s.d.router.Release(cap.ID, appID, runID)
+		s.d.releaseAppCapture(appID, runID, cap.ID)
 	}()
 	_ = view // the granted event is queued by SubscribeCapture
 	for {
@@ -611,7 +613,7 @@ func (s *audioService) Playback(stream frameworkv1.AudioService_PlaybackServer) 
 	if err != nil {
 		return err
 	}
-	pb, err := s.d.audio.OpenPlayback(appID, runID, open.EndpointId, formatFromProto(open.Format), open.ConversationId)
+	pb, err := s.d.openAppPlayback(appID, runID, open.EndpointId, formatFromProto(open.Format), open.ConversationId)
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
@@ -688,22 +690,16 @@ func (s *audioService) SetMasterVolume(ctx context.Context, req *frameworkv1.Set
 	if req.Volume < 0 || req.Volume > 1 {
 		return nil, status.Error(codes.InvalidArgument, "volume must be in [0,1]")
 	}
-	if err := s.d.writeUserSettings([]string{"master_volume"}, func(v *settings.UserSettings) {
-		v.MasterVolume = float64(req.Volume)
-	}); err != nil {
+	if err := s.d.applyMasterVolume(float64(req.Volume)); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	s.d.audio.SetMasterVolume(float64(req.Volume))
 	return s.d.audioState(), nil
 }
 
 func (s *audioService) SetMicrophoneMuted(ctx context.Context, req *frameworkv1.SetMicrophoneMutedRequest) (*frameworkv1.AudioState, error) {
-	if err := s.d.writeUserSettings([]string{"microphone_muted"}, func(v *settings.UserSettings) {
-		v.MicrophoneMuted = req.Muted
-	}); err != nil {
+	if err := s.d.applyMicrophoneMute(req.Muted); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	s.d.audio.SetMuted(req.Muted)
 	// The settings watcher applies the muted-indicator policy so there is a
 	// single writer for that state.
 	return s.d.audioState(), nil

@@ -75,7 +75,7 @@ func (d *Daemon) playVolumeCue() {
 		return
 	}
 	format := dev.PlaybackFormat()
-	p, err := d.audio.OpenPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
+	p, err := d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
 	if err != nil {
 		d.logs.Warnf("audio", "", "volume cue: %v", err)
 		return
@@ -132,13 +132,17 @@ func (d *Daemon) showVolumeOSD(pct int) {
 	d.osdMu.Lock()
 	defer d.osdMu.Unlock()
 	if d.osdPres == nil {
-		d.osdPres = d.pres.Open(resourceID, routing.SystemAppID, "system", presentations.Segment)
+		pres, err := d.openAppPresentation(routing.SystemAppID, "", resourceID)
+		if err != nil {
+			return
+		}
+		d.osdPres = pres
 	}
-	if err := d.pres.Update(d.osdPres, presentations.SegmentFrame(volumeCells(pct), false)); err != nil {
+	if err := d.updateAppPresentation(routing.SystemAppID, "", d.osdPres, presentations.SegmentFrame(volumeCells(pct), false)); err != nil {
 		return
 	}
 	if d.osdCapture == "" {
-		if cap, err := d.router.Acquire(resourceID, routing.SystemAppID, "system", d.osdPres.ID, routing.TouchNone); err == nil {
+		if cap, err := d.acquireAppCapture(routing.SystemAppID, "", resourceID, d.osdPres.ID, routing.TouchNone); err == nil {
 			d.osdCapture = cap.ID
 		}
 	}
@@ -149,11 +153,13 @@ func (d *Daemon) showVolumeOSD(pct int) {
 		d.osdMu.Lock()
 		defer d.osdMu.Unlock()
 		if d.osdCapture != "" {
-			d.router.ForceRelease(d.osdCapture)
+			d.releaseAppCapture(routing.SystemAppID, "", d.osdCapture)
 			d.osdCapture = ""
 		}
 		if d.osdPres != nil {
-			_ = d.pres.Update(d.osdPres, presentations.Blank())
+			_ = d.updateAppPresentation(routing.SystemAppID, "", d.osdPres, presentations.Blank())
+			d.closeAppPresentation(routing.SystemAppID, "", d.osdPres)
+			d.osdPres = nil
 		}
 		d.osdTimer = nil
 	})

@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+option go_package = "capsulad/gen/go/capsula/contracts/clock/v1;clockv1";
+
+package capsula.contracts.clock.v1;
+
+// Standard interface exposed by the built-in Clock system app.
+// Clients discover this contract through capsula.framework.v1.AppInterfaceService
+// and invoke it with AppBusService.Call targeting app_id "capsula.clock".
+// All methods are unary; responses carry the authoritative state after the
+// command, so callers can render without a follow-up read.
+service ClockService {
+  rpc GetState(GetStateRequest) returns (ClockState);
+
+  // A stopwatch starts at zero when idle and is a no-op while running.
+  // Pause/resume preserve accumulated monotonic elapsed time.
+  rpc StopwatchStart(StopwatchCommandRequest) returns (StopwatchInfo);
+  rpc StopwatchPause(StopwatchCommandRequest) returns (StopwatchInfo);
+  rpc StopwatchResume(StopwatchCommandRequest) returns (StopwatchInfo);
+  rpc StopwatchReset(StopwatchCommandRequest) returns (StopwatchInfo);
+
+  rpc StartTimer(StartTimerRequest) returns (TimerInfo);
+  rpc CancelTimer(CancelTimerRequest) returns (TimerInfo);
+  rpc ListTimers(ListTimersRequest) returns (ListTimersResponse);
+
+  // SetAlarm with an empty alarm_id creates an alarm; a non-empty id updates
+  // it in place. days_of_week bit 0 is Monday through bit 6 Sunday. Zero
+  // means a one-shot alarm at the next occurrence, disabled after it fires.
+  rpc SetAlarm(SetAlarmRequest) returns (AlarmInfo);
+  rpc SetAlarmEnabled(SetAlarmEnabledRequest) returns (AlarmInfo);
+  rpc DeleteAlarm(DeleteAlarmRequest) returns (DeleteAlarmResponse);
+  rpc ListAlarms(ListAlarmsRequest) returns (ListAlarmsResponse);
+
+  // Stops the current visible/audible timer or alarm alert immediately.
+  rpc DismissAlert(DismissAlertRequest) returns (DismissAlertResponse);
+}
+
+message GetStateRequest {}
+message StopwatchCommandRequest {}
+message StartTimerRequest {
+  uint64 duration_ms = 1;
+  string label = 2;
+}
+message CancelTimerRequest { string timer_id = 1; }
+message ListTimersRequest {}
+message ListTimersResponse { repeated TimerInfo timers = 1; }
+message SetAlarmRequest {
+  string alarm_id = 1;
+  string label = 2;
+  uint32 hour = 3;
+  uint32 minute = 4;
+  uint32 days_of_week = 5;
+  string timezone = 6;
+  bool enabled = 7;
+}
+message SetAlarmEnabledRequest {
+  string alarm_id = 1;
+  bool enabled = 2;
+}
+message DeleteAlarmRequest { string alarm_id = 1; }
+message DeleteAlarmResponse { bool deleted = 1; }
+message ListAlarmsRequest {}
+message ListAlarmsResponse { repeated AlarmInfo alarms = 1; }
+message DismissAlertRequest { string alert_id = 1; }
+message DismissAlertResponse { bool dismissed = 1; }
+
+enum StopwatchStatus {
+  STOPWATCH_STATUS_IDLE = 0;
+  STOPWATCH_STATUS_RUNNING = 1;
+  STOPWATCH_STATUS_PAUSED = 2;
+}
+
+message StopwatchInfo {
+  StopwatchStatus state = 1;
+  uint64 elapsed_ms = 2;
+  uint64 started_unix_ms = 3;
+}
+
+enum TimerStatus {
+  TIMER_STATUS_RUNNING = 0;
+  TIMER_STATUS_COMPLETED = 1;
+  TIMER_STATUS_CANCELLED = 2;
+}
+
+message TimerInfo {
+  string timer_id = 1;
+  string label = 2;
+  uint64 duration_ms = 3;
+  uint64 remaining_ms = 4;
+  TimerStatus status = 5;
+  uint64 started_unix_ms = 6;
+  uint64 finished_unix_ms = 7;
+}
+
+message AlarmInfo {
+  string alarm_id = 1;
+  string label = 2;
+  uint32 hour = 3;
+  uint32 minute = 4;
+  // Bit 0 Monday through bit 6 Sunday. Zero is one-shot.
+  uint32 days_of_week = 5;
+  bool enabled = 6;
+  // IANA zone, or empty to follow the device timezone.
+  string timezone = 7;
+  string effective_timezone = 8;
+  uint64 next_trigger_unix_ms = 9;
+  string next_trigger_rfc3339 = 10;
+  uint64 last_triggered_unix_ms = 11;
+}
+
+enum AlertKind {
+  ALERT_KIND_TIMER = 0;
+  ALERT_KIND_ALARM = 1;
+}
+
+message ActiveAlert {
+  string alert_id = 1;
+  AlertKind kind = 2;
+  string source_id = 3;
+  string label = 4;
+  uint64 started_unix_ms = 5;
+}
+
+message ClockState {
+  string local_time_rfc3339 = 1;
+  string timezone = 2;
+  StopwatchInfo stopwatch = 3;
+  repeated TimerInfo timers = 4;
+  repeated AlarmInfo alarms = 5;
+  repeated ActiveAlert active_alerts = 6;
+}

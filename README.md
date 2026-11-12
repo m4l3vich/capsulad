@@ -31,14 +31,22 @@ the implementation is honest about what is verified on real hardware and what is
 - **Audio mixer/fan-out** with software mixing, conversation ducking, bounded capture queues,
   discontinuities, pre-roll for activations and the visible-indication microphone watchdog.
 - **Four-page Web UI**: Overview (Bluetooth state and discoverability, now-playing metadata, volume,
-  installed applications), Settings (default display/ring selection among installed apps, with an
-  empty selection keeping the built-in providers; brightness, assistant and touch behaviour,
-  microphone and muted indication, device timezone), Access (admin password, static API keys,
-  public certificate download), Diagnostics (hardware, firmware, software, runs, resources, logs).
-- **Built-in clock and ring providers**: the segment clock and LED-ring effects are daemon-internal,
-  not installed packages, and remain the baseline whenever no external provider is selected. Their
-  app-configuration keys are still available without a package: `capsula.clock` (`blink`,
-  `timezone`) and `capsula.ring` (`mode`).
+  installed applications including built-in system apps), Settings (default display/ring selection
+  among installed applications and system apps, with an explicit "none" choice; brightness,
+  assistant and touch behaviour, microphone and muted indication, device timezone), Access (admin
+  password, static API keys, public certificate download), Diagnostics (hardware, firmware,
+  software, runs, resources, logs).
+- **Built-in clock and ring system apps** (`capsula.clock`, `capsula.ring`): compiled into
+  `capsulad` but otherwise normal application identities. They appear in `ApplicationService`,
+  the Web UI and default-provider selections, have a run lifecycle (`Launch`/`Stop`/`WatchRuns`),
+  app settings through `ApplicationConfigurationService`, and routed app-bus services. Only their
+  packaging is special: no package directory, no child process, and no install/uninstall.
+  The clock exposes `capsula.contracts.clock.v1.ClockService` (stopwatch, timers, alarms) and the
+  ring exposes `capsula.contracts.ring.v1.RingService`; both are unary. Clock settings cover
+  colon blink, timezone, display mode, timer duration and one alarm; ring settings cover effect,
+  palette, speed and brightness. Legacy `org.capsula.clock` / `org.example.ring-controller` state
+  migrates to these IDs. Rendering always goes through presentations/captures, so an external
+  capture preempts a system app and its baseline resumes on release.
 - **Media-player contract without a bundled provider**: the standard
   `capsula.contracts.media.v1.MediaPlayerService` app-bus plumbing remains available to external
   apps — unary commands plus a server-streaming `WatchPlayers` whose first event is a snapshot — but
@@ -46,14 +54,23 @@ the implementation is honest about what is verified on real hardware and what is
   whatever providers an operator installs; no app listens on its own socket.
 - **Optional dumb assistant** (`org.capsula.dumbassistant`): an ordinary first-party package, not a
   system app and not part of the default build. It lives in its own nested Go module and is built
-  only by the explicit `dumbassistant` target. It claims `voice_assistant` and answers every
-  activation with the same packaged WAV, either after a constant delay or a uniformly random delay
-  in a configured range; while it handles a prompt the LED ring glows teal. It performs no
-  recognition, and it is neither installed, selected nor started unless an operator chooses it.
-- **Framework-owned boot service**: `deploy/rockchip-stock/S60capsulad` starts the daemon after
-  mount, microphone-gate and PulseAudio init, gates on `capsulad -health`, and starts the preserved
-  vendor chain if the daemon cannot become healthy. The stock assistant init scripts are retired on
-  the deployed unit.
+  only by the explicit `dumbassistant` target. It claims `voice_assistant`, consumes real
+  microphone PCM, paints the whole ring teal with brightness tracking input level, ends the turn
+  after a 700 ms post-speech silence or a hold-to-talk release, then fades to a blue chase for the
+  configured reply delay. `delay` accepts empty (0 ms), a constant, or an ascending inclusive
+  range, 0–60000 ms; `reply_asset` is a path relative to the shared read-only app asset store (apps receive
+  `CAPSULA_ASSETS=/assets` in namespace mode and the host store path otherwise; empty uses the
+  packaged fallback). The daemon rejects absolute/traversal/symlink targets and files not registered
+  in the shared asset manifest, synchronously and again in the app. It performs no speech recognition, and it is neither installed, selected nor started
+  unless an operator chooses it.
+- **Framework-owned boot service**: one self-contained hook,
+  `deploy/rockchip-stock/S99btctl.sh`, starts the daemon after mount, microphone-gate and
+  PulseAudio init; it pins the Bluetooth UART IRQ, preserves/retires and restores the vendor
+  assistant init scripts, gates on `capsulad -health`, and starts the preserved vendor chain if
+  the daemon cannot become healthy. The hook is removable: `S99btctl.sh disable` stops the daemon,
+  restores the vendor scripts and moves the hook aside; `enable` reinstates it. The name is
+  inherited from the vendor boot list because `rcS` expands its script list before the `/data`
+  overlay pivot.
 - **In-place daemon upgrades**: `capsula daemon install -binary PATH` proves the replacement runs,
   stages it beside the live binary, swaps by rename, restarts through the boot service and checks
   the framework API; any failure restores the previous binary. `capsula daemon rollback` restores
@@ -63,23 +80,32 @@ the implementation is honest about what is verified on real hardware and what is
   recordings or training are refused below 2 MiB of free `/data`.
 - **Bluetooth through BlueZ**: the daemon owns adapter power, discoverability and pairability over
   the system D-Bus, lists paired devices and unpairs them from the Web UI (an administrator-only
-  operation, refused for supervised apps). It loads PulseAudio's Bluetooth discovery so the adapter
-  advertises A2DP Sink and accepts an audio source, then routes that source to the speaker.
+  operation, refused for supervised apps). A headless BlueZ pairing agent (NoInputNoOutput) lets a
+  new source bond without the retired vendor `btctl`; new bonds are accepted only while the
+  persisted `bluetooth_pairable` switch is on, and an already-paired source may always authorize
+  services. It loads PulseAudio's Bluetooth discovery so the adapter advertises A2DP Sink and
+  accepts an audio source, then routes that source to the speaker.
 - **Bluetooth media mode**: AVRCP play/pause/next/previous and absolute volume go to the connected
-  source, and its track metadata is read when the source exposes it. A provider app publishes this
-  through the standard `MediaPlayerService`, so the Web UI and other apps see a normal
-  `bluetooth` player; a blue ring pulse marks connect and disconnect.
+  source, and its track metadata is read when the source exposes it. Volume is event-driven in both
+  directions through the same `applyMasterVolume` path as the keys and application RPC; the daemon
+  does not echo a transport value it just wrote. A provider app publishes this through the standard
+  `MediaPlayerService`, so the Web UI and other apps see a normal `bluetooth` player. Connect and
+  disconnect each play exactly three completed blue fade-in/out ring pulses, and the two rightmost
+  segment cells read `bt` for two seconds, through ordinary presentations and captures over the
+  selected baseline.
 - **Physical controls**: the circle (play/pause) key is the talk button — hold it past 700 ms to summon
   the assistant, release to end the turn, short taps do nothing. Volume keys step 5 %, ramp while held
   (200 ms decaying to 60 ms) and stop at the bounds; each change plays a synthesized percussive tick at
-  the new level and shows the percentage on the segment display for a second.
+  the new level and shows the percentage on the segment display for a second. Key, application and
+  Bluetooth volume all write the same persisted setting and apply the same mixer/transport path; the
+  microphone key uses the same persistent mute path as `AudioService.SetMicrophoneMuted`.
 - **Personal wakeword training from the browser**: record on the device, then run waveform
   augmentation, pretrained speech embeddings, hard-negative training and independent quality gates
   on the device. The browser only displays progress; no Python, ONNX runtime or GPU is needed there.
 - **Muted-microphone indication** on the ring: a red run on the bottom three pixels that fades in
   and out, independent of the mute state itself. The microphone key is a press-edge toggle; volume
   keys step once per press.
-- **Device timezone** set in the Web UI, inherited by apps as `TZ`; the built-in clock provider
+- **Device timezone** set in the Web UI, inherited by apps as `TZ`; the built-in clock system app
   follows it, and changing it restarts boot applications to apply the new zone.
 - **Typed settings** with compare-and-swap revisions, partial updates, masked storage and delivery
   to the owning app only.
@@ -140,21 +166,34 @@ and Rust binding use Cargo's release profile, and the Go binding is built into i
 to `build/bin`, `build/lib` and `build/include`; the Rust binding uses its own Cargo target
 directory. Builds are local artifacts and nothing here deploys them to a device.
 
-The clock face and LED-ring behaviour are internal to `capsulad`; they are not installable packages
-and need no `app install`. Their settings remain on the app-configuration surface even though no
-package exists, and an empty default display/ring selection means this internal baseline:
+The clock face and LED-ring behaviour are built-in **system apps** compiled into `capsulad`.
+They are not installable packages and need no `app install`, but they are otherwise normal apps:
+`capsula app list` and the Web UI list them, `capsula app start capsula.clock` starts a stopped
+one, `Launch`/`Stop` and run events work, their settings use the standard app-configuration
+surface, and their services are routed over the app bus. Only packaging (no directory, process or
+uninstall) is special. On a fresh install each is the default provider for its resource; the Web UI
+can select another installed provider or none, and there is no hidden fallback.
 
 ```sh
 capsula -data-dir build/demo settings app capsula.clock blink=true timezone=Europe/Moscow
-capsula -data-dir build/demo settings app capsula.ring mode=ambient
+capsula -data-dir build/demo settings app capsula.ring effect=breathe palette=aurora
+capsula -data-dir build/demo app runs capsula.ring
+capsula -data-dir build/demo app stop <run-id>
+capsula -data-dir build/demo app start capsula.ring
 ```
 
-`capsula.clock` accepts `blink` (boolean, default true) and `timezone` (IANA name, default empty,
-which follows the device timezone). `capsula.ring` accepts `mode=ambient|spinner|rainbow`. Legacy
-defaults `org.capsula.clock`, `org.example.ring-controller` and `org.capsula.assistant` migrate to
-the internal baseline at boot, and the old clock settings are copied to `capsula.clock` once.
-`capsula settings show` and the Web UI default-provider dropdown list only installed packages; an
-empty default keeps the built-in providers.
+`capsula.clock` settings cover `blink` (boolean), `timezone` (IANA name; empty follows the device),
+`display_mode`, the timer duration and one alarm (label, hour, minute, weekday mask, timezone,
+enabled). `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle`),
+`palette`, `speed` and `brightness`; the legacy `mode` key is accepted only so an existing settings
+file still validates; it is migrated to `effect` and no longer offered. Legacy defaults `org.capsula.clock`,
+`org.example.ring-controller` and `org.capsula.assistant` migrate to these IDs at boot, and the old
+clock settings are copied to `capsula.clock` once. The Web UI default-provider dropdowns list
+installed packages and system apps; an empty selection means no default provider.
+
+Brightness for an auto-managed display is floored at 5 %: darkness and malformed/stale sensor
+samples can never blank an enabled automatic display, while a manual brightness of 0 remains an
+explicit off.
 
 An upgrade quarantines previously installed legacy bundles
 (`org.capsula.clock`, `org.example.ring-controller`, `org.capsula.assistant`, `org.capsula.media`):
@@ -164,8 +203,8 @@ upgrading the daemon suppresses the processes but does **not** reclaim their dis
 directories in a manual `ls` does not mean they are active. An operator may remove those bundle
 directories explicitly to reclaim space; `capsulad` never auto-deletes installed app or operator
 data. Quarantine affects only those retired sample IDs: custom/third-party providers and generic
-interfaces are unaffected. The built-in baseline is internal (`capsula.builtin`), not an installed
-application.
+interfaces are unaffected. The default providers are the built-in system apps `capsula.clock` and
+`capsula.ring`, which are real registry entries with a run lifecycle, not a hidden baseline.
 
 The optional dumb assistant is deliberately separate:
 
@@ -267,7 +306,7 @@ capsula -data-dir build/demo auth key revoke automation
 capsula -data-dir build/demo cert status
 capsula -data-dir build/demo settings show
 capsula -data-dir build/demo settings app capsula.clock blink=false
-capsula -data-dir build/demo settings app capsula.ring mode=spinner
+capsula -data-dir build/demo settings app capsula.ring effect=spinner
 ```
 
 The rest of the CLI uses the framework Unix socket as before:
@@ -595,8 +634,8 @@ behavior starts a new major. Compatibility failures are explicit (`UNSUPPORTED_A
 | `sdk/rust` | Rust binding that dynamically loads the shared native library, with real-daemon smoke examples |
 | `sdk/cpp` | C++ `dlopen` example and CMake target for the C ABI |
 | `apps/dumbassistant` | optional first-party nested Go module; built only on request |
-| `deploy/rockchip-stock` | boot service and bring-up scripts for the RK3308 stock image |
-| `proto/` | draft v0.5 framework and media contract schemas; the example ring schema was retired with the built-in ring provider |
+| `deploy/rockchip-stock` | single removable boot hook and bring-up scripts for the RK3308 stock image |
+| `proto/` | draft v0.5 framework and media contract schemas; the ring contract now ships as the compiled-in `capsula.ring` system app interface |
 | `docs/` | hardware findings, implementation status, security notes |
 
 ## Verification

@@ -90,6 +90,29 @@ var catalog = []Info{
 		Params: []ParamDef{
 			{Name: "speed", Description: "Hue rotations per second.", Type: "number", Default: 0.2, HasMin: true, Min: 0, HasMax: true, Max: 3},
 			{Name: "saturation", Description: "Color saturation.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
+			{Name: "brightness", Description: "Overall brightness.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
+		},
+	},
+	{
+		ID: "system.ring.comet", Kind: KindRingEffect, DisplayName: "Comet",
+		Description: "A bright head with a long tail that fades into a second color.",
+		Params: []ParamDef{
+			{Name: "speed", Description: "Revolutions per second.", Type: "number", Default: 0.35, HasMin: true, Min: 0, HasMax: true, Max: 3},
+			{Name: "color", Description: "Head color.", Type: "rgb", Default: backend.RGB{R: 0, G: 220, B: 255}},
+			{Name: "tail_color", Description: "Color the tail fades toward.", Type: "rgb", Default: backend.RGB{R: 0, G: 64, B: 180}},
+			{Name: "tail", Description: "Number of trailing pixels.", Type: "integer", Default: int64(8), HasMin: true, Min: 0, HasMax: true, Max: 11},
+			{Name: "intensity", Description: "Overall brightness.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
+		},
+	},
+	{
+		ID: "system.ring.sparkle", Kind: KindRingEffect, DisplayName: "Sparkle",
+		Description: "Deterministic twinkles in two colors; no random flicker between frames.",
+		Params: []ParamDef{
+			{Name: "speed", Description: "Twinkle cycles per second.", Type: "number", Default: 0.9, HasMin: true, Min: 0.02, HasMax: true, Max: 5},
+			{Name: "color", Description: "Primary twinkle color.", Type: "rgb", Default: backend.RGB{R: 210, G: 240, B: 255}},
+			{Name: "color_b", Description: "Secondary twinkle color.", Type: "rgb", Default: backend.RGB{R: 120, G: 80, B: 255}},
+			{Name: "density", Description: "Fraction of pixels that can twinkle.", Type: "number", Default: 0.6, HasMin: true, Min: 0, HasMax: true, Max: 1},
+			{Name: "intensity", Description: "Overall brightness.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
 		},
 	},
 	{
@@ -309,9 +332,54 @@ func RingFrame(presetID string, params Params, pixels int, t float64) ([]backend
 	case "system.ring.rainbow":
 		speed := paramFloat(vals, "speed")
 		sat := paramFloat(vals, "saturation")
+		level := paramFloat(vals, "brightness")
 		for i := range pixels {
 			hue := math.Mod(t*speed+float64(i)/float64(pixels), 1)
-			out[i] = hsv(hue, sat, 1)
+			out[i] = hsv(hue, sat, level)
+		}
+	case "system.ring.comet":
+		speed := paramFloat(vals, "speed")
+		headColor := paramRGB(vals, "color")
+		tailColor := paramRGB(vals, "tail_color")
+		intensity := paramFloat(vals, "intensity")
+		tail := int(paramFloat(vals, "tail"))
+		head := int(math.Floor(t*speed*float64(pixels))) % pixels
+		if head < 0 {
+			head += pixels
+		}
+		for i := range pixels {
+			dist := ((head-i)%pixels + pixels) % pixels
+			switch {
+			case dist == 0:
+				out[i] = scale(headColor, intensity)
+			case tail > 0 && dist <= tail:
+				fade := 1 - float64(dist)/float64(tail+1)
+				out[i] = scale(lerpRGB(headColor, tailColor, float64(dist)/float64(tail+1)), intensity*fade)
+			}
+		}
+	case "system.ring.sparkle":
+		speed := paramFloat(vals, "speed")
+		colorA := paramRGB(vals, "color")
+		colorB := paramRGB(vals, "color_b")
+		density := paramFloat(vals, "density")
+		intensity := paramFloat(vals, "intensity")
+		for i := range pixels {
+			gate := hash01(i, 0xc2b2ae35)
+			if gate > density {
+				continue
+			}
+			rate := 0.55 + 0.9*hash01(i, 0x9e3779b9)
+			phase := hash01(i, 0x85ebca6b)
+			s := math.Sin(2 * math.Pi * (t*speed*rate + phase))
+			if s <= 0 {
+				continue
+			}
+			lvl := math.Pow(s, 6)
+			color := colorA
+			if hash01(i, 0x27d4eb2f) < 0.5 {
+				color = colorB
+			}
+			out[i] = scale(color, intensity*lvl)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported ring effect %q", presetID)
@@ -410,4 +478,31 @@ func hsv(h, s, v float64) backend.RGB {
 		r, g, b = v, p, q
 	}
 	return backend.RGB{R: uint8(r * 255), G: uint8(g * 255), B: uint8(b * 255)}
+}
+
+// lerpRGB blends two colors by t in [0,1].
+func lerpRGB(a, b backend.RGB, t float64) backend.RGB {
+	if t <= 0 {
+		return a
+	}
+	if t >= 1 {
+		return b
+	}
+	mix := func(x, y uint8) uint8 {
+		return uint8(math.Round(float64(x) + (float64(y)-float64(x))*t))
+	}
+	return backend.RGB{R: mix(a.R, b.R), G: mix(a.G, b.G), B: mix(a.B, b.B)}
+}
+
+// hash01 maps a pixel index and salt to a stable value in [0,1). Effects use
+// it instead of a random source so a frame is reproducible and does not
+// flicker between renders.
+func hash01(index int, salt uint32) float64 {
+	x := uint32(index)*0x9e3779b1 + salt
+	x ^= x >> 16
+	x *= 0x7feb352d
+	x ^= x >> 15
+	x *= 0x846ca68b
+	x ^= x >> 16
+	return float64(x>>8) / float64(1<<24)
 }

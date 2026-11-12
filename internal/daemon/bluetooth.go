@@ -10,16 +10,20 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/grpcpeer"
+	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
 )
 
 // applyBluetoothSettings powers the adapter and applies the persisted pairable
-// switch. It runs at startup and on every settings change; only a real change
-// reaches D-Bus. Failures are logged, never claimed as success.
+// switch. The A2DP sink profile is advertised before pairing is enabled: a
+// source that connects first finds no audio-source profile and drops the link.
+// It runs at startup and on every settings change; only a real change reaches
+// D-Bus. Failures are logged, never claimed as success.
 func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	if d.bt == nil {
 		return
@@ -27,28 +31,40 @@ func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	d.btMu.Lock()
 	initial := !d.btInit
 	changed := d.btPairable != v.BluetoothPairable
-	d.btPairable = v.BluetoothPairable
 	d.btInit = true
 	d.btMu.Unlock()
 	if !initial && !changed {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 8*time.Second)
+		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 		defer cancel()
+		if v.BluetoothPairable {
+			// Refuse to accept a source before the profile it needs exists.
+			if err := d.ensureBluetoothAdvertisement(); err != nil {
+				d.logs.Warnf("bluetooth", "", "audio profile advertisement: %v; pairing stays off", err)
+				return
+			}
+		}
 		if err := d.bt.EnsurePowered(ctx); err != nil {
 			d.logs.Warnf("bluetooth", "", "power on: %v", err)
 			return
 		}
 		if err := d.bt.SetPairable(ctx, v.BluetoothPairable); err != nil {
+			// Leave the recorded state unchanged so the next settings change
+			// retries instead of claiming the switch was applied.
 			d.logs.Warnf("bluetooth", "", "pairable=%v: %v", v.BluetoothPairable, err)
+			return
 		}
+		d.btMu.Lock()
+		d.btPairable = v.BluetoothPairable
+		d.btMu.Unlock()
 	}()
 }
 
 // applyBluetoothVolume mirrors the framework master onto the source's AVRCP
-// volume, which the local gain stages complement. The write timestamp lets the
-// sync loop ignore the echo of its own write.
+// volume, which the local gain stages complement. BlueZ suppresses the echo of
+// a level it just wrote, so the source does not report it back as a change.
 func (d *Daemon) applyBluetoothVolume(level float64) {
 	if d.bt == nil {
 		return
@@ -60,7 +76,6 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	}
 	d.btVolume = level
 	d.btVolSet = true
-	d.btVolumeAt = time.Now()
 	d.btMu.Unlock()
 	if d.btNative {
 		d.setBluetoothStreamTrim(level)
@@ -87,28 +102,30 @@ func (d *Daemon) forceBluetoothVolume() {
 	d.applyBluetoothVolume(d.user.Get().Values.MasterVolume)
 }
 
-// watchBluetooth owns the connect/disconnect ring cue and volume resync.
-// currentBluetoothAddress returns the connected source reported by the last
-// media state or the paired-device list, if any.
-func (d *Daemon) currentBluetoothAddress() string {
-	if d.bt == nil {
-		return ""
+// applyBluetoothSourceVolume mirrors an AVRCP volume change made on the source
+// into the framework master through the canonical master-volume path. That path
+// persists the level, applies the local mixer and re-applies the Bluetooth
+// gain; BlueZ does not republish a level it just wrote, so the mirror cannot
+// loop. No OSD or cue is involved: those belong to input handling only.
+func (d *Daemon) applyBluetoothSourceVolume(volume uint16) {
+	if volume > 127 {
+		volume = 127
 	}
-	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Second)
-	defer cancel()
-	if state, err := d.bt.Media(ctx); err == nil && state.DeviceAddress != "" {
-		return state.DeviceAddress
+	level := float64(volume) / 127
+	if math.Abs(level-d.user.Get().Values.MasterVolume) < 0.001 {
+		return
 	}
-	if devices, err := d.bt.PairedDevices(ctx); err == nil {
-		for _, dev := range devices {
-			if dev.Connected {
-				return dev.Address
-			}
-		}
+	if err := d.applyMasterVolume(level); err != nil {
+		d.logs.Debugf("bluetooth", "", "sync master volume from source: %v", err)
+		return
 	}
-	return ""
+	d.logs.Infof("bluetooth", "", "master volume synced from the source: %d%%", int(math.Round(level*100)))
 }
 
+// watchBluetooth owns the connect/disconnect notifications, the audio route,
+// and volume mirroring. Everything is driven by manager events; there is no
+// polling ticker, so a source-side change reaches the framework as soon as
+// BlueZ reports it.
 func (d *Daemon) watchBluetooth() {
 	if d.bt == nil {
 		return
@@ -117,14 +134,27 @@ func (d *Daemon) watchBluetooth() {
 	// seeds its state without emitting a connect event.
 	d.ensureConnectedBluetoothRoutes()
 	events := d.bt.Watch(d.ctx)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	ring := &bluetoothNotice{}
+	display := &bluetoothNotice{}
+	defer func() {
+		ring.close(d)
+		display.close(d)
+	}()
 	for {
+		var ringDone, displayDone <-chan time.Time
+		if ring.timer != nil {
+			ringDone = ring.timer.C
+		}
+		if display.timer != nil {
+			displayDone = display.timer.C
+		}
 		select {
 		case <-d.ctx.Done():
 			return
-		case <-ticker.C:
-			d.syncBluetoothVolume()
+		case <-ringDone:
+			ring.close(d)
+		case <-displayDone:
+			display.close(d)
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -132,13 +162,27 @@ func (d *Daemon) watchBluetooth() {
 			switch ev.Kind {
 			case bluetooth.EventConnected:
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
-				d.pulseBluetoothRing()
+				d.showBluetoothPulse(ring)
+				d.showBluetoothIndicator(display)
 				d.connectBluetoothAudio(ev.DeviceAddress)
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
-				d.pulseBluetoothRing()
+				d.showBluetoothPulse(ring)
 				d.stopBluetoothStream()
 				d.removeBluetoothAudioRoute(ev.DeviceAddress)
+			case bluetooth.EventVolume:
+				d.applyBluetoothSourceVolume(ev.Volume)
+			case bluetooth.EventTransport:
+				// BlueZ configured a usable transport; acquire it now instead
+				// of retrying on a timer. The transport exposes AVRCP absolute
+				// volume at this point, so the framework level can reach the
+				// source before the first media packet. PulseAudio owns the
+				// transport in fallback mode, so only the native sink acquires.
+				if !d.btNative {
+					continue
+				}
+				d.forceBluetoothVolume()
+				d.startBluetoothStream(ev.DeviceAddress)
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
 					if !d.btNative {
@@ -148,83 +192,10 @@ func (d *Daemon) watchBluetooth() {
 						// only acquirable once playback starts.
 						d.startBluetoothStream(ev.Media.DeviceAddress)
 					}
-					d.forceBluetoothVolume()
 				}
 			}
 		}
 	}
-}
-
-// syncBluetoothVolume keeps the source and the framework master in step. It
-// also self-heals PulseAudio recreating the device module with the default
-// avrcp_absolute_volume=1, which would otherwise mirror the remote volume onto
-// the local source and re-introduce the double/cubic attenuation.
-func (d *Daemon) syncBluetoothVolume() {
-	if d.bt == nil {
-		return
-	}
-	address := d.currentBluetoothAddress()
-	if address == "" {
-		return
-	}
-	if d.btNative {
-		// PulseAudio may be restarted and re-register its A2DP endpoints; keep
-		// it out of Bluetooth audio and re-apply the stream curve. The module
-		// scan spawns pactl, so it is not worth doing every 2 s.
-		d.btMu.Lock()
-		checkPulse := time.Since(d.btPulseAt) >= 10*time.Second
-		if checkPulse {
-			d.btPulseAt = time.Now()
-		}
-		d.btMu.Unlock()
-		if checkPulse {
-			d.unloadPulseBluetoothModules()
-		}
-		d.setBluetoothStreamTrim(d.user.Get().Values.MasterVolume)
-		// Retry acquisition while a source is connected: a source can connect
-		// paused, and AVRCP may not deliver a play event in time.
-		d.startBluetoothStream(address)
-	} else {
-		if d.ensureDecoupledBluetoothModule(address) {
-			d.removeBluetoothAudioRoute(address)
-			d.ensureBluetoothAudioRoute(address)
-		}
-		// Re-assert the local stages: PulseAudio can recreate/reset them on
-		// profile or source changes, and a lost loopback gain means full scale.
-		d.setBluetoothSourceFixed(address)
-		d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
-	}
-	d.btMu.Lock()
-	wrote := d.btVolumeAt
-	d.btMu.Unlock()
-	if time.Since(wrote) < 3*time.Second {
-		return
-	}
-	ctx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
-	volume, err := d.bt.TransportVolume(ctx)
-	cancel()
-	if err != nil {
-		return
-	}
-	level := float64(volume) / 127
-	if level > 1 {
-		level = 1
-	}
-	current := d.user.Get().Values.MasterVolume
-	diff := level - current
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff <= 0.01 {
-		return
-	}
-	if err := d.writeUserSettings([]string{"master_volume"}, func(v *settings.UserSettings) {
-		v.MasterVolume = level
-	}); err != nil {
-		d.logs.Debugf("bluetooth", "", "sync master volume: %v", err)
-		return
-	}
-	d.logs.Infof("bluetooth", "", "master volume synced from the source: %d%%", int(math.Round(level*100)))
 }
 
 // connectBluetoothAudio brings up the source's A2DP/AVRCP profiles before
@@ -237,6 +208,10 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 		go func() {
 			ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
 			defer cancel()
+			// PulseAudio may have been restarted since startup and registered
+			// its own A2DP endpoints; it must not compete for this source's
+			// transport. This is a single check per connect, not a poll.
+			d.unloadPulseBluetoothModules()
 			if trust, ok := d.bt.(bluetooth.TrustSetter); ok {
 				if err := trust.SetTrusted(ctx, address, true); err != nil {
 					d.logs.Debugf("bluetooth", "", "trust %s: %v", address, err)
@@ -272,69 +247,138 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 	}()
 }
 
-// pulseBluetoothRing runs a short blue pulse on the ring for a source
-// connect/disconnect. It uses the shared safe system presentation path: an
-// app-presented ring baseline is restored when the pulse releases.
-func (d *Daemon) pulseBluetoothRing() {
-	ringID := d.ringResourceID()
-	if ringID == "" {
+// --- connect/disconnect notifications --------------------------------------
+//
+// Both notifications are ordinary system presentations with captures, created
+// through the same presentation manager and router that applications use. A
+// presentation with a capture wins routing while it is held, and the app or
+// internal baseline underneath resumes the moment the capture is released.
+
+// The pulse is one fade-in/fade-out per second, so three complete pulses take
+// exactly three seconds. The guard keeps the presentation alive just past the
+// last fade so the final frame at zero intensity is rendered before release.
+const (
+	bluetoothPulseSpeed  = 1.0
+	bluetoothPulseCount  = 3
+	bluetoothPulseGuard  = 20 * time.Millisecond
+	bluetoothIndicatorOn = 2 * time.Second
+)
+
+// Seven-segment masks for the lowercase "bt": bit 0 = a (top) ... bit 6 = g
+// (middle). b lights c,d,e,f,g; t lights d,e,f,g.
+var bluetoothGlyphs = [2]uint16{0b1111100, 0b1111000}
+
+// bluetoothIndicatorCells puts "bt" on the two rightmost segment cells.
+func bluetoothIndicatorCells(digitCount int) []uint16 {
+	cells := make([]uint16, digitCount)
+	if digitCount >= len(bluetoothGlyphs) {
+		copy(cells[digitCount-len(bluetoothGlyphs):], bluetoothGlyphs[:])
+	}
+	return cells
+}
+
+// bluetoothPulseContent returns the blue whole-ring pulse and how long its
+// presentation must live to complete exactly three fade-in/out cycles.
+func bluetoothPulseContent() (presentations.Content, time.Duration, error) {
+	params, err := presets.ValidateParams(mustPreset("system.ring.pulse"), presets.Params{
+		"speed": bluetoothPulseSpeed, "color": rgb(0, 136, 255), "min_intensity": 0.0,
+	})
+	if err != nil {
+		return presentations.Content{}, 0, err
+	}
+	period := time.Duration(float64(time.Second) / bluetoothPulseSpeed)
+	return presentations.RingEffect("system.ring.pulse", params),
+		time.Duration(bluetoothPulseCount)*period + bluetoothPulseGuard, nil
+}
+
+// bluetoothNotice is one transient system presentation plus its capture and
+// lifetime timer. It is only touched from the watchBluetooth goroutine.
+type bluetoothNotice struct {
+	pres    *presentations.Presentation
+	capture string
+	timer   *time.Timer
+}
+
+func (n *bluetoothNotice) show(d *Daemon, resourceID string, content presentations.Content, life time.Duration) {
+	n.close(d)
+	if resourceID == "" {
 		return
 	}
-	params, err := presets.ValidateParams(mustPreset("system.ring.pulse"), presets.Params{
-		"speed": 1.1, "color": rgb(0, 136, 255), "min_intensity": 0.0,
-	})
+	// Same open/capture/update entrypoints as any application: the facade
+	// validates the resource and reserves SystemAppID for framework cues.
+	p, err := d.openAppPresentation(routing.SystemAppID, "", resourceID)
+	if err != nil {
+		d.logs.Warnf("bluetooth", "", "notification presentation: %v", err)
+		return
+	}
+	if err := d.updateAppPresentation(routing.SystemAppID, "", p, content); err != nil {
+		d.logs.Warnf("bluetooth", "", "notification presentation: %v", err)
+		d.closeAppPresentation(routing.SystemAppID, "", p)
+		return
+	}
+	cap, err := d.acquireAppCapture(routing.SystemAppID, "", resourceID, p.ID, routing.TouchNone)
+	if err != nil {
+		d.logs.Warnf("bluetooth", "", "notification capture: %v", err)
+		d.closeAppPresentation(routing.SystemAppID, "", p)
+		return
+	}
+	n.pres, n.capture, n.timer = p, cap.ID, time.NewTimer(life)
+}
+
+// close releases the capture and destroys the presentation so the previous
+// owner becomes visible again and no stale system baseline is left Ready.
+func (n *bluetoothNotice) close(d *Daemon) {
+	if n.timer != nil {
+		n.timer.Stop()
+		n.timer = nil
+	}
+	if n.capture != "" {
+		// Owner-scoped release through the same helper RoutingService uses.
+		d.releaseAppCapture(routing.SystemAppID, "", n.capture)
+		n.capture = ""
+	}
+	if n.pres != nil {
+		d.closeAppPresentation(routing.SystemAppID, "", n.pres)
+		n.pres = nil
+	}
+}
+
+// showBluetoothPulse runs the three-pulse connect/disconnect animation.
+func (d *Daemon) showBluetoothPulse(n *bluetoothNotice) {
+	content, life, err := bluetoothPulseContent()
 	if err != nil {
 		d.logs.Warnf("bluetooth", "", "pulse cue: %v", err)
 		return
 	}
-	// Reuse the internal ring baseline presentation. Opening a second
-	// framework presentation would create a competing baseline, and the
-	// internal one already carries the mode/microphone state machine.
-	ring := d.builtins.ring
-	if ring == nil {
-		return
-	}
-	d.btPulseMu.Lock()
-	if d.btPulseCap == "" {
-		cap, err := d.router.Acquire(ringID, routing.BuiltinAppID, "system", ring.pres.ID, routing.TouchNone)
-		if err != nil {
-			d.btPulseMu.Unlock()
-			d.logs.Warnf("bluetooth", "", "pulse capture: %v", err)
-			return
-		}
-		d.btPulseCap = cap.ID
-	}
-	ring.setPulse(params)
-	d.btPulseGen++
-	gen := d.btPulseGen
-	if d.btPulseTmr != nil {
-		d.btPulseTmr.Stop()
-	}
-	d.btPulseTmr = time.AfterFunc(2*time.Second, func() { d.endBluetoothPulse(gen) })
-	d.btPulseMu.Unlock()
+	n.show(d, d.ringResourceID(), content, life)
 }
 
-func (d *Daemon) endBluetoothPulse(gen uint64) {
-	d.btPulseMu.Lock()
-	defer d.btPulseMu.Unlock()
-	if gen != d.btPulseGen {
+// bluetoothIndicatorContent is the segment frame plus its exact display time.
+func bluetoothIndicatorContent(digitCount int) (presentations.Content, time.Duration) {
+	return presentations.SegmentFrame(bluetoothIndicatorCells(digitCount), false), bluetoothIndicatorOn
+}
+
+// showBluetoothIndicator shows "bt" on the two rightmost cells for two seconds.
+func (d *Daemon) showBluetoothIndicator(n *bluetoothNotice) {
+	resourceID := d.segmentDisplayResourceID()
+	if resourceID == "" {
 		return
 	}
-	ringID := d.ringResourceID()
-	capture := d.btPulseCap
-	d.btPulseCap = ""
-	if capture != "" {
-		selected := d.router.Current(ringID).SelectedCaptureID == capture
-		d.router.ForceRelease(capture)
-		if !selected {
-			d.logs.Infof("bluetooth", "", "connection pulse was obscured by another ring capture")
+	digitCount := 4
+	if info := d.resources[resourceID]; info != nil && info.GetSegment() != nil {
+		digitCount = int(info.GetSegment().GetDigitCount())
+	}
+	content, life := bluetoothIndicatorContent(digitCount)
+	n.show(d, resourceID, content, life)
+}
+
+func (d *Daemon) segmentDisplayResourceID() string {
+	for _, info := range d.resources {
+		if info.Kind == frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY {
+			return info.ResourceId
 		}
 	}
-	// Restore the internal baseline the settings-driven state machine wants.
-	if d.builtins != nil && d.builtins.ring != nil {
-		d.builtins.ring.clearPulse()
-	}
-	d.updateSystemRing()
+	return ""
 }
 
 // requireLocalAdmin rejects paired-device management from supervised apps.

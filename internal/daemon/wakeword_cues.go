@@ -54,13 +54,18 @@ func (d *Daemon) beginRecordingIndicator() {
 		return
 	}
 	if d.recIndicator == nil {
-		d.recIndicator = d.pres.Open(ringID, routing.SystemAppID, "system", presentations.Ring)
+		pres, err := d.openAppPresentation(routing.SystemAppID, "", ringID)
+		if err != nil {
+			d.logf("recording indicator: %v", err)
+			return
+		}
+		d.recIndicator = pres
 	}
-	if err := d.pres.Update(d.recIndicator, presentations.RingEffect(recordPulsePreset, params)); err != nil {
+	if err := d.updateAppPresentation(routing.SystemAppID, "", d.recIndicator, presentations.RingEffect(recordPulsePreset, params)); err != nil {
 		d.logf("recording indicator: %v", err)
 		return
 	}
-	cap, err := d.router.Acquire(ringID, routing.SystemAppID, "system", d.recIndicator.ID, routing.TouchNone)
+	cap, err := d.acquireAppCapture(routing.SystemAppID, "", ringID, d.recIndicator.ID, routing.TouchNone)
 	if err != nil {
 		d.logf("recording indicator: %v", err)
 		return
@@ -72,11 +77,13 @@ func (d *Daemon) endRecordingIndicator() {
 	d.recIndMu.Lock()
 	defer d.recIndMu.Unlock()
 	if d.recCaptureID != "" && d.router != nil {
-		d.router.ForceRelease(d.recCaptureID)
+		d.releaseAppCapture(routing.SystemAppID, "", d.recCaptureID)
 		d.recCaptureID = ""
 	}
 	if d.recIndicator != nil && d.pres != nil {
-		_ = d.pres.Update(d.recIndicator, presentations.Blank())
+		_ = d.updateAppPresentation(routing.SystemAppID, "", d.recIndicator, presentations.Blank())
+		d.closeAppPresentation(routing.SystemAppID, "", d.recIndicator)
+		d.recIndicator = nil
 	}
 }
 
@@ -98,7 +105,7 @@ func (d *Daemon) playRecordingCue(ctx context.Context) error {
 		return fmt.Errorf("no audio device for the start tones")
 	}
 	format := dev.PlaybackFormat()
-	p, err := d.audio.OpenPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
+	p, err := d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
 	if err != nil {
 		return fmt.Errorf("play start tones: %w", err)
 	}

@@ -6,15 +6,16 @@ import (
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
+	"capsulad/internal/manifest"
 	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
 )
 
-// seedDefaults selects an installed custom provider on first run without
-// overriding an explicit user choice. The internal clock and ring baseline
-// need no registry entry, and removed sample providers are never re-seeded.
+// seedDefaults selects an installed provider on first run without overriding
+// an explicit user choice. The compiled-in clock and ring apps are in the same
+// registry as packages, and removed sample providers are never re-seeded.
 // Provides hints only populate dropdowns; they never grant capabilities.
 func (d *Daemon) seedDefaults() {
 	snap := d.user.Get()
@@ -34,24 +35,18 @@ func (d *Daemon) seedDefaults() {
 		if patch.DefaultAppByResource[info.ResourceId] != "" {
 			continue
 		}
-		for _, app := range d.reg.List() {
-			if hasProvide(app.Manifest.Provides, want) && !isRetiredApp(app.Manifest.ID) {
-				if patch.DefaultAppByResource == nil {
-					patch.DefaultAppByResource = map[string]string{}
-				}
-				patch.DefaultAppByResource[info.ResourceId] = app.Manifest.ID
-				changed = true
-				break
+		if appID := d.preferredProvider(want); appID != "" {
+			if patch.DefaultAppByResource == nil {
+				patch.DefaultAppByResource = map[string]string{}
 			}
+			patch.DefaultAppByResource[info.ResourceId] = appID
+			changed = true
 		}
 	}
 	if patch.DefaultAssistantAppID == "" {
-		for _, app := range d.reg.List() {
-			if hasProvide(app.Manifest.Provides, "voice_assistant") && !isRetiredApp(app.Manifest.ID) {
-				patch.DefaultAssistantAppID = app.Manifest.ID
-				changed = true
-				break
-			}
+		if appID := d.preferredProvider("voice_assistant"); appID != "" {
+			patch.DefaultAssistantAppID = appID
+			changed = true
 		}
 	}
 	if !changed {
@@ -61,6 +56,26 @@ func (d *Daemon) seedDefaults() {
 	if _, err := d.user.Update(snap.Revision, patch, fields); err != nil {
 		d.logs.Warnf("daemon", "", "could not seed default providers: %v", err)
 	}
+}
+
+// preferredProvider returns an installed provider for a capability. External
+// packages win over compiled-in system apps, so a user-installed clock or ring
+// controller is selected on first run; built-ins remain the fallback on a
+// device with no such package.
+func (d *Daemon) preferredProvider(want string) string {
+	var builtin string
+	for _, app := range d.reg.List() {
+		if isRetiredApp(app.Manifest.ID) || !hasProvide(app.Manifest.Provides, want) {
+			continue
+		}
+		if app.Manifest.Entrypoint.Runtime != manifest.RuntimeBuiltin {
+			return app.Manifest.ID
+		}
+		if builtin == "" {
+			builtin = app.Manifest.ID
+		}
+	}
+	return builtin
 }
 
 func hasProvide(list []string, want string) bool {
@@ -73,10 +88,10 @@ func hasProvide(list []string, want string) bool {
 }
 
 // isRetiredApp reports the sample applications whose behavior moved into the
-// daemon or that were removed from the distribution. A package directory left
-// over from an upgrade is ignored at runtime but never deleted: it is excluded
-// from boot, default selection and explicit launches so it cannot compete with
-// the internal providers.
+// compiled-in system apps or that were removed from the distribution. A
+// package directory left over from an upgrade is ignored at runtime but never
+// deleted: it is excluded from boot, default selection and explicit launches
+// so it cannot compete with the system apps.
 func isRetiredApp(appID string) bool {
 	switch appID {
 	case legacyClockAppID, legacyRingAppID, legacyAssistantAppID, legacyMediaAppID:
@@ -254,18 +269,23 @@ func (d *Daemon) startMicIndicator() {
 		return
 	}
 	if d.micIndicator == nil {
-		d.micIndicator = d.pres.Open(ringID, routing.SystemAppID, "system", presentations.Ring)
+		pres, err := d.openAppPresentation(routing.SystemAppID, "", ringID)
+		if err != nil {
+			d.logs.Errorf("daemon", "", "muted indication presentation: %v", err)
+			return
+		}
+		d.micIndicator = pres
 	}
 	params, err := presets.ValidateParams(mustPreset("system.ring.indicator"), indicatorParams(0.25, 1.0))
 	if err != nil {
 		d.logs.Errorf("daemon", "", "muted indication: %v", err)
 		return
 	}
-	if err := d.pres.Update(d.micIndicator, presentations.RingEffect("system.ring.indicator", params)); err != nil {
+	if err := d.updateAppPresentation(routing.SystemAppID, "", d.micIndicator, presentations.RingEffect("system.ring.indicator", params)); err != nil {
 		d.logs.Errorf("daemon", "", "muted indication: %v", err)
 		return
 	}
-	cap, err := d.router.Acquire(ringID, routing.SystemAppID, "system", d.micIndicator.ID, routing.TouchNone)
+	cap, err := d.acquireAppCapture(routing.SystemAppID, "", ringID, d.micIndicator.ID, routing.TouchNone)
 	if err != nil {
 		d.logs.Errorf("daemon", "", "muted indication capture: %v", err)
 		return
@@ -315,7 +335,7 @@ func (d *Daemon) fadeOutMicIndicator(reason string) {
 		params := cloneParams(base)
 		params["intensity"] = intensity * (1 - float64(i)/steps)
 		params["fade_in"] = 0.0
-		_ = d.pres.Update(p, presentations.RingEffect("system.ring.indicator", params))
+		_ = d.updateAppPresentation(routing.SystemAppID, "", p, presentations.RingEffect("system.ring.indicator", params))
 		time.Sleep(40 * time.Millisecond)
 	}
 
@@ -338,10 +358,12 @@ func (d *Daemon) releaseMicIndicatorLocked(reason string) {
 	ringID := d.ringResourceID()
 	sel := d.router.Current(ringID)
 	selected := sel.SelectedCaptureID == d.micCaptureID
-	d.router.ForceRelease(d.micCaptureID)
+	d.releaseAppCapture(routing.SystemAppID, "", d.micCaptureID)
 	d.micCaptureID = ""
 	if d.micIndicator != nil {
-		_ = d.pres.Update(d.micIndicator, presentations.Blank())
+		_ = d.updateAppPresentation(routing.SystemAppID, "", d.micIndicator, presentations.Blank())
+		d.closeAppPresentation(routing.SystemAppID, "", d.micIndicator)
+		d.micIndicator = nil
 	}
 	if !selected {
 		d.logs.Infof("daemon", "", "muted indication %s but was obscured by another capture (%s)", reason, sel.SelectedAppID)
@@ -364,35 +386,29 @@ func rgb(r, g, b uint8) backend.RGB { return backend.RGB{R: r, G: g, B: b} }
 // displayed value never drifts and the keypad steps stay exact. It reports
 // whether the value changed; a ramp uses that to stop at a bound.
 func (d *Daemon) adjustVolume(delta int) bool {
-	for i := 0; i < 3; i++ {
-		snap := d.user.Get()
-		pct := int(math.Round(snap.Values.MasterVolume*100)) + delta
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 100 {
-			pct = 100
-		}
-		next := float64(pct) / 100
-		changed := next != snap.Values.MasterVolume
-		patch := snap.Values
-		patch.MasterVolume = next
-		if _, err := d.user.Update(snap.Revision, patch, []string{"master_volume"}); err == nil {
-			d.logs.Infof("daemon", "", "master volume %d%%", pct)
-			// Apply before the cue so the tick is heard at the new level, then
-			// show the percentage for a moment.
-			d.audio.SetMasterVolume(next)
-			// During a fast ramp the cue is throttled so steps do not turn into
-			// a buzz; the last step of a tap always plays.
-			if d.cueAllowed() {
-				d.playVolumeCue()
-			}
-			d.showVolumeOSD(pct)
-			return changed
-		}
+	snap := d.user.Get()
+	pct := int(math.Round(snap.Values.MasterVolume*100)) + delta
+	if pct < 0 {
+		pct = 0
 	}
-	d.logs.Warnf("daemon", "", "could not update master volume")
-	return false
+	if pct > 100 {
+		pct = 100
+	}
+	next := float64(pct) / 100
+	changed := next != snap.Values.MasterVolume
+	if err := d.applyMasterVolume(next); err != nil {
+		d.logs.Warnf("daemon", "", "could not update master volume: %v", err)
+		return false
+	}
+	d.logs.Infof("daemon", "", "master volume %d%%", pct)
+	// Apply before the cue so the tick is heard at the new level, then show
+	// the percentage for a moment. During a fast ramp the cue is throttled so
+	// steps do not turn into a buzz; the last step of a tap always plays.
+	if d.cueAllowed() {
+		d.playVolumeCue()
+	}
+	d.showVolumeOSD(pct)
+	return changed
 }
 
 // cueAllowed throttles the volume tick to at most one per 80 ms.
@@ -430,23 +446,18 @@ func (d *Daemon) audioState() *frameworkv1.AudioState {
 }
 
 func (d *Daemon) setMuted(muted bool) {
-	for i := 0; i < 3; i++ {
-		snap := d.user.Get()
-		patch := snap.Values
-		patch.MicrophoneMuted = muted
-		if _, err := d.user.Update(snap.Revision, patch, []string{"microphone_muted"}); err == nil {
-			d.logs.Infof("daemon", "", "microphone muted=%v", muted)
-			return
-		}
+	if err := d.applyMicrophoneMute(muted); err != nil {
+		d.logs.Warnf("daemon", "", "could not update microphone mute: %v", err)
+		return
 	}
-	d.logs.Warnf("daemon", "", "could not update microphone mute")
+	d.logs.Infof("daemon", "", "microphone muted=%v", muted)
 }
 
-// updateSystemRing reconciles the internal ring baseline with the microphone
-// mute state and active capture streams. The built-in provider owns the
-// default effect; external captures still take priority while held.
+// updateSystemRing reasserts the ring app's baseline after lifecycle changes.
+// The app owns its content and reasserts it only when the rendered signature
+// changed; explicit captures still take priority while held.
 func (d *Daemon) updateSystemRing() {
 	if d.builtins != nil && d.builtins.ring != nil {
-		d.builtins.ring.update()
+		d.builtins.ring.reassert()
 	}
 }

@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+option go_package = "capsulad/gen/go/capsula/contracts/ring/v1;ringv1";
+
+package capsula.contracts.ring.v1;
+
+// Standard interface exposed by the built-in Ring system app.
+// Discovery uses capsula.framework.v1.AppInterfaceService; calls use
+// AppBusService.Call targeting app_id "capsula.ring". The ring app renders its
+// baseline presentation through normal presentation/capture routing.
+service RingService {
+  rpc GetState(GetStateRequest) returns (RingState);
+}
+
+message GetStateRequest {}
+message RingState {
+  // Effective values currently rendered by the app (not a pending edit).
+  string effect = 1;
+  string palette = 2;
+  float brightness = 3;
+  float speed = 4;
+  // Presentation currently owned by the ring baseline; empty when stopped.
+  string presentation_id = 5;
+}

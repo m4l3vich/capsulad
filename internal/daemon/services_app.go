@@ -48,13 +48,24 @@ func (s *applicationService) ListRuntimes(ctx context.Context, _ *frameworkv1.Li
 		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_MICROPYTHON, Available: false,
 		Detail: "no MicroPython host runner is built for this target; script packages are rejected rather than executed without bindings",
 	}
-	return &frameworkv1.ListRuntimesResponse{Runtimes: []*frameworkv1.RuntimeAvailability{native, quick, micropython}}, nil
+	builtin := &frameworkv1.RuntimeAvailability{
+		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN, Available: true,
+		ImplementationVersion: "capsulad/" + version.Version,
+		Detail:                "compiled-in system applications: normal app identity, settings, run lifecycle and app-bus endpoints; no package, process or install/uninstall",
+	}
+	return &frameworkv1.ListRuntimesResponse{Runtimes: []*frameworkv1.RuntimeAvailability{native, quick, micropython, builtin}}, nil
 }
 
 func (s *applicationService) GetBinaryProvenance(ctx context.Context, req *frameworkv1.GetBinaryProvenanceRequest) (*frameworkv1.BinaryProvenanceResult, error) {
 	app, ok := s.d.reg.Get(req.AppId)
 	if !ok {
 		return nil, status.Error(codes.NotFound, "application is not installed")
+	}
+	if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
+		return &frameworkv1.BinaryProvenanceResult{
+			AppId: req.AppId, Status: frameworkv1.ProvenanceStatus_PROVENANCE_NOT_PROVIDED,
+			Detail: "compiled-in system application; there is no package binary to verify",
+		}, nil
 	}
 	s.d.provMu.Lock()
 	cached, ok := s.d.prov[req.AppId]
@@ -126,9 +137,6 @@ type appConfigService struct {
 }
 
 func (s *appConfigService) Describe(ctx context.Context, req *frameworkv1.DescribeAppConfigurationRequest) (*frameworkv1.AppConfigurationSchema, error) {
-	if out, ok := builtinConfigurationSchema(req.AppId); ok {
-		return out, nil
-	}
 	app, ok := s.d.reg.Get(req.AppId)
 	if !ok {
 		return nil, status.Error(codes.NotFound, "application is not installed")
@@ -196,6 +204,9 @@ func (s *appConfigService) Update(ctx context.Context, req *frameworkv1.UpdateAp
 	if err != nil {
 		if strings.Contains(err.Error(), "stale") {
 			return nil, status.Error(codes.Aborted, err.Error())
+		}
+		if st, ok := status.FromError(err); ok && st.Code() == codes.InvalidArgument {
+			return nil, st.Err()
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

@@ -20,29 +20,44 @@ import (
 // not ducked or re-mixed by the software mixer, matching the vendor design
 // where Bluetooth audio bypasses app streams.
 
-// ensurePulseBluetoothModules registers the A2DP/AVRCP endpoints with BlueZ.
-// Without them the adapter advertises neither Audio Sink nor Headset and a
-// source refuses to connect ("connection-profile-unavailable"). The stock
-// vendor btctl supplied them; after retiring it, PulseAudio's standard
-// discovery module is the supported owner.
-func (d *Daemon) ensurePulseBluetoothModules() {
+// ensurePulseBluetoothModules registers the A2DP/AVRCP endpoints with BlueZ
+// through PulseAudio. Without them the adapter advertises neither Audio Sink
+// nor Headset and a source refuses to connect ("connection-profile-unavailable").
+// The stock vendor btctl supplied them; after retiring it, PulseAudio's
+// standard discovery module is the supported fallback owner.
+func (d *Daemon) ensurePulseBluetoothModules() error {
 	if d.dev.Platform() == backend.PlatformSimulator {
-		return
+		return nil
 	}
+	loaded, err := pulseBluetoothModulesLoadedE()
+	if err != nil {
+		return err
+	}
+	if loaded {
+		return nil
+	}
+	out, loadErr := exec.Command("pactl", "load-module", "module-bluetooth-discover").Output()
+	if loadErr != nil {
+		return fmt.Errorf("load pulse bluetooth modules: %w", loadErr)
+	}
+	d.logs.Infof("bluetooth", "", "loaded PulseAudio Bluetooth discovery (module %s)", strings.TrimSpace(string(out)))
+	return nil
+}
+
+// pulseBluetoothModulesLoaded reports whether PulseAudio owns the Bluetooth
+// audio profiles right now.
+func pulseBluetoothModulesLoaded() bool {
+	loaded, err := pulseBluetoothModulesLoadedE()
+	return err == nil && loaded
+}
+
+func pulseBluetoothModulesLoadedE() (bool, error) {
 	out, err := exec.Command("pactl", "list", "short", "modules").Output()
 	if err != nil {
-		d.logs.Warnf("bluetooth", "", "pulse modules: %v", err)
-		return
+		return false, fmt.Errorf("pulse modules: %w", err)
 	}
-	if strings.Contains(string(out), "module-bluez5-discover") || strings.Contains(string(out), "module-bluetooth-discover") {
-		return
-	}
-	loaded, loadErr := exec.Command("pactl", "load-module", "module-bluetooth-discover").Output()
-	if loadErr != nil {
-		d.logs.Warnf("bluetooth", "", "load pulse bluetooth modules: %v", loadErr)
-		return
-	}
-	d.logs.Infof("bluetooth", "", "loaded PulseAudio Bluetooth discovery (module %s)", strings.TrimSpace(string(loaded)))
+	return strings.Contains(string(out), "module-bluez5-discover") ||
+		strings.Contains(string(out), "module-bluetooth-discover"), nil
 }
 
 func (d *Daemon) resetBluetoothRoutes() {

@@ -105,36 +105,97 @@ func (b *BlueZ) RegisterA2DPSink(ctx context.Context) error {
 		return err
 	}
 	b.endpointMu.Lock()
-	if b.endpoint != nil {
-		b.endpointMu.Unlock()
+	registered, armed := b.endpoint != nil, b.armed
+	b.endpointMu.Unlock()
+	if registered {
+		// The object is exported already; only BlueZ's registration may be
+		// missing after a service restart or adapter power cycle.
+		if !armed {
+			b.rearmA2DP(ctx)
+		}
 		return nil
 	}
-	b.endpointMu.Unlock()
 
 	ep := &sbcEndpoint{b: b}
 	if err := b.conn.Export(ep, a2dpEndpointID, "org.bluez.MediaEndpoint1"); err != nil {
 		return fmt.Errorf("export A2DP endpoint: %w", err)
-	}
-	props := map[string]dbus.Variant{
-		"UUID":  dbus.MakeVariant(a2dpSinkUUID),
-		"Codec": dbus.MakeVariant(byte(0)),
-		// Sampling frequency, channel mode, block length, subbands,
-		// allocation method, minimum and maximum bitpool.
-		"Capabilities": dbus.MakeVariant([]byte{0xF0, 0x0F, 0xF0, 0x0C, 0x03, 0x02, 0x35}),
 	}
 	adapter := b.adapterPath()
 	if adapter == "" {
 		return ErrUnavailable
 	}
 	if err := b.conn.Object(bluezService, adapter).CallWithContext(ctx,
-		"org.bluez.Media1.RegisterEndpoint", 0, a2dpEndpointID, props).Err; err != nil {
+		"org.bluez.Media1.RegisterEndpoint", 0, a2dpEndpointID, a2dpEndpointProps()).Err; err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("register A2DP endpoint: %w", err)
 	}
 	b.endpointMu.Lock()
 	b.endpoint = ep
 	b.endpointPath = a2dpEndpointID
+	b.armed = true
 	b.endpointMu.Unlock()
 	return nil
+}
+
+// SinkRegistered reports whether the sink endpoint is currently registered with
+// the adapter. It lets the daemon avoid tearing down a working audio owner when
+// the persisted pairing setting is applied.
+func (b *BlueZ) SinkRegistered() bool {
+	b.endpointMu.Lock()
+	defer b.endpointMu.Unlock()
+	return b.endpoint != nil && b.armed
+}
+
+// markA2DPUnarmed records that BlueZ no longer holds the registration, e.g.
+// after a service restart.
+func (b *BlueZ) markA2DPUnarmed() {
+	b.endpointMu.Lock()
+	b.armed = false
+	b.endpointMu.Unlock()
+}
+
+// rearmA2DP registers the exported endpoint again after BlueZ restarted or the
+// adapter was power-cycled; either event discards the registration while our
+// exported D-Bus object survives. AlreadyExists means it is advertised already.
+func (b *BlueZ) rearmA2DP(ctx context.Context) {
+	b.endpointMu.Lock()
+	registered := b.endpoint != nil
+	path := b.endpointPath
+	b.endpointMu.Unlock()
+	if !registered || path == "" {
+		return
+	}
+	adapter := b.adapterPath()
+	if adapter == "" {
+		return
+	}
+	err := b.conn.Object(bluezService, adapter).CallWithContext(ctx,
+		"org.bluez.Media1.RegisterEndpoint", 0, path, a2dpEndpointProps()).Err
+	if err == nil {
+		b.markA2DPArmed()
+		return
+	}
+	if isAlreadyExists(err) {
+		b.markA2DPArmed()
+		return
+	}
+	// The next BlueZ signal retries; a missing adapter is not an error here.
+}
+
+func (b *BlueZ) markA2DPArmed() {
+	b.endpointMu.Lock()
+	b.armed = true
+	b.endpointMu.Unlock()
+}
+
+// a2dpEndpointProps is the local SBC sink capability advertised to BlueZ:
+// sampling frequency, channel mode, block length, subbands, allocation method,
+// minimum and maximum bitpool.
+func a2dpEndpointProps() map[string]dbus.Variant {
+	return map[string]dbus.Variant{
+		"UUID":         dbus.MakeVariant(a2dpSinkUUID),
+		"Codec":        dbus.MakeVariant(byte(0)),
+		"Capabilities": dbus.MakeVariant([]byte{0xF0, 0x0F, 0xF0, 0x0C, 0x03, 0x02, 0x35}),
+	}
 }
 
 // AcquireA2DP finds the transport belonging to our endpoint and acquires it.
@@ -253,6 +314,7 @@ func (b *BlueZ) unregisterA2DP() {
 	path := b.endpointPath
 	b.endpointPath = ""
 	b.endpoint = nil
+	b.armed = false
 	b.transport = ""
 	b.endpointMu.Unlock()
 	if path == "" {

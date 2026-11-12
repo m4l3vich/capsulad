@@ -53,10 +53,14 @@ type Registry struct {
 
 	mu   sync.RWMutex
 	apps map[string]*App
+	// builtins are applications compiled into the daemon. They share the same
+	// lookup and listing surface as installed packages but have no package
+	// directory and cannot be installed or uninstalled.
+	builtins map[string]*App
 }
 
 func Open(root string, logs *logbus.Bus) (*Registry, error) {
-	r := &Registry{root: root, logs: logs, apps: map[string]*App{}}
+	r := &Registry{root: root, logs: logs, apps: map[string]*App{}, builtins: map[string]*App{}}
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("apps root: %w", err)
 	}
@@ -73,6 +77,12 @@ func (r *Registry) Rescan() error {
 	if err != nil {
 		return err
 	}
+	r.mu.RLock()
+	reserved := make(map[string]bool, len(r.builtins))
+	for id := range r.builtins {
+		reserved[id] = true
+	}
+	r.mu.RUnlock()
 	apps := map[string]*App{}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -86,6 +96,10 @@ func (r *Registry) Rescan() error {
 		m, err := manifest.Load(dir, mf)
 		if err != nil {
 			r.logs.Warnf("registry", "", "skipping package in %s: %v", e.Name(), err)
+			continue
+		}
+		if reserved[m.ID] {
+			r.logs.Warnf("registry", m.ID, "ignoring package %s: the ID belongs to a built-in system application", dir)
 			continue
 		}
 		if m.ID != e.Name() {
@@ -201,15 +215,54 @@ func firstNonEmptyLine(s string) string {
 func (r *Registry) Get(appID string) (*App, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if a, ok := r.builtins[appID]; ok {
+		return a, true
+	}
 	a, ok := r.apps[appID]
 	return a, ok
+}
+
+// RegisterBuiltin adds a compiled-in application to the same identity space as
+// installed packages. It returns an error when the ID is already present: a
+// package must never silently shadow a system app or the reverse.
+func (r *Registry) RegisterBuiltin(app *App) error {
+	if app == nil || app.Manifest == nil {
+		return fmt.Errorf("builtin application is required")
+	}
+	if app.Manifest.Entrypoint.Runtime != manifest.RuntimeBuiltin {
+		return fmt.Errorf("builtin %s must use the builtin runtime", app.Manifest.ID)
+	}
+	if err := app.Manifest.Validate(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.builtins[app.Manifest.ID]; ok {
+		return fmt.Errorf("builtin application %s is already registered", app.Manifest.ID)
+	}
+	if _, ok := r.apps[app.Manifest.ID]; ok {
+		return fmt.Errorf("installed package %s collides with a builtin application", app.Manifest.ID)
+	}
+	r.builtins[app.Manifest.ID] = app
+	return nil
+}
+
+// IsBuiltin reports whether an app ID is owned by the daemon.
+func (r *Registry) IsBuiltin(appID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.builtins[appID]
+	return ok
 }
 
 func (r *Registry) List() []*App {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]*App, 0, len(r.apps))
+	out := make([]*App, 0, len(r.apps)+len(r.builtins))
 	for _, a := range r.apps {
+		out = append(out, a)
+	}
+	for _, a := range r.builtins {
 		out = append(out, a)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID() < out[j].ID() })
@@ -232,6 +285,9 @@ func (r *Registry) Install(src string) (*App, error) {
 	m, err := manifest.Load(src, filepath.Join(src, ManifestFile))
 	if err != nil {
 		return nil, err
+	}
+	if r.IsBuiltin(m.ID) {
+		return nil, fmt.Errorf("app %s is a built-in system application and cannot be replaced", m.ID)
 	}
 	dst := filepath.Join(r.root, m.ID)
 	if _, err := os.Stat(dst); err == nil {
@@ -289,6 +345,9 @@ func copyTree(src, dst string) error {
 
 // Uninstall removes an installed package directory.
 func (r *Registry) Uninstall(appID string) error {
+	if r.IsBuiltin(appID) {
+		return fmt.Errorf("app %s is a built-in system application and cannot be uninstalled", appID)
+	}
 	app, ok := r.Get(appID)
 	if !ok {
 		return fmt.Errorf("app %s is not installed", appID)

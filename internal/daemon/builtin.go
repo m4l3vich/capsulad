@@ -1,31 +1,29 @@
 package daemon
 
 import (
+	_ "embed"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	"capsulad/internal/presentations"
-	"capsulad/internal/presets"
-	"capsulad/internal/routing"
+	"capsulad/internal/manifest"
+	"capsulad/internal/registry"
 	"capsulad/internal/settings"
 )
 
-// The framework owns the segment clock and ring baseline directly. These are
-// not installed applications: no manifest, process, run ID, bus connection or
-// supervision entry exists for them. Their presentations belong to the
-// reserved BuiltinAppID, which routing treats as the internal baseline after a
-// user-selected default application and before a blank system fallback.
+// Clock and ring are compiled-in system applications. They live in the same
+// registry, bus and application-configuration surfaces as installed packages:
+// they are listed, launched, stopped and discovered like any other app, and
+// present content exclusively through presentations and captures. Only their
+// packaging differs: they cannot be installed, removed or shadowed by a
+// package, and their runtime is the daemon itself.
 const (
-	// builtinClockSettingsID is the app-settings namespace for the internal
-	// clock. It never appears in the registry or application list.
-	builtinClockSettingsID = "capsula.clock"
-	builtinRingSettingsID  = "capsula.ring"
-	builtinRunID           = "builtin"
+	clockAppID = "capsula.clock"
+	ringAppID  = "capsula.ring"
+
+	clockServiceName = "capsula.contracts.clock.v1.ClockService"
+	ringServiceName  = "capsula.contracts.ring.v1.RingService"
 
 	// Legacy IDs from the removed sample applications. They are used only to
 	// migrate persisted state, never to launch or resolve a provider.
@@ -33,37 +31,74 @@ const (
 	legacyRingAppID      = "org.example.ring-controller"
 	legacyAssistantAppID = "org.capsula.assistant"
 	legacyMediaAppID     = "org.capsula.media"
+
+	// Settings namespaces are the app IDs themselves. Kept as named constants
+	// because persisted settings and migration code refer to them.
+	builtinClockSettingsID = clockAppID
+	builtinRingSettingsID  = ringAppID
 )
 
-// Seven-segment masks: bit 0 = a (top) ... bit 6 = g (middle).
-var clockDigits = map[rune]uint16{
-	'0': 0b0111111, '1': 0b0000110, '2': 0b1011011, '3': 0b1001111,
-	'4': 0b1100110, '5': 0b1101101, '6': 0b1111101, '7': 0b0000111,
-	'8': 0b1111111, '9': 0b1101111, '-': 0b1000000, ' ': 0,
-}
+//go:embed builtinschemas/clock.protoset
+var clockDescriptorSet []byte
+
+//go:embed builtinschemas/ring.protoset
+var ringDescriptorSet []byte
 
 type builtinProviders struct {
 	clock *builtinClock
 	ring  *builtinRing
 }
 
-// newBuiltins opens the internal baseline presentations. Content is applied
-// once the daemon has settings and the output loop is running.
+// newBuiltins creates the internal system apps and registers them with the
+// daemon. Registration makes them visible to application listing, interface
+// discovery, default-provider seeding and routed calls before the output loop
+// starts. Content is applied when the run lifecycle calls start().
 func newBuiltins(d *Daemon) *builtinProviders {
 	out := &builtinProviders{}
 	for _, info := range d.resources {
 		switch info.Kind {
 		case frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY:
-			p := d.pres.Open(info.ResourceId, routing.BuiltinAppID, builtinRunID, presentations.Segment)
-			out.clock = &builtinClock{d: d, pres: p, blink: true}
+			if out.clock == nil {
+				out.clock = newBuiltinClock(d, info.ResourceId)
+			}
 		case frameworkv1.ResourceKind_RESOURCE_LED_RING:
-			p := d.pres.Open(info.ResourceId, routing.BuiltinAppID, builtinRunID, presentations.Ring)
-			out.ring = &builtinRing{d: d, pres: p}
+			if out.ring == nil {
+				out.ring = newBuiltinRing(d, info.ResourceId)
+			}
+		}
+	}
+	if out.clock != nil {
+		d.RegisterAppSettingsValidator(clockAppID, validateClockSettings)
+		app := out.clock
+		if err := d.RegisterSystemApp(SystemApp{
+			Manifest:   clockManifest(),
+			Interfaces: []registry.Interface{clockInterface()},
+			Start:      app.start,
+			Stop:       app.stop,
+			HandleCall: app.handleCall,
+			Action:     app.action,
+		}); err != nil {
+			d.logs.Errorf(clockAppID, "", "register system app: %v", err)
+		}
+	}
+	if out.ring != nil {
+		d.RegisterAppSettingsValidator(ringAppID, validateRingSettings)
+		app := out.ring
+		if err := d.RegisterSystemApp(SystemApp{
+			Manifest:   ringManifest(),
+			Interfaces: []registry.Interface{ringInterface()},
+			Start:      app.start,
+			Stop:       app.stop,
+			HandleCall: app.handleCall,
+		}); err != nil {
+			d.logs.Errorf(ringAppID, "", "register system app: %v", err)
 		}
 	}
 	return out
 }
 
+// start is idempotent. Run starts apps through their SystemApp.Start hooks, so
+// this helper exists for callers that own both runtimes explicitly.
 func (b *builtinProviders) start() {
 	if b == nil {
 		return
@@ -76,389 +111,194 @@ func (b *builtinProviders) start() {
 	}
 }
 
-// --- internal clock ---------------------------------------------------------
+// --- system app packaging ---------------------------------------------------
 
-type builtinClock struct {
-	d    *Daemon
-	pres *presentations.Presentation
-
-	mu       sync.Mutex
-	blink    bool
-	appTZ    string
-	deviceTZ string
-	loc      *time.Location
-	now      func() time.Time
-}
-
-func (c *builtinClock) start() {
-	c.mu.Lock()
-	if c.now == nil {
-		c.now = time.Now
-	}
-	c.mu.Unlock()
-	c.loadSettings()
-	c.render()
-	go c.loop()
-}
-
-func (c *builtinClock) loadSettings() {
-	snap, ch, cancel, err := c.d.appCfg.WatchApp(builtinClockSettingsID)
-	if err != nil {
-		c.d.logs.Warnf("clock", "", "settings unavailable: %v", err)
-		return
-	}
-	c.applySettings(snap.Values)
-	go func() {
-		defer cancel()
-		for {
-			select {
-			case <-c.d.ctx.Done():
-				return
-			case next, ok := <-ch:
-				if !ok {
-					return
-				}
-				c.applySettings(next.Values)
-				c.render()
-			}
-		}
-	}()
-}
-
-func (c *builtinClock) applySettings(values []settings.AppSettingView) {
-	var blink *bool
-	var tz *string
-	for _, v := range values {
-		switch v.Key {
-		case "blink":
-			var b bool
-			if json.Unmarshal([]byte(v.Value), &b) == nil {
-				blink = &b
-			}
-		case "timezone":
-			var s string
-			if json.Unmarshal([]byte(v.Value), &s) == nil {
-				tz = &s
-			}
-		}
-	}
-	c.mu.Lock()
-	changed := false
-	if blink != nil && *blink != c.blink {
-		c.blink = *blink
-		changed = true
-	}
-	if tz != nil && *tz != c.appTZ {
-		c.appTZ = *tz
-		changed = true
-	}
-	loc := c.resolveLocationLocked()
-	if changed || loc != c.loc {
-		c.loc = loc
-	}
-	c.mu.Unlock()
-}
-
-// setDeviceTimezone follows the device-wide setting. The clock's own timezone
-// setting wins when it is non-empty, matching the removed bundled app.
-func (c *builtinClock) setDeviceTimezone(name string) {
-	c.mu.Lock()
-	if name == c.deviceTZ {
-		c.mu.Unlock()
-		return
-	}
-	c.deviceTZ = name
-	loc := c.resolveLocationLocked()
-	c.loc = loc
-	c.mu.Unlock()
-	c.render()
-}
-
-func (c *builtinClock) resolveLocationLocked() *time.Location {
-	name := c.appTZ
-	if name == "" {
-		name = c.deviceTZ
-	}
-	if name == "" {
-		return nil
-	}
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		c.d.logs.Warnf("clock", "", "timezone %q unavailable (%v); using the device timezone", name, err)
-		if c.deviceTZ != "" && c.deviceTZ != name {
-			if device, derr := time.LoadLocation(c.deviceTZ); derr == nil {
-				return device
-			}
-		}
-		return nil
-	}
-	return loc
-}
-
-func (c *builtinClock) loop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.d.ctx.Done():
-			return
-		case <-ticker.C:
-			c.render()
-		}
+func clockManifest() *manifest.Manifest {
+	return &manifest.Manifest{
+		ID: clockAppID, Name: "Clock", Version: "1.0.0",
+		Description: "Built-in segment clock with stopwatch, timers and alarms.",
+		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
+		Provides:   []string{"segment_display_provider"},
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
+		Settings: []manifest.Setting{
+			{Key: "blink", Label: "Blink colon", Type: "boolean", Default: true},
+			{Key: "timezone", Label: "Timezone", Type: "text", Default: "",
+				Description: "IANA zone name, e.g. Asia/Shanghai. Empty follows the device timezone."},
+			{Key: "display_mode", Label: "Display", Type: "select", Default: "clock",
+				Description: "Shown when no timer or stopwatch is active.",
+				Choices: []manifest.Choice{
+					{Value: "clock", Label: "Clock"},
+					{Value: "stopwatch", Label: "Stopwatch"},
+					{Value: "timer", Label: "Timer"},
+				}},
+			{Key: "timer_seconds", Label: "Timer duration (seconds)", Type: "integer", Default: 300,
+				Description: "Duration used by the Start timer action.",
+				Min:         numberPtr(1), Max: numberPtr(86400)},
+			{Key: "alarm_label", Label: "Alarm label", Type: "text", Default: "Alarm"},
+			{Key: "alarm_hour", Label: "Alarm hour", Type: "integer", Default: 7,
+				Min: numberPtr(0), Max: numberPtr(23)},
+			{Key: "alarm_minute", Label: "Alarm minute", Type: "integer", Default: 0,
+				Min: numberPtr(0), Max: numberPtr(59)},
+			{Key: "alarm_days", Label: "Alarm days", Type: "integer", Default: 0,
+				Description: "Weekday bitmask: bit 0 Monday through bit 6 Sunday. 0 fires once at the next occurrence and then disables.",
+				Min:         numberPtr(0), Max: numberPtr(127)},
+			{Key: "alarm_timezone", Label: "Alarm timezone", Type: "text", Default: "",
+				Description: "IANA zone for the alarm. Empty follows the device timezone."},
+			{Key: "alarm_enabled", Label: "Alarm enabled", Type: "boolean", Default: false},
+		},
+		Actions: []manifest.Action{
+			{ID: "stopwatch_start", Label: "Start stopwatch"},
+			{ID: "stopwatch_pause", Label: "Pause stopwatch"},
+			{ID: "stopwatch_resume", Label: "Resume stopwatch"},
+			{ID: "stopwatch_reset", Label: "Reset stopwatch"},
+			{ID: "timer_start", Label: "Start timer"},
+			{ID: "timer_cancel", Label: "Cancel timer"},
+			{ID: "alarm_enable", Label: "Enable alarm"},
+			{ID: "alarm_disable", Label: "Disable alarm"},
+			{ID: "alert_dismiss", Label: "Dismiss alert"},
+		},
+		Interfaces: []manifest.Interface{{
+			Service: clockServiceName, Version: "v1",
+		}},
 	}
 }
 
-func clockFrame(now time.Time, blink bool) ([]uint16, bool) {
-	hhmm := now.Format("1504")
-	cells := make([]uint16, 0, len(hhmm))
-	for _, r := range hhmm {
-		cells = append(cells, clockDigits[r])
-	}
-	colon := true
-	if blink {
-		colon = now.Second()%2 == 0
-	}
-	return cells, colon
-}
-
-func (c *builtinClock) render() {
-	c.mu.Lock()
-	loc := c.loc
-	blink := c.blink
-	now := c.now
-	c.mu.Unlock()
-	if now == nil {
-		now = time.Now
-	}
-	at := now()
-	if loc != nil {
-		at = at.In(loc)
-	}
-	cells, colon := clockFrame(at, blink)
-	if err := c.d.pres.Update(c.pres, presentations.SegmentFrame(cells, colon)); err != nil &&
-		c.d.ctx.Err() == nil && !c.pres.Closed() {
-		c.d.logs.Warnf("clock", "", "frame: %v", err)
-	}
-}
-
-// --- internal ring ----------------------------------------------------------
-
-type builtinRing struct {
-	d    *Daemon
-	pres *presentations.Presentation
-
-	mu        sync.Mutex
-	micActive bool
-	muted     bool
-	mode      string
-	pulse     *presets.Params
-	pulseSeq  uint64
-	applied   string
-
-	ambientParams presets.Params
-	micParams     presets.Params
-	spinnerParams presets.Params
-	rainbowParams presets.Params
-}
-
-func (r *builtinRing) start() {
-	r.ambientParams = mustParams("system.ring.breathe", presets.Params{
-		"period_s": 4.0, "color": rgb(0, 200, 120),
-	})
-	r.micParams = mustParams("system.ring.pulse", presets.Params{
-		"speed": 0.9, "color": rgb(0, 136, 255), "min_intensity": 0.08,
-	})
-	r.spinnerParams = mustParams("system.ring.spinner", presets.Params{
-		"speed": 0.8, "color": rgb(0, 136, 255), "intensity": 1.0, "tail": 5,
-	})
-	r.rainbowParams = mustParams("system.ring.rainbow", presets.Params{
-		"speed": 0.3, "saturation": 1.0,
-	})
-	r.loadSettings()
-	r.forceRefresh()
-	r.update()
-}
-
-func (r *builtinRing) forceRefresh() {
-	r.mu.Lock()
-	content, sig := r.contentLocked()
-	r.applied = sig
-	r.mu.Unlock()
-	r.write(content)
-}
-
-func (r *builtinRing) loadSettings() {
-	snap, ch, cancel, err := r.d.appCfg.WatchApp(builtinRingSettingsID)
-	if err != nil {
-		r.d.logs.Warnf("ring", "", "settings unavailable: %v", err)
-		return
-	}
-	r.applySettings(snap.Values)
-	go func() {
-		defer cancel()
-		for {
-			select {
-			case <-r.d.ctx.Done():
-				return
-			case next, ok := <-ch:
-				if !ok {
-					return
-				}
-				r.applySettings(next.Values)
-			}
-		}
-	}()
-}
-
-func (r *builtinRing) applySettings(values []settings.AppSettingView) {
-	r.mu.Lock()
-	mode := r.mode
-	r.mu.Unlock()
-	for _, v := range values {
-		if v.Key != "mode" {
-			continue
-		}
-		var s string
-		if json.Unmarshal([]byte(v.Value), &s) != nil {
-			continue
-		}
-		switch s {
-		case "ambient", "spinner", "rainbow":
-			mode = s
-		default:
-			mode = "ambient"
-		}
-	}
-	if mode == "" {
-		mode = "ambient"
-	}
-	r.mu.Lock()
-	changed := mode != r.mode
-	r.mode = mode
-	var (
-		content presentations.Content
-		sig     string
-	)
-	if changed {
-		content, sig = r.contentLocked()
-		r.applied = sig
-	}
-	r.mu.Unlock()
-	if changed {
-		r.write(content)
+func ringManifest() *manifest.Manifest {
+	return &manifest.Manifest{
+		ID: ringAppID, Name: "Ring", Version: "1.0.0",
+		Description: "Built-in LED ring baseline with palette-driven effects.",
+		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
+		Provides:   []string{"led_ring_controller"},
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
+		Settings: []manifest.Setting{
+			{Key: "effect", Label: "Ring effect", Type: "select", Default: "breathe",
+				Description: "Baseline effect while no application or system indication owns the ring.",
+				Choices: []manifest.Choice{
+					{Value: "breathe", Label: "Breathe"},
+					{Value: "spinner", Label: "Spinner"},
+					{Value: "rainbow", Label: "Rainbow"},
+					{Value: "pulse", Label: "Pulse"},
+					{Value: "comet", Label: "Comet"},
+					{Value: "sparkle", Label: "Sparkle"},
+				}},
+			{Key: "palette", Label: "Palette", Type: "select", Default: "aurora",
+				Choices: []manifest.Choice{
+					{Value: "aurora", Label: "Aurora"},
+					{Value: "ocean", Label: "Ocean"},
+					{Value: "sunset", Label: "Sunset"},
+					{Value: "ember", Label: "Ember"},
+					{Value: "mono", Label: "Mono"},
+					{Value: "spectrum", Label: "Spectrum"},
+				}},
+			{Key: "brightness", Label: "Brightness", Type: "number", Default: 1.0,
+				Min: numberPtr(0), Max: numberPtr(1)},
+			{Key: "speed", Label: "Speed", Type: "number", Default: 1.0,
+				Min: numberPtr(0.1), Max: numberPtr(4)},
+		},
+		Interfaces: []manifest.Interface{{
+			Service: ringServiceName, Version: "v1",
+		}},
 	}
 }
 
-// update reconciles the ring baseline with the microphone mute state and
-// active capture streams. It is called by the output loop and lifecycle
-// events, so an application start/stop restores the correct internal state.
-func (r *builtinRing) update() {
-	if r == nil {
-		return
+func numberPtr(v float64) *float64 { return &v }
+
+func clockInterface() registry.Interface {
+	names := []string{
+		"GetState", "StopwatchStart", "StopwatchPause", "StopwatchResume", "StopwatchReset",
+		"StartTimer", "CancelTimer", "ListTimers", "SetAlarm", "SetAlarmEnabled",
+		"DeleteAlarm", "ListAlarms", "DismissAlert",
 	}
-	muted := r.d.user.Get().Values.MicrophoneMuted
-	micActive := false
-	if !muted {
-		for _, s := range r.d.audio.ActiveStreams() {
-			if s.Input && s.AppID != "" && s.AppID != routing.SystemAppID {
-				micActive = true
-				break
-			}
-		}
+	methods := make([]registry.Method, 0, len(names))
+	for _, name := range names {
+		methods = append(methods, registry.Method{Name: name})
 	}
-	r.mu.Lock()
-	changed := r.micActive != micActive || r.muted != muted
-	r.micActive, r.muted = micActive, muted
-	var (
-		content presentations.Content
-		sig     string
-		write   bool
-	)
-	if changed {
-		content, sig = r.contentLocked()
-		write = sig != r.applied
-		if write {
-			r.applied = sig
-		}
-	}
-	r.mu.Unlock()
-	if write {
-		r.write(content)
+	return registry.Interface{
+		Service: clockServiceName, Version: "v1",
+		Summary:    "Stopwatch, timers and alarms for the built-in segment clock.",
+		Descriptor: clockDescriptorSet, Methods: methods, Docs: clockServiceDocs,
 	}
 }
 
-func (r *builtinRing) contentLocked() (presentations.Content, string) {
-	if r.pulse != nil {
-		return presentations.RingEffect("system.ring.pulse", *r.pulse), fmt.Sprintf("pulse:%d", r.pulseSeq)
-	}
-	if r.muted {
-		return presentations.Blank(), "blank"
-	}
-	if r.micActive {
-		return presentations.RingEffect("system.ring.pulse", r.micParams), "mic"
-	}
-	switch r.mode {
-	case "spinner":
-		return presentations.RingEffect("system.ring.spinner", r.spinnerParams), "mode:spinner"
-	case "rainbow":
-		return presentations.RingEffect("system.ring.rainbow", r.rainbowParams), "mode:rainbow"
-	default:
-		return presentations.RingEffect("system.ring.breathe", r.ambientParams), "mode:ambient"
+func ringInterface() registry.Interface {
+	return registry.Interface{
+		Service: ringServiceName, Version: "v1",
+		Summary:    "Current palette-driven effect rendered by the built-in ring app.",
+		Descriptor: ringDescriptorSet,
+		Methods:    []registry.Method{{Name: "GetState"}},
+		Docs:       ringServiceDocs,
 	}
 }
 
-// setPulse applies the transient Bluetooth connection pulse without opening a
-// second presentation. The presentation is captured by the caller so it wins
-// routing over an external baseline.
-func (r *builtinRing) setPulse(params presets.Params) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	r.pulse = &params
-	r.pulseSeq++
-	content, sig := r.contentLocked()
-	r.applied = sig
-	r.mu.Unlock()
-	r.write(content)
-}
+const clockServiceDocs = `# ClockService
+Stopwatch, timer and alarm control for the built-in Clock system app.
+All calls are unary and routed with AppBusService.Call targeting app_id capsula.clock.
+Requests and responses are protobuf JSON (snake_case fields).
 
-func (r *builtinRing) clearPulse() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	r.pulse = nil
-	content, sig := r.contentLocked()
-	r.applied = sig
-	r.mu.Unlock()
-	r.write(content)
-}
+## GetState
+Returns local time, the effective timezone, stopwatch, timers, alarms and active alerts.
 
-func (r *builtinRing) write(content presentations.Content) {
-	if err := r.d.pres.Update(r.pres, content); err != nil &&
-		r.d.ctx.Err() == nil && !r.pres.Closed() {
-		r.d.logs.Warnf("ring", "", "baseline: %v", err)
-	}
-}
+## StopwatchStart
+Starts a stopwatch at zero when idle; no-op while already running.
 
-func mustParams(id string, params presets.Params) presets.Params {
-	out, err := presets.ValidateParams(mustPreset(id), params)
-	if err != nil {
-		panic("built-in preset " + id + ": " + err.Error())
-	}
-	return out
-}
+## StopwatchPause
+Pauses a running stopwatch and preserves monotonic elapsed time.
+
+## StopwatchResume
+Continues a paused stopwatch. On an idle stopwatch it starts at zero.
+
+## StopwatchReset
+Stops the stopwatch and clears elapsed time.
+
+## StartTimer
+Starts a countdown. duration_ms must be positive. The completion is also
+announced audibly and on the segment/ring display through normal captures.
+
+## CancelTimer
+Cancels a running timer by ID. Unknown IDs return NOT_FOUND.
+
+## ListTimers
+Lists running timers and completed timers whose alert is still active.
+
+## SetAlarm
+Creates an alarm with an empty alarm_id or updates one in place. days_of_week
+bit 0 is Monday through bit 6 Sunday; 0 is a one-shot alarm that disables after
+firing. timezone is an IANA name; empty follows the device timezone. The alarm
+ID "default" is additionally managed by this app's settings.
+
+## SetAlarmEnabled
+Enables or disables an alarm and recomputes its next trigger.
+
+## DeleteAlarm
+Deletes a service-created alarm. The settings-managed "default" alarm cannot be deleted.
+
+## ListAlarms
+Lists alarms with effective timezone and next trigger.
+
+## DismissAlert
+Stops the visible/audible alert for a timer or alarm immediately.
+`
+
+const ringServiceDocs = `# RingService
+Current state of the built-in Ring system app. Calls are unary and routed with
+AppBusService.Call targeting app_id capsula.ring.
+
+## GetState
+Returns the effective effect, palette, brightness, speed and the owned
+baseline presentation ID. State changes are made through application settings.
+`
 
 // --- legacy state migration -------------------------------------------------
 
-// migrateLegacyState removes persisted choices that referred to the removed
-// sample applications and carries the clock's typed settings across to the
-// internal namespace. It runs once per boot before defaults are seeded, so a
-// migrated empty default does not get replaced by a stale provider hint.
+// migrateLegacyState rewrites persisted choices that referred to the removed
+// sample applications and carries their app settings across. It runs once per
+// boot before defaults are seeded, so a migrated empty default does not get
+// replaced by a stale provider hint.
 func (d *Daemon) migrateLegacyState() {
 	d.migrateLegacyDefaults()
-	d.migrateLegacyClockSettings()
+	d.migrateLegacyAppSettings(legacyClockAppID, clockAppID)
+	d.migrateLegacyAppSettings(legacyRingAppID, ringAppID)
+	d.migrateLegacyRingMode()
 }
 
 func (d *Daemon) migrateLegacyDefaults() {
@@ -468,7 +308,17 @@ func (d *Daemon) migrateLegacyDefaults() {
 	assistantChanged := false
 	for resourceID, appID := range patch.DefaultAppByResource {
 		switch appID {
-		case legacyClockAppID, legacyRingAppID, legacyAssistantAppID, legacyMediaAppID:
+		case legacyClockAppID:
+			patch.DefaultAppByResource[resourceID] = systemAppForResource(d, resourceID)
+			changed = true
+		case legacyRingAppID:
+			if info := d.resources[resourceID]; info != nil && info.Kind == frameworkv1.ResourceKind_RESOURCE_LED_RING {
+				patch.DefaultAppByResource[resourceID] = ringAppID
+			} else {
+				patch.DefaultAppByResource[resourceID] = clockAppID
+			}
+			changed = true
+		case legacyAssistantAppID, legacyMediaAppID:
 			delete(patch.DefaultAppByResource, resourceID)
 			changed = true
 		}
@@ -489,17 +339,26 @@ func (d *Daemon) migrateLegacyDefaults() {
 		d.logs.Warnf("daemon", "", "could not migrate legacy provider defaults: %v", err)
 		return
 	}
-	d.logs.Infof("daemon", "", "migrated legacy provider defaults to the built-in baseline")
+	d.logs.Infof("daemon", "", "migrated legacy provider defaults to the system apps")
 }
 
-func (d *Daemon) migrateLegacyClockSettings() {
+func systemAppForResource(d *Daemon, resourceID string) string {
+	if info := d.resources[resourceID]; info != nil && info.Kind == frameworkv1.ResourceKind_RESOURCE_LED_RING {
+		return ringAppID
+	}
+	return clockAppID
+}
+
+// migrateLegacyAppSettings copies a retired app's settings file into the
+// system app namespace once. An existing destination is authoritative.
+func (d *Daemon) migrateLegacyAppSettings(srcID, dstID string) {
 	root := filepath.Join(d.cfg.DataDir, "app-settings")
-	src := filepath.Join(root, legacyClockAppID, "settings.json")
-	dst := filepath.Join(root, builtinClockSettingsID, "settings.json")
+	src := filepath.Join(root, srcID, "settings.json")
+	dst := filepath.Join(root, dstID, "settings.json")
 	if _, err := os.Stat(dst); err == nil {
 		return
 	} else if !os.IsNotExist(err) {
-		d.logs.Warnf("clock", "", "settings migration: %v", err)
+		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
 	data, err := os.ReadFile(src)
@@ -507,80 +366,82 @@ func (d *Daemon) migrateLegacyClockSettings() {
 		return
 	}
 	if err != nil {
-		d.logs.Warnf("clock", "", "settings migration: %v", err)
+		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		d.logs.Warnf("clock", "", "settings migration: %v", err)
+		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
 	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		d.logs.Warnf("clock", "", "settings migration: %v", err)
+		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
-	d.logs.Infof("clock", "", "migrated legacy clock settings")
+	d.logs.Infof(dstID, "", "migrated legacy %s settings", srcID)
 }
 
-// isBuiltinSettingsID reports the reserved settings namespaces owned by the
-// internal providers rather than by a supervised application.
-func isBuiltinSettingsID(appID string) bool {
-	return appID == builtinClockSettingsID || appID == builtinRingSettingsID
-}
-
-// builtinManifestSchema exposes the internal providers' typed settings through
-// the same app-configuration surface as installed applications. The providers
-// are never registered or listed; only their settings namespaces exist.
-func builtinManifestSchema(appID string) (*settings.ManifestSchema, bool) {
-	switch appID {
-	case builtinClockSettingsID:
-		return &settings.ManifestSchema{
-			AppID: appID,
-			Settings: []settings.SchemaSetting{
-				{Key: "blink", Type: "boolean", DefaultJSON: "true"},
-				{Key: "timezone", Type: "text", DefaultJSON: `""`},
-			},
-		}, true
-	case builtinRingSettingsID:
-		return &settings.ManifestSchema{
-			AppID: appID,
-			Settings: []settings.SchemaSetting{
-				{Key: "mode", Type: "select", DefaultJSON: `"ambient"`},
-			},
-		}, true
-	default:
-		return nil, false
+// migrateLegacyRingMode carries the hidden provider's "mode" key forward to
+// the ring app's "effect" key when no explicit effect exists, then removes the
+// obsolete key so no competing alias survives. Explicit effects are preserved.
+func (d *Daemon) migrateLegacyRingMode() {
+	path := filepath.Join(d.cfg.DataDir, "app-settings", ringAppID, "settings.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
 	}
-}
-
-// builtinConfigurationSchema describes the internal providers' settings to the
-// same clients that enumerate installed applications. The provider itself has
-// no application record, action list, or launch lifecycle.
-func builtinConfigurationSchema(appID string) (*frameworkv1.AppConfigurationSchema, bool) {
-	schema, ok := builtinManifestSchema(appID)
+	var doc struct {
+		Revision uint64                     `json:"revision"`
+		Values   map[string]json.RawMessage `json:"values"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Values == nil {
+		return
+	}
+	raw, ok := doc.Values["mode"]
 	if !ok {
-		return nil, false
+		return
 	}
-	out := &frameworkv1.AppConfigurationSchema{AppId: appID}
-	for _, def := range schema.Settings {
-		entry := &frameworkv1.AppSettingDefinition{
-			Key: def.Key, Type: settingTypeProto(def.Type), DefaultValueJson: def.DefaultJSON,
+	if _, hasEffect := doc.Values["effect"]; !hasEffect {
+		var mode string
+		if json.Unmarshal(raw, &mode) != nil {
+			return
 		}
-		switch {
-		case appID == builtinClockSettingsID && def.Key == "blink":
-			entry.Label = "Blink colon"
-		case appID == builtinClockSettingsID && def.Key == "timezone":
-			entry.Label = "Timezone"
-			entry.Description = "IANA zone name. Empty follows the device timezone."
-		case appID == builtinRingSettingsID && def.Key == "mode":
-			entry.Label = "Ring mode"
-			entry.Description = "Default effect while no application or system indication owns the ring."
-			for _, mode := range []struct{ value, label string }{
-				{"ambient", "Ambient"}, {"spinner", "Spinner"}, {"rainbow", "Rainbow"},
-			} {
-				entry.Choices = append(entry.Choices, &frameworkv1.SettingChoice{Value: mode.value, Label: mode.label})
-			}
+		effect := "breathe"
+		switch mode {
+		case "spinner":
+			effect = "spinner"
+		case "rainbow":
+			effect = "rainbow"
 		}
-		out.Settings = append(out.Settings, entry)
+		encoded, err := json.Marshal(effect)
+		if err != nil {
+			return
+		}
+		doc.Values["effect"] = encoded
 	}
-	return out, true
+	// The obsolete alias is removed after its one-time translation; keeping it
+	// would leave two competing settings for the same behavior.
+	delete(doc.Values, "mode")
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		d.logs.Warnf(ringAppID, "", "mode migration: %v", err)
+		return
+	}
+	d.logs.Infof(ringAppID, "", "removed obsolete ring mode setting")
+}
+
+// decodeSetting unmarshals one raw setting value from the app store.
+func decodeSetting(values []settings.AppSettingView, key string, out any) bool {
+	for _, v := range values {
+		if v.Key != key {
+			continue
+		}
+		return json.Unmarshal([]byte(v.Value), out) == nil
+	}
+	return false
 }

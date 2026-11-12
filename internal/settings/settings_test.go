@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -158,3 +159,53 @@ func TestDefaultMutedIndicatorPersistsUntilUnmute(t *testing.T) {
 		t.Fatalf("default muted indicator = %v, want MutedUntilUnmute", got)
 	}
 }
+
+// The semantic validator must reject before any write: the revision and the
+// previous value stay exactly as they were, so a rejected Update is visible to
+// the caller with no partial state change.
+func TestAppSettingsValidatorRejectsBeforeWrite(t *testing.T) {
+	lookup := func(appID string) (*ManifestSchema, bool) {
+		if appID != "org.example.assistant" {
+			return nil, false
+		}
+		return &ManifestSchema{AppID: appID, Settings: []SchemaSetting{
+			{Key: "delay", Type: "text", DefaultJSON: `"1000"`},
+		}}, true
+	}
+	store, err := OpenApps(filepath.Join(t.TempDir(), "apps"), testLogs(t), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetValidator(func(appID string, values map[string]json.RawMessage) error {
+		if appID != "org.example.assistant" {
+			return nil
+		}
+		var delay string
+		_ = json.Unmarshal(values["delay"], &delay)
+		if delay == "bad" {
+			return errRejectedDelay
+		}
+		return nil
+	})
+	snap, _, _, err := store.Update("org.example.assistant", 0, []Change{{Key: "delay", Value: "100"}})
+	if err != nil {
+		t.Fatalf("valid update: %v", err)
+	}
+	if _, _, _, err := store.Update("org.example.assistant", snap.Revision, []Change{{Key: "delay", Value: "bad"}}); err == nil {
+		t.Fatal("invalid value was accepted")
+	}
+	after, err := store.Snapshot("org.example.assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != snap.Revision {
+		t.Fatalf("rejected update advanced revision %d -> %d", snap.Revision, after.Revision)
+	}
+	for _, v := range after.Values {
+		if v.Key == "delay" && v.Value != `"100"` {
+			t.Fatalf("rejected update changed the value: %s", v.Value)
+		}
+	}
+}
+
+var errRejectedDelay = errors.New("delay: rejected by validator")

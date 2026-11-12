@@ -3,10 +3,9 @@
 //
 // Selection for display/ring resources follows ARCHITECTURE.md section 4:
 // latest acquired eligible live capture, else the configured default app's
-// baseline presentation, else the framework-owned built-in baseline, else a
-// framework fallback. Touch and assistant-role resources use last-capture-wins
-// on a single effective capture. Captures are temporary routing choices, never
-// permissions.
+// baseline presentation (including compiled-in system apps), else a framework
+// fallback. There is no hidden provider tier: an app is selected only because
+// it is the configured default, holds a capture, or is the framework fallback.
 package routing
 
 import (
@@ -22,11 +21,6 @@ import (
 // SystemAppID owns framework fallback and overlay presentations. It is not an
 // installed application and cannot be launched or configured.
 const SystemAppID = "capsula.system"
-
-// BuiltinAppID owns the framework's internal baseline presentations (the
-// segment clock and LED ring defaults). Like SystemAppID it is not an installed
-// application; it has no run, settings package, or supervision lifecycle.
-const BuiltinAppID = "capsula.builtin"
 
 type TouchMode int
 
@@ -326,18 +320,6 @@ func (r *Router) recomputeSelection(resourceID string) Selection {
 				sel.Reason = "default_baseline"
 				return sel
 			}
-		}
-	}
-
-	// Framework-owned internal baseline (clock/ring providers). A configured
-	// default app still takes precedence; this is the fallback when the user
-	// has not chosen one, or the configured app is not currently presenting.
-	for _, p := range r.pres.ListResource(resourceID) {
-		if p.AppID == BuiltinAppID && p.Ready() {
-			sel.SelectedPresentation = p.ID
-			sel.SelectedAppID = p.AppID
-			sel.Reason = "builtin_baseline"
-			return sel
 		}
 	}
 

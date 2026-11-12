@@ -108,6 +108,7 @@ func TestEncodeWS2812FrameBrightness(t *testing.T) {
 		{"above one", 2, ws2812GammaTable[255]},
 		{"full", 1, ws2812GammaTable[255]},
 		{"half", 0.5, ws2812GammaTable[128]},
+		{"auto floor", 0.05, ws2812GammaTable[13]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := encodeWS2812Frame(pixel, tc.brightness, ws2812ChannelCount)
@@ -165,6 +166,14 @@ func TestEncodeMultiCtrlFrame(t *testing.T) {
 	for i, record := range records {
 		if record.Enable != 1 {
 			t.Fatalf("record %d enable = %d, want 1", i, record.Enable)
+		}
+	}
+	// The auto-darkness floor must survive 8-bit quantization: 5 % is 13/255,
+	// not zero, so an enabled automatic display stays visibly lit.
+	floor := encodeMultiCtrlFrame(cells, true, 0.05, multiCtrlCellCount)
+	for i, record := range floor {
+		if want[i] != 0 && record.Brightness == 0 {
+			t.Fatalf("channel %d quantized the 5%% floor to zero", i)
 		}
 	}
 }

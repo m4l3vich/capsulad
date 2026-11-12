@@ -23,13 +23,52 @@ import (
 // microphones. If endpoint registration fails, the PA route remains available
 // as a fallback so Bluetooth still works.
 func (d *Daemon) initBluetoothAudio() {
+	if err := d.prepareBluetoothAudio(); err != nil {
+		d.logs.Warnf("bluetooth", "", "audio owner: %v", err)
+	}
+}
+
+// ensureBluetoothAdvertisement makes the sink profile available before a
+// source is allowed to connect. It is idempotent: an already registered
+// endpoint or a running PulseAudio owner is left untouched so applying the
+// pairing setting never tears down a working audio path.
+func (d *Daemon) ensureBluetoothAdvertisement() error {
 	if d.bt == nil || d.dev.Platform() == backend.PlatformSimulator {
-		return
+		return nil
+	}
+	if d.bluetoothAudioReady() {
+		return nil
+	}
+	return d.prepareBluetoothAudio()
+}
+
+func (d *Daemon) bluetoothAudioReady() bool {
+	if d.btNative {
+		return true
+	}
+	if registrar, ok := d.bt.(bluetooth.A2DPRegistrar); ok && registrar.SinkRegistered() {
+		return true
+	}
+	return pulseBluetoothModulesLoaded()
+}
+
+// prepareBluetoothAudio registers the A2DP sink endpoint or, when that is not
+// possible, loads PulseAudio's bluez5 discovery so the adapter still advertises
+// an audio sink. It reports whether some audio-source profile is advertised.
+func (d *Daemon) prepareBluetoothAudio() error {
+	if d.bt == nil || d.dev.Platform() == backend.PlatformSimulator {
+		return nil
+	}
+	if d.btNative {
+		return nil
 	}
 	sink, ok := d.bt.(bluetooth.A2DPSink)
 	if !ok {
-		d.ensurePulseBluetoothModules()
-		return
+		return d.ensurePulseBluetoothModules()
+	}
+	if registrar, ok := d.bt.(bluetooth.A2DPRegistrar); ok && registrar.SinkRegistered() {
+		d.btNative = true
+		return nil
 	}
 	// PulseAudio's discovery module registers its own A2DP endpoints and would
 	// compete with ours. Unload it (and any device modules) before registering.
@@ -38,11 +77,11 @@ func (d *Daemon) initBluetoothAudio() {
 	defer cancel()
 	if err := sink.RegisterA2DPSink(ctx); err != nil {
 		d.logs.Warnf("bluetooth", "", "native A2DP endpoint unavailable: %v; using PulseAudio routing", err)
-		d.ensurePulseBluetoothModules()
-		return
+		return d.ensurePulseBluetoothModules()
 	}
 	d.btNative = true
 	d.logs.Infof("bluetooth", "", "native A2DP SBC sink endpoint registered")
+	return nil
 }
 
 func (d *Daemon) unloadPulseBluetoothModules() {
@@ -62,11 +101,11 @@ func (d *Daemon) unloadPulseBluetoothModules() {
 	}
 }
 
-// startBluetoothStream waits for BlueZ to configure the transport and then
-// owns it: RTP -> SBC decode -> framework mixer. The wait covers the profile
-// handshake after a source connects. The periodic sync also retries this while
-// a source is connected, so a paused source that starts later does not depend
-// on an AVRCP event that may be unavailable.
+// startBluetoothStream acquires the A2DP transport BlueZ just made usable and
+// hands it to the framework mixer: RTP -> SBC decode -> mixer. A single
+// attempt is made per transport event; ErrNoTransport means the source is not
+// streaming yet and the next transport event will try again, so no timer or
+// retry loop is involved.
 func (d *Daemon) startBluetoothStream(address string) {
 	sink, ok := d.bt.(bluetooth.A2DPSink)
 	if !ok {
@@ -83,38 +122,22 @@ func (d *Daemon) startBluetoothStream(address string) {
 	d.btStreamMu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
 		defer cancel()
-		var transport *bluetooth.A2DPTransport
-		var err error
-		for i := 0; i < 50; i++ {
-			if !d.bluetoothGen(gen) {
-				return
-			}
-			transport, err = sink.AcquireA2DP(ctx)
-			if err == nil {
-				if !d.bluetoothGen(gen) {
-					_ = transport.File.Close()
-					return
-				}
-				break
-			}
+		transport, err := sink.AcquireA2DP(ctx)
+		if err != nil {
 			if !errors.Is(err, bluetooth.ErrNoTransport) {
 				d.logs.Debugf("bluetooth", "", "A2DP acquire: %v", err)
 			}
-			select {
-			case <-d.ctx.Done():
-				return
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-		if transport == nil {
 			d.btStreamMu.Lock()
 			if d.btStreamGen == gen {
 				d.btStreamStart = false
 			}
 			d.btStreamMu.Unlock()
-			d.logs.Debugf("bluetooth", "", "A2DP transport for %s not ready: %v", address, err)
+			return
+		}
+		if !d.bluetoothGen(gen) {
+			_ = transport.File.Close()
 			return
 		}
 		stream := &a2dpStream{d: d, address: address, transport: transport}
@@ -271,7 +294,7 @@ func (s *a2dpStream) ensurePlayback(rate, channels int) (*audio.Playback, error)
 	if s.playback != nil {
 		return s.playback, nil
 	}
-	p, err := s.d.audio.OpenPlayback(routing.SystemAppID, "", "audio.output.speaker",
+	p, err := s.d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker",
 		backend.AudioFormat{Format: backend.S16LE, RateHz: rate, Channels: channels}, "")
 	if err != nil {
 		return nil, err

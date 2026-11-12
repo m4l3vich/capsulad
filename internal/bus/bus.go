@@ -8,6 +8,7 @@
 package bus
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -33,6 +34,19 @@ const (
 
 type ResolveFunc func(runID string) (appID string, pid int, ok bool)
 
+// InternalHandler answers a routed app-bus call on behalf of a compiled-in
+// system app. request and each response are the same protobuf JSON frames the
+// SDK sends over AppBusService.Call, so an external app cannot tell a system
+// app from a supervised one. An empty responses slice means an empty successful
+// reply; returning a gRPC status preserves its code and message.
+type InternalHandler func(ctx context.Context, service, rpc string, request []byte) ([][]byte, error)
+
+type internalTarget struct {
+	runID   string
+	appID   string
+	handler InternalHandler
+}
+
 type Hooks struct {
 	OnReady            func(runID, appID string)
 	OnDisconnect       func(runID, appID string)
@@ -45,17 +59,19 @@ type Bus struct {
 	resolve ResolveFunc
 	hooks   Hooks
 
-	mu     sync.Mutex
-	conns  map[string]*conn
-	byApp  map[string]*conn
-	calls  map[string]*call
-	closed bool
+	mu       sync.Mutex
+	conns    map[string]*conn
+	byApp    map[string]*conn
+	internal map[string]*internalTarget
+	calls    map[string]*call
+	closed   bool
 }
 
 func New(logs *logbus.Bus, resolve ResolveFunc, hooks Hooks) *Bus {
 	return &Bus{
 		logs: logs, resolve: resolve, hooks: hooks,
-		conns: map[string]*conn{}, byApp: map[string]*conn{}, calls: map[string]*call{},
+		conns: map[string]*conn{}, byApp: map[string]*conn{},
+		internal: map[string]*internalTarget{}, calls: map[string]*call{},
 	}
 }
 
@@ -214,6 +230,42 @@ func (b *Bus) unregister(c *conn) {
 	}
 }
 
+// RegisterInternal attaches a compiled-in system app to the app-bus routing
+// table. It has no Connect stream: routed calls are answered in-process, while
+// ReadyApp/ReadyRun report the app exactly like a connected supervised app.
+func (b *Bus) RegisterInternal(appID, runID string, h InternalHandler) error {
+	if appID == "" || runID == "" || h == nil {
+		return fmt.Errorf("internal app id, run id and handler are required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return fmt.Errorf("daemon is shutting down")
+	}
+	if old, ok := b.internal[appID]; ok {
+		return fmt.Errorf("internal app %s is already registered for run %s", appID, old.runID)
+	}
+	if c, ok := b.byApp[appID]; ok && c.ready.Load() {
+		return fmt.Errorf("app %s already has a connected ready run %s", appID, c.runID)
+	}
+	b.internal[appID] = &internalTarget{runID: runID, appID: appID, handler: h}
+	return nil
+}
+
+// UnregisterInternal detaches a system app's routed-call endpoint.
+func (b *Bus) UnregisterInternal(appID string) {
+	b.mu.Lock()
+	delete(b.internal, appID)
+	b.mu.Unlock()
+}
+
+func (b *Bus) internalTarget(appID string) (*internalTarget, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ok := b.internal[appID]
+	return t, ok
+}
+
 // --- routed calls ----------------------------------------------------------
 
 type call struct {
@@ -260,6 +312,9 @@ func (b *Bus) Call(stream frameworkv1.AppBusService_CallServer) error {
 	start := first.GetStart()
 	if start == nil || start.GetTargetAppId() == "" || start.GetGrpcService() == "" || start.GetRpcName() == "" {
 		return status.Error(codes.InvalidArgument, "first RoutedCall message must be RoutedCallStart with target, service and rpc")
+	}
+	if target, ok := b.internalTarget(start.GetTargetAppId()); ok {
+		return b.callInternal(stream, start, target)
 	}
 	target, ok := b.readyConn(start.GetTargetAppId())
 	if !ok {
@@ -363,6 +418,70 @@ func (b *Bus) Call(stream frameworkv1.AppBusService_CallServer) error {
 	}
 }
 
+// callInternal services a routed call against an in-process system app. The
+// wire shape is identical to a supervised target: one request frame for unary
+// or server-streaming calls, then an optional half-close. Bidirectional request
+// streaming is rejected because no system app exposes it; it is reported as
+// UNIMPLEMENTED rather than silently dropping frames.
+func (b *Bus) callInternal(stream frameworkv1.AppBusService_CallServer, start *frameworkv1.RoutedCallStart, target *internalTarget) error {
+	ctx := stream.Context()
+	if ms := start.GetTimeoutMs(); ms > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+		defer cancel()
+	}
+	var request []byte
+	called := false
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		switch m := msg.Message.(type) {
+		case *frameworkv1.RoutedCallRequest_RequestMessage:
+			if called {
+				_ = stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
+					End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(codes.Unimplemented), Detail: "system apps do not accept bidirectional request streams"},
+				}})
+				return nil
+			}
+			request = m.RequestMessage
+			called = true
+		case *frameworkv1.RoutedCallRequest_HalfClose:
+			goto invoke
+		case *frameworkv1.RoutedCallRequest_Start:
+			return status.Error(codes.InvalidArgument, "RoutedCallStart must be the only start message")
+		}
+	}
+invoke:
+	responses, err := target.handler(ctx, start.GetGrpcService(), start.GetRpcName(), request)
+	if err != nil {
+		code := codes.Internal
+		detail := err.Error()
+		if st, ok := status.FromError(err); ok {
+			code = st.Code()
+			detail = st.Message()
+		}
+		_ = stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
+			End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(code), Detail: detail},
+		}})
+		return nil
+	}
+	for _, resp := range responses {
+		if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+			ResponseMessage: resp,
+		}}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
+		End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(codes.OK)},
+	}})
+}
+
 func (b *Bus) pumpRequests(stream frameworkv1.AppBusService_CallServer, target *conn, cl *call, fail func(codes.Code, string)) {
 	halfClosed := false
 	for {
@@ -463,29 +582,47 @@ func (b *Bus) SendApp(appID string, msg *frameworkv1.AppInbound) error {
 	return c.enqueue(msg)
 }
 
-// ReadyRun reports whether a run completed AppReady.
+// ReadyRun reports whether a run completed AppReady or is a registered
+// in-process system app.
 func (b *Bus) ReadyRun(runID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	c, ok := b.conns[runID]
-	return ok && c.ready.Load()
+	if c, ok := b.conns[runID]; ok && c.ready.Load() {
+		return true
+	}
+	for _, t := range b.internal {
+		if t.runID == runID {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadyApp returns the current ready run for an app.
 func (b *Bus) ReadyApp(appID string) (string, bool) {
-	c, ok := b.readyConn(appID)
-	if !ok {
-		return "", false
+	if c, ok := b.readyConn(appID); ok {
+		return c.runID, true
 	}
-	return c.runID, true
+	if t, ok := b.internalTarget(appID); ok {
+		return t.runID, true
+	}
+	return "", false
 }
 
-// Connected reports whether a run has an established bus connection.
+// Connected reports whether a run has an established bus connection. A live
+// in-process system app counts as connected for discovery.
 func (b *Bus) Connected(runID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.conns[runID]
-	return ok
+	if _, ok := b.conns[runID]; ok {
+		return true
+	}
+	for _, t := range b.internal {
+		if t.runID == runID {
+			return true
+		}
+	}
+	return false
 }
 
 // Close terminates every connection.
@@ -505,6 +642,7 @@ func (b *Bus) Close() {
 		calls = append(calls, c)
 	}
 	b.calls = map[string]*call{}
+	b.internal = map[string]*internalTarget{}
 	b.mu.Unlock()
 	for _, c := range all {
 		c.close()

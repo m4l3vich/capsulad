@@ -104,6 +104,10 @@ func New(addr string, tlsCfg *tls.Config, conn *grpc.ClientConn, logs *logbus.Bu
 			}
 			return v
 		},
+		"clockStatus": clockStatus,
+		"clockDur":    clockDuration,
+		"clockDays":   clockDays,
+		"clockHasDay": clockHasDay,
 	}).Parse(templates)
 	if err != nil {
 		return nil, err
@@ -144,6 +148,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /applications/{id}/launch", s.appLaunch)
 	mux.HandleFunc("POST /applications/{id}/stop", s.appStop)
 	mux.HandleFunc("POST /applications/{id}/action", s.appAction)
+	mux.HandleFunc("POST /applications/{id}/clock", s.clockAction)
 	mux.HandleFunc("POST /applications/{id}/settings", s.appSettings)
 	mux.HandleFunc("POST /media", s.mediaAction)
 	mux.HandleFunc("GET /api/status", s.apiStatus)

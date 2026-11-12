@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"sync"
@@ -58,6 +59,9 @@ type Run struct {
 	Sandbox      string
 	InvocationID string
 	Restarts     int
+	// Virtual marks an in-process system application. It has no child process
+	// but the same run record, state events and stop/launch semantics.
+	Virtual bool
 
 	cmd *exec.Cmd
 }
@@ -87,6 +91,7 @@ type Supervisor struct {
 	mu      sync.Mutex
 	runs    map[string]*Run
 	byApp   map[string][]string
+	virtual map[string]func()
 	onState func(Run)
 	onExit  func(Run)
 	backoff map[string]int
@@ -98,6 +103,7 @@ func New(parent context.Context, logs *logbus.Bus, clock *ids.Clock, sock string
 	return &Supervisor{
 		ctx: ctx, cancel: cancel, logs: logs, clock: clock, sock: sock, spawner: spawner,
 		runs: map[string]*Run{}, byApp: map[string][]string{}, backoff: map[string]int{},
+		virtual: map[string]func(){},
 	}
 }
 
@@ -328,6 +334,49 @@ func (s *Supervisor) ReadyRun(appID string) (Run, bool) {
 	return Run{}, false
 }
 
+// RegisterBuiltin records a compiled-in system app as a READY run. The caller
+// supplies a stable run ID so app-bus callers keep their target across a
+// stop/start cycle. Registration is idempotent.
+func (s *Supervisor) RegisterBuiltin(m *manifest.Manifest, runID string) (Run, error) {
+	if m == nil || m.Entrypoint.Runtime != manifest.RuntimeBuiltin {
+		return Run{}, fmt.Errorf("builtin run requires a builtin manifest")
+	}
+	if runID == "" {
+		return Run{}, fmt.Errorf("builtin run id is required")
+	}
+	s.mu.Lock()
+	if existing, ok := s.runs[runID]; ok {
+		snap := existing.clone()
+		s.mu.Unlock()
+		return snap, nil
+	}
+	run := &Run{
+		RunID: runID, AppID: m.ID, State: Ready, StartedNS: s.clock.NowNS(),
+		Runtime: manifest.RuntimeBuiltin, Sandbox: "builtin", ExitCode: -1,
+		// The virtual run executes inside the daemon process. Recording the real
+		// daemon PID lets the existing SO_PEERCRED check bind the run identity:
+		// only a connection from this process can claim it, so an external app
+		// cannot impersonate a system app by sending its run ID.
+		PID: os.Getpid(), Virtual: true,
+	}
+	s.runs[runID] = run
+	s.byApp[m.ID] = append(s.byApp[m.ID], runID)
+	snapshot := run.clone()
+	s.mu.Unlock()
+	s.logs.Infof("supervisor", m.ID, "started built-in run=%s", runID)
+	s.notifyState(snapshot)
+	return snapshot, nil
+}
+
+// BindBuiltinStop attaches the teardown hook invoked by Stop.
+func (s *Supervisor) BindBuiltinStop(runID string, stop func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.runs[runID]; ok {
+		s.virtual[runID] = stop
+	}
+}
+
 // Stop requests graceful termination and escalates to SIGKILL after timeout.
 func (s *Supervisor) Stop(runID string) bool {
 	s.mu.Lock()
@@ -335,6 +384,40 @@ func (s *Supervisor) Stop(runID string) bool {
 	if !ok {
 		s.mu.Unlock()
 		return false
+	}
+	if run.Virtual {
+		if run.State == Stopping {
+			s.mu.Unlock()
+			return true
+		}
+		run.State = Stopping
+		appID := run.AppID
+		stop := s.virtual[runID]
+		stopping := run.clone()
+		s.mu.Unlock()
+
+		s.notifyState(stopping)
+		if stop != nil {
+			stop()
+		}
+		s.mu.Lock()
+		run.State = Exited
+		run.ExitCode = 0
+		run.Detail = "stopped"
+		delete(s.runs, runID)
+		delete(s.virtual, runID)
+		list := s.byApp[appID]
+		for i, id := range list {
+			if id == runID {
+				s.byApp[appID] = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		exited := run.clone()
+		s.mu.Unlock()
+		s.logs.Infof("supervisor", appID, "stopped built-in run=%s", runID)
+		s.notifyState(exited)
+		return true
 	}
 	run.State = Stopping
 	proc := run.cmd.Process

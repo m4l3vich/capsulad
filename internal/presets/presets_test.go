@@ -111,3 +111,94 @@ func TestIndicatorFadesInFromDark(t *testing.T) {
 		t.Fatalf("pixel 5 after fade = %+v, want full red", full[5])
 	}
 }
+
+func TestCometAndSparkleRenderDeterministically(t *testing.T) {
+	comet := Params{
+		"speed": 0.5, "color": backend.RGB{R: 0, G: 220, B: 255},
+		"tail_color": backend.RGB{R: 0, G: 64, B: 180}, "tail": int64(8), "intensity": 1.0,
+	}
+	a, err := RingFrame("system.ring.comet", comet, 12, 0.2)
+	if err != nil {
+		t.Fatalf("comet: %v", err)
+	}
+	b, err := RingFrame("system.ring.comet", comet, 12, 0.2)
+	if err != nil {
+		t.Fatalf("comet repeat: %v", err)
+	}
+	if len(a) != 12 || len(b) != 12 {
+		t.Fatalf("comet lengths = %d/%d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("comet pixel %d changed between identical frames", i)
+		}
+	}
+	lit := 0
+	for _, px := range a {
+		if px != (backend.RGB{}) {
+			lit++
+		}
+	}
+	if lit < 2 {
+		t.Fatalf("comet lit %d pixels, want head plus tail", lit)
+	}
+
+	sparkle := Params{
+		"speed": 1.0, "color": backend.RGB{R: 255, G: 255, B: 255},
+		"color_b": backend.RGB{R: 80, G: 120, B: 255}, "density": 1.0, "intensity": 1.0,
+	}
+	first, err := RingFrame("system.ring.sparkle", sparkle, 12, 0.15)
+	if err != nil {
+		t.Fatalf("sparkle: %v", err)
+	}
+	second, err := RingFrame("system.ring.sparkle", sparkle, 12, 0.15)
+	if err != nil {
+		t.Fatalf("sparkle repeat: %v", err)
+	}
+	twinkles := 0
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("sparkle pixel %d flickered between identical frames", i)
+		}
+		if first[i] != (backend.RGB{}) {
+			twinkles++
+		}
+	}
+	if twinkles == 0 {
+		t.Fatal("sparkle rendered no lit pixels")
+	}
+	if _, err := RingFrame("system.ring.sparkle", Params{"density": 2.0}, 12, 0); err == nil {
+		t.Fatal("out-of-range density was accepted")
+	}
+}
+
+func TestRainbowBrightnessIsAdditive(t *testing.T) {
+	full, err := RingFrame("system.ring.rainbow", Params{"brightness": 1.0}, 12, 0.3)
+	if err != nil {
+		t.Fatalf("rainbow: %v", err)
+	}
+	half, err := RingFrame("system.ring.rainbow", Params{"brightness": 0.5}, 12, 0.3)
+	if err != nil {
+		t.Fatalf("rainbow half: %v", err)
+	}
+	darker := 0
+	for i := range full {
+		if half[i].R <= full[i].R && half[i].G <= full[i].G && half[i].B <= full[i].B &&
+			half[i] != full[i] {
+			darker++
+		}
+	}
+	if darker == 0 {
+		t.Fatal("brightness did not dim the rainbow")
+	}
+	// Omitting brightness keeps the historical full-level output.
+	legacy, err := RingFrame("system.ring.rainbow", Params{}, 12, 0.3)
+	if err != nil {
+		t.Fatalf("rainbow default: %v", err)
+	}
+	for i := range legacy {
+		if legacy[i] != full[i] {
+			t.Fatalf("default brightness changed legacy output at pixel %d", i)
+		}
+	}
+}

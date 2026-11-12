@@ -160,37 +160,35 @@ INFO watchdog  /dev/watchdog armed, timeout=21s
 
 `-supersede=off` leaves the vendor stack alone; an explicit comma list replaces the default set. A
 reaper stops any superseded process that respawns. The takeover was **runtime only** during
-bring-up; the boot integration is now deployed:
+bring-up; boot integration is now one removable hook:
 
-- `/etc/init.d/S60capsulad` (repo: `deploy/rockchip-stock/S60capsulad`) starts the daemon after
-  `S02mount-data`, `S50mic-enable` and `S50pulseaudio`, gates on `capsulad -health`, and falls back
-  to the preserved vendor chain (`/data/capsdemo/vendor-init/S97voice-agent.sh`) if the daemon
-  cannot become healthy.
-- **The boot hook is `S99btctl.sh`.** `rcS` expands `/etc/init.d/S??*` once, before
-  `S23overlayfs.sh` pivots into the `/data` overlay, so a script that exists only in the overlay
-  (`S60capsulad`) is never in that list. The stock `S99btctl.sh` is a vendor no-op; its deployed
-  replacement `exec`s `/etc/init.d/S60capsulad start`. The vendor assistant scripts
-  (`S97voice-agent.sh`, `S99sysmon.sh`) are whiteouted in the overlay and copied to
-  `/data/capsdemo/vendor-init/`.
-- Verified across two power cycles on serial `03104B1D40E15C55` at that deployment: `boot.log`
-  records `starting /data/capsdemo/capsulad` and `daemon healthy`, `capsulad -health` exits 0,
-  clock, assistant and media reported `APP_READY`, and `/dev/watchdog armed, timeout=21s` appears.
-  Those three were supervised packages at the time; current builds have no assistant or media
-  sample app and run the clock face and ring inside the daemon. This refactored build was
-  redeployed to the unit on 2026-11-12 (`capsulad` sha256 `86d131ae…fe604`): canonical
-  `S60capsulad` restart became healthy,
-  `capsulad -health` exits 0, `/dev/watchdog armed, timeout=21s` appears, and the boot scripts are
-  byte-identical to the deployed ones. The retired clock, assistant and media bundles were removed
-  after a host backup (the ring bundle was never installed); the migrated app settings were
-  preserved. The shared native SDK (`libcapsula.so.1`, sha256 `b8632b17…72b50d`, ABI 1.0,
-  35 capabilities) and its metadata are installed in `/data/capsdemo/lib`; a native app mapped it
-  at `/capsula/lib` under the mount namespace and reported `APP_READY`, and the optional
-  `org.capsula.dumbassistant` (sha256 `993f58ae…45686`) remains the selected default. One
-  `voice_key` activation drove the teal ring, a conversation and
-  PCM_S16LE 44.1 kHz stereo playback through to reply end and ring release; `master.monitor`
-  showed nonzero output (peak 913, RMS 436) at the configured 5 % volume — a loopback
-  measurement, not an acoustic recording. No reboot or power-cycle test was run for this
-  deployment.
+- **The only capsulad boot file is `/etc/init.d/S99btctl.sh`** (repo:
+  `deploy/rockchip-stock/S99btctl.sh`). `rcS` expands `/etc/init.d/S??*` once, before
+  `S23overlayfs.sh` pivots into the `/data` overlay, so the file must keep the pre-existing S99
+  name; there is no separate `S60capsulad`. The hook performs every capsulad-specific action:
+  boot-log cap, data/run directory preparation, Bluetooth UART IRQ affinity, retirement of
+  `S97voice-agent.sh`/`S99sysmon.sh` while the daemon owns the hardware (pristine copies are kept
+  in `/data/capsdemo/vendor-init/stock`), daemon start after `S02mount-data`, `S50mic-enable` and
+  `S50pulseaudio`, the `capsulad -health` gate, and restoration plus startup of the preserved
+  vendor chain (`/data/capsdemo/vendor-init/S97voice-agent.sh`) when the daemon cannot become
+  healthy.
+- **Disable and restore.** `/etc/init.d/S99btctl.sh disable` stops the daemon, restores the vendor
+  init scripts, starts the vendor assistant, writes `/data/capsdemo/boot/disabled` and moves the
+  hook to `/data/capsdemo/boot/S99btctl.sh.disabled`. Run that copy with `enable` to remove the
+  marker and reinstate the hook. Removing the file alone is only safe after `disable` has restored
+  the vendor scripts; a firmware-provided pristine S99btctl.sh can be copied back if desired.
+- Historical evidence: the previous two-file deployment (`S60capsulad` plus an `exec` wrapper) was
+  verified across two power cycles on serial `03104B1D40E15C55`: `boot.log` records
+  `starting /data/capsdemo/capsulad` and `daemon healthy`, `capsulad -health` exits 0, the
+  supervised clock/assistant/media packages reported `APP_READY`, and
+  `/dev/watchdog armed, timeout=21s` appears. Current builds start the clock and ring as
+  compiled-in system apps and no longer ship those sample packages. The 2026-11-12 redeploy
+  (`capsulad` sha256 `86d131ae…fe604`) made the old `S60capsulad` restart healthy, `capsulad
+  -health` exit 0, watchdog 21 s; the shared native SDK (`libcapsula.so.1`, sha256
+  `b8632b17…72b50d`, ABI 1.0, 35 capabilities) and the optional `org.capsula.dumbassistant`
+  (sha256 `993f58ae…45686`) were installed at that time. **The single-hook rewrite and the current
+  clock/ring system-app build have not been deployed to the unit**; no power-cycle, fallback or
+  physical effect verification exists for them yet.
 - A factory reset wipes the overlay: the device then boots the stock assistant and the deployment
   must be repeated.
 
@@ -203,9 +201,8 @@ capsula -data-dir /data/capsdemo daemon rollback     # restores the previous bin
 ```
 
 `daemon install` runs `<binary> -version`, stages beside the target, renames the live binary to
-`capsulad.prev`, activates by rename, restarts through `/etc/init.d/S60capsulad`, and requires the
-framework API to answer before it reports success; any failure puts the previous binary back. The
-`.prev` copy is 22,479,000 bytes on `/data` after the 2026-11-12 install, so delete it only when the
+`capsulad.prev`, activates by rename, restarts through `/etc/init.d/S99btctl.sh`, and requires the
+framework API to answer before it reports success; any failure puts the previous binary back. The `.prev` copy is 22,610,180 bytes on `/data` after the 2026-11-12T12:26Z install, so delete it only when the
 rollback copy is no longer wanted. `daemon rollback` restores the binary only: a full return to the
 old app-based clock/ring/assistant also needs the old bundles and manifests from the host backup
 (`_capsula-mini-deploy-backup/20261112T181842/`), because the old daemon's strict manifest loader
@@ -261,27 +258,29 @@ Live verification with the paired MacBook (2026-11-11):
 
 ### Bluetooth volume and A2DP jitter
 
-The Mac's AVRCP volume and the Capsula master are kept equal in both directions: a master change
-writes the transport, and a 2 s loop adopts the Mac's value when its slider moves. The Mac is **not**
-trusted as the only attenuation. Observed on the unit: with the Capsula master at 5 % and the Mac
-output at its minimum, the transport volume read ~6/127 yet the captured stream was near full
-scale, and the speaker was ~90–100 % loud. The AVRCP slider had moved without attenuating the
-stream.
+The Mac's AVRCP volume and the Capsula master are kept equal in both directions through one
+`applyMasterVolume` path: a master change writes the transport, and a transport change from the
+source updates the framework master. Updates are event-driven (BlueZ `PropertiesChanged`); the
+earlier implementation's 2 s poll, echo window and coalescing were removed. The Mac is **not**
+trusted as the only attenuation. Observed on the unit with the earlier build: with the Capsula
+master at 5 % and the Mac output at its minimum, the transport volume read ~6/127 yet the captured
+stream was near full scale, and the speaker was ~90–100 % loud. The AVRCP slider had moved without
+attenuating the stream.
 
 The loopback therefore carries a local safety gain of master^1.5 (cube-root compensated, because
 PulseAudio sink-input volume is cubic), while the source is held at a fixed 90 % trim. A linear
-master was still too hot at 5–7 % on this amplifier. The local gain and source trim are re-asserted
-every 2 s, so a PulseAudio reset cannot leave the path at full scale. The audible Bluetooth level is
-bounded by master^1.5 and is at most about 0.73 × it; the Mac's own attenuation, when it does apply,
-makes it quieter still. This is the only arrangement that is safe with a source that may ignore
-AVRCP.
+master was still too hot at 5–7 % on this amplifier. The local gain and source trim are applied on
+source/route changes and volume events, rather than by a periodic re-assert. The audible Bluetooth
+level is bounded by master^1.5 and is at most about 0.73 × it; the Mac's own attenuation, when it
+does apply, makes it quieter still. This is the only arrangement that is safe with a source that
+may ignore AVRCP.
 
-PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on connect, and a 2 s
-guard reloads it whenever PulseAudio recreates it with the default (1). The default mirrored the
-transport onto the local source and applied a cubic second attenuation; at master 30 / Mac 50 the
-source mirrored 47 % (10.4 % cubic) and the audio collapsed to ~1.5 %, which sounded like a phone
-call. The self-heal is required because a profile reconnect recreated the module with defaults
-after the first fix.
+PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on every source
+connect, because PulseAudio recreates it with the default (1) on a profile reconnect. The default
+mirrored the transport onto the local source and applied a cubic second attenuation; at master 30
+/ Mac 50 the source mirrored 47 % (10.4 % cubic) and the audio collapsed to ~1.5 %, which sounded
+like a phone call. No periodic self-heal remains; the per-connect reload and source/route events
+cover recreation.
 
 Audio quality was compared directly with the stock stack: the vendor `voice-agent`/`btctl` chain
 sounded clearly better on the same source. The vendor registers its own A2DP endpoint and feeds
@@ -316,10 +315,10 @@ The volume cue peaks at 0.22 of full scale, about five times quieter than the or
 A2DP jitter was tuned separately: the original 60 ms loopback target let the source buffer swing by
 hundreds of milliseconds and the resampler move between 44.03 and 44.4 kHz. With 250 ms the source
 settles at 57–111 ms against its 68 ms target at ~44.1 kHz. The Bluetooth UART IRQ is moved to CPU3
-by `S60capsulad`, because `hci_uart` logged `Unexpected start frame` errors while the IRQ shared
+by the boot hook, because `hci_uart` logged `Unexpected start frame` errors while the IRQ shared
 CPU0 with the daemon and wakeword inference.
 
-Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only.Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
+Paired-device listing and unpair are Web-UI/CLI only. `ListPairedDevices` and `UnpairDevice` reject
 supervised app callers by run ID and by sandbox UID; the rest of the Bluetooth surface is
 app-facing. Unpair itself was exercised against the simulator manager, not against the user's
 paired MacBook.
@@ -406,20 +405,22 @@ alongside them works, so the driver does not enforce exclusive ownership, but fr
 stock agent until it is stopped as well.
 
 `capsulad -platform rockchip-stock` starts on this image and reports `mode=mountns`; the daemon's
-built-in clock and ring providers drive `display.segment.front` and the LED ring without separately
+built-in clock and ring system apps drive `display.segment.front` and the LED ring without separately
 installed clock or ring apps.
 
 ### Operating the unit without a service manager
 
-The init integration is deployed (`S99btctl.sh` execs `S60capsulad start`), so normal starts,
+The deployed unit still has the historical two-file init integration (`S60capsulad` plus an
+`exec` wrapper). The repository target is the single self-contained `/etc/init.d/S99btctl.sh`
+hook; deploy it before relying on `disable`/`enable` there. Once deployed, normal starts,
 restarts and upgrades go through the boot service; the manual sequence below remains the
 maintenance fallback when the overlay or boot hook is missing. Two facts make that less trivial
 than it looks:
 
-- **`/data` holds only 78.5 MB.** The current stripped `capsulad` is 22,610,180 bytes;
+- **`/data` holds only 78.5 MB.** The current stripped `capsulad` is 23,003,288 bytes;
   operator-installed app
   packages, recordings and logs grow from there. A deploy that keeps the old binary next to the new
-  one needs the new binary's size free (22,610,180 bytes, or the same again for a retained
+  one needs the new binary's size free (23,003,288 bytes, or the same again for a retained
   `.prev`); free space first (`df -h /data`), deploy to `*.new` and `mv` into place,
   and keep the log small. Upgrading the daemon quarantines old installed sample bundles but keeps
   their files; a manual `ls` may still show them even though they are not active. Removing those
@@ -484,7 +485,14 @@ at 7.4 lux, and the framework's implementation writes **13/255** at 7.3 lux (5 %
 truncation). The framework animates toward each new value at 0.06 per 100 ms tick, which matches the
 smooth stock transition.
 
-The built-in clock provider takes the timezone from the daemon's device timezone, unless the
+**Framework divergence:** the vendor curve returns 0 below 5 lux, which blanks an enabled automatic
+display in darkness. The framework keeps the stock curve for the sensor range but floors the auto
+path at 5 % (13/255 after quantization), ignores malformed samples (`NaN`, `±Inf`, negative) instead
+of treating them as darkness, and keeps the last good target when a read fails. The floor applies
+only in auto mode; a manual brightness of 0 is still an explicit off. The 5 % level is intended to
+be visible, but the physical result in a dark room is not measured.
+
+The built-in clock system app takes the timezone from the daemon's device timezone, unless the
 `capsula.clock` app-configuration `timezone` key overrides it; the sandbox no longer forces `TZ=UTC`;
 `/etc/localtime` and `/usr/share/zoneinfo` are bind-mounted so a scripted or native app can resolve
 zones.
@@ -515,13 +523,14 @@ zones.
    microphone (live capture RMS 1977, peak 9420 → RMS 38, peak 222 with PulseAudio unmuted, so the
    attenuation is the GPIO gate and not the mixer). The vendor assistant is now retired at boot, so
    this is the normal configuration.
-6. ~~Vendor daemon coexistence/ownership rules and boot ordering~~ done: `S99btctl.sh` execs
-   `S60capsulad start`, which health-gates and falls back to the preserved vendor chain; that
-   deployment verified across power cycles with clock, assistant and media `APP_READY`. Current
-   builds do not include those sample packages; the clock and ring run inside the daemon, and this
-   build was redeployed on 2026-11-12 (health 0, canonical `S60capsulad` restart, watchdog 21 s;
-   no power-cycle test yet). Bluetooth connect, AVRCP control and absolute volume are verified
-   with a paired source without `voice-agent`/`btctl`. Remaining: pair and unpair a throwaway device
-   through the Web UI (unpair was deliberately not run against the user's MacBook), exercise a
-   source that publishes AVRCP track metadata, and decide the boundary for the vendor helpers that
-   still run (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).
+6. ~~Vendor daemon coexistence/ownership rules and boot ordering~~ done: one self-contained
+   `/etc/init.d/S99btctl.sh` hook contains preparation, health-gated start, vendor retirement and
+   fallback. The historical two-file deployment was verified across power cycles with clock,
+   assistant and media `APP_READY`; current builds do not include those sample packages, and the
+   clock and ring are now compiled-in system apps. The 2026-11-12 build was health-verified with
+   the old service (watchdog 21 s) but has no power-cycle test; the single-hook rewrite has not
+   been deployed. Bluetooth connect, AVRCP control and absolute volume are verified with a paired
+   source without `voice-agent`/`btctl`. Remaining: deploy and power-cycle the single hook, pair
+   and unpair a throwaway device through the Web UI (unpair was deliberately not run against the
+   user's MacBook), exercise a source that publishes AVRCP track metadata, and decide the boundary
+   for the vendor helpers that still run (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).

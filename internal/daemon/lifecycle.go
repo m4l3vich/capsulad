@@ -34,6 +34,13 @@ func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocation
 	if err := app.Manifest.ValidateLaunchArguments(args); err != nil {
 		return "", "", false, err
 	}
+	if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
+		runID, err := d.startSystemApp(appID)
+		if err != nil {
+			return "", "", false, err
+		}
+		return runID, "", false, nil
+	}
 	if err := d.compatible(app.Manifest); err != nil {
 		return "", "", false, err
 	}
@@ -306,6 +313,9 @@ func (d *Daemon) Stop(runID string) bool {
 }
 
 func (d *Daemon) TriggerAction(appID, actionID string) (string, error) {
+	if d.SystemAppInstalled(appID) {
+		return d.TriggerSystemAction(appID, actionID)
+	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return "", fmt.Errorf("application %s is not installed", appID)
@@ -336,9 +346,9 @@ func (d *Daemon) TriggerAction(appID, actionID string) (string, error) {
 
 // AppSettings push after a configuration change.
 func (d *Daemon) pushAppSettings(appID string, rev uint64, values map[string]json.RawMessage) {
-	if isBuiltinSettingsID(appID) {
-		// Built-in providers subscribe to the store directly; there is no app
-		// bus connection to deliver to.
+	if d.SystemAppInstalled(appID) {
+		// System apps subscribe to the settings store directly; they have no
+		// bus connection to deliver a private settings event to.
 		return
 	}
 	msg := &frameworkv1.AppSettingsChanged{Revision: rev}
@@ -374,6 +384,9 @@ func (d *Daemon) startBootApps() {
 	for _, app := range d.reg.List() {
 		if isRetiredApp(app.Manifest.ID) {
 			continue
+		}
+		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
+			continue // started by startSystemApps before this pass
 		}
 		if app.Manifest.StartOnBoot || app.Manifest.Background {
 			d.ensureRunning(app.Manifest.ID)

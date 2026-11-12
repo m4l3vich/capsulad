@@ -58,6 +58,15 @@ type appPageData struct {
 	Provenance *frameworkv1.BinaryProvenanceResult
 	Logs       []logbus.Entry
 	Args       []*frameworkv1.AppArgumentInfo
+
+	ClockService string
+	Clock        *clockState
+	ClockErr     string
+	AlarmForm    clockAlarmForm
+
+	RingService string
+	Ring        *ringState
+	RingErr     string
 }
 
 type mediaProvider struct {
@@ -182,7 +191,7 @@ func (s *Server) application(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := ctxTimeout(r)
 	defer cancel()
 	appID := r.PathValue("id")
-	data := appPageData{Described: map[string]*frameworkv1.AppInterfaceDescription{}}
+	data := appPageData{Described: map[string]*frameworkv1.AppInterfaceDescription{}, AlarmForm: defaultClockAlarmForm()}
 	appsvc := frameworkv1.NewApplicationServiceClient(s.Conn)
 	apps, err := appsvc.ListApplications(ctx, &frameworkv1.ListApplicationsRequest{})
 	if err != nil {
@@ -216,6 +225,35 @@ func (s *Server) application(w http.ResponseWriter, r *http.Request) {
 			if desc, err := frameworkv1.NewAppInterfaceServiceClient(s.Conn).DescribeInterface(ctx, &frameworkv1.DescribeAppInterfaceRequest{AppId: appID, GrpcService: iface.GrpcService}); err == nil {
 				data.Described[iface.GrpcService] = desc
 			}
+		}
+	}
+	if service, err := s.findClockService(ctx, appID); err == nil {
+		data.ClockService = service
+		if state, err := s.clockSnapshot(ctx, appID, service); err != nil {
+			data.ClockErr = rpcMessage(err)
+		} else {
+			data.Clock = state
+			if editID := r.URL.Query().Get("edit"); editID != "" {
+				for _, alarm := range state.Alarms {
+					if alarm.AlarmID != editID {
+						continue
+					}
+					data.AlarmForm = clockAlarmForm{
+						AlarmID: alarm.AlarmID, Label: alarm.Label,
+						Hour: alarm.Hour, Minute: alarm.Minute, Days: alarm.DaysOfWeek,
+						Timezone: alarm.Timezone, Enabled: alarm.Enabled,
+					}
+					break
+				}
+			}
+		}
+	}
+	if service, err := s.findRingService(ctx, appID, data.App.Provides); err == nil {
+		data.RingService = service
+		if state, err := s.ringSnapshot(ctx, appID, service); err != nil {
+			data.RingErr = rpcMessage(err)
+		} else {
+			data.Ring = state
 		}
 	}
 	runs, _ := appsvc.ListRuns(ctx, &frameworkv1.ListRunsRequest{AppId: appID})
@@ -326,6 +364,14 @@ func (s *Server) appSettings(w http.ResponseWriter, r *http.Request) {
 		v := raw[0]
 		switch def.Type {
 		case frameworkv1.SettingType_SETTING_INTEGER, frameworkv1.SettingType_SETTING_NUMBER:
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if _, err := strconv.ParseFloat(v, 64); err != nil {
+				s.redirect(w, r, "/applications/"+appID, "", fmt.Sprintf("%s must be a number", def.Label))
+				return
+			}
 			changes = append(changes, &frameworkv1.AppSettingChange{Key: def.Key, ValueJson: v})
 		default:
 			changes = append(changes, &frameworkv1.AppSettingChange{Key: def.Key, ValueJson: jsonString(v)})
@@ -333,7 +379,7 @@ func (s *Server) appSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = cfg.Update(ctx, &frameworkv1.UpdateAppConfigurationRequest{AppId: appID, ExpectedRevision: expected, Changes: changes})
 	if err != nil {
-		s.redirect(w, r, "/applications/"+appID, "", err.Error())
+		s.redirect(w, r, "/applications/"+appID, "", rpcMessage(err))
 		return
 	}
 	s.redirect(w, r, "/applications/"+appID, "settings saved", "")
@@ -386,7 +432,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		resourceID := "display.segment.front"
 		if group == "ring" {
 			resourceID = "light.ring.main"
-		} else if rid := r.PostFormValue("resource_id"); rid != "" {
+		}
+		if rid := r.PostFormValue("resource_id"); rid != "" {
 			resourceID = rid
 		}
 		if patch.DefaultAppByResource == nil {

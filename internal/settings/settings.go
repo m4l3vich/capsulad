@@ -378,6 +378,11 @@ type AppStore struct {
 	root string
 	logs *logbus.Bus
 	look ManifestLookup
+	// validate, when set, receives the fully merged candidate value map before
+	// it is written. It lets the owning daemon/app reject semantically invalid
+	// settings (cross-field ranges, path policy) synchronously, with no write
+	// and no revision bump on failure. It must not call back into the store.
+	validate func(appID string, values map[string]json.RawMessage) error
 
 	mu    sync.Mutex
 	state map[string]*appState
@@ -388,6 +393,14 @@ type AppStore struct {
 func OpenApps(root string, logs *logbus.Bus, look ManifestLookup) (*AppStore, error) {
 	a := &AppStore{root: root, logs: logs, look: look, state: map[string]*appState{}, subs: map[string]map[int]chan AppSnapshot{}}
 	return a, nil
+}
+
+// SetValidator installs the semantic validator used by Update. The daemon
+// installs one dispatcher that routes to per-app validators.
+func (a *AppStore) SetValidator(v func(appID string, values map[string]json.RawMessage) error) {
+	a.mu.Lock()
+	a.validate = v
+	a.mu.Unlock()
 }
 
 func (a *AppStore) stateLocked(appID string) (*appState, error) {
@@ -528,6 +541,11 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 			return AppSnapshot{}, 0, nil, err
 		}
 		next[ch.Key] = raw
+	}
+	if a.validate != nil {
+		if err := a.validate(appID, next); err != nil {
+			return AppSnapshot{}, 0, nil, err
+		}
 	}
 	newRev := st.rev + 1
 	if a.root != "" {

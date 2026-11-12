@@ -61,6 +61,13 @@ type A2DPSink interface {
 	ReleaseA2DP(ctx context.Context) error
 }
 
+// A2DPRegistrar is optionally implemented by a manager that can report whether
+// its sink endpoint is currently advertised. The daemon uses it to decide when
+// profile advertisement still has to be prepared before pairing is enabled.
+type A2DPRegistrar interface {
+	SinkRegistered() bool
+}
+
 // Status is the adapter state a UI can show.
 type Status struct {
 	Present      bool
@@ -131,6 +138,14 @@ const (
 	EventConnected EventKind = iota + 1
 	EventDisconnected
 	EventMedia
+	// EventVolume reports an AVRCP absolute-volume change made on the source.
+	// It is emitted only when the level actually changes, so the framework
+	// mirroring it cannot loop back into another change.
+	EventVolume
+	// EventTransport reports an A2DP transport that became usable (pending or
+	// active). Callers acquire the stream when they see it instead of polling
+	// for the transport.
+	EventTransport
 )
 
 // Event carries the state after a change. Media is set for EventMedia and on
@@ -140,6 +155,8 @@ type Event struct {
 	DeviceAddress string
 	DeviceName    string
 	Media         MediaState
+	// Volume is the AVRCP absolute volume (0..127) for EventVolume.
+	Volume uint16
 }
 
 // Manager is the Bluetooth facade. A nil Manager means the subsystem is absent.
@@ -169,14 +186,16 @@ type Manager interface {
 // Memory is a scriptable manager. It stores state and broadcasts events exactly
 // like the real facade, so app and RPC paths can be tested without a bus.
 type Memory struct {
-	mu       sync.Mutex
-	status   Status
-	devices  []Device
-	media    MediaState
-	revision uint64
-	subs     map[int]chan Event
-	nextID   int
-	closed   bool
+	mu        sync.Mutex
+	status    Status
+	devices   []Device
+	media     MediaState
+	volume    uint16
+	hasVolume bool
+	revision  uint64
+	subs      map[int]chan Event
+	nextID    int
+	closed    bool
 }
 
 // NewMemory returns a powered simulator adapter with no devices.
@@ -256,9 +275,30 @@ func (m *Memory) Unpair(_ context.Context, address string) error {
 
 func (m *Memory) ConnectAudio(context.Context, string) error { return nil }
 
-func (m *Memory) SetTransportVolume(context.Context, float64) error { return nil }
+// SetTransportVolume records the framework-driven level. Like the real
+// manager it does not emit an event: the source did not change.
+func (m *Memory) SetTransportVolume(_ context.Context, level float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if level < 0 {
+		level = 0
+	}
+	if level > 1 {
+		level = 1
+	}
+	m.volume = uint16(level*127 + 0.5)
+	m.hasVolume = true
+	return nil
+}
 
-func (m *Memory) TransportVolume(context.Context) (uint16, error) { return 0, nil }
+func (m *Memory) TransportVolume(context.Context) (uint16, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.hasVolume {
+		return 0, ErrUnsupported
+	}
+	return m.volume, nil
+}
 
 func (m *Memory) Media(context.Context) (MediaState, error) {
 	m.mu.Lock()
@@ -291,6 +331,14 @@ func (m *Memory) Command(_ context.Context, cmd Command) error {
 	m.mu.Unlock()
 	m.broadcast(event)
 	return nil
+}
+
+// SubscriberCount reports how many Watch channels are registered. It is a
+// simulator diagnostic used to tell when a consumer has attached.
+func (m *Memory) SubscriberCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.subs)
 }
 
 func (m *Memory) Watch(ctx context.Context) <-chan Event {
@@ -347,7 +395,21 @@ func (m *Memory) SimulateConnect(dev Device, media MediaState) {
 	m.revision++
 	media.Revision = m.revision
 	m.media = media
+	m.hasVolume = true
+	m.volume = 100
 	event := Event{Kind: EventConnected, DeviceAddress: dev.Address, DeviceName: dev.Name, Media: media}
+	m.mu.Unlock()
+	m.broadcast(event)
+}
+
+// SimulateVolume publishes an AVRCP absolute-volume change made on the source.
+func (m *Memory) SimulateVolume(volume uint16) {
+	if volume > 127 {
+		volume = 127
+	}
+	m.mu.Lock()
+	m.volume, m.hasVolume = volume, true
+	event := Event{Kind: EventVolume, Volume: volume, Media: m.media, DeviceAddress: m.media.DeviceAddress, DeviceName: m.media.DeviceName}
 	m.mu.Unlock()
 	m.broadcast(event)
 }
@@ -363,6 +425,8 @@ func (m *Memory) SimulateDisconnect(address string) {
 	if m.media.DeviceAddress == address {
 		m.media = MediaState{}
 	}
+	m.hasVolume = false
+	m.volume = 0
 	m.revision++
 	m.media.Revision = m.revision
 	event := Event{Kind: EventDisconnected, DeviceAddress: address, Media: m.media}

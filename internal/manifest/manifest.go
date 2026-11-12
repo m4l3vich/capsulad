@@ -24,6 +24,10 @@ const (
 	RuntimeNative      Runtime = "native"
 	RuntimeQuickJS     Runtime = "quickjs"
 	RuntimeMicroPython Runtime = "micropython"
+	// RuntimeBuiltin marks an application compiled into capsulad. It has a
+	// normal registry identity, app settings, routing ownership, run lifecycle
+	// and app-bus endpoint, but no package directory or child process.
+	RuntimeBuiltin Runtime = "builtin"
 )
 
 type Entrypoint struct {
@@ -177,6 +181,13 @@ func (m *Manifest) Validate() error {
 		if m.Entrypoint.Architecture != "" || m.Entrypoint.ABI != "" {
 			return fmt.Errorf("app %s: script entrypoint must not declare architecture/abi", m.ID)
 		}
+	case RuntimeBuiltin:
+		if m.Entrypoint.Architecture != "" || m.Entrypoint.ABI != "" || m.Entrypoint.Path != "" {
+			return fmt.Errorf("app %s: built-in entrypoint must not declare path, architecture or abi", m.ID)
+		}
+		if m.NativeSDK != nil {
+			return fmt.Errorf("app %s: built-in applications do not load the native SDK", m.ID)
+		}
 	default:
 		return fmt.Errorf("app %s: unknown runtime %q", m.ID, m.Entrypoint.Runtime)
 	}
@@ -201,7 +212,7 @@ func (m *Manifest) Validate() error {
 			seenCaps[c] = true
 		}
 	}
-	if err := validateRelPath("entrypoint.path", m.Entrypoint.Path, true); err != nil {
+	if err := validateRelPath("entrypoint.path", m.Entrypoint.Path, m.Entrypoint.Runtime != RuntimeBuiltin); err != nil {
 		return fmt.Errorf("app %s: %w", m.ID, err)
 	}
 	seenSettings := map[string]bool{}

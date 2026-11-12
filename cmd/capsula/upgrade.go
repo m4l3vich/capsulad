@@ -44,7 +44,7 @@ func daemonUpgrade(args []string, dataDir, socket string) error {
 	fs := flag.NewFlagSet("daemon install", flag.ContinueOnError)
 	binary := fs.String("binary", "", "new capsulad binary to install")
 	target := fs.String("target", "", "installed daemon path (default <data-dir>/capsulad)")
-	initScript := fs.String("init-script", "/etc/init.d/S60capsulad", "boot service used to restart the daemon")
+	initScript := fs.String("init-script", "/etc/init.d/S99btctl.sh", "boot service used to restart the daemon")
 	timeout := fs.Duration("timeout", 45*time.Second, "time to wait for a healthy daemon after restart")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -128,7 +128,7 @@ func undoInstall(target, previous string, hadPrevious bool, initScript, socket, 
 func daemonRollback(args []string, dataDir, socket string) error {
 	fs := flag.NewFlagSet("daemon rollback", flag.ContinueOnError)
 	target := fs.String("target", "", "installed daemon path (default <data-dir>/capsulad)")
-	initScript := fs.String("init-script", "/etc/init.d/S60capsulad", "boot service used to restart the daemon")
+	initScript := fs.String("init-script", "/etc/init.d/S99btctl.sh", "boot service used to restart the daemon")
 	timeout := fs.Duration("timeout", 45*time.Second, "time to wait for a healthy daemon after restart")
 	if err := fs.Parse(args); err != nil {
 		return err

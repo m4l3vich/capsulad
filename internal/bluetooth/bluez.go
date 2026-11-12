@@ -22,8 +22,11 @@ const (
 )
 
 // BlueZ is the real manager. It reads the object manager and subscribes to
-// PropertiesChanged/ObjectManager signals; every notification refreshes the
-// whole small object tree instead of trying to merge partial updates.
+// PropertiesChanged/ObjectManager/NameOwnerChanged signals; every notification
+// refreshes the whole small object tree instead of trying to merge partial
+// updates. Transport volume changes refresh without the signal coalescing delay,
+// and connect/disconnect, volume and transport readiness are published as
+// events so callers never poll.
 type BlueZ struct {
 	conn *dbus.Conn
 
@@ -42,9 +45,18 @@ type BlueZ struct {
 	cancel   context.CancelFunc
 	powering atomic.Bool
 
+	agentExported   atomic.Bool
+	agentRegistered atomic.Bool
+
+	volume       uint16
+	volumeSet    bool
+	volumeWrote  bool
+	transportKey string
+
 	endpointMu   sync.Mutex
 	endpointPath dbus.ObjectPath
 	endpoint     *sbcEndpoint
+	armed        bool
 	transport    dbus.ObjectPath
 }
 
@@ -64,6 +76,10 @@ func Open(ctx context.Context) (*BlueZ, error) {
 	if b.adapter == "" {
 		return nil, fmt.Errorf("%w: no BlueZ adapter", ErrUnavailable)
 	}
+	// A registered agent is required for a remote device to bond. Best effort
+	// here so a transient BlueZ state cannot disable adapter control; enabling
+	// pairing retries and reports the error instead of claiming success.
+	_ = b.registerAgent(ctx)
 	runCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	go b.run(runCtx)
@@ -74,6 +90,7 @@ func (b *BlueZ) Close() error {
 	if b.cancel != nil {
 		b.cancel()
 	}
+	b.unregisterAgent()
 	b.unregisterA2DP()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -115,6 +132,13 @@ func (b *BlueZ) SetDiscoverable(ctx context.Context, on bool) error {
 func (b *BlueZ) SetPairable(ctx context.Context, on bool) error {
 	if err := b.EnsurePowered(ctx); err != nil {
 		return err
+	}
+	if on {
+		// Without a registered agent BlueZ cannot complete a new bond, so do
+		// not advertise pairability we cannot honor.
+		if err := b.registerAgent(ctx); err != nil {
+			return err
+		}
 	}
 	if err := b.setAdapterProperty(ctx, "Pairable", on); err != nil {
 		return err
@@ -274,6 +298,12 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 		"org.bluez.MediaTransport1", "Volume", dbus.MakeVariant(value)).Err; err != nil {
 		return fmt.Errorf("set transport volume: %w", err)
 	}
+	// Record the level we just wrote so the PropertiesChanged echo of our own
+	// write is not republished as a source-side change, even when no snapshot
+	// of the source's level existed before the write.
+	b.mu.Lock()
+	b.volume, b.volumeSet, b.volumeWrote = value, true, true
+	b.mu.Unlock()
 	return nil
 }
 
@@ -475,6 +505,39 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 	} else {
 		media.Revision = b.media.Revision
 	}
+
+	// AVRCP absolute volume. A first observation is still published: a source
+	// change that happens before any snapshot (including between connect and
+	// the first refresh) must not be dropped. Only the exact level this manager
+	// wrote before a snapshot is suppressed, because that read is our echo.
+	if volume, ok := transportVolume(objs); ok {
+		publish, echo := volumeObservation(b.volume, b.volumeSet, b.volumeWrote, volume)
+		switch {
+		case echo:
+			b.volumeSet = true
+		case publish:
+			b.volume, b.volumeSet = volume, true
+			events = append(events, Event{Kind: EventVolume, Volume: volume, Media: media})
+		}
+		b.volumeWrote = false
+	} else {
+		// No transport: the next source's first level is initial state again.
+		b.volumeSet = false
+		b.volumeWrote = false
+		b.volume = 0
+	}
+	// A pending or active transport is the point at which the stream can be
+	// acquired; publish the transition instead of having callers poll for it.
+	if key := usableTransportKey(objs); key != b.transportKey {
+		b.transportKey = key
+		if key != "" {
+			events = append(events, Event{
+				Kind: EventTransport, Media: media,
+				DeviceAddress: media.DeviceAddress, DeviceName: media.DeviceName,
+			})
+		}
+	}
+
 	b.media = media
 	subs := make([]chan Event, 0, len(b.subs))
 	for _, ch := range b.subs {
@@ -528,10 +591,15 @@ func (b *BlueZ) reconcilePower(ctx context.Context) {
 	}
 	_ = b.refresh(callCtx)
 	b.ensurePageScan()
+	// Powering the adapter discards the endpoints registered with it, so the
+	// sink profile must be advertised again before a source can connect.
+	b.rearmA2DP(callCtx)
 }
 
-// watchOnce installs the match rules and refreshes on any relevant signal. A
-// 5-second poll covers missed notifications and sources that do not emit them.
+// watchOnce installs the match rules and refreshes on any relevant signal.
+// Transport volume changes refresh immediately so a source-side volume change
+// reaches the framework without the coalescing delay used for the discovery
+// signal bursts.
 func (b *BlueZ) watchOnce(ctx context.Context) error {
 	sigCh := make(chan *dbus.Signal, 128)
 	b.conn.Signal(sigCh)
@@ -540,6 +608,7 @@ func (b *BlueZ) watchOnce(ctx context.Context) error {
 	matches := [][]dbus.MatchOption{
 		{dbus.WithMatchSender(bluezService), dbus.WithMatchInterface("org.freedesktop.DBus.Properties"), dbus.WithMatchMember("PropertiesChanged"), dbus.WithMatchPathNamespace(bluezNamespace)},
 		{dbus.WithMatchSender(bluezService), dbus.WithMatchInterface("org.freedesktop.DBus.ObjectManager"), dbus.WithMatchPathNamespace(bluezNamespace)},
+		{dbus.WithMatchSender("org.freedesktop.DBus"), dbus.WithMatchInterface("org.freedesktop.DBus"), dbus.WithMatchMember("NameOwnerChanged")},
 	}
 	for _, opts := range matches {
 		if err := b.conn.AddMatchSignal(opts...); err != nil {
@@ -557,16 +626,32 @@ func (b *BlueZ) watchOnce(ctx context.Context) error {
 		<-debounce.C
 	}
 	defer debounce.Stop()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case _, ok := <-sigCh:
+		case sig, ok := <-sigCh:
 			if !ok {
 				return fmt.Errorf("bluez signal channel closed")
+			}
+			if transportVolumeSignal(sig) {
+				_ = b.refresh(ctx)
+				b.reconcilePower(ctx)
+				continue
+			}
+			if bluezRestarted(sig) {
+				// BlueZ forgets endpoint registrations and transports when
+				// the service restarts; advertise the sink profile again.
+				b.mu.Lock()
+				b.transportKey = ""
+				b.mu.Unlock()
+				b.markA2DPUnarmed()
+				_ = b.refresh(ctx)
+				b.reconcilePower(ctx)
+				b.rearmA2DP(ctx)
+				_ = b.registerAgent(ctx)
+				continue
 			}
 			if !debounce.Stop() {
 				select {
@@ -577,9 +662,10 @@ func (b *BlueZ) watchOnce(ctx context.Context) error {
 			debounce.Reset(120 * time.Millisecond)
 		case <-debounce.C:
 			_ = b.refresh(ctx)
-		case <-ticker.C:
-			_ = b.refresh(ctx)
 			b.reconcilePower(ctx)
+			if !b.SinkRegistered() {
+				b.rearmA2DP(ctx)
+			}
 		}
 	}
 }
@@ -737,6 +823,84 @@ func findVolumeTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Var
 		return pendingPath, pendingProps
 	}
 	return idlePath, idleProps
+}
+
+// transportVolume reads the AVRCP absolute volume of the transport the volume
+// path targets. ok is false when no transport exposes the property, i.e. the
+// source does not support absolute volume.
+func transportVolume(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (uint16, bool) {
+	path, props := findVolumeTransport(objs)
+	if path == "" {
+		return 0, false
+	}
+	switch v := props["Volume"].Value().(type) {
+	case uint16:
+		return v, true
+	case uint32:
+		return uint16(v), true
+	}
+	return 0, false
+}
+
+// volumeObservation decides what an observed transport level means.
+//
+//	publish: the level is a source-side change (or the first observation, which
+//	         must still reach the framework even without a prior snapshot).
+//	echo:    the level is exactly what this manager wrote before any snapshot,
+//	         so publishing it would loop the framework's own write back.
+func volumeObservation(last uint16, haveLast, wrote bool, observed uint16) (publish, echo bool) {
+	if !haveLast {
+		if wrote && last == observed {
+			return false, true
+		}
+		return true, false
+	}
+	return last != observed, false
+}
+
+// usableTransportKey identifies the A2DP transport a stream can be acquired
+// from right now. It is empty while the endpoint is configured but idle: an
+// idle transport stays silent and acquiring it blocks.
+func usableTransportKey(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) string {
+	for path, ifaces := range objs {
+		props, ok := ifaces["org.bluez.MediaTransport1"]
+		if !ok || strProp(props, "UUID") != a2dpSinkUUID {
+			continue
+		}
+		state := strProp(props, "State")
+		if state != "pending" && state != "active" {
+			continue
+		}
+		if codec, ok := props["Codec"]; ok && byteValue(codec) != 0 {
+			continue
+		}
+		return string(path) + "|" + state
+	}
+	return ""
+}
+
+// transportVolumeSignal matches the PropertiesChanged BlueZ emits when the
+// source changes its AVRCP absolute volume.
+func transportVolumeSignal(sig *dbus.Signal) bool {
+	if sig == nil || sig.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" || len(sig.Body) < 2 {
+		return false
+	}
+	iface, _ := sig.Body[0].(string)
+	if iface != "org.bluez.MediaTransport1" {
+		return false
+	}
+	changed, _ := sig.Body[1].(map[string]dbus.Variant)
+	_, ok := changed["Volume"]
+	return ok
+}
+
+// bluezRestarted reports a NameOwnerChanged for the BlueZ service.
+func bluezRestarted(sig *dbus.Signal) bool {
+	if sig == nil || sig.Name != "org.freedesktop.DBus.NameOwnerChanged" || len(sig.Body) < 1 {
+		return false
+	}
+	name, _ := sig.Body[0].(string)
+	return name == bluezService
 }
 
 func findDevicePath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, address string) dbus.ObjectPath {

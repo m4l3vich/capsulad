@@ -682,6 +682,10 @@ enum ApplicationRuntime {
   RUNTIME_NATIVE = 1;
   RUNTIME_QUICKJS = 2;
   RUNTIME_MICROPYTHON = 3;
+  // Compiled into capsulad. Such an application has a normal identity, app
+  // settings, run lifecycle and app-bus endpoints, but no package directory,
+  // child process or install/uninstall operation.
+  RUNTIME_BUILTIN = 4;
 }
 message ApplicationEntrypoint {
   ApplicationRuntime runtime = 1;
@@ -755,6 +759,12 @@ message InstalledApplication {
   repeated DeclaredAppInterface interfaces = 10;
   ApplicationEntrypoint entrypoint = 11;
   GitHubAttestationDeclaration github_attestation = 12;
+  // Server-owned lifecycle metadata. Clients must not infer these from the
+  // app ID: built-in system apps and supervised packages are distinguished
+  // only by what the daemon reports here.
+  bool system_app = 13;
+  bool can_stop = 14;
+  bool can_uninstall = 15;
 }
 message DeclaredAppInterface {
   string grpc_service = 1;

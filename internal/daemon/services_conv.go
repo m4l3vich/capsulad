@@ -81,6 +81,8 @@ func runtimeProto(rt manifest.Runtime) frameworkv1.ApplicationRuntime {
 		return frameworkv1.ApplicationRuntime_RUNTIME_QUICKJS
 	case manifest.RuntimeMicroPython:
 		return frameworkv1.ApplicationRuntime_RUNTIME_MICROPYTHON
+	case manifest.RuntimeBuiltin:
+		return frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN
 	default:
 		return frameworkv1.ApplicationRuntime_APPLICATION_RUNTIME_UNSPECIFIED
 	}
@@ -88,11 +90,15 @@ func runtimeProto(rt manifest.Runtime) frameworkv1.ApplicationRuntime {
 
 func (d *Daemon) appProto(app *registry.App) *frameworkv1.InstalledApplication {
 	m := app.Manifest
+	system := m.Entrypoint.Runtime == manifest.RuntimeBuiltin
 	out := &frameworkv1.InstalledApplication{
 		AppId: m.ID, DisplayName: m.Name, Version: m.Version,
 		StartOnBoot: m.StartOnBoot, SingleInstance: m.SingleInstance,
 		Provides: append([]string(nil), m.Provides...), Background: m.Background,
 		RestartOnFailure: m.RestartOnFailure,
+		SystemApp:        system,
+		CanStop:          true,
+		CanUninstall:     false,
 		Entrypoint: &frameworkv1.ApplicationEntrypoint{
 			Runtime: runtimeProto(m.Entrypoint.Runtime), RelativePath: m.Entrypoint.Path,
 			CpuArchitecture: m.Entrypoint.Architecture, BinaryAbi: m.Entrypoint.ABI,

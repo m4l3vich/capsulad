@@ -1,7 +1,7 @@
 id = "org.capsula.dumbassistant"
 name = "Dumb Assistant"
-version = "0.1.0"
-description = "Optional first-party assistant that answers every activation with the same packaged audio reply after a configurable delay."
+version = "0.2.0"
+description = "Optional first-party assistant that listens to real microphone PCM, waits for speech to end, and answers with a packaged WAV after a configurable delay."
 background = false
 start_on_boot = false
 restart_on_failure = true
@@ -18,61 +18,36 @@ sdk = "0.5"
 # The app links only the Go SDK, which dlopens the shared Capsula engine. The
 # engine is injected by the launcher and is never bundled into this package.
 # Every capability below is exercised by the assistant: activations, settings
-# and invocation notifications over the app bus, PCM playback, and ring
-# presentations/captures over audio and routing services.
+# and invocation notifications over the app bus, microphone capture and PCM
+# playback, device settings for hold-to-talk mode, and ring presentations and
+# captures over audio and routing services.
 [native_sdk]
 abi_major = 1
 min_minor = 0
 required_capabilities = [
   "capsula.service.audio",
+  "capsula.audio.capture",
   "capsula.audio.playback",
   "capsula.audio.pcm-fast-path",
   "capsula.service.presentation",
   "capsula.service.routing",
   "capsula.service.assistant",
+  "capsula.service.settings",
   "capsula.bus.connect",
   "capsula.bus.events",
   "capsula.bus.notifications",
 ]
 
 [[settings]]
-key = "delay_mode"
-label = "Delay mode"
-description = "Constant waits delay_ms every time. Random picks uniformly between delay_min_ms and delay_max_ms."
-type = "select"
-default = "constant"
-
-[[settings.choices]]
-value = "constant"
-label = "Constant"
-
-[[settings.choices]]
-value = "random"
-label = "Random in range"
+key = "delay"
+label = "Reply delay"
+description = "Empty waits no time. A single value waits that many milliseconds (100 = 100 ms). A range like 200-1500 waits a uniformly random time between the bounds, inclusive. Negative, inverted, malformed and above-60000 values are rejected."
+type = "text"
+default = "1000"
 
 [[settings]]
-key = "delay_ms"
-label = "Constant delay (ms)"
-description = "Wait before playing the reply when delay_mode is constant."
-type = "integer"
-default = 1000
-min = 0.0
-max = 60000.0
-
-[[settings]]
-key = "delay_min_ms"
-label = "Minimum random delay (ms)"
-description = "Lower bound used when delay_mode is random."
-type = "integer"
-default = 500
-min = 0.0
-max = 60000.0
-
-[[settings]]
-key = "delay_max_ms"
-label = "Maximum random delay (ms)"
-description = "Upper bound used when delay_mode is random. A value below the minimum is swapped at use time."
-type = "integer"
-default = 2500
-min = 0.0
-max = 60000.0
+key = "reply_asset"
+label = "Reply WAV asset"
+description = "Path relative to the shared read-only /assets asset store, for example audio/assistant/reply.wav. Empty uses the packaged assets/reply.wav. Absolute paths, '..' traversal, symlinks and assets not declared in the store manifest are rejected."
+type = "text"
+default = ""

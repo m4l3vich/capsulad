@@ -1,0 +1,14 @@
+
+œ
+$capsula/contracts/ring/v1/ring.protocapsula.contracts.ring.v1"
+GetStateRequest"œ
+	RingState
+effect (	Reffect
+palette (	Rpalette
+
+brightness (R
+brightness
+speed (Rspeed'
+presentation_id (	RpresentationId2k
+RingService\
+GetState*.capsula.contracts.ring.v1.GetStateRequest$.capsula.contracts.ring.v1.RingStateB2Z0capsulad/gen/go/capsula/contracts/ring/v1;ringv1bproto3

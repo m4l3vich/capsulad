@@ -83,7 +83,7 @@ func buildModuleApp(t *testing.T, pkg string) string {
 	return out
 }
 
-const clockManifest = `
+const testClockManifest = `
 id = "test.clock"
 name = "Test clock"
 version = "0.1.0"
@@ -196,7 +196,7 @@ func newTestDaemonWith(t *testing.T, extras ...appInstall) (*Daemon, context.Can
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	apps := filepath.Join(base, "apps")
-	installApp(t, apps, "test.clock", "clock", bin, clockManifest)
+	installApp(t, apps, "test.clock", "clock", bin, testClockManifest)
 	installApp(t, apps, "test.assistant", "assistant", bin, assistantManifest)
 	installApp(t, apps, "test.probe", "probe", bin, probeManifest)
 	for _, extra := range extras {

@@ -148,7 +148,7 @@ dumbassistant:
 	mkdir -p $(APPDIR)/org.capsula.dumbassistant/assets
 	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsula.dumbassistant/dumbassistant ./cmd/dumbassistant
 	cp apps/dumbassistant/manifest.toml $(APPDIR)/org.capsula.dumbassistant/manifest.toml
-	cp apps/dumbassistant/assets/reply.wav $(APPDIR)/org.capsula.dumbassistant/assets/reply.wav
+	cp -R apps/dumbassistant/assets/. $(APPDIR)/org.capsula.dumbassistant/assets/
 
 test:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...

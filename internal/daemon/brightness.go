@@ -30,7 +30,12 @@ const (
 	stockBrightnessDeadband = 0.05
 	stockBrightnessMinLux   = 5.0
 	stockBrightnessMaxLux   = 32768.0
-	autoBrightnessPoll      = time.Second
+	// autoBrightnessFloor is the lowest level an auto-managed display is
+	// allowed to reach. The stock curve reports 0 below 5 lux, which turns an
+	// enabled automatic display completely dark; the framework keeps it
+	// perceptibly lit while preserving a manual brightness of 0 as "off".
+	autoBrightnessFloor = 0.05
+	autoBrightnessPoll  = time.Second
 	// brightnessTick paces the fade so a change looks like the vendor's
 	// animated transition rather than a jump.
 	brightnessTick     = 100 * time.Millisecond
@@ -51,6 +56,30 @@ func ambientBrightness(lux float64) float64 {
 	pct := math.Trunc(math.Log(stockBrightnessBias+stockBrightnessLambda*lux) * stockBrightnessScale)
 	pct = math.Max(stockBrightnessFloor, math.Min(stockBrightnessCeil, pct))
 	return pct / 100
+}
+
+// autoBrightness maps one ambient sample to an auto-managed level. A malformed
+// sample (NaN, an infinity, or a negative illuminance from a transient read) is
+// reported as invalid so the caller keeps the last good target instead of
+// treating it as darkness. Valid levels are floored at autoBrightnessFloor:
+// an enabled automatic display must never blank, even at 0 lux.
+func autoBrightness(lux float64) (float64, bool) {
+	if math.IsNaN(lux) || math.IsInf(lux, 0) || lux < 0 {
+		return 0, false
+	}
+	return math.Max(autoBrightnessFloor, ambientBrightness(lux)), true
+}
+
+// clampAutoBrightness keeps every auto path above the visible floor, including
+// the window before the first valid sensor sample and persisted 0 values.
+func clampAutoBrightness(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, -1) || v < autoBrightnessFloor {
+		return autoBrightnessFloor
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // stepToward bounds one animation tick so brightness changes are a short fade
@@ -77,8 +106,15 @@ func (d *Daemon) effectiveBrightness(resourceID string) (float64, bool) {
 		lvl, ok := d.autoLvl[resourceID]
 		d.autoMu.Unlock()
 		if ok {
-			return lvl, true
+			return clampAutoBrightness(lvl), true
 		}
+		// No valid sample yet: an enabled automatic display still must not
+		// blank, so a persisted manual 0 is treated as the visible floor.
+		v, ok := values.DisplayBrightness[resourceID]
+		if !ok {
+			return autoBrightnessFloor, true
+		}
+		return clampAutoBrightness(v), true
 	}
 	v, ok := values.DisplayBrightness[resourceID]
 	return v, ok
@@ -113,7 +149,13 @@ func (d *Daemon) autoBrightnessLoop() {
 			lastSample = time.Now()
 			if haveSensor {
 				if lux, ok := sensors.Read("sensor.ambient_light"); ok {
-					target := ambientBrightness(lux)
+					target, valid := autoBrightness(lux)
+					if !valid {
+						// ParseFloat accepts "nan"/"inf" and a sensor can return
+						// a transient negative; none of those mean darkness.
+						// Keep the last good target instead of blanking.
+						continue
+					}
 					for _, info := range d.resources {
 						if info.Kind != frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY && info.Kind != frameworkv1.ResourceKind_RESOURCE_LED_RING {
 							continue
