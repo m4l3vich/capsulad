@@ -80,6 +80,9 @@ type RingState struct {
 	Brightness     float32 `json:"brightness"`
 	Speed          float32 `json:"speed"`
 	PresentationID string  `json:"presentation_id"`
+	// Active is false while the configured active window excludes the current
+	// local time; the app then presents a blank frame.
+	Active bool `json:"active"`
 }
 
 func (c *Client) clockCall(ctx context.Context, rpc string, request, response any) error {

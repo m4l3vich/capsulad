@@ -200,6 +200,12 @@ func ringManifest() *manifest.Manifest {
 				Min: numberPtr(0), Max: numberPtr(1)},
 			{Key: "speed", Label: "Speed", Type: "number", Default: 1.0,
 				Min: numberPtr(0.1), Max: numberPtr(4)},
+			{Key: "schedule_enabled", Label: "Active window", Type: "boolean", Default: false,
+				Description: "Light the ring only between the start and end times. Volume, mute and alert indications still use the ring."},
+			{Key: "schedule_start", Label: "Active from", Type: "text", Default: "22:00",
+				Description: "HH:MM in the device timezone. The window may cross midnight; equal start and end mean all day."},
+			{Key: "schedule_end", Label: "Active until", Type: "text", Default: "07:00",
+				Description: "HH:MM in the device timezone. Outside the window the app presents a blank frame instead of the effect."},
 		},
 		Interfaces: []manifest.Interface{{
 			Service: ringServiceName, Version: "v1",
@@ -290,8 +296,15 @@ Current state of the built-in Ring system app. Calls are unary and routed with
 AppBusService.Call targeting app_id capsula.ring.
 
 ## GetState
-Returns the effective effect, palette, brightness, speed and the owned
-baseline presentation ID. State changes are made through application settings.
+Returns the effective effect, palette, brightness, speed, the owned baseline
+presentation ID and whether the baseline is currently lit. State changes are
+made through application settings.
+
+The optional active window (schedule_enabled, schedule_start, schedule_end) is
+evaluated against local wall-clock time in the device timezone. Outside the
+window the app presents an explicit blank frame on its normal baseline
+presentation, so the ring goes dark and returns at the next boundary without
+losing ownership; system and app indications still preempt it as usual.
 `
 
 // --- legacy state migration -------------------------------------------------

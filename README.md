@@ -46,7 +46,8 @@ the implementation is honest about what is verified on real hardware and what is
   The clock exposes `capsula.contracts.clock.v1.ClockService` (stopwatch, timers, alarms) and the
   ring exposes `capsula.contracts.ring.v1.RingService`; both are unary. Clock settings cover
   colon blink, timezone, display mode, timer duration and one alarm; ring settings cover effect,
-  palette, speed and brightness. Legacy `org.capsula.clock` / `org.example.ring-controller` state
+  palette, speed, brightness and an optional wall-clock active window (for a nightlight, or to
+  keep the ring dark at night). Legacy `org.capsula.clock` / `org.example.ring-controller` state
   migrates to these IDs. Rendering always goes through presentations/captures, so an external
   capture preempts a system app and its baseline resumes on release.
 - **Media-player contract without a bundled provider**: the standard
@@ -205,7 +206,12 @@ capsula -data-dir build/demo app start capsula.ring
 `capsula.clock` settings cover `blink` (boolean), `timezone` (IANA name; empty follows the device),
 `display_mode`, the timer duration, the stopwatch reset gesture (`hold` or `double_tap`) and one
 alarm (label, hour, minute, weekday mask, timezone, enabled). `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle`),
-`palette`, `speed` and `brightness`; the legacy `mode` key is accepted only so an existing settings
+`palette`, `speed`, `brightness` and an optional wall-clock active window
+(`schedule_enabled`, `schedule_start`/`schedule_end` as 24-hour `HH:MM` in the device timezone; the
+window may cross midnight and equal bounds mean all day). Outside the window the app presents an
+explicit blank frame on its normal baseline presentation, so the ring is dark but still yields to
+volume, mute, alert and application captures, and the selected effect returns at the boundary. The
+legacy `mode` key is accepted only so an existing settings
 file still validates; it is migrated to `effect` and no longer offered. Legacy defaults `org.capsula.clock`,
 `org.example.ring-controller` and `org.capsula.assistant` migrate to these IDs at boot, and the old
 clock settings are copied to `capsula.clock` once. The Web UI default-provider dropdowns list

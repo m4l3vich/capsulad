@@ -494,8 +494,9 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 <div class="card"><div class="k">Palette</div><div class="v">{{.Palette}}</div></div>
 <div class="card"><div class="k">Brightness</div><div class="v">{{printf "%.2f" .Brightness}}</div></div>
 <div class="card"><div class="k">Speed</div><div class="v">{{printf "%.2f" .Speed}}</div></div>
+<div class="card"><div class="k">Baseline</div><div class="v">{{with .Active}}{{if .}}on{{else}}off by schedule{{end}}{{else}}unknown{{end}}</div></div>
 </div>
-<p class="muted">These are the values the running ring app is rendering. Change effect, palette, brightness or speed in <a href="#configuration">Configuration</a> below; the app applies them to its normal ring presentation.</p>
+<p class="muted">These are the values the running ring app is rendering. Change effect, palette, brightness, speed or the active window in <a href="#configuration">Configuration</a> below; the app applies them to its normal ring presentation. Outside a configured active window the built-in ring app's baseline is explicitly blank, while volume, mute and alert indications still use the ring.</p>
 {{end}}{{end}}{{end}}
 
 {{if not $app.SystemApp}}{{with .Data.Provenance}}<h2>Build provenance</h2>

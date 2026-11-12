@@ -333,6 +333,14 @@ func ringEffectPresentationFrame(id string, params presets.Params) *frameworkv1.
 	}}
 }
 
+// blankPresentationFrame is explicit zero content, not an absent update: it
+// keeps ownership and eligibility while the backend writes nothing lit.
+func blankPresentationFrame() *frameworkv1.PresentationFrame {
+	return &frameworkv1.PresentationFrame{Payload: &frameworkv1.PresentationFrame_Blank{
+		Blank: &frameworkv1.BlankPresentation{},
+	}}
+}
+
 func presetArguments(params presets.Params) []*frameworkv1.PresetArgument {
 	keys := make([]string, 0, len(params))
 	for key := range params {

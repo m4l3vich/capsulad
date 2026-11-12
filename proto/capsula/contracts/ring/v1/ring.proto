@@ -21,4 +21,8 @@ message RingState {
   float speed = 4;
   // Presentation currently owned by the ring baseline; empty when stopped.
   string presentation_id = 5;
+  // Whether the baseline is lit. False while the configured active window
+  // excludes the current local time; the app then presents an explicit blank
+  // frame and other captures (volume, mute, alerts) still preempt it.
+  bool active = 6;
 }

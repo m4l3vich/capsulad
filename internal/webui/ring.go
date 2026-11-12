@@ -17,6 +17,9 @@ type ringState struct {
 	Brightness     float64 `json:"brightness"`
 	Speed          float64 `json:"speed"`
 	PresentationID string  `json:"presentation_id"`
+	// Active is nil for providers that predate the field: the card must not
+	// claim a schedule suppressed a ring that never reported one.
+	Active *bool `json:"active"`
 }
 
 // findRingService identifies the ring controller from manifest provides and

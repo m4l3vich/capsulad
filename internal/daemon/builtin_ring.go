@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -12,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
+	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presets"
 	"capsulad/internal/settings"
@@ -34,6 +38,19 @@ type builtinRing struct {
 	brightness float64
 	speed      float64
 
+	// The optional active window is local wall-clock time. Outside it the app
+	// keeps its normal baseline presentation but presents an explicit blank
+	// frame, so the ring goes dark while other captures still preempt it and
+	// the selected effect returns at the boundary.
+	now             func() time.Time
+	deviceTZ        string
+	loc             *time.Location
+	scheduleEnabled bool
+	activeFrom      int // minutes since local midnight
+	activeUntil     int
+	active          bool
+	wake            chan struct{}
+
 	applied string
 }
 
@@ -41,6 +58,9 @@ func newBuiltinRing(d *Daemon, ringID string) *builtinRing {
 	return &builtinRing{
 		d: d, ringID: ringID,
 		effect: "breathe", palette: "aurora", brightness: 1, speed: 1,
+		now: time.Now, active: true, loc: time.Local,
+		activeFrom: 22 * 60, activeUntil: 7 * 60,
+		wake: make(chan struct{}, 1),
 	}
 }
 
@@ -83,7 +103,8 @@ func (r *builtinRing) start() {
 	r.mu.Unlock()
 
 	r.loadSettings(ctx)
-	r.reassert()
+	r.refreshSchedule()
+	go r.scheduleLoop(ctx)
 }
 
 func (r *builtinRing) stop() {
@@ -139,6 +160,8 @@ func (r *builtinRing) applySettings(values []settings.AppSettingView) {
 	r.mu.Lock()
 	effect, palette := r.effect, r.palette
 	brightness, speed := r.brightness, r.speed
+	scheduleEnabled := r.scheduleEnabled
+	activeFrom, activeUntil := r.activeFrom, r.activeUntil
 	r.mu.Unlock()
 
 	var nextEffect, nextPalette string
@@ -155,6 +178,21 @@ func (r *builtinRing) applySettings(values []settings.AppSettingView) {
 	if decodeSetting(values, "speed", &rate) {
 		speed = clampRange(rate, 0.1, 4)
 	}
+	var enabled bool
+	if decodeSetting(values, "schedule_enabled", &enabled) {
+		scheduleEnabled = enabled
+	}
+	var fromText, untilText string
+	if decodeSetting(values, "schedule_start", &fromText) {
+		if minute, ok := parseClockTime(fromText); ok {
+			activeFrom = minute
+		}
+	}
+	if decodeSetting(values, "schedule_end", &untilText) {
+		if minute, ok := parseClockTime(untilText); ok {
+			activeUntil = minute
+		}
+	}
 	switch effect {
 	case "breathe", "spinner", "rainbow", "pulse", "comet", "sparkle":
 	default:
@@ -169,8 +207,41 @@ func (r *builtinRing) applySettings(values []settings.AppSettingView) {
 	r.mu.Lock()
 	r.effect, r.palette = effect, palette
 	r.brightness, r.speed = brightness, speed
+	r.scheduleEnabled = scheduleEnabled
+	r.activeFrom, r.activeUntil = activeFrom, activeUntil
+	r.mu.Unlock()
+	r.refreshSchedule()
+	r.signalSchedule()
+}
+
+// refreshSchedule re-evaluates the active window against the current wall
+// clock and republishes the baseline when the answer changed.
+func (r *builtinRing) refreshSchedule() {
+	r.mu.Lock()
+	if !r.running {
+		r.mu.Unlock()
+		return
+	}
+	r.active = r.scheduleActiveLocked(r.now())
 	r.mu.Unlock()
 	r.reassert()
+}
+
+// setDeviceTimezone follows the device-wide zone. The active window is local
+// wall-clock time, so the same window can open or close on a zone change.
+func (r *builtinRing) setDeviceTimezone(name string) {
+	r.mu.Lock()
+	if name == r.deviceTZ {
+		r.mu.Unlock()
+		return
+	}
+	r.deviceTZ = name
+	// Resolve once per zone change: the boundary timer must not read tzdata
+	// under the app lock on every tick.
+	r.loc = loadLocationOrDefault(name)
+	r.mu.Unlock()
+	r.refreshSchedule()
+	r.signalSchedule()
 }
 
 func (r *builtinRing) reassert() {
@@ -179,7 +250,7 @@ func (r *builtinRing) reassert() {
 		r.mu.Unlock()
 		return
 	}
-	id, params, sig := r.contentLocked()
+	frame, sig := r.frameLocked()
 	pres := r.pres
 	if pres == nil {
 		// The baseline stream is not attached yet (startup) or is being torn
@@ -194,9 +265,21 @@ func (r *builtinRing) reassert() {
 	}
 	r.applied = sig
 	r.mu.Unlock()
-	if err := pres.UpdateFrame(ringEffectPresentationFrame(id, params)); err != nil && r.d.ctx.Err() == nil {
+	if err := pres.UpdateFrame(frame); err != nil && r.d.ctx.Err() == nil {
 		r.d.logs.Debugf(ringAppID, "", "baseline: %v", err)
 	}
+}
+
+// frameLocked builds the baseline frame for the current state. A closed active
+// window yields an explicit blank frame: the presentation stays owned and
+// eligible, so the backend writes zeroes instead of freezing the last effect,
+// and the selected effect resumes when the window opens again.
+func (r *builtinRing) frameLocked() (*frameworkv1.PresentationFrame, string) {
+	if !r.active {
+		return blankPresentationFrame(), "blank"
+	}
+	id, params, sig := r.contentLocked()
+	return ringEffectPresentationFrame(id, params), sig
 }
 
 func (r *builtinRing) contentLocked() (string, presets.Params, string) {
@@ -249,6 +332,155 @@ func (r *builtinRing) contentLocked() (string, presets.Params, string) {
 		fmt.Sprintf("%s|%s|%.3f|%.3f", r.effect, r.palette, r.brightness, r.speed)
 }
 
+// --- active window ----------------------------------------------------------
+
+const (
+	// scheduleRecheck bounds one wait so a wall-clock step that does not pass
+	// through the settings watcher (a manual `date` or NTP correction) is
+	// picked up within the hour instead of at the next boundary. The timer
+	// fires at a boundary or this ceiling, never per output frame.
+	scheduleRecheck = time.Hour
+	// scheduleMinWait keeps a boundary that just passed from arming a
+	// zero-delay timer in a tight loop.
+	scheduleMinWait = time.Second
+)
+
+// scheduleLoop arms one timer for the next boundary (or settings/timezone
+// wake-up) instead of polling the clock on every output tick.
+func (r *builtinRing) scheduleLoop(ctx context.Context) {
+	for {
+		r.mu.Lock()
+		wait := r.scheduleWaitLocked()
+		r.mu.Unlock()
+		var (
+			timer  *time.Timer
+			timerC <-chan time.Time
+		)
+		if wait > 0 {
+			timer = time.NewTimer(wait)
+			timerC = timer.C
+		}
+		select {
+		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		case <-r.wake:
+			if timer != nil {
+				timer.Stop()
+			}
+		case <-timerC:
+			r.refreshSchedule()
+		}
+	}
+}
+
+// signalSchedule wakes the boundary loop after a settings or timezone change.
+func (r *builtinRing) signalSchedule() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// scheduleWaitLocked returns the delay until the next window boundary, or zero
+// when no boundary can change the state and only an explicit wake-up will.
+func (r *builtinRing) scheduleWaitLocked() time.Duration {
+	if !r.scheduleEnabled || r.activeFrom == r.activeUntil {
+		return 0
+	}
+	now := r.now()
+	next, ok := nextScheduleChange(now, r.activeFrom, r.activeUntil, r.locationLocked())
+	if !ok {
+		return 0
+	}
+	wait := next.Sub(now)
+	if wait < scheduleMinWait {
+		wait = scheduleMinWait
+	}
+	if wait > scheduleRecheck {
+		wait = scheduleRecheck
+	}
+	return wait
+}
+
+// scheduleActiveLocked reports whether the configured window contains now.
+func (r *builtinRing) scheduleActiveLocked(now time.Time) bool {
+	if !r.scheduleEnabled {
+		return true
+	}
+	return withinSchedule(now, r.activeFrom, r.activeUntil, r.locationLocked())
+}
+
+func (r *builtinRing) locationLocked() *time.Location {
+	if r.loc != nil {
+		return r.loc
+	}
+	return time.Local
+}
+
+// withinSchedule reports whether a wall-clock instant falls in the active
+// window. The window is half-open, may cross midnight, and equal bounds mean
+// the whole day.
+func withinSchedule(now time.Time, start, end int, loc *time.Location) bool {
+	if start == end {
+		return true
+	}
+	local := now.In(loc)
+	current := local.Hour()*60 + local.Minute()
+	if start < end {
+		return current >= start && current < end
+	}
+	return current >= start || current < end
+}
+
+// nextScheduleChange returns the next local instant at which withinSchedule
+// flips. It scans today and tomorrow so an overnight window works; a whole-day
+// window has no boundary.
+func nextScheduleChange(now time.Time, start, end int, loc *time.Location) (time.Time, bool) {
+	if start == end {
+		return time.Time{}, false
+	}
+	local := now.In(loc)
+	var next time.Time
+	for day := 0; day <= 1; day++ {
+		d := local.AddDate(0, 0, day)
+		for _, minute := range [2]int{start, end} {
+			t := time.Date(d.Year(), d.Month(), d.Day(), minute/60, minute%60, 0, 0, loc)
+			if !t.After(local) {
+				continue
+			}
+			if next.IsZero() || t.Before(next) {
+				next = t
+			}
+		}
+	}
+	return next, !next.IsZero()
+}
+
+// parseClockTime parses a 24-hour HH:MM wall-clock time into minutes since
+// midnight.
+func parseClockTime(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	hours, minutes, ok := strings.Cut(s, ":")
+	if !ok || len(hours) < 1 || len(hours) > 2 || len(minutes) != 2 {
+		return 0, false
+	}
+	hour, err := strconv.Atoi(hours)
+	if err != nil {
+		return 0, false
+	}
+	minute, err := strconv.Atoi(minutes)
+	if err != nil {
+		return 0, false
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return hour*60 + minute, true
+}
+
 func (r *builtinRing) handleCall(ctx context.Context, service, rpc string, request []byte) ([][]byte, error) {
 	if service != ringServiceName {
 		return nil, status.Errorf(codes.Unimplemented, "ring app does not implement %s", service)
@@ -271,9 +503,10 @@ func (r *builtinRing) handleCall(ctx context.Context, service, rpc string, reque
 		Effect: r.effect, Palette: r.palette,
 		Brightness: float32(r.brightness), Speed: float32(r.speed),
 		PresentationId: r.presentationIDLocked(),
+		Active:         r.active,
 	}
 	r.mu.Unlock()
-	payload, err := encodeProtoResponse(out)
+	payload, err := encodeRingState(out)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -317,6 +550,25 @@ func validateRingSettings(values map[string]json.RawMessage) error {
 			return fmt.Errorf("speed must be between 0.1 and 4")
 		}
 	}
+	var enabled bool
+	if raw, ok := values["schedule_enabled"]; ok {
+		if json.Unmarshal(raw, &enabled) != nil {
+			return fmt.Errorf("schedule_enabled must be true or false")
+		}
+	}
+	for _, key := range []string{"schedule_start", "schedule_end"} {
+		raw, ok := values[key]
+		if !ok {
+			continue
+		}
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return fmt.Errorf("%s must be text", key)
+		}
+		if _, ok := parseClockTime(text); !ok {
+			return fmt.Errorf("%s must be a 24-hour HH:MM time, got %q", key, text)
+		}
+	}
 	return nil
 }
 
@@ -329,6 +581,14 @@ func (r *builtinRing) presentationIDLocked() string {
 
 func encodeProtoResponse(msg proto.Message) ([]byte, error) {
 	return protojson.MarshalOptions{UseProtoNames: true}.Marshal(msg)
+}
+
+// encodeRingState emits default values so the built-in app always reports
+// active=false while its window is closed. Without that, proto3 would omit the
+// field and a reader could not tell "inactive" from "this provider does not
+// report activity".
+func encodeRingState(msg proto.Message) ([]byte, error) {
+	return protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}.Marshal(msg)
 }
 
 func mustParams(id string, params presets.Params) presets.Params {

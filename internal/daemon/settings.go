@@ -146,6 +146,9 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	if d.builtins != nil && d.builtins.clock != nil {
 		d.builtins.clock.setDeviceTimezone(v.Timezone)
 	}
+	if d.builtins != nil && d.builtins.ring != nil {
+		d.builtins.ring.setDeviceTimezone(v.Timezone)
+	}
 	timezoneChanged := prev != nil && prev.Timezone != v.Timezone
 	d.audio.SetMasterVolume(v.MasterVolume)
 	d.audio.SetMuted(v.MicrophoneMuted)
