@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"math/rand/v2"
 	"os"
@@ -507,5 +508,220 @@ func TestLevelFromRMS(t *testing.T) {
 	quiet, loud := levelFromRMS(0.01), levelFromRMS(0.2)
 	if loud <= quiet {
 		t.Fatalf("level is not monotonic: %f -> %f", quiet, loud)
+	}
+}
+
+func TestIsPreroll(t *testing.T) {
+	item := reply{activationNS: 1000}
+	cases := []struct {
+		name string
+		item reply
+		ns   uint64
+		want bool
+	}{
+		{"before activation", item, 999, true},
+		{"at activation", item, 1000, false},
+		{"after activation", item, 1001, false},
+		{"unknown activation time", reply{}, 1, false},
+		{"unknown chunk time", item, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPreroll(tc.item, &capsula.AudioChunk{MonotonicTimeNS: tc.ns}); got != tc.want {
+				t.Fatalf("isPreroll(activation=%d, chunk=%d) = %v, want %v",
+					tc.item.activationNS, tc.ns, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReleaseHandling(t *testing.T) {
+	signalled := func(tr *turn) bool {
+		t.Helper()
+		select {
+		case <-tr.release:
+			return true
+		default:
+			return false
+		}
+	}
+
+	a := &assistant{}
+
+	// A release can arrive before its queued activation becomes the active
+	// turn; it must be remembered and applied exactly once.
+	queued := &turn{activationID: "queued", release: make(chan struct{})}
+	a.releaseInput(&capsula.InputReleased{ActivationID: "queued"})
+	if a.pendingRelease != "queued" {
+		t.Fatalf("pending release = %q, want queued", a.pendingRelease)
+	}
+	if signalled(queued) {
+		t.Fatal("queued turn was released before it became active")
+	}
+	a.setActive(queued)
+	if !signalled(queued) {
+		t.Fatal("pending release was not applied to the turn")
+	}
+	if a.pendingRelease != "" {
+		t.Fatalf("pending release survived activation: %q", a.pendingRelease)
+	}
+
+	// A release for a different activation must not end the active turn; it
+	// belongs to a turn that is still waiting in the queue.
+	active := &turn{activationID: "active", release: make(chan struct{})}
+	a.setActive(active)
+	a.releaseInput(&capsula.InputReleased{ActivationID: "other"})
+	if signalled(active) {
+		t.Fatal("release for another activation ended the active turn")
+	}
+	if a.pendingRelease != "other" {
+		t.Fatalf("pending release = %q, want other", a.pendingRelease)
+	}
+
+	// Releasing the active turn signals it immediately and clears it.
+	a.releaseInput(&capsula.InputReleased{ActivationID: "active"})
+	if !signalled(active) {
+		t.Fatal("release did not signal the active turn")
+	}
+	a.clearActive(active)
+	if a.active != nil {
+		t.Fatalf("active turn = %+v after clearing", a.active)
+	}
+
+	// A nil release is ignored.
+	a.releaseInput(nil)
+}
+
+func TestEmptyActivationIdentityIgnored(t *testing.T) {
+	a := &assistant{queue: make(chan reply, 1)}
+	a.enqueue(&capsula.Activation{})
+	select {
+	case item := <-a.queue:
+		t.Fatalf("activation without an id was queued: %+v", item)
+	default:
+	}
+
+	a.releaseInput(&capsula.InputReleased{})
+	if a.pendingRelease != "" {
+		t.Fatalf("release without an id became pending: %q", a.pendingRelease)
+	}
+
+	// The empty pending-release sentinel must not release an active turn that
+	// also has no identity; such a turn would reply without listening.
+	pending := &turn{release: make(chan struct{})}
+	a.setActive(pending)
+	select {
+	case <-pending.release:
+		t.Fatal("empty pending release signalled an unidentified turn")
+	default:
+	}
+}
+
+// A steady room noise floor (a fan, a fridge, traffic) must not be mistaken for
+// speech, and speech above it must still start and end. The old fixed
+// thresholds either never ended the turn or let the background keep it open
+// until the listen cap cancelled it.
+func TestSpeechTrackerAdaptsToRoomNoise(t *testing.T) {
+	tr := &speechTracker{}
+	for range 50 {
+		if started, _ := tr.feed(0.03, 20*time.Millisecond); started {
+			t.Fatal("room noise started speech")
+		}
+	}
+	started := false
+	for range 20 {
+		if s, _ := tr.feed(0.18, 20*time.Millisecond); s {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatal("speech above the room noise was not detected")
+	}
+	ended := false
+	for range 100 {
+		if _, e := tr.feed(0.03, 20*time.Millisecond); e {
+			ended = true
+			break
+		}
+	}
+	if !ended {
+		t.Fatal("speech tail against the same room noise did not end the turn")
+	}
+	if tr.active() {
+		t.Fatal("tracker stayed active after the utterance")
+	}
+
+	// A quiet room keeps the absolute floors: a level that is well above the
+	// background but still quiet is not speech.
+	quiet := &speechTracker{}
+	for range 50 {
+		quiet.feed(0.001, 20*time.Millisecond)
+	}
+	on, _ := quiet.thresholds()
+	if on != speechOnRMS {
+		t.Fatalf("quiet-room onset threshold = %f, want %f", on, speechOnRMS)
+	}
+}
+
+// A dismiss action cancels the active turn and drops activations that were
+// queued behind it, so a stale request cannot be answered after the user has
+// dismissed the assistant.
+func TestDismissCancelsActiveTurnAndQueuedActivations(t *testing.T) {
+	a := &assistant{queue: make(chan reply, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.active = &turn{activationID: "act_1", release: make(chan struct{}), cancel: cancel}
+	a.queue <- reply{activationID: "act_2"}
+
+	a.dismiss()
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("dismiss did not cancel the active turn")
+	}
+	if got := len(a.queue); got != 0 {
+		t.Fatalf("%d queued activations survived dismissal", got)
+	}
+
+	// Dismissing with no active turn is a no-op, not a panic.
+	a.active = nil
+	a.dismiss()
+}
+
+// Pre-activation audio characterizes the room before any speech window is
+// classified, so a loud steady background is not mistaken for an utterance.
+func TestSpeechTrackerPreRollCalibratesLoudRoom(t *testing.T) {
+	tr := &speechTracker{}
+	for range 20 {
+		tr.calibrate(0.06)
+	}
+	on, off := tr.thresholds()
+	if on != noiseFloorMax*speechNoiseOn || off != noiseFloorMax*speechNoiseOff {
+		t.Fatalf("calibrated thresholds on=%f off=%f", on, off)
+	}
+	for range 50 {
+		if started, _ := tr.feed(0.06, 20*time.Millisecond); started {
+			t.Fatal("calibrated room noise started speech")
+		}
+	}
+	started := false
+	for range 20 {
+		if s, _ := tr.feed(0.2, 20*time.Millisecond); s {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatal("speech above the calibrated room noise was not detected")
+	}
+	ended := false
+	for range 100 {
+		if _, e := tr.feed(0.06, 20*time.Millisecond); e {
+			ended = true
+			break
+		}
+	}
+	if !ended {
+		t.Fatal("speech did not end against the calibrated room noise")
 	}
 }

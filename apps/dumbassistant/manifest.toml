@@ -38,6 +38,11 @@ required_capabilities = [
   "capsula.bus.notifications",
 ]
 
+[[actions]]
+id = "dismiss"
+label = "Dismiss the current turn"
+description = "Stops playback and listening immediately and returns to idle without restarting the app."
+
 [[settings]]
 key = "delay"
 label = "Reply delay"

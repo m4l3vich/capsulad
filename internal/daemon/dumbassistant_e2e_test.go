@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -253,8 +254,12 @@ func TestDumbAssistantMuteCancels(t *testing.T) {
 }
 
 // TestDumbAssistantTalkReleaseEndsTurn proves a hold-to-talk turn ends on the
-// framework release event, not on a silence window: the injected tone never
-// stops before release.
+// framework release event, not on a silence window. It uses the real talk key,
+// which the framework labels as a touch-origin activation, so the app must
+// honor the hold-to-talk setting for physical keys too: after speech stops, the
+// key is still held and no reply may start. A wakeword activation is delivered
+// while the key is still held, so the release must be routed to the original
+// key activation rather than whichever activation was delivered last.
 func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	d, appID := startDumbAssistant(t)
 	if err := d.writeUserSettings([]string{"touch_hold_mode"}, func(v *settings.UserSettings) {
@@ -263,7 +268,7 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.simTouchSignal(backend.InputEvent{Gesture: &backend.GestureEvent{ID: "hold", Phase: "start"}})
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "voice", Pressed: true}})
 	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
 		return d.router.Current("light.ring.main").SelectedAppID == appID
 	})
@@ -280,10 +285,29 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	waitFor(t, 2*time.Second, "speech detected", func() bool {
 		return strings.Contains(logText(d), "speech detected")
 	})
+	// Let voiced time exceed minSpeech (140 ms), then stop speaking while the
+	// key remains held. A turn that ignored the hold-to-talk mode would end on
+	// the 700 ms silence and open its reply after the configured delay.
+	time.Sleep(300 * time.Millisecond)
+	stopTone()
+	quiet := time.Now()
+	for time.Since(quiet) < 2600*time.Millisecond {
+		if playbackOpen(d, appID) {
+			t.Fatalf("key turn ended on silence before release; daemon log:\n%s", logText(d))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Deliver a wakeword activation while the key turn is held and listening.
+	// The release below belongs to the voice key; a release path that tags the
+	// most recently delivered activation would end the wrong turn and leave
+	// this one listening until the safety cap.
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
 
 	released := time.Now()
-	d.simTouchSignal(backend.InputEvent{Gesture: &backend.GestureEvent{ID: "hold", Phase: "end"}})
-	stopTone()
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "voice", Pressed: false}})
 	waitFor(t, 2*time.Second, "talk button release", func() bool {
 		return strings.Contains(logText(d), "talk button released")
 	})
@@ -295,6 +319,76 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, "reply playback finished", func() bool {
 		return !playbackOpen(d, appID)
+	})
+	waitFor(t, 3*time.Second, "ring released", func() bool {
+		return strings.Contains(logText(d), "ring released")
+	})
+}
+
+// TestDumbAssistantHoldModeTapDoesNotActivate proves a sub-threshold panel tap
+// in hold-to-talk mode is not a turn. The framework activates on a hold, not on
+// a tap, so the assistant must not claim the ring or open the microphone.
+func TestDumbAssistantHoldModeTapDoesNotActivate(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	if err := d.writeUserSettings([]string{"touch_hold_mode"}, func(v *settings.UserSettings) {
+		v.TouchHoldMode = settings.HoldToTalk
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "primary", Pressed: true}})
+	time.Sleep(100 * time.Millisecond)
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "primary", Pressed: false}})
+
+	// Wait past the hold threshold so a late activation would be visible.
+	time.Sleep(1200 * time.Millisecond)
+	if got := d.router.Current("light.ring.main").SelectedAppID; got == appID {
+		t.Fatalf("hold-mode tap captured the ring; selected app is %q", got)
+	}
+	if inputOpen(d, appID) {
+		t.Fatal("hold-mode tap opened the microphone")
+	}
+	if text := logText(d); strings.Contains(text, "ACTIVATION_TOUCH queued") || strings.Contains(text, "microphone listening") {
+		t.Fatalf("hold-mode tap activated the assistant:\n%s", text)
+	}
+}
+
+// TestDumbAssistantUnpairedTouchActivationCancels proves a touch activation
+// whose release never arrives still cancels on the no-speech window. This is
+// the lost-release safety net: without it an otherwise silent hold-to-talk turn
+// would keep the ring and microphone claimed for the full listen cap.
+func TestDumbAssistantUnpairedTouchActivationCancels(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	if err := d.writeUserSettings([]string{"touch_hold_mode"}, func(v *settings.UserSettings) {
+		v.TouchHoldMode = settings.HoldToTalk
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A manual touch activation with no coordinating release simulates a lost
+	// TouchRelease for the active turn.
+	if _, ok := d.wake.Trigger("touch", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator touch trigger failed")
+	}
+	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream open", func() bool {
+		return inputOpen(d, appID)
+	})
+	waitAssistantListening(t, d, 1)
+
+	waitFor(t, 6*time.Second, "no speech cancellation", func() bool {
+		return strings.Contains(logText(d), "no speech within")
+	})
+	if strings.Contains(logText(d), "listen window elapsed") {
+		t.Fatal("lost-release turn reached the listen cap instead of the no-speech window")
+	}
+	if playbackOpen(d, appID) {
+		t.Fatal("lost-release turn produced reply playback")
+	}
+	waitFor(t, 3*time.Second, "microphone stream closed", func() bool {
+		return !inputOpen(d, appID)
 	})
 	waitFor(t, 3*time.Second, "ring released", func() bool {
 		return strings.Contains(logText(d), "ring released")
@@ -427,9 +521,9 @@ func TestDumbAssistantZeroDelayTransitionsDuringReply(t *testing.T) {
 
 // TestDumbAssistantAudioGapDoesNotReply proves a dropped-audio gap while
 // speech status is unknown does not start the reply path. It deliberately
-// overflows the capture queue with silence after a voiced burst, waits past
-// the configured delay with no playback, then speaks and quiets normally to
-// finish the turn.
+// overflows the real transport with voiced PCM while the consumer is paused,
+// then resumes speech and waits past the configured delay with no playback.
+// Only genuine end-of-speech may finish the turn.
 func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 	d, appID := startDumbAssistant(t)
 	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
@@ -451,12 +545,49 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 	waitFor(t, 2*time.Second, "speech before the gap", func() bool {
 		return strings.Contains(logText(d), "speech detected")
 	})
+	time.Sleep(300 * time.Millisecond)
 	tone()
 
-	// A silence burst bigger than the capture queue forces dropped-frame
-	// chunks; the tracker is active from the tone, so the gap is exactly the
-	// uncertain-status case the app must not treat as end-of-speech.
-	sim.InjectPCM(make([]byte, 16000*2*60))
+	// Pause the real consumer while a voiced burst exceeds the transport
+	// window. Preserved pre-gap chunks must remain voiced: enough known
+	// silence before the gap would legitimately end the utterance.
+	run, ok := d.sup.ReadyRun(appID)
+	if !ok {
+		t.Fatal("assistant is not running")
+	}
+	process, err := os.FindProcess(run.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	paused := true
+	defer func() {
+		if paused {
+			_ = process.Signal(syscall.SIGCONT)
+		}
+	}()
+	frames, unsubscribe := d.audio.SubscribeFrames(8192)
+	defer unsubscribe()
+	const burstFrames = 16000 * 120
+	sim.InjectPCM(tonePCMFrames(16000, burstFrames))
+	drained := 0
+	deadline := time.After(2 * time.Second)
+	for drained < burstFrames {
+		select {
+		case f := <-frames:
+			drained += len(f.PCM) / 2
+		case <-deadline:
+			t.Fatal("capture source did not deliver the queued burst")
+		}
+	}
+	if err := process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	paused = false
+	speech := startToneInjector(sim, 200)
+	defer speech()
 	gapDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(gapDeadline) && !strings.Contains(logText(d), "audio gap") {
 		time.Sleep(50 * time.Millisecond)
@@ -464,8 +595,6 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 	if !strings.Contains(logText(d), "audio gap") {
 		t.Fatalf("audio gap not observed; daemon log:\n%s", logText(d))
 	}
-	speech := startToneInjector(sim, 200)
-	defer speech()
 	gapAt := time.Now()
 	for time.Now().Before(gapAt.Add(1500 * time.Millisecond)) {
 		if playbackOpen(d, appID) {
@@ -701,4 +830,97 @@ func wavDuration(t *testing.T, data []byte) time.Duration {
 	}
 	frames := pcmBytes / (channels * bits / 8)
 	return time.Duration(frames) * time.Second / time.Duration(rate)
+}
+
+// The circle/play-pause key dismisses an in-flight assistant turn instead of
+// starting another one. It must stop listening or playback immediately and
+// release the ring and microphone, leaving the assistant ready for the next
+// activation.
+func TestDumbAssistantPrimaryKeyDismissesTurn(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
+	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream open", func() bool {
+		return inputOpen(d, appID)
+	})
+	waitAssistantListening(t, d, 1)
+
+	d.input.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "play_pause", Pressed: true}})
+	time.Sleep(60 * time.Millisecond)
+	d.input.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "play_pause", Pressed: false}})
+
+	waitFor(t, 3*time.Second, "assistant dismiss action", func() bool {
+		return strings.Contains(logText(d), "assistant turn dismissed by the circle key") &&
+			strings.Contains(logText(d), "dismissed")
+	})
+	waitFor(t, 3*time.Second, "ring released after dismissal", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID != appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream closed after dismissal", func() bool {
+		return !inputOpen(d, appID)
+	})
+	if playbackOpen(d, appID) {
+		t.Fatal("dismissed turn opened reply playback")
+	}
+	if got := strings.Count(logText(d), "playing reply for activation="); got != 0 {
+		t.Fatalf("dismissed turn played %d replies:\n%s", got, logText(d))
+	}
+	if _, ok := d.sup.ReadyRun(appID); !ok {
+		t.Fatal("assistant was not ready after dismissal")
+	}
+}
+
+// A killed assistant must come back by itself and accept a new activation.
+// Previously the lost bus connection was treated as a deliberate stop, so the
+// run never restarted and both wakeword and manual activation had no target.
+func TestDumbAssistantKilledMidTurnRestartsAndActivates(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	first, ok := d.sup.ReadyRun(appID)
+	if !ok {
+		t.Fatal("assistant is not ready")
+	}
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
+	waitFor(t, 3*time.Second, "microphone stream open before the kill", func() bool {
+		return inputOpen(d, appID)
+	})
+
+	if err := syscall.Kill(first.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill assistant: %v", err)
+	}
+	replacement := ""
+	waitFor(t, 10*time.Second, "assistant restarts after being killed", func() bool {
+		run, ok := d.sup.ReadyRun(appID)
+		if !ok || run.RunID == first.RunID {
+			return false
+		}
+		replacement = run.RunID
+		return true
+	})
+	if replacement == "" {
+		t.Fatal("no replacement run")
+	}
+	waitFor(t, 3*time.Second, "killed turn released its microphone stream", func() bool {
+		return !inputOpen(d, appID)
+	})
+	waitFor(t, 3*time.Second, "killed turn released the ring", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID != appID
+	})
+
+	// The restarted process must be usable: a fresh activation opens a real
+	// microphone stream and reaches the listening state again.
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("wakeword trigger after restart failed")
+	}
+	waitFor(t, 3*time.Second, "restarted assistant listens", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID && inputOpen(d, appID)
+	})
+	waitFor(t, 3*time.Second, "second listening turn", func() bool {
+		return strings.Count(logText(d), "microphone listening") >= 2
+	})
 }

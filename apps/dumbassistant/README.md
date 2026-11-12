@@ -24,9 +24,13 @@ library path in `CAPSULA_LIBRARY`, and the manifest declares the optional
 - While listening, every ring pixel is teal (`#008080`). Brightness follows the
   real captured PCM level (RMS mapped over -60..0 dBFS), with fast attack and a
   slower release. There is no synthetic level generator.
-- Speech end comes from the captured PCM: sustained energy starts an utterance,
-  700 ms of quiet below the release threshold ends it, and a blip shorter than
-  140 ms is rejected as noise. A 3 s no-speech window cancels the turn without a
+- Speech end comes from the captured PCM: sustained energy above a learned
+  room-noise floor starts an utterance, 700 ms of quiet near that floor ends it,
+  and a blip shorter than 140 ms is rejected as noise. The activation pre-roll
+  calibrates the floor before speech is classified, and it keeps adapting while
+  listening. The absolute thresholds remain the floor for a quiet room; a steady
+  fan or traffic raises the onset and release thresholds instead of holding the
+  turn open until the listen cap. A 3 s no-speech window cancels the turn without a
   reply. Continuous speech that reaches the 10 s listen cap also cancels the
   turn with a full cleanup instead of pretending the utterance ended, so a
   reply delay can never start while the user is still speaking. These are
@@ -40,6 +44,11 @@ library path in `CAPSULA_LIBRARY`, and the manifest declares the optional
   delay neither skips it nor adds a wait; the blend can continue into playback.
 - The app begins a conversation while listening so other mixer playback is
   ducked; the conversation closes with the turn.
+- The manifest declares a `dismiss` action. The daemon invokes it when the
+  circle/play-pause key is pressed during a turn; the app cancels listening, the
+  reply delay or playback, drops activations queued behind it, and releases the
+  ring, microphone, conversation and playback through the normal teardown. The
+  process stays running and ready for the next activation.
 - Global mute, microphone watchdog notices, daemon shutdown, a closed capture
   stream and unavailable audio all cancel the turn. The microphone, ring capture
   and ring presentation are always released; no capture is left claimed.

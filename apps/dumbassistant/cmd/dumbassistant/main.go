@@ -195,6 +195,7 @@ type turn struct {
 	activationID string
 	release      chan struct{}
 	releaseOnce  sync.Once
+	cancel       context.CancelFunc
 }
 
 func (t *turn) signalRelease() {
@@ -262,6 +263,12 @@ func main() {
 			a.releaseInput(rel)
 		},
 		Settings: a.applySettings,
+		Action: func(_ context.Context, act *capsula.ActionInvoked) {
+			if act == nil || act.ActionID != dismissActionID {
+				return
+			}
+			a.dismiss()
+		},
 		Invocation: func(_ context.Context, inv *capsula.LaunchInvocation) {
 			log.Printf("dumbassistant: invocation %s", inv.ID)
 			_ = client.NotifyInvocationResult(inv.ID, true, "dumb assistant is always ready")
@@ -277,6 +284,13 @@ func main() {
 
 func (a *assistant) enqueue(act *capsula.Activation) {
 	if act == nil {
+		return
+	}
+	if act.ID == "" {
+		// Every turn is matched to the framework's release event by this ID.
+		// An unidentified activation could otherwise collide with the empty
+		// "no pending release" sentinel and be released before it listens.
+		log.Printf("dumbassistant: activation without an id dropped origin=%s", act.Origin.String())
 		return
 	}
 	item := reply{
@@ -298,7 +312,7 @@ func (a *assistant) enqueue(act *capsula.Activation) {
 }
 
 func (a *assistant) releaseInput(rel *capsula.InputReleased) {
-	if rel == nil {
+	if rel == nil || rel.ActivationID == "" {
 		return
 	}
 	a.mu.Lock()
@@ -318,7 +332,7 @@ func (a *assistant) releaseInput(rel *capsula.InputReleased) {
 func (a *assistant) setActive(t *turn) {
 	a.mu.Lock()
 	a.active = t
-	if a.pendingRelease == t.activationID {
+	if a.pendingRelease != "" && a.pendingRelease == t.activationID {
 		a.pendingRelease = ""
 		t.signalRelease()
 	}
@@ -353,7 +367,7 @@ func (a *assistant) answer(item reply) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	defer cancel()
 
-	t := &turn{activationID: item.activationID, release: make(chan struct{})}
+	t := &turn{activationID: item.activationID, release: make(chan struct{}), cancel: cancel}
 	a.setActive(t)
 	defer a.clearActive(t)
 
@@ -398,6 +412,35 @@ func (a *assistant) answer(item reply) {
 	log.Printf("dumbassistant: reply for activation=%s finished", item.activationID)
 }
 
+// dismissActionID is the manifest-declared action the framework invokes when a
+// physical key dismisses the current turn. It cancels listening, the reply
+// delay and playback in one step; the deferred teardown releases the ring,
+// microphone, conversation and playback streams.
+const dismissActionID = "dismiss"
+
+// dismiss cancels the active turn and drops activations that were queued but
+// not started, so a dismissed assistant cannot answer a stale request later.
+func (a *assistant) dismiss() {
+	a.mu.Lock()
+	active := a.active
+	a.pendingRelease = ""
+	a.mu.Unlock()
+	if active == nil || active.cancel == nil {
+		log.Printf("dumbassistant: dismiss ignored; no active turn")
+		return
+	}
+	log.Printf("dumbassistant: activation=%s dismissed", active.activationID)
+	active.cancel()
+	for {
+		select {
+		case item := <-a.queue:
+			log.Printf("dumbassistant: activation=%s dropped; dismissed", item.activationID)
+		default:
+			return
+		}
+	}
+}
+
 func (a *assistant) beginConversation(ctx context.Context, activationID string) (*capsula.Conversation, string) {
 	conv, err := a.client.BeginConversation(ctx, activationID)
 	if err != nil {
@@ -412,7 +455,9 @@ func (a *assistant) beginConversation(ctx context.Context, activationID string) 
 // listen consumes real microphone PCM until the utterance ends. It returns
 // false when the turn must be cancelled: mute, watchdog, daemon shutdown, a
 // closed stream, or silence with no speech at all. Hold-to-talk turns end on
-// the framework's release event instead of a silence window.
+// the framework's release event instead of a silence window, but the no-speech
+// watchdog still applies: a release that is never delivered must not leave the
+// ring and microphone claimed for the full listen cap.
 func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringView, conversationID string) bool {
 	holdToTalk := item.origin == capsula.ActivationOriginTouch && a.holdToTalk(ctx)
 
@@ -434,6 +479,7 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 	rate := 16000
 	started := time.Now()
 	lastVoice := started
+	lastGapLog := time.Time{}
 	ticker := time.NewTicker(listenTick)
 	defer ticker.Stop()
 
@@ -448,7 +494,10 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 			return true
 
 		case <-ticker.C:
-			if !tracker.active() && !holdToTalk && time.Since(lastVoice) >= noSpeechLimit {
+			// The no-speech window applies to hold-to-talk turns too: if the
+			// release event is lost, an otherwise silent turn must not keep
+			// the ring and microphone claimed for the full listen cap.
+			if !tracker.active() && time.Since(lastVoice) >= noSpeechLimit {
 				log.Printf("dumbassistant: activation=%s no speech within %s; cancelled", item.activationID, noSpeechLimit)
 				return false
 			}
@@ -482,8 +531,14 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 				// A gap is not evidence that the utterance ended. Reset the
 				// classifier and keep listening; the no-speech window and the
 				// safety cap still bound the turn, so dropped audio can never
-				// produce a premature reply.
-				log.Printf("dumbassistant: activation=%s audio gap dropped=%d; continuing", item.activationID, c.DroppedFramesBefore)
+				// produce a premature reply. Log at most twice a second: a
+				// backlog can carry hundreds of gap markers, and a line per
+				// chunk slows this consumer enough to overflow the transport
+				// buffer instead of draining it.
+				if time.Since(lastGapLog) >= 500*time.Millisecond {
+					lastGapLog = time.Now()
+					log.Printf("dumbassistant: activation=%s audio gap dropped=%d; continuing", item.activationID, c.DroppedFramesBefore)
+				}
 				tracker.reset()
 				continue
 			}
@@ -493,10 +548,12 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 				ring.observe(levelFromRMS(rms))
 			}
 			if isPreroll(item, c) {
+				// Pre-activation audio is the room, not this utterance: learn
+				// the noise floor from it so a loud fan or traffic is already
+				// characterized before the first speech window arrives. It must
+				// never start a turn by itself.
+				tracker.calibrate(rms)
 				continue
-			}
-			if rms >= speechOnRMS {
-				lastVoice = time.Now()
 			}
 			frames := int(c.FrameCount)
 			if frames <= 0 {
@@ -504,6 +561,9 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 			}
 			duration := time.Duration(frames) * time.Second / time.Duration(rate)
 			startedNow, ended := tracker.feed(rms, duration)
+			if startedNow || tracker.active() {
+				lastVoice = time.Now()
+			}
 			if startedNow {
 				log.Printf("dumbassistant: activation=%s speech detected", item.activationID)
 			}
@@ -531,26 +591,106 @@ func isPreroll(item reply, c *capsula.AudioChunk) bool {
 	return item.activationNS != 0 && c.MonotonicTimeNS != 0 && c.MonotonicTimeNS < item.activationNS
 }
 
-// speechTracker classifies consecutive PCM chunks. It is intentionally small:
-// sustained energy starts speech, a quieter sustained tail ends it, and a blip
-// shorter than minSpeech is treated as noise rather than an utterance.
+// speechTracker classifies consecutive PCM chunks against an adaptive noise
+// floor. A fixed absolute threshold fails in a real room: a fan, a fridge or
+// traffic keeps the level above the "silence" value, so the turn never ends and
+// the listen cap cancels it. Silence is instead whatever the room is doing, and
+// speech must rise clearly above it. The absolute values remain the floor for a
+// quiet room; the relative values scale with measured background noise.
 type speechTracker struct {
 	onRun    int
 	speaking bool
 	speech   time.Duration
 	silence  time.Duration
+	// floor is the running background RMS. It follows quieter rooms quickly
+	// and louder ones slowly, and only samples below the onset threshold move
+	// it, so an utterance cannot raise its own detection threshold.
+	floor float64
 }
+
+const (
+	// Noise-floor adaptation. Downward tracking is fast enough to notice a
+	// fan stopping. Upward tracking is slower so a short utterance cannot
+	// become the background, but it still converges within about a second of
+	// steady noise (5 % per 20 ms frame).
+	noiseFloorDown = 0.25
+	noiseFloorUp   = 0.05
+	noiseFloorMin  = 0.0005
+	noiseFloorMax  = 0.04
+	speechNoiseOn  = 2.5 // speech onset must exceed background by this factor
+	speechNoiseOff = 1.5 // the tail counts as silence near this factor
+)
 
 func (t *speechTracker) active() bool { return t.speaking }
 
+// calibrate folds a pre-activation chunk into the noise floor. Unlike observe it
+// does not refuse a level above the current onset threshold: pre-roll is by
+// definition background, and following it quickly is what makes a loud room
+// distinguishable from speech once the turn actually starts.
+func (t *speechTracker) calibrate(rms float64) {
+	target := math.Min(rms, noiseFloorMax)
+	if t.floor <= 0 {
+		t.floor = target
+	} else {
+		t.floor += (target - t.floor) * noiseFloorDown
+	}
+	if t.floor < noiseFloorMin {
+		t.floor = noiseFloorMin
+	}
+	if t.floor > noiseFloorMax {
+		t.floor = noiseFloorMax
+	}
+}
+
 func (t *speechTracker) reset() { *t = speechTracker{} }
+
+// thresholds returns the onset and tail thresholds for the current floor.
+func (t *speechTracker) thresholds() (on, off float64) {
+	on, off = speechOnRMS, speechOffRMS
+	if scaled := t.floor * speechNoiseOn; scaled > on {
+		on = scaled
+	}
+	if scaled := t.floor * speechNoiseOff; scaled > off {
+		off = scaled
+	}
+	return on, off
+}
+
+// observe records a chunk that did not start speech. The first chunk seeds the
+// floor; later chunks move it quickly toward a quieter room and slowly toward a
+// louder one. A sample above the current onset threshold is likely speech and
+// is not folded into the background.
+func (t *speechTracker) observe(rms float64) {
+	if t.floor <= 0 {
+		// Seed low enough that the first chunk of a real utterance cannot
+		// become the background it has to exceed. A noisy room then walks the
+		// floor upward at the slow rate.
+		t.floor = math.Min(rms, speechOffRMS)
+	}
+	if on, _ := t.thresholds(); rms > on {
+		return
+	}
+	rate := noiseFloorUp
+	if rms < t.floor {
+		rate = noiseFloorDown
+	}
+	t.floor += (rms - t.floor) * rate
+	if t.floor < noiseFloorMin {
+		t.floor = noiseFloorMin
+	}
+	if t.floor > noiseFloorMax {
+		t.floor = noiseFloorMax
+	}
+}
 
 func (t *speechTracker) feed(rms float64, duration time.Duration) (started bool, ended bool) {
 	if duration <= 0 {
 		duration = 10 * time.Millisecond
 	}
+	t.observe(rms)
 	if !t.speaking {
-		if rms >= speechOnRMS {
+		on, _ := t.thresholds()
+		if rms > on {
 			t.onRun++
 		} else {
 			t.onRun = 0
@@ -565,7 +705,8 @@ func (t *speechTracker) feed(rms float64, duration time.Duration) (started bool,
 		return false, false
 	}
 
-	if rms <= speechOffRMS {
+	_, off := t.thresholds()
+	if rms <= off {
 		t.silence += duration
 	} else {
 		// Only voiced time counts toward minSpeech; a click that survives
@@ -574,8 +715,9 @@ func (t *speechTracker) feed(rms float64, duration time.Duration) (started bool,
 		t.silence = 0
 	}
 	if t.silence >= endSilence {
-		if t.speech < minSpeech {
-			t.reset()
+		longEnough := t.speech >= minSpeech
+		t.reset()
+		if !longEnough {
 			return false, false
 		}
 		return false, true
