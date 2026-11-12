@@ -70,6 +70,9 @@ type Config struct {
 	WakewordNegatives string
 	// WakewordTrace logs the detector's peak score continuously.
 	WakewordTrace bool
+	// OutputTrace samples successful rendered hardware writes in the bounded
+	// daemon log. Ownership and brightness transitions are always logged.
+	OutputTrace bool
 	// MemLimitMB bounds the daemon's Go heap. The RK3308 has 240 MiB in total
 	// and the stock vendor stack coexists with framework apps, so an unbounded
 	// heap lets the kernel OOM-kill the supervisor (which resets the board).
@@ -198,8 +201,9 @@ type Daemon struct {
 	btStreamGen   uint64
 	btStreamStart bool
 
-	lastActivation string
-	lastActMu      sync.Mutex
+	touchActivation string
+	touchAssistant  string
+	touchActMu      sync.Mutex
 
 	adminSrv  *httpAdmin
 	closing   chan struct{}

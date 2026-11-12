@@ -43,6 +43,7 @@ func main() {
 	fs.StringVar(&cfg.WakewordNegatives, "wakeword-negatives", "", "negative-training corpus (default <data-dir>/wakeword/negatives.bin; training input only)")
 	fs.StringVar(&cfg.Supersede, "supersede", "auto", "vendor processes to replace: auto, off, or a comma-separated list")
 	fs.BoolVar(&cfg.WakewordTrace, "wakeword-trace", false, "log the wakeword detector score twice a second")
+	fs.BoolVar(&cfg.OutputTrace, "output-trace", os.Getenv("CAPSULA_OUTPUT_TRACE") == "1", "sample rendered LED/display writes up to four times a second per resource")
 	fs.StringVar(&cfg.Watchdog, "watchdog", "auto", "hardware watchdog owner: auto (arm /dev/watchdog when present), off, or an explicit device path")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	health := fs.Bool("health", false, "check a running daemon and exit 0 when it serves the framework API")

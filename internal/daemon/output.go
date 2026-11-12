@@ -1,8 +1,7 @@
 package daemon
 
 import (
-	"fmt"
-	"strings"
+	"slices"
 	"time"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
@@ -19,11 +18,10 @@ func (d *Daemon) applyRouting(resourceID string) {
 	sel := d.router.Current(resourceID)
 	d.selMu.Lock()
 	prev := d.lastSel[resourceID]
-	if prev != sel.SelectedAppID {
-		d.lastSel[resourceID] = sel.SelectedAppID
-	}
+	signature := sel.SelectedAppID + "\x00" + sel.SelectedPresentation + "\x00" + sel.SelectedCaptureID
+	d.lastSel[resourceID] = signature
 	d.selMu.Unlock()
-	if prev != sel.SelectedAppID {
+	if prev != signature {
 		d.logs.Infof("routing", sel.SelectedAppID,
 			"%s selected app=%s presentation=%s reason=%s capture=%s",
 			resourceID, emptyDash(sel.SelectedAppID), emptyDash(sel.SelectedPresentation), sel.Reason, emptyDash(sel.SelectedCaptureID))
@@ -41,9 +39,17 @@ func emptyDash(s string) string {
 }
 
 type lastWrite struct {
-	segment string
-	ring    string
-	errAt   time.Time
+	cells        []uint16
+	pixels       []backend.RGB
+	blankCells   []uint16
+	blankPixels  []backend.RGB
+	colon        bool
+	brightness   float64
+	presentation string
+	capture      string
+	valid        bool
+	errAt        time.Time
+	traceAt      time.Time
 }
 
 // outputLoop renders the selected presentation into the physical backend.
@@ -83,51 +89,73 @@ func (d *Daemon) outputLoop() {
 				b = 1 // missing entries default to full brightness
 			}
 			sel := d.router.Current(info.ResourceId)
-			if sel.SelectedPresentation == "" {
-				continue
-			}
-			p, ok := d.pres.Get(sel.SelectedPresentation)
-			if !ok {
-				continue
-			}
+			p, _ := d.pres.Get(sel.SelectedPresentation)
 			lw := last[key]
 			if lw == nil {
 				lw = &lastWrite{}
 				last[key] = lw
 			}
+			ownershipChanged := !lw.valid || lw.presentation != sel.SelectedPresentation || lw.capture != sel.SelectedCaptureID
+			brightnessChanged := !lw.valid || lw.brightness != b
 			if seg != nil {
-				cells, colon, ok := p.RenderSegment(seg.Caps())
-				if !ok {
-					continue
+				var cells []uint16
+				var colon, rendered bool
+				if p != nil {
+					cells, colon, rendered = p.RenderSegment(seg.Caps())
 				}
-				sig := fmt.Sprintf("%v|%v|%.2f", cells, colon, b)
-				if sig == lw.segment {
+				if !rendered {
+					if lw.blankCells == nil {
+						lw.blankCells = make([]uint16, seg.Caps().DigitCount)
+					}
+					cells, colon = lw.blankCells, false
+				}
+				if !ownershipChanged && !brightnessChanged && colon == lw.colon && slices.Equal(cells, lw.cells) {
 					continue
 				}
 				if err := seg.WriteSegment(backend.SegmentFrame{Cells: cells, Colon: colon, Brightness: b}); err != nil {
 					d.logWriteError(lw, info.ResourceId, err)
 					continue
 				}
-				lw.segment = sig
+				lw.cells, lw.colon = cells, colon
 			}
 			if ring != nil {
-				pixels, ok := p.RenderRing(ring.Caps(), d.clock.NowNS())
-				if !ok {
-					continue
+				var pixels []backend.RGB
+				var rendered bool
+				if p != nil {
+					pixels, rendered = p.RenderRing(ring.Caps(), d.clock.NowNS())
 				}
-				var sb strings.Builder
-				for _, px := range pixels {
-					fmt.Fprintf(&sb, "%02x%02x%02x", px.R, px.G, px.B)
+				if !rendered {
+					if lw.blankPixels == nil {
+						lw.blankPixels = make([]backend.RGB, ring.Caps().PixelCount)
+					}
+					pixels = lw.blankPixels
 				}
-				sig := sb.String()
-				if sig == lw.ring {
+				if !ownershipChanged && !brightnessChanged && slices.Equal(pixels, lw.pixels) {
 					continue
 				}
 				if err := ring.WriteRing(backend.RingFrame{Pixels: pixels, Brightness: b}); err != nil {
 					d.logWriteError(lw, info.ResourceId, err)
 					continue
 				}
-				lw.ring = sig
+				lw.pixels = pixels
+			}
+			lw.valid = true
+			lw.brightness = b
+			lw.presentation, lw.capture = sel.SelectedPresentation, sel.SelectedCaptureID
+			// Ownership and brightness transitions are always recorded. Opt-in
+			// animation samples are bounded to four records/second/resource;
+			// the normal rotating log remains bounded on the device.
+			if ownershipChanged || brightnessChanged || (d.cfg.OutputTrace && time.Since(lw.traceAt) >= 250*time.Millisecond) {
+				lw.traceAt = time.Now()
+				if ring != nil {
+					d.logs.Infof("output", sel.SelectedAppID,
+						"%s wrote presentation=%s capture=%s brightness=%.4f pixels=%v",
+						key, emptyDash(sel.SelectedPresentation), emptyDash(sel.SelectedCaptureID), b, lw.pixels)
+				} else {
+					d.logs.Infof("output", sel.SelectedAppID,
+						"%s wrote presentation=%s capture=%s brightness=%.4f cells=%v colon=%v",
+						key, emptyDash(sel.SelectedPresentation), emptyDash(sel.SelectedCaptureID), b, lw.cells, lw.colon)
+				}
 			}
 		}
 	}
@@ -163,12 +191,41 @@ func (d *Daemon) indicationActive(appID string) bool {
 		if !ok || !p.Ready() || !p.Visible() {
 			continue
 		}
-		switch p.ContentKind() {
-		case presentations.ContentRingEffect:
-			return true // continuously perceptible; framework animates it
-		case presentations.ContentSegmentFrame, presentations.ContentSegmentFace, presentations.ContentRingFrame, presentations.ContentBlank:
-			if d.clock.NowNS()-p.LastUpdateNS() < uint64(2*time.Second) {
-				return true
+		kind := p.ContentKind()
+		if kind == presentations.ContentBlank {
+			continue
+		}
+		now := d.clock.NowNS()
+		if kind != presentations.ContentRingEffect && now-p.LastUpdateNS() >= uint64(2*time.Second) {
+			continue
+		}
+		if info.Kind == frameworkv1.ResourceKind_RESOURCE_LED_RING && d.dev.Ring() != nil {
+			// Check a second phase for effects so the dark instant of a
+			// pulse is not mistaken for a permanently invisible indicator.
+			for _, offset := range [...]uint64{0, uint64(137 * time.Millisecond)} {
+				pixels, rendered := p.RenderRing(d.dev.Ring().Caps(), now+offset)
+				if rendered {
+					for _, pixel := range pixels {
+						if pixel != (backend.RGB{}) {
+							return true
+						}
+					}
+				}
+				if kind != presentations.ContentRingEffect {
+					break
+				}
+			}
+		} else if d.dev.Segment() != nil {
+			cells, colon, rendered := p.RenderSegment(d.dev.Segment().Caps())
+			if rendered {
+				if colon {
+					return true
+				}
+				for _, cell := range cells {
+					if cell != 0 {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -209,24 +266,26 @@ func (d *Daemon) deliverActivation(act wakeword.Activation) {
 		ActivationId: act.ID, Origin: frameworkv1.ActivationOrigin_ACTIVATION_WAKEWORD,
 		MatchedModelId: act.ModelID, MonotonicTimeNs: act.TimeNS, ExpiresMonotonicNs: act.ExpiresNS,
 	}
-	if act.Origin == "touch" {
+	if wakeword.ManualOrigin(act.Origin) {
 		msg.Origin = frameworkv1.ActivationOrigin_ACTIVATION_TOUCH
 	}
 	if err := d.bus.SendApp(appID, &frameworkv1.AppInbound{Message: &frameworkv1.AppInbound_Activation{Activation: msg}}); err != nil {
 		d.logs.Warnf("wakeword", appID, "activation=%s delivery failed: %v", act.ID, err)
 		return
 	}
-	d.lastActMu.Lock()
-	d.lastActivation = act.ID
-	d.lastActMu.Unlock()
+	if wakeword.ManualOrigin(act.Origin) {
+		d.touchActMu.Lock()
+		d.touchActivation, d.touchAssistant = act.ID, appID
+		d.touchActMu.Unlock()
+	}
 	d.logs.Infof("wakeword", appID, "activation=%s delivered", act.ID)
 }
 
 func (d *Daemon) sendTouchRelease() {
-	appID := d.assistantAppID()
-	d.lastActMu.Lock()
-	actID := d.lastActivation
-	d.lastActMu.Unlock()
+	d.touchActMu.Lock()
+	actID, appID := d.touchActivation, d.touchAssistant
+	d.touchActivation, d.touchAssistant = "", ""
+	d.touchActMu.Unlock()
 	if appID == "" || actID == "" {
 		return
 	}
