@@ -35,9 +35,28 @@ The ring app also has an optional active window: local `HH:MM` bounds (device
 timezone, crossing midnight allowed) present an explicit blank baseline frame
 outside the window, with one timer per boundary instead of per-frame polling,
 and boundary/timezone/settings changes republish the frame.
-These paths have unit and simulator-daemon regression coverage; they have not
-been re-deployed to the Rockchip unit, and the acoustic-room, real-Mac Bluetooth
-and listening gates below remain open.
+These paths have unit and simulator-daemon regression coverage. The stopwatch,
+Bluetooth and speech-floor paths were not re-exercised on the Rockchip unit by
+the deployment below (the ring active window was), and the acoustic-room,
+real-Mac Bluetooth and listening gates remain open.
+
+### Ring active window deployed (2026-11-13)
+
+Commit `089f589` (daemon sha256 `e0dd1e1a…3453925a6`) was installed on the unit
+through `/etc/init.d/S99btctl.sh` with `capsula daemon install`: the health gate
+passed, the previous binary is retained as `capsulad.prev`, and the host backup
+is `_capsula-mini-deploy-backup/20261112T181428Z-ring-schedule/`. The restart
+preserved user revision 2198 and every choice: clock/ring/dumbassistant
+providers, ring effect `rainbow`/`spectrum` at speed 4, `Asia/Shanghai`,
+microphone muted, 5 % volume; the new keys appear as
+`schedule_enabled=false`, `schedule_start="22:00"`, `schedule_end="07:00"`.
+The installed binary was then exercised in a scratch simulator instance on the
+unit: with a window starting the next minute, trace frames stopped at the
+closing boundary, an all-zero frame held outside it (`dev state` 0/12 lit), the
+pulse animation resumed on the opening boundary second (12/12 lit), and the
+write stream stopped again at the closing boundary. This is digital-frame
+evidence from the target binary, not a photometric measurement or a production
+night-window trial; production settings were not changed.
 
 This does not replace the remaining acoustic/room, browser, or real-peer Bluetooth gates below.
 
@@ -50,7 +69,7 @@ This does not replace the remaining acoustic/room, browser, or real-peer Bluetoo
 | Singleton launch invocations (queued/bounded/expiring) | implemented | delay-injection test |
 | Reverse-RPC bus (`Connect`, routed unary/streaming `Call`) | implemented | routed-call test |
 | Presentations (first-content readiness, in-place content) | implemented | routing tests + built-in clock system app |
-| Built-in clock and ring system apps (`capsula.clock`, `capsula.ring`) | implemented as compiled-in applications with normal registry identity, `ApplicationService` list/launch/stop/run events, app settings, routing ownership and app-bus endpoints; only packaging is special (no directory, process, install or uninstall). Clock service `capsula.contracts.clock.v1.ClockService` covers stopwatch, timers and alarms (unary); ring service `capsula.contracts.ring.v1.RingService` exposes state. Clock settings: `blink`, `timezone`, `display_mode`, `timer_seconds`, `stopwatch_reset_gesture=hold|double_tap`, alarm label/hour/minute/days/timezone/enabled. A running stopwatch holds an orange whole-ring pulse; a tap pauses/resumes it and the configured hold or double tap resets it without summoning the assistant. Ring settings: `effect=breathe|spinner|rainbow|pulse|comet|sparkle`, `palette`, `speed`, `brightness`, and an optional local-wall-clock active window `schedule_enabled` + `schedule_start`/`schedule_end` (`HH:MM`, device timezone, may cross midnight, equal bounds mean all day): outside the window the app presents an explicit blank baseline frame, so the ring is dark but still yields to system/app captures and the effect returns at the boundary, with one timer armed per boundary (capped at an hourly recheck) rather than per-frame polling; legacy `mode` is read once for migration and hidden from new settings UIs. Both are seeded as defaults on a fresh install; an empty selection means none. Legacy `org.capsula.clock` / `org.example.ring-controller` settings and default IDs migrate, and retired sample bundles stay quarantined. External captures preempt and release normally. | simulator tests for list/get/default round-trip, stop/launch/run events, capture preemption and clock service calls; the new build was not redeployed to the unit |
+| Built-in clock and ring system apps (`capsula.clock`, `capsula.ring`) | implemented as compiled-in applications with normal registry identity, `ApplicationService` list/launch/stop/run events, app settings, routing ownership and app-bus endpoints; only packaging is special (no directory, process, install or uninstall). Clock service `capsula.contracts.clock.v1.ClockService` covers stopwatch, timers and alarms (unary); ring service `capsula.contracts.ring.v1.RingService` exposes state. Clock settings: `blink`, `timezone`, `display_mode`, `timer_seconds`, `stopwatch_reset_gesture=hold|double_tap`, alarm label/hour/minute/days/timezone/enabled. A running stopwatch holds an orange whole-ring pulse; a tap pauses/resumes it and the configured hold or double tap resets it without summoning the assistant. Ring settings: `effect=breathe|spinner|rainbow|pulse|comet|sparkle`, `palette`, `speed`, `brightness`, and an optional local-wall-clock active window `schedule_enabled` + `schedule_start`/`schedule_end` (`HH:MM`, device timezone, may cross midnight, equal bounds mean all day): outside the window the app presents an explicit blank baseline frame, so the ring is dark but still yields to system/app captures and the effect returns at the boundary, with one timer armed per boundary (capped at an hourly recheck) rather than per-frame polling; legacy `mode` is read once for migration and hidden from new settings UIs. Both are seeded as defaults on a fresh install; an empty selection means none. Legacy `org.capsula.clock` / `org.example.ring-controller` settings and default IDs migrate, and retired sample bundles stay quarantined. External captures preempt and release normally. | simulator tests for list/get/default round-trip, stop/launch/run events, capture preemption and clock service calls; the ring-schedule build (commit `089f589`) was installed on the unit on 2026-11-13 and its schedule transitions were exercised there in a scratch simulator instance (see the deployment note above), while the earlier compiled-in-app build was redeployed on 2026-11-12 |
 | Captures (last eligible wins, baseline fallback, out-of-order release) | implemented | routing tests |
 | Touch partial/full, system controls, cancellation | implemented | routing/input tests |
 | Audio mixing, fan-out, ducking, pre-roll, mic watchdog | implemented | simulator test |
