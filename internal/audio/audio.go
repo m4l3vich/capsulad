@@ -295,6 +295,7 @@ type Playback struct {
 	conv                             *resampler
 
 	mgr          *Manager
+	feedFrames   int
 	mu           sync.Mutex
 	closed       bool
 	queuedBytes  int
@@ -308,6 +309,10 @@ type Playback struct {
 func (p *Playback) ID() string                   { return p.id }
 func (p *Playback) Events() <-chan PlaybackEvent { return p.events }
 func (p *Playback) AppID() string                { return p.appID }
+
+// Close stops playback immediately and discards queued audio. CloseInput,
+// unlike Close, lets a successfully completed stream drain its queued tail.
+func (p *Playback) Close() { p.mgr.closePlayback(p.id) }
 
 func (p *Playback) emit(e PlaybackEvent) bool {
 	p.mu.Lock()
@@ -350,14 +355,17 @@ func (p *Playback) Write(pcm []byte) error {
 		p.mu.Unlock()
 		return fmt.Errorf("playback stream is closed")
 	}
+	// Account before publishing: the mixer may consume immediately after the
+	// send, before this goroutine is scheduled again.
+	p.queuedBytes += len(pcm)
 	p.mu.Unlock()
 	select {
 	case <-p.done:
+		p.mu.Lock()
+		p.queuedBytes -= len(pcm)
+		p.mu.Unlock()
 		return fmt.Errorf("playback stream is closed")
 	case p.in <- pcm:
-		p.mu.Lock()
-		p.queuedBytes += len(pcm)
-		p.mu.Unlock()
 		return nil
 	}
 }
@@ -397,8 +405,9 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 	}
 	p := &Playback{
 		id: ids.New("pbs"), appID: appID, runID: runID, conversationID: conversationID,
-		format: format,
-		events: make(chan PlaybackEvent, 16), in: make(chan []byte, playbackQueue),
+		format:     format,
+		feedFrames: (format.RateHz*mixFrameMS+999)/1000 + 2,
+		events:     make(chan PlaybackEvent, 16), in: make(chan []byte, playbackQueue),
 		ctl: make(chan string, 4), done: make(chan struct{}),
 		conv: newResampler(format, outFmt()), gain: 1, trim: 1, mgr: m,
 	}
@@ -460,6 +469,10 @@ func (m *Manager) mixLoop() {
 			p.drainControl()
 			p.feed()
 			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				continue
+			}
 			paused := p.paused
 			closedInput := p.inputClosed
 			queued := p.queuedBytes
@@ -531,16 +544,18 @@ func (p *Playback) drainControl() {
 		case cmd := <-p.ctl:
 			switch cmd {
 			case "FLUSH":
+				discarded := 0
+			drain:
 				for {
 					select {
-					case <-p.in:
-						continue
+					case chunk := <-p.in:
+						discarded += len(chunk)
 					default:
+						break drain
 					}
-					break
 				}
 				p.mu.Lock()
-				p.queuedBytes = 0
+				p.queuedBytes -= discarded
 				p.mu.Unlock()
 				p.conv.reset()
 			case "PAUSE":
@@ -558,9 +573,11 @@ func (p *Playback) drainControl() {
 	}
 }
 
-// feed moves queued chunks into the resampler. Called from the mixer loop.
+// feed moves only the next mixer quantum into the resampler. Draining the
+// entire channel on every tick would turn the resampler into an unbounded
+// second queue and defeat playback backpressure, especially while paused.
 func (p *Playback) feed() {
-	for {
+	for p.conv.srcFrames() < p.feedFrames {
 		select {
 		case chunk := <-p.in:
 			p.mu.Lock()

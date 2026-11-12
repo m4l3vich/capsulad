@@ -109,8 +109,8 @@ func (d *Daemon) playRecordingCue(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("play start tones: %w", err)
 	}
+	defer p.Close()
 	if err := p.Write(countdownCuePCM(format)); err != nil {
-		p.CloseInput()
 		return fmt.Errorf("play start tones: %w", err)
 	}
 	p.CloseInput()

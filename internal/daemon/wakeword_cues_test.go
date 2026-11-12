@@ -114,6 +114,24 @@ func TestPlayRecordingCueDrains(t *testing.T) {
 	case <-time.After(6 * time.Second):
 		t.Fatal("recording cue did not finish playing")
 	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	go func() { errCh <- d.playRecordingCue(cancelled) }()
+	waitFor(t, time.Second, "recording countdown started", func() bool {
+		return len(manager.ActiveStreams()) != 0
+	})
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != context.Canceled {
+			t.Fatalf("cancelled countdown returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled recording countdown did not stop")
+	}
+	if streams := manager.ActiveStreams(); len(streams) != 0 {
+		t.Fatalf("cancelled recording countdown left audio playing: %+v", streams)
+	}
 }
 
 func TestRecordingIndicatorSelectsAndReleasesRing(t *testing.T) {

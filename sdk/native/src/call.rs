@@ -20,7 +20,13 @@ use crate::registry::Registry;
 
 pub static CALLS: Registry<CallInner> = Registry::new();
 
-pub const EVENT_QUEUE: usize = 64;
+// EVENT_QUEUE bounds the response backlog between the async transport task and
+// the consumer thread. It must be larger than the transport's flow-control
+// window (roughly 100 audio chunks): a short scheduling stall in the consumer
+// (or an app intentionally paused by an operator) must create backpressure,
+// not fail a live audio call. 512 chunks is about 10 s of 20 ms microphone
+// frames and stays a bounded, small allocation.
+pub const EVENT_QUEUE: usize = 512;
 pub const OUT_QUEUE: usize = 256;
 
 /* ------------------------------------------------------------------ *

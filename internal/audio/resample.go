@@ -77,7 +77,7 @@ func (r *resampler) pull(n int) []float32 {
 		r.src = r.src[:(frames-consume)*2]
 		r.pos -= float64(consume)
 	}
-	if r.pos > float64(r.srcFrames()) {
+	if r.pos >= float64(r.srcFrames()) {
 		r.pos = 0
 		r.src = r.src[:0]
 	}

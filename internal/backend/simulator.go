@@ -284,7 +284,7 @@ func (s *simSource) ReadPCM(p []byte) (int, error) {
 	n := copy(p, carry)
 	s.mu.Lock()
 	if n < len(carry) {
-		s.carry = append([]byte(nil), carry[n:]...)
+		s.carry = carry[n:]
 	} else {
 		s.carry = nil
 	}

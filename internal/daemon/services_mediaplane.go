@@ -617,6 +617,7 @@ func (s *audioService) Playback(stream frameworkv1.AudioService_PlaybackServer) 
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
+	defer pb.Close()
 	sendErr := make(chan error, 1)
 	finished := make(chan struct{})
 	go func() {
@@ -644,6 +645,16 @@ func (s *audioService) Playback(stream frameworkv1.AudioService_PlaybackServer) 
 				}
 				return
 			}
+		}
+	}()
+	// Cancellation must also unblock Write when a paused/full playback queue
+	// is applying backpressure. Normal half-close still waits for the mixer
+	// to drain and finish the event stream before this handler returns.
+	go func() {
+		select {
+		case <-stream.Context().Done():
+			pb.Close()
+		case <-finished:
 		}
 	}()
 	for {
