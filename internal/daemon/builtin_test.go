@@ -529,6 +529,9 @@ func TestClockServiceAlarmTriggerAndDisable(t *testing.T) {
 	if !reenabled {
 		t.Fatal("alarm did not re-enable")
 	}
+	if !app.dismissAlert("") {
+		t.Fatal("alarm alert was not dismissed")
+	}
 }
 
 func TestClockServiceRPCAndRingState(t *testing.T) {

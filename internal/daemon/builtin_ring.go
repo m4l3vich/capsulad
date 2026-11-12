@@ -24,7 +24,6 @@ type builtinRing struct {
 	mu      sync.Mutex
 	running bool
 	runID   string
-	ctx     context.Context
 	cancel  context.CancelFunc
 
 	client *builtinAppClient
@@ -53,16 +52,34 @@ func (r *builtinRing) start() {
 	}
 	r.running = true
 	r.runID = r.d.SystemAppRunID(ringAppID)
-	r.ctx, r.cancel = context.WithCancel(r.d.ctx)
+	ctx, cancel := context.WithCancel(r.d.ctx)
+	r.cancel = cancel
 	r.applied = ""
-	r.client = newBuiltinAppClient(r.d, ringAppID)
-	pres, err := r.client.OpenPresentation(r.ctx, r.ringID)
+	client := newBuiltinAppClient(r.d, ringAppID)
+	r.client = client
+	r.mu.Unlock()
+
+	// Opening the stream talks to the daemon's own gRPC endpoint. Doing that
+	// outside the lock keeps the output loop, which reasserts the baseline on
+	// every tick, from stalling if the stream is slow or fails.
+	pres, err := client.OpenPresentation(ctx, r.ringID)
+
+	r.mu.Lock()
+	if !r.running || r.client != client {
+		// A stop or a newer start won the race while the stream was opening.
+		r.mu.Unlock()
+		cancel()
+		if pres != nil {
+			pres.Close()
+		}
+		client.Close()
+		return
+	}
 	if err != nil {
 		r.d.logs.Errorf(ringAppID, "", "open baseline presentation: %v", err)
 	} else {
 		r.pres = pres
 	}
-	ctx := r.ctx
 	r.mu.Unlock()
 
 	r.loadSettings(ctx)
@@ -76,23 +93,22 @@ func (r *builtinRing) stop() {
 		return
 	}
 	r.running = false
-	if r.cancel != nil {
-		r.cancel()
-	}
+	cancel := r.cancel
+	r.cancel = nil
 	pres := r.pres
 	client := r.client
 	r.pres = nil
 	r.client = nil
 	r.applied = ""
 	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if pres != nil {
 		pres.Close()
 	}
 	if client != nil {
 		client.Close()
-	}
-	if r.cancel != nil {
-		r.cancel()
 	}
 }
 
@@ -164,16 +180,20 @@ func (r *builtinRing) reassert() {
 		return
 	}
 	id, params, sig := r.contentLocked()
+	pres := r.pres
+	if pres == nil {
+		// The baseline stream is not attached yet (startup) or is being torn
+		// down. Recording the signature here would make the first reassert
+		// after attachment believe the frame was already written.
+		r.mu.Unlock()
+		return
+	}
 	if sig == r.applied {
 		r.mu.Unlock()
 		return
 	}
 	r.applied = sig
-	pres := r.pres
 	r.mu.Unlock()
-	if pres == nil {
-		return
-	}
 	if err := pres.UpdateFrame(ringEffectPresentationFrame(id, params)); err != nil && r.d.ctx.Err() == nil {
 		r.d.logs.Debugf(ringAppID, "", "baseline: %v", err)
 	}

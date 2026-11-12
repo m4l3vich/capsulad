@@ -134,6 +134,12 @@ func clockManifest() *manifest.Manifest {
 			{Key: "timer_seconds", Label: "Timer duration (seconds)", Type: "integer", Default: 300,
 				Description: "Duration used by the Start timer action.",
 				Min:         numberPtr(1), Max: numberPtr(86400)},
+			{Key: "stopwatch_reset_gesture", Label: "Stopwatch reset gesture", Type: "select", Default: "hold",
+				Description: "How the circle/play-pause button resets a running or paused stopwatch. A single tap pauses or resumes it; the chosen gesture resets it and never summons the assistant.",
+				Choices: []manifest.Choice{
+					{Value: "hold", Label: "Hold the button"},
+					{Value: "double_tap", Label: "Double tap the button"},
+				}},
 			{Key: "alarm_label", Label: "Alarm label", Type: "text", Default: "Alarm"},
 			{Key: "alarm_hour", Label: "Alarm hour", Type: "integer", Default: 7,
 				Min: numberPtr(0), Max: numberPtr(23)},

@@ -413,12 +413,16 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		WatchdogPollMS:   1000,
 	})
 	d.input = input.NewManager(ctx, clock, logs, touchCaps(d.dev.Touch()), d.touchState, input.Handlers{
-		VolumeUp:   func() bool { return d.adjustVolume(5) },
-		VolumeDown: func() bool { return d.adjustVolume(-5) },
-		MicToggle:  func() { d.setMuted(!d.user.Get().Values.MicrophoneMuted) },
-		Activation: func(origin string) { d.triggerWakeword(origin, "") },
-		Release:    d.sendTouchRelease,
-		HoldToTalk: func() bool { return d.user.Get().Values.TouchHoldMode == settings.HoldToTalk },
+		VolumeUp:         func() bool { return d.adjustVolume(5) },
+		VolumeDown:       func() bool { return d.adjustVolume(-5) },
+		MicToggle:        func() { d.setMuted(!d.user.Get().Values.MicrophoneMuted) },
+		Activation:       func(origin string) { d.triggerWakeword(origin, "") },
+		Release:          d.sendTouchRelease,
+		HoldToTalk:       func() bool { return d.user.Get().Values.TouchHoldMode == settings.HoldToTalk },
+		DismissAlert:     d.dismissFrameworkAlerts,
+		DismissAssistant: func() bool { return d.dismissAssistantTurn() },
+		PrimaryActive:    d.clockPrimaryActive,
+		PrimaryGesture:   d.clockPrimaryGesture,
 	})
 	d.wake = wakeword.NewManager(ctx, clock, logs, d.wakeModels())
 	d.wake.SetOnFire(d.deliverActivation)
@@ -431,6 +435,85 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		logs.Warnf("daemon", "", "audio service unavailable: %v", err)
 	}
 	return d, nil
+}
+
+// dismissFrameworkAlerts silences a sounding framework alert (clock timer or
+// alarm) from a physical control and reports whether one was showing. The
+// input manager uses that result to consume the press instead of summoning the
+// assistant, so one button press cannot both dismiss and activate.
+func (d *Daemon) dismissFrameworkAlerts() bool {
+	if d.builtins == nil || d.builtins.clock == nil {
+		return false
+	}
+	return d.builtins.clock.dismissAlert("")
+}
+
+// dismissAssistantTurn ends the selected assistant's in-flight turn from the
+// circle/play-pause key. The turn is identified by the resources the assistant
+// currently owns: the ring presentation it holds for the whole turn (including
+// the reply delay and playback) and its audio streams. Dismissal goes through
+// the app's declared "dismiss" action, so the app stops playback, closes its
+// ring/microphone streams and returns to idle without being killed. A turn is
+// always consumed even when the app does not implement the action, so the same
+// press cannot start a second turn on top of it.
+func (d *Daemon) dismissAssistantTurn() bool {
+	appID := d.assistantAppID()
+	if appID == "" || !d.assistantTurnOwned(appID) {
+		return false
+	}
+	if _, err := d.TriggerAction(appID, "dismiss"); err != nil {
+		// Consume the press anyway: a second activation on top of a turn the
+		// app cannot dismiss is worse than an unresponsive provider.
+		d.logs.Warnf("input", appID, "dismiss action: %v", err)
+		return true
+	}
+	d.logs.Infof("input", appID, "assistant turn dismissed by the circle key")
+	return true
+}
+
+// assistantTurnOwned reports whether the assistant currently owns a visible or
+// audible resource. The ring presentation is the stable marker for the whole
+// turn; streams cover a turn whose presentation failed to open.
+func (d *Daemon) assistantTurnOwned(appID string) bool {
+	if appID == "" || d.router == nil {
+		return false
+	}
+	if d.audio != nil {
+		for _, st := range d.audio.ActiveStreams() {
+			if st.AppID == appID {
+				return true
+			}
+		}
+	}
+	for resourceID, info := range d.resources {
+		switch info.Kind {
+		case frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY,
+			frameworkv1.ResourceKind_RESOURCE_LED_RING:
+		default:
+			continue
+		}
+		if sel, _ := d.router.State(resourceID); sel.SelectedAppID == appID {
+			return true
+		}
+	}
+	return false
+}
+
+// clockPrimaryActive reports whether a running stopwatch owns the primary
+// button, so a tap pauses it instead of summoning the assistant.
+func (d *Daemon) clockPrimaryActive() bool {
+	if d.builtins == nil || d.builtins.clock == nil {
+		return false
+	}
+	return d.builtins.clock.stopwatchEngaged()
+}
+
+// clockPrimaryGesture routes a framework-owned primary gesture to the clock.
+func (d *Daemon) clockPrimaryGesture(kind string) bool {
+	if d.builtins == nil || d.builtins.clock == nil {
+		return false
+	}
+	return d.builtins.clock.primaryGesture(kind)
 }
 
 func touchCaps(t backend.TouchDevice) backend.TouchCaps {

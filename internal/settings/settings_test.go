@@ -52,6 +52,18 @@ func TestUserSettingsCASAndValidation(t *testing.T) {
 	}
 }
 
+func TestUserSnapshotsDoNotExposeBrightnessMode(t *testing.T) {
+	store, err := OpenUser(filepath.Join(t.TempDir(), "settings.json"), testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Get()
+	snapshot.Values.BrightnessMode["light.ring.main"] = BrightnessAuto
+	if mode := store.Get().Values.BrightnessMode["light.ring.main"]; mode != "" {
+		t.Fatalf("mutating a caller snapshot changed live brightness mode to %q", mode)
+	}
+}
+
 func TestAppSettingsMaskedRedactionAndClear(t *testing.T) {
 	dir := t.TempDir()
 	lookup := func(appID string) (*ManifestSchema, bool) {

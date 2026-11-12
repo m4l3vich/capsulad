@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
@@ -18,6 +20,15 @@ import (
 // registry as packages, and removed sample providers are never re-seeded.
 // Provides hints only populate dropdowns; they never grant capabilities.
 func (d *Daemon) seedDefaults() {
+	// An existing settings document is authoritative. Both an absent map
+	// entry and an empty value mean the user selected no provider; neither
+	// is permission to re-enable a provider at the next restart.
+	if _, err := os.Stat(filepath.Join(d.cfg.DataDir, "settings.json")); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		d.logs.Warnf("daemon", "", "could not inspect settings before seeding providers: %v", err)
+		return
+	}
 	snap := d.user.Get()
 	patch := snap.Values
 	changed := false
@@ -120,6 +131,7 @@ func (d *Daemon) watchSettings() {
 
 func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	v := snap.Values
+	prev := d.lastApplied
 	for _, info := range d.resources {
 		switch info.Kind {
 		case frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY, frameworkv1.ResourceKind_RESOURCE_LED_RING:
@@ -133,7 +145,7 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	if d.builtins != nil && d.builtins.clock != nil {
 		d.builtins.clock.setDeviceTimezone(v.Timezone)
 	}
-	timezoneChanged := d.lastApplied != nil && d.lastApplied.Timezone != v.Timezone
+	timezoneChanged := prev != nil && prev.Timezone != v.Timezone
 	d.audio.SetMasterVolume(v.MasterVolume)
 	d.audio.SetMuted(v.MicrophoneMuted)
 	d.applyBluetoothSettings(v)
@@ -141,13 +153,24 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	d.wake.SetEnabled(v.WakewordEnabled)
 	d.wake.SetMuted(v.MicrophoneMuted)
 
-	if v.MicrophoneMuted != d.lastMuted {
+	// The muted indication mirrors the current mute state and its configured
+	// lifetime. Changing the mode or delay while the microphone stays muted
+	// must apply immediately; waiting for the next toggle would leave the old
+	// lifetime (for example an indication that never hides, or a stale timer)
+	// in effect for the whole mute period.
+	muteChanged := v.MicrophoneMuted != d.lastMuted
+	indicatorChanged := prev != nil &&
+		(prev.MutedIndicator != v.MutedIndicator || prev.MutedIndicatorDelayMS != v.MutedIndicatorDelayMS)
+	if muteChanged || (indicatorChanged && v.MicrophoneMuted) {
 		d.lastMuted = v.MicrophoneMuted
 		d.updateMicIndicator(v.MicrophoneMuted)
 	}
 	d.updateSystemRing()
+	// A cached sensor level belongs to the mode it was sampled in. Dropping it
+	// when the mode changes keeps a re-enabled automatic display from adopting
+	// the level from an earlier automatic period before the next sample.
+	d.resetAutoLevels(prev, &v)
 
-	prev := d.lastApplied
 	d.lastApplied = &v
 	if timezoneChanged {
 		// A running app keeps the TZ it was launched with, so the new device
@@ -162,11 +185,12 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	}
 }
 
-// restartBootAppsForTimezone stops every running app and starts the boot set
-// again so it picks up the new TZ. Launch refuses while a run is still
+// restartBootAppsForTimezone stops every running external app and starts the
+// boot set again so it picks up the new TZ. Launch refuses while a run is still
 // registered, so the restart waits for each stop to complete before relaunching.
-// Ad-hoc runs are left alone; their next invocation launches them with the new
-// environment.
+// Compiled-in apps are skipped: they run in the daemon's environment and the
+// clock already followed the zone through setDeviceTimezone. Ad-hoc runs are
+// left alone; their next invocation launches them with the new environment.
 func (d *Daemon) restartBootAppsForTimezone() {
 	if d.sup == nil {
 		return
@@ -174,6 +198,14 @@ func (d *Daemon) restartBootAppsForTimezone() {
 	var stopped []string
 	seen := map[string]bool{}
 	for _, run := range d.sup.List("") {
+		// Compiled-in apps run inside the daemon, so they inherit no TZ
+		// environment: the clock already received the new zone through
+		// setDeviceTimezone, which keeps running timers and a monotonic
+		// stopwatch. Stopping them here would clear that state, and
+		// startBootApps deliberately never relaunches built-ins.
+		if run.Virtual {
+			continue
+		}
 		if seen[run.AppID] {
 			continue
 		}
@@ -182,6 +214,10 @@ func (d *Daemon) restartBootAppsForTimezone() {
 		d.sup.StopApp(run.AppID)
 	}
 	tz := d.user.Get().Values.Timezone
+	if len(stopped) == 0 {
+		d.logs.Infof("daemon", "", "timezone changed to %q; compiled-in apps follow it in place", tz)
+		return
+	}
 	d.logs.Infof("daemon", "", "timezone changed to %q; restarting %d app(s) to apply it", tz, len(stopped))
 	go func() {
 		deadline := time.Now().Add(15 * time.Second)
@@ -236,7 +272,13 @@ func (d *Daemon) updateMicIndicator(muted bool) {
 		d.startMicIndicator()
 		return
 	}
-	go d.fadeOutMicIndicator("unmuted")
+	// Capture the mute period being ended before the fade goroutine runs. A
+	// mute that lands first bumps the generation, so the fade aborts instead
+	// of hiding the fresh indication.
+	d.indicatorMu.Lock()
+	gen := d.micGen
+	d.indicatorMu.Unlock()
+	go d.fadeOutMicIndicatorGen(gen, "unmuted")
 }
 
 // indicatorParams builds the muted indication: red on the bottom three pixels,
@@ -265,9 +307,6 @@ func (d *Daemon) startMicIndicator() {
 	snap := d.user.Get().Values
 	d.indicatorMu.Lock()
 	defer d.indicatorMu.Unlock()
-	if d.micCaptureID != "" {
-		return
-	}
 	if d.micIndicator == nil {
 		pres, err := d.openAppPresentation(routing.SystemAppID, "", ringID)
 		if err != nil {
@@ -281,44 +320,77 @@ func (d *Daemon) startMicIndicator() {
 		d.logs.Errorf("daemon", "", "muted indication: %v", err)
 		return
 	}
+	// Re-assert the full indication on every start: a lifetime change can
+	// arrive while a previous expiry fade is in progress, and the fade must
+	// not be allowed to leave the indication dimmed.
 	if err := d.updateAppPresentation(routing.SystemAppID, "", d.micIndicator, presentations.RingEffect("system.ring.indicator", params)); err != nil {
 		d.logs.Errorf("daemon", "", "muted indication: %v", err)
 		return
 	}
-	cap, err := d.acquireAppCapture(routing.SystemAppID, "", ringID, d.micIndicator.ID, routing.TouchNone)
-	if err != nil {
-		d.logs.Errorf("daemon", "", "muted indication capture: %v", err)
-		return
-	}
-	d.micCaptureID = cap.ID
 	d.micParams = params
 	d.micGen++
-	d.logs.Infof("daemon", "", "microphone muted indication active (capture=%s mode=%d)", cap.ID, snap.MutedIndicator)
-	switch snap.MutedIndicator {
+	if d.micCaptureID == "" {
+		cap, err := d.acquireAppCapture(routing.SystemAppID, "", ringID, d.micIndicator.ID, routing.TouchNone)
+		if err != nil {
+			d.logs.Errorf("daemon", "", "muted indication capture: %v", err)
+			return
+		}
+		d.micCaptureID = cap.ID
+		d.logs.Infof("daemon", "", "microphone muted indication active (capture=%s mode=%d)", cap.ID, snap.MutedIndicator)
+	}
+	d.armMicIndicatorLocked(snap)
+}
+
+// armMicIndicatorLocked applies the configured indication lifetime to the
+// current mute period. The mode and delay are live settings, so a re-arm
+// replaces any pending expiry instead of letting the old timer hide the new
+// policy early.
+func (d *Daemon) armMicIndicatorLocked(values settings.UserSettings) {
+	if d.micTimer != nil {
+		d.micTimer.Stop()
+		d.micTimer = nil
+	}
+	switch values.MutedIndicator {
 	case settings.MutedImmediate:
 		d.releaseMicIndicatorLocked("immediate")
 	case settings.MutedUntilUnmute:
 		// Keep it until an explicit unmute.
 	default:
-		delay := time.Duration(snap.MutedIndicatorDelayMS) * time.Millisecond
+		delay := time.Duration(values.MutedIndicatorDelayMS) * time.Millisecond
 		if delay <= 0 {
 			delay = 30 * time.Second
 		}
-		d.micTimer = time.AfterFunc(delay, func() {
-			d.fadeOutMicIndicator("expired")
-		})
+		gen := d.micGen
+		var timer *time.Timer
+		timer = time.AfterFunc(delay, func() { d.expireMicIndicator(timer, gen) })
+		d.micTimer = timer
 	}
 }
 
-// fadeOutMicIndicator tapers the indication to black before releasing the
-// capture. The generation counter aborts a fade that races a fresh mute.
-func (d *Daemon) fadeOutMicIndicator(reason string) {
+// expireMicIndicator fades an indication only when its timer still owns the
+// current mute period. A callback that was already running when a settings
+// update re-armed the lifetime must not hide the fresh indication.
+func (d *Daemon) expireMicIndicator(timer *time.Timer, gen uint64) {
 	d.indicatorMu.Lock()
-	if d.micCaptureID == "" || d.micIndicator == nil {
+	current := d.micTimer == timer && d.micCaptureID != "" && d.micGen == gen
+	d.indicatorMu.Unlock()
+	if !current {
+		return
+	}
+	d.fadeOutMicIndicatorGen(gen, "expired")
+}
+
+// fadeOutMicIndicatorGen tapers the indication to black before releasing the
+// capture. The generation counter aborts a fade that races a fresh mute: each
+// step re-checks the generation and writes while holding the indicator lock, so
+// a fresh mute either aborts the fade before the frame or restores full
+// intensity after it; an in-flight step can never leave the indication dimmed.
+func (d *Daemon) fadeOutMicIndicatorGen(gen uint64, reason string) {
+	d.indicatorMu.Lock()
+	if d.micCaptureID == "" || d.micIndicator == nil || d.micGen != gen {
 		d.indicatorMu.Unlock()
 		return
 	}
-	gen := d.micGen
 	p := d.micIndicator
 	base := cloneParams(d.micParams)
 	d.indicatorMu.Unlock()
@@ -326,9 +398,8 @@ func (d *Daemon) fadeOutMicIndicator(reason string) {
 	const steps = 6
 	for i := 1; i <= steps; i++ {
 		d.indicatorMu.Lock()
-		stale := d.micGen != gen
-		d.indicatorMu.Unlock()
-		if stale {
+		if d.micCaptureID == "" || d.micIndicator == nil || d.micGen != gen {
+			d.indicatorMu.Unlock()
 			return
 		}
 		intensity, _ := base["intensity"].(float64)
@@ -336,6 +407,7 @@ func (d *Daemon) fadeOutMicIndicator(reason string) {
 		params["intensity"] = intensity * (1 - float64(i)/steps)
 		params["fade_in"] = 0.0
 		_ = d.updateAppPresentation(routing.SystemAppID, "", p, presentations.RingEffect("system.ring.indicator", params))
+		d.indicatorMu.Unlock()
 		time.Sleep(40 * time.Millisecond)
 	}
 

@@ -153,6 +153,7 @@ func cloneUser(v UserSettings) UserSettings {
 	for k, val := range v.DisplayBrightness {
 		out.DisplayBrightness[k] = val
 	}
+	out.BrightnessMode = cloneMap(v.BrightnessMode)
 	return out
 }
 

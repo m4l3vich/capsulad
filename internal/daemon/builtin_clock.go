@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
+	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presets"
 	"capsulad/internal/settings"
@@ -22,9 +23,12 @@ import (
 const (
 	defaultAlarmID = "default"
 	maxTimerMS     = uint64(30 * 24 * 60 * 60 * 1000)
-	timerAlertMS   = uint64(10_000)
-	alarmAlertMS   = uint64(60_000)
 	tickInterval   = 200 * time.Millisecond
+
+	// Alerts repeat until the user dismisses them. These are the silences
+	// between clips, not lifetimes.
+	timerAlertGap = 1100 * time.Millisecond
+	alarmAlertGap = 1800 * time.Millisecond
 )
 
 // Seven-segment masks: bit 0 = a (top) ... bit 6 = g (middle).
@@ -71,13 +75,11 @@ const (
 )
 
 type clockAlert struct {
-	id          string
-	kind        clockAlertKind
-	sourceID    string
-	label       string
-	startedMS   uint64
-	expiresMono uint64
-	audioSent   bool
+	id        string
+	kind      clockAlertKind
+	sourceID  string
+	label     string
+	startedMS uint64
 }
 
 type clockDisplay struct {
@@ -112,6 +114,9 @@ type builtinClock struct {
 	loc         *time.Location
 	displayMode string
 	timerSecs   uint64
+	// stopwatchReset chooses which primary-key gesture resets/dismisses the
+	// stopwatch: "hold" (default) or "double_tap". A tap always pauses/resumes.
+	stopwatchReset string
 
 	stopwatch struct {
 		running   bool
@@ -136,14 +141,37 @@ type builtinClock struct {
 	alertPres      map[string]*appPresentation
 	alertCap       map[string]*appCapture
 	alertSig       map[string]clockDisplay
+	alertRingSig   string
+	alertErrAt     time.Time
 	audioCache     map[string][]byte
+
+	// countdown* is the clock's normal ring capture while a timer runs. It is
+	// distinct from the alert overlay so the ring baseline returns as soon as
+	// the countdown ends and an external capture can always preempt it.
+	countPres       *appPresentation
+	countCap        *appCapture
+	countFrameTimer string
+	countFrameLit   int
+	countFramePix   int
+	countLogTimer   string
+	countLogLit     int
+	countErrAt      time.Time
+
+	// audioMu serializes the single alert-audio loop. At most one clip plays at
+	// a time; dismissal cancels the loop and the in-flight clip.
+	audioMu      sync.Mutex
+	audioCancel  context.CancelFunc
+	audioAlertID string
+	// playAudio is nil in production, where the app client's Playback is used.
+	playAudio func(context.Context, backend.AudioFormat, []byte) error
 }
 
 func newBuiltinClock(d *Daemon, segmentID string) *builtinClock {
 	c := &builtinClock{
 		d: d, segmentID: segmentID,
 		blink: true, displayMode: "clock", timerSecs: 300, loc: time.Local,
-		timers: map[string]*clockTimer{}, alarms: map[string]*clockAlarm{},
+		stopwatchReset: "hold",
+		timers:         map[string]*clockTimer{}, alarms: map[string]*clockAlarm{},
 		alerts:    map[string]*clockAlert{},
 		alertPres: map[string]*appPresentation{}, alertCap: map[string]*appCapture{},
 		alertSig: map[string]clockDisplay{}, audioCache: map[string][]byte{},
@@ -176,6 +204,16 @@ func (c *builtinClock) start() {
 	c.alertPres = map[string]*appPresentation{}
 	c.alertCap = map[string]*appCapture{}
 	c.alertSig = map[string]clockDisplay{}
+	c.alertRingSig = ""
+	c.alertErrAt = time.Time{}
+	c.countPres = nil
+	c.countCap = nil
+	c.countFrameTimer = ""
+	c.countFrameLit = 0
+	c.countFramePix = 0
+	c.countLogTimer = ""
+	c.countLogLit = -1
+	c.countErrAt = time.Time{}
 	c.appliedOK = false
 	if a := c.alarms[defaultAlarmID]; a != nil {
 		c.alarms = map[string]*clockAlarm{defaultAlarmID: a}
@@ -233,9 +271,25 @@ func (c *builtinClock) stop() {
 	for _, cap := range c.alertCap {
 		caps = append(caps, cap)
 	}
+	if c.countPres != nil {
+		alertPres = append(alertPres, c.countPres)
+	}
+	if c.countCap != nil {
+		caps = append(caps, c.countCap)
+	}
 	c.alertPres = map[string]*appPresentation{}
 	c.alertCap = map[string]*appCapture{}
 	c.alertSig = map[string]clockDisplay{}
+	c.alertRingSig = ""
+	c.alertErrAt = time.Time{}
+	c.countPres = nil
+	c.countCap = nil
+	c.countFrameTimer = ""
+	c.countFrameLit = 0
+	c.countFramePix = 0
+	c.countLogTimer = ""
+	c.countLogLit = -1
+	c.countErrAt = time.Time{}
 	c.timers = map[string]*clockTimer{}
 	c.timerOrder = nil
 	c.alerts = map[string]*clockAlert{}
@@ -244,6 +298,7 @@ func (c *builtinClock) stop() {
 	c.alertGen++
 	c.mu.Unlock()
 
+	c.stopAlertAudio()
 	for _, cap := range caps {
 		cap.Release()
 	}
@@ -305,6 +360,7 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	tz := c.appTZ
 	mode := c.displayMode
 	timerSecs := c.timerSecs
+	resetGesture := c.stopwatchReset
 	a := c.alarms[defaultAlarmID]
 	alarmLabel, alarmHour, alarmMinute := "Alarm", 7, 0
 	alarmDays, alarmTZ, alarmEnabled := 0, "", false
@@ -317,6 +373,7 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	decodeSetting(values, "blink", &blink)
 	decodeSetting(values, "timezone", &tz)
 	decodeSetting(values, "display_mode", &mode)
+	decodeSetting(values, "stopwatch_reset_gesture", &resetGesture)
 	var secs int64
 	if decodeSetting(values, "timer_seconds", &secs) && secs > 0 {
 		timerSecs = uint64(secs)
@@ -351,6 +408,11 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	default:
 		mode = "clock"
 	}
+	switch resetGesture {
+	case "hold", "double_tap":
+	default:
+		resetGesture = "hold"
+	}
 	if timerSecs == 0 {
 		timerSecs = 300
 	}
@@ -371,6 +433,7 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	c.loc = c.resolveLocationLocked()
 	c.displayMode = mode
 	c.timerSecs = timerSecs
+	c.stopwatchReset = resetGesture
 	a = c.alarms[defaultAlarmID]
 	if a == nil {
 		a = &clockAlarm{id: defaultAlarmID}
@@ -379,12 +442,23 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	}
 	changed := a.label != alarmLabel || a.hour != alarmHour || a.minute != alarmMinute ||
 		int(a.days) != alarmDays || a.tz != alarmTZ || a.enabled != alarmEnabled
+	wasEnabled := a.enabled
+	removed := 0
 	if changed {
 		a.label, a.hour, a.minute = alarmLabel, alarmHour, alarmMinute
 		a.days, a.tz, a.enabled = uint8(alarmDays), alarmTZ, alarmEnabled
 		a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
+		if wasEnabled && !alarmEnabled {
+			removed = c.removeAlertsLocked(func(alert *clockAlert) bool {
+				return alert.kind == alertAlarm && alert.sourceID == defaultAlarmID
+			})
+		}
 	}
 	c.mu.Unlock()
+	if removed > 0 {
+		c.d.logs.Infof(clockAppID, "", "default alarm disabled; %d active alert(s) dismissed", removed)
+		c.reconcileAlertAudio()
+	}
 	c.publish()
 }
 
@@ -470,8 +544,9 @@ func (c *builtinClock) tick() {
 	c.publish()
 }
 
-// advanceLocked fires due timers and alarms, expires alerts and recomputes
-// recurring alarm triggers. The caller holds c.mu.
+// advanceLocked fires due timers and alarms and recomputes recurring alarm
+// triggers. Alerts stay active until explicitly dismissed; the caller holds
+// c.mu.
 func (c *builtinClock) advanceLocked(now time.Time, mono uint64) {
 	for _, id := range c.timerOrder {
 		t := c.timers[id]
@@ -480,7 +555,8 @@ func (c *builtinClock) advanceLocked(now time.Time, mono uint64) {
 		}
 		t.status = timerCompleted
 		t.finishedMS = uint64(now.UnixMilli())
-		c.addAlertLocked(alertTimer, t.id, t.label, now, mono, timerAlertMS)
+		alertID := c.addAlertLocked(alertTimer, t.id, t.label, now)
+		c.d.logs.Infof(clockAppID, "", "timer %s (%s) completed; alert %s rings until dismissed", t.id, t.label, alertID)
 	}
 	for _, id := range c.alarmOrder {
 		a := c.alarms[id]
@@ -497,23 +573,28 @@ func (c *builtinClock) advanceLocked(now time.Time, mono uint64) {
 		} else {
 			a.next = nextAlarmTrigger(a, now.Add(time.Second), c.alarmLocationLocked(a))
 		}
-		c.addAlertLocked(alertAlarm, a.id, a.label, now, mono, alarmAlertMS)
-	}
-	for i := len(c.alertOrder) - 1; i >= 0; i-- {
-		a := c.alerts[c.alertOrder[i]]
-		if a != nil && mono >= a.expiresMono {
-			c.removeAlertLocked(a.id)
-		}
+		alertID := c.addAlertLocked(alertAlarm, a.id, a.label, now)
+		c.d.logs.Infof(clockAppID, "", "alarm %s (%s) fired; alert %s rings until dismissed", a.id, a.label, alertID)
 	}
 }
 
-func (c *builtinClock) addAlertLocked(kind clockAlertKind, sourceID, label string, now time.Time, mono, lifetime uint64) string {
+func (c *builtinClock) addAlertLocked(kind clockAlertKind, sourceID, label string, now time.Time) string {
+	// A recurring alarm that is already ringing must not add a second alert for
+	// the same source; otherwise an ignored daily alarm grows the alert list
+	// without bound.
+	for _, id := range c.alertOrder {
+		if alert := c.alerts[id]; alert != nil && alert.kind == kind && alert.sourceID == sourceID {
+			alert.label = label
+			c.alertGen++
+			return id
+		}
+	}
 	c.alertGen++
 	c.nextID++
 	id := fmt.Sprintf("alt_%d", c.nextID)
 	c.alerts[id] = &clockAlert{
 		id: id, kind: kind, sourceID: sourceID, label: label,
-		startedMS: uint64(now.UnixMilli()), expiresMono: mono + lifetime*1_000_000,
+		startedMS: uint64(now.UnixMilli()),
 	}
 	c.alertOrder = append(c.alertOrder, id)
 	return id
@@ -543,6 +624,20 @@ func (c *builtinClock) removeAlertLocked(id string) {
 	}
 }
 
+// removeAlertsLocked dismisses every alert matching match, for cases where the
+// source disappears (alarm disabled or deleted) and no user dismissal will
+// ever arrive. The caller holds c.mu.
+func (c *builtinClock) removeAlertsLocked(match func(*clockAlert) bool) int {
+	removed := 0
+	for _, id := range append([]string(nil), c.alertOrder...) {
+		if alert := c.alerts[id]; alert != nil && match(alert) {
+			c.removeAlertLocked(id)
+			removed++
+		}
+	}
+	return removed
+}
+
 func (c *builtinClock) dismissAlert(id string) bool {
 	c.mu.Lock()
 	if id == "" {
@@ -550,19 +645,26 @@ func (c *builtinClock) dismissAlert(id string) bool {
 			c.mu.Unlock()
 			return false
 		}
+		count := len(c.alertOrder)
 		for _, cur := range append([]string(nil), c.alertOrder...) {
 			c.removeAlertLocked(cur)
 		}
 		c.mu.Unlock()
+		c.d.logs.Infof(clockAppID, "", "%d active alert(s) dismissed", count)
+		c.reconcileAlertAudio()
 		c.publish()
 		return true
 	}
-	if c.alerts[id] == nil {
+	alert := c.alerts[id]
+	if alert == nil {
 		c.mu.Unlock()
 		return false
 	}
+	kind, sourceID := alert.kind, alert.sourceID
 	c.removeAlertLocked(id)
 	c.mu.Unlock()
+	c.d.logs.Infof(clockAppID, "", "%s alert %s (%s) dismissed", clockAlertKindName(kind), id, sourceID)
+	c.reconcileAlertAudio()
 	c.publish()
 	return true
 }
@@ -645,26 +747,18 @@ func (c *builtinClock) publish() {
 	baseChanged := !c.appliedOK || base != c.applied
 	c.applied = base
 	c.appliedOK = true
-	var audio []byte
-	if haveAlert && !alert.audioSent {
-		audio = c.alertAudioLocked(alert.kind)
-		if audio != nil {
-			alert.audioSent = true
-		}
-	}
 	gen := c.alertGen
 	pres := c.pres
 	c.mu.Unlock()
 
+	c.reconcileAlertAudio()
 	if pres != nil && baseChanged {
 		if err := pres.UpdateFrame(segmentPresentationFrame(base.cells[:], base.colon)); err != nil && c.d.ctx.Err() == nil {
 			c.d.logs.Debugf(clockAppID, "", "baseline update: %v", err)
 		}
 	}
 	c.publishAlert(alertDisplay, haveAlert, gen)
-	if audio != nil {
-		c.playAlertAudio(audio)
-	}
+	c.publishCountdown()
 }
 
 func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint64) {
@@ -694,6 +788,7 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 		c.alertPres = map[string]*appPresentation{}
 		c.alertCap = map[string]*appCapture{}
 		c.alertSig = map[string]clockDisplay{}
+		c.alertRingSig = ""
 		c.mu.Unlock()
 		for _, cap := range caps {
 			cap.Release()
@@ -707,13 +802,7 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 	segment := c.alertPres[c.segmentID]
 	ring := c.alertPres[c.ringID]
 	segmentChanged := c.alertSig[c.segmentID] != display
-	if c.segmentID != "" {
-		c.alertSig[c.segmentID] = display
-	}
-	ringChanged := c.alertSig[c.ringID] != display
-	if c.ringID != "" {
-		c.alertSig[c.ringID] = display
-	}
+	ringChanged := c.alertRingSig != "ring-pulse"
 	segmentCaptured := c.alertCap[c.segmentID] != nil
 	ringCaptured := c.alertCap[c.ringID] != nil
 	c.mu.Unlock()
@@ -724,7 +813,7 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 	if segment == nil && c.segmentID != "" {
 		p, err := client.OpenPresentation(ctx, c.segmentID)
 		if err != nil {
-			c.d.logs.Debugf(clockAppID, "", "alert segment presentation: %v", err)
+			c.logAlertFailure("alert segment presentation", err)
 		} else {
 			segment = p
 			c.mu.Lock()
@@ -735,7 +824,7 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 	if ring == nil && c.ringID != "" {
 		p, err := client.OpenPresentation(ctx, c.ringID)
 		if err != nil {
-			c.d.logs.Debugf(clockAppID, "", "alert ring presentation: %v", err)
+			c.logAlertFailure("alert ring presentation", err)
 		} else {
 			ring = p
 			c.mu.Lock()
@@ -745,15 +834,23 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 	}
 	if segment != nil && segmentChanged {
 		if err := segment.UpdateFrame(segmentPresentationFrame(display.cells[:], display.colon)); err != nil {
-			c.d.logs.Debugf(clockAppID, "", "alert segment: %v", err)
+			c.logAlertFailure("alert segment", err)
+		} else if c.segmentID != "" {
+			c.mu.Lock()
+			c.alertSig[c.segmentID] = display
+			c.mu.Unlock()
 		}
 	}
 	if ring != nil && ringChanged {
 		params := mustParams("system.ring.pulse", presets.Params{
-			"speed": 1.6, "color": backend.RGB{R: 255, G: 96, B: 24}, "min_intensity": 0.12,
+			"speed": 1.6, "color": ringCountdownColor, "min_intensity": 0.12,
 		})
 		if err := ring.UpdateFrame(ringEffectPresentationFrame("system.ring.pulse", params)); err != nil {
-			c.d.logs.Debugf(clockAppID, "", "alert ring: %v", err)
+			c.logAlertFailure("alert ring", err)
+		} else {
+			c.mu.Lock()
+			c.alertRingSig = "ring-pulse"
+			c.mu.Unlock()
 		}
 	}
 	if segment != nil && !segmentCaptured {
@@ -762,7 +859,7 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 			c.alertCap[c.segmentID] = cap
 			c.mu.Unlock()
 		} else {
-			c.d.logs.Debugf(clockAppID, "", "alert display capture: %v", err)
+			c.logAlertFailure("alert display capture", err)
 		}
 	}
 	if ring != nil && !ringCaptured {
@@ -771,9 +868,235 @@ func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint6
 			c.alertCap[c.ringID] = cap
 			c.mu.Unlock()
 		} else {
-			c.d.logs.Debugf(clockAppID, "", "alert ring capture: %v", err)
+			c.logAlertFailure("alert ring capture", err)
 		}
 	}
+}
+
+// publishCountdown owns the clock's normal ring capture while at least one
+// timer runs. It is separate from the alert overlay: an alert takes the ring,
+// and the countdown resumes beneath it once the alert is dismissed. Releasing
+// the capture returns the configured ring baseline.
+func (c *builtinClock) publishCountdown() {
+	c.alertMu.Lock()
+	defer c.alertMu.Unlock()
+
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return
+	}
+	var (
+		active     bool
+		stopwatch  bool
+		timerID    string
+		lit        int
+		pixels     int
+		logTimer   string
+		logLit     int
+		logPixels  int
+		logSeconds int
+		logState   bool
+	)
+	if c.activeAlertLocked() == nil {
+		if t := c.nearestRunningTimerLocked(); t != nil {
+			if px := c.ringPixelCount(); px > 0 {
+				mono := c.mono()
+				remaining := uint64(0)
+				if t.deadlineNS > mono {
+					remaining = t.deadlineNS - mono
+				}
+				active = true
+				timerID, pixels = t.id, px
+				lit = countdownLitPixels(pixels, t.durationNS, remaining)
+				if c.countLogTimer != t.id || c.countLogLit != lit {
+					c.countLogTimer, c.countLogLit = t.id, lit
+					logState = true
+					logTimer, logLit, logPixels = t.id, lit, pixels
+					logSeconds = int((remaining + 999_999_999) / 1_000_000_000)
+				}
+			}
+		} else if c.stopwatch.running && c.ringID != "" {
+			// A running stopwatch owns the ring with a slow orange pulse. A
+			// timer countdown takes precedence, and pausing the stopwatch
+			// releases the capture so the selected baseline returns.
+			active = true
+			stopwatch = true
+			timerID = stopwatchCueID
+		}
+	}
+	if !active {
+		c.countLogTimer, c.countLogLit = "", -1
+	}
+	client, ctx := c.client, c.ctx
+	pres, cap := c.countPres, c.countCap
+	curTimer, curLit, curPixels := c.countFrameTimer, c.countFrameLit, c.countFramePix
+	if !active {
+		c.countPres, c.countCap = nil, nil
+		c.countFrameTimer, c.countFrameLit, c.countFramePix = "", 0, 0
+	}
+	c.mu.Unlock()
+
+	if logState {
+		c.d.logs.Infof(clockAppID, "", "timer %s countdown %d/%d pixels lit (%ds remaining)",
+			logTimer, logLit, logPixels, logSeconds)
+	}
+	if !active {
+		if cap != nil {
+			cap.Release()
+		}
+		if pres != nil {
+			pres.Close()
+		}
+		return
+	}
+	if client == nil {
+		return
+	}
+	if pres == nil {
+		p, err := client.OpenPresentation(ctx, c.ringID)
+		if err != nil {
+			c.logCountdownFailure("countdown ring presentation", err)
+			return
+		}
+		pres = p
+		c.mu.Lock()
+		c.countPres = p
+		c.countFrameTimer, c.countFrameLit, c.countFramePix = "", 0, 0
+		c.mu.Unlock()
+		curTimer, curLit, curPixels = "", 0, 0
+	}
+	if curTimer != timerID || curLit != lit || curPixels != pixels {
+		var frame *frameworkv1.PresentationFrame
+		if stopwatch {
+			params := mustParams("system.ring.pulse", presets.Params{
+				"speed": 0.8, "color": ringCountdownColor, "min_intensity": 0.08,
+			})
+			frame = ringEffectPresentationFrame("system.ring.pulse", params)
+		} else {
+			frame = ringFramePresentationFrame(countdownRingPixels(pixels, lit))
+		}
+		if err := pres.UpdateFrame(frame); err != nil {
+			c.logCountdownFailure("countdown ring frame", err)
+		} else {
+			c.mu.Lock()
+			c.countFrameTimer, c.countFrameLit, c.countFramePix = timerID, lit, pixels
+			c.mu.Unlock()
+		}
+	}
+	if cap == nil {
+		acquired, err := client.Capture(ctx, c.ringID, pres.ID())
+		if err != nil {
+			c.logCountdownFailure("countdown ring capture", err)
+			return
+		}
+		c.mu.Lock()
+		c.countCap = acquired
+		c.mu.Unlock()
+	}
+}
+
+// logAlertFailure reports a broken alert overlay at most once per five seconds.
+// Alerts now ring until dismissed, so retry logs must not fill the log.
+func (c *builtinClock) logAlertFailure(what string, err error) {
+	c.mu.Lock()
+	now := c.now()
+	if !c.alertErrAt.IsZero() && now.Sub(c.alertErrAt) < 5*time.Second {
+		c.mu.Unlock()
+		return
+	}
+	c.alertErrAt = now
+	c.mu.Unlock()
+	c.d.logs.Debugf(clockAppID, "", "%s: %v", what, err)
+}
+
+// logCountdownFailure reports a broken overlay at most once per five seconds;
+// a timer can run for days and must not fill the log with retry noise.
+func (c *builtinClock) logCountdownFailure(what string, err error) {
+	c.mu.Lock()
+	now := c.now()
+	if !c.countErrAt.IsZero() && now.Sub(c.countErrAt) < 5*time.Second {
+		c.mu.Unlock()
+		return
+	}
+	c.countErrAt = now
+	c.mu.Unlock()
+	c.d.logs.Debugf(clockAppID, "", "%s: %v", what, err)
+}
+
+// ringPixelCount reads the proven ring geometry; a missing capability means no
+// countdown rather than a guessed pixel count.
+func (c *builtinClock) ringPixelCount() int {
+	if c.ringID == "" {
+		return 0
+	}
+	if info := c.d.resources[c.ringID]; info != nil && info.GetRing() != nil {
+		return int(info.GetRing().GetPixelCount())
+	}
+	return 0
+}
+
+const stopwatchCueID = "stopwatch"
+
+// ringCountdownColor is the warm orange used by both clock ring cues: the timer
+// arc extinguishes, while a running stopwatch pulses the whole ring, so the two
+// states are distinguishable by motion rather than by a second color.
+var ringCountdownColor = backend.RGB{R: 255, G: 96, B: 24}
+
+// countdownLitPixels maps the remaining fraction onto ring geometry. Pixel 0
+// is the top and indices advance clockwise, so extinguishing counterclockwise
+// from the top means the top pixel goes first, then N-1 down toward index 1.
+// The lit arc is contiguous: 1..lit, or the whole ring when nothing has
+// extinguished yet.
+func countdownLitPixels(pixels int, durationNS, remainingNS uint64) int {
+	if pixels <= 0 || durationNS == 0 || remainingNS == 0 {
+		return 0
+	}
+	if remainingNS >= durationNS {
+		return pixels
+	}
+	lit := int((remainingNS*uint64(pixels) + durationNS - 1) / durationNS)
+	if lit < 1 {
+		lit = 1
+	}
+	if lit > pixels {
+		lit = pixels
+	}
+	return lit
+}
+
+// countdownRingPixels renders the lit arc. When the arc is partial it starts at
+// index 1 because index 0 (top) is the first pixel to go dark.
+func countdownRingPixels(pixels, lit int) []backend.RGB {
+	if pixels <= 0 {
+		return nil
+	}
+	out := make([]backend.RGB, pixels)
+	if lit <= 0 {
+		return out
+	}
+	if lit >= pixels {
+		for i := range out {
+			out[i] = ringCountdownColor
+		}
+		return out
+	}
+	for i := 1; i <= lit; i++ {
+		out[i] = ringCountdownColor
+	}
+	return out
+}
+
+func ringFramePresentationFrame(pixels []backend.RGB) *frameworkv1.PresentationFrame {
+	out := make([]*frameworkv1.RgbPixel, 0, len(pixels))
+	for _, px := range pixels {
+		out = append(out, &frameworkv1.RgbPixel{
+			Red: uint32(px.R), Green: uint32(px.G), Blue: uint32(px.B),
+		})
+	}
+	return &frameworkv1.PresentationFrame{Payload: &frameworkv1.PresentationFrame_Ring{
+		Ring: &frameworkv1.RingFrame{Pixels: out},
+	}}
 }
 
 func (c *builtinClock) baselineDisplayLocked(now time.Time, mono uint64) clockDisplay {
@@ -822,7 +1145,7 @@ func (c *builtinClock) alertDisplayLocked(a *clockAlert, now time.Time) clockDis
 			return clockDisplay{cells: fourDigits(alarm.hour*100 + alarm.minute), colon: now.UnixMilli()/500%2 == 0}
 		}
 	}
-	cells := [4]uint16{0, 0, 0, 0}
+	cells := fourDigits(0)
 	colons := now.UnixMilli()/500%2 == 0
 	return clockDisplay{cells: cells, colon: colons}
 }
@@ -1091,6 +1414,79 @@ func (c *builtinClock) stopwatchCommand(rpc string) *clockv1.StopwatchInfo {
 	return info
 }
 
+// stopwatchEngaged reports whether the stopwatch owns the primary button: it is
+// running or paused with elapsed time.
+func (c *builtinClock) stopwatchEngaged() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.running {
+		return false
+	}
+	return c.stopwatch.running || c.stopwatch.elapsedNS > 0
+}
+
+// stopwatchToggle pauses a running stopwatch or resumes a paused one. It
+// reports false when no stopwatch is engaged, so the press keeps its normal
+// assistant meaning.
+func (c *builtinClock) stopwatchToggle() bool {
+	c.mu.Lock()
+	mono := c.mono()
+	if !c.running || (!c.stopwatch.running && c.stopwatch.elapsedNS == 0) {
+		c.mu.Unlock()
+		return false
+	}
+	paused := c.stopwatch.running
+	if paused {
+		c.stopwatch.elapsedNS += mono - c.stopwatch.startedNS
+		c.stopwatch.running = false
+	} else {
+		c.stopwatch.running = true
+		c.stopwatch.startedNS = mono
+		if c.stopwatch.startedMS == 0 {
+			c.stopwatch.startedMS = uint64(c.now().UnixMilli())
+		}
+	}
+	c.mu.Unlock()
+	if paused {
+		c.d.logs.Infof(clockAppID, "", "stopwatch paused by the primary key")
+	} else {
+		c.d.logs.Infof(clockAppID, "", "stopwatch resumed by the primary key")
+	}
+	c.publish()
+	return true
+}
+
+// stopwatchResetGesture resets a running or paused stopwatch only when the
+// configured reset gesture matches. The press is still consumed by the caller,
+// so a non-matching hold or double tap never summons the assistant.
+func (c *builtinClock) stopwatchResetGesture(gesture string) bool {
+	c.mu.Lock()
+	engaged := c.running && (c.stopwatch.running || c.stopwatch.elapsedNS > 0)
+	if !engaged || c.stopwatchReset != gesture {
+		c.mu.Unlock()
+		return false
+	}
+	c.stopwatch.running = false
+	c.stopwatch.elapsedNS = 0
+	c.stopwatch.startedMS = 0
+	c.mu.Unlock()
+	c.d.logs.Infof(clockAppID, "", "stopwatch reset and dismissed by a %s", gesture)
+	c.publish()
+	return true
+}
+
+// primaryGesture dispatches a framework-owned primary-key gesture to the
+// stopwatch. Every gesture that engages the stopwatch is consumed.
+func (c *builtinClock) primaryGesture(kind string) bool {
+	switch kind {
+	case "tap":
+		return c.stopwatchToggle()
+	case "hold", "double_tap":
+		return c.stopwatchResetGesture(kind)
+	}
+	return false
+}
+
 func (c *builtinClock) stopwatchInfoLocked(mono uint64) *clockv1.StopwatchInfo {
 	elapsed := c.stopwatch.elapsedNS
 	state := clockv1.StopwatchStatus_STOPWATCH_STATUS_IDLE
@@ -1123,6 +1519,7 @@ func (c *builtinClock) startTimer(durationMS uint64, label string) *clockv1.Time
 	c.timerOrder = append(c.timerOrder, id)
 	out := timerInfo(t, mono)
 	c.mu.Unlock()
+	c.d.logs.Infof(clockAppID, "", "timer %s (%s) started for %d ms", id, label, durationMS)
 	c.publish()
 	return out
 }
@@ -1153,7 +1550,9 @@ func (c *builtinClock) cancelTimer(id string) (*clockv1.TimerInfo, error) {
 			break
 		}
 	}
+	label := t.label
 	c.mu.Unlock()
+	c.d.logs.Infof(clockAppID, "", "timer %s (%s) cancelled", id, label)
 	c.publish()
 	return out, nil
 }
@@ -1258,7 +1657,17 @@ func (c *builtinClock) setAlarmEnabled(id string, enabled bool) (*clockv1.AlarmI
 	a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
 	out := alarmInfo(a, c.alarmLocationLocked(a))
 	label, hour, minute, days, tz := a.label, a.hour, a.minute, int(a.days), a.tz
+	dismissed := 0
+	if !enabled {
+		dismissed = c.removeAlertsLocked(func(alert *clockAlert) bool {
+			return alert.kind == alertAlarm && alert.sourceID == id
+		})
+	}
 	c.mu.Unlock()
+	if dismissed > 0 {
+		c.d.logs.Infof(clockAppID, "", "alarm %s disabled; %d active alert(s) dismissed", id, dismissed)
+		c.reconcileAlertAudio()
+	}
 	if id == defaultAlarmID {
 		c.persistDefaultAlarm(label, hour, minute, days, tz, enabled)
 	}
@@ -1285,7 +1694,15 @@ func (c *builtinClock) deleteAlarm(id string) (*clockv1.DeleteAlarmResponse, err
 			break
 		}
 	}
+	dismissed := c.removeAlertsLocked(func(alert *clockAlert) bool {
+		return alert.kind == alertAlarm && alert.sourceID == id
+	})
 	c.mu.Unlock()
+	if dismissed > 0 {
+		c.d.logs.Infof(clockAppID, "", "alarm %s deleted; %d active alert(s) dismissed", id, dismissed)
+		c.reconcileAlertAudio()
+		c.publish()
+	}
 	return &clockv1.DeleteAlarmResponse{Deleted: true}, nil
 }
 
@@ -1469,18 +1886,110 @@ func synthAlertPCM(kind clockAlertKind, format backend.AudioFormat) []byte {
 	return out
 }
 
-func (c *builtinClock) playAlertAudio(pcm []byte) {
+// reconcileAlertAudio keeps exactly one repeating audio loop for the currently
+// active alert. Repeated publishes while the same alert rings are no-ops, so a
+// 200 ms tick never accumulates goroutines or overlapping clips.
+func (c *builtinClock) reconcileAlertAudio() {
 	c.mu.Lock()
-	client := c.client
-	format := c.audioFormat
-	ctx := c.ctx
+	var (
+		alertID string
+		kind    clockAlertKind
+		pcm     []byte
+		format  backend.AudioFormat
+		client  *builtinAppClient
+		ctx     context.Context
+		play    func(context.Context, backend.AudioFormat, []byte) error
+	)
+	if c.running && c.client != nil && c.ctx != nil {
+		if alert := c.activeAlertLocked(); alert != nil {
+			alertID = alert.id
+			kind = alert.kind
+			pcm = c.alertAudioLocked(alert.kind)
+			format = c.audioFormat
+			client = c.client
+			ctx = c.ctx
+			play = c.playAudio
+		}
+	}
 	c.mu.Unlock()
-	if client == nil || ctx == nil {
+
+	c.audioMu.Lock()
+	defer c.audioMu.Unlock()
+	if alertID == "" {
+		c.stopAlertAudioLocked()
 		return
 	}
-	go func() {
-		if err := client.Playback(ctx, format, pcm); err != nil && c.d.ctx.Err() == nil {
+	if c.audioAlertID == alertID && c.audioCancel != nil {
+		return
+	}
+	c.stopAlertAudioLocked()
+	if client == nil || ctx == nil || pcm == nil {
+		return
+	}
+	if play == nil {
+		play = client.Playback
+	}
+	wrapped := func(ctx context.Context, format backend.AudioFormat, pcm []byte) error {
+		err := play(ctx, format, pcm)
+		if err != nil && ctx.Err() == nil && c.d.ctx.Err() == nil {
 			c.d.logs.Debugf(clockAppID, "", "alert audio: %v", err)
 		}
-	}()
+		return err
+	}
+	gap := timerAlertGap
+	if kind == alertAlarm {
+		gap = alarmAlertGap
+	}
+	audioCtx, cancel := context.WithCancel(ctx)
+	c.audioAlertID = alertID
+	c.audioCancel = cancel
+	c.d.logs.Infof(clockAppID, "", "%s alert %s audio repeating until dismissed", clockAlertKindName(kind), alertID)
+	go alertAudioLoop(audioCtx, format, pcm, gap, wrapped)
+}
+
+func (c *builtinClock) stopAlertAudio() {
+	c.audioMu.Lock()
+	defer c.audioMu.Unlock()
+	c.stopAlertAudioLocked()
+}
+
+func (c *builtinClock) stopAlertAudioLocked() {
+	if c.audioCancel != nil {
+		c.audioCancel()
+		c.audioCancel = nil
+	}
+	c.audioAlertID = ""
+}
+
+// alertAudioLoop plays one clip, then waits gap before the next. Cancellation
+// interrupts both the in-flight clip and the silence.
+func alertAudioLoop(ctx context.Context, format backend.AudioFormat, pcm []byte, gap time.Duration,
+	play func(context.Context, backend.AudioFormat, []byte) error,
+) {
+	if gap <= 0 {
+		gap = time.Second
+	}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = play(ctx, format, pcm)
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.NewTimer(gap)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func clockAlertKindName(kind clockAlertKind) string {
+	if kind == alertAlarm {
+		return "alarm"
+	}
+	return "timer"
 }

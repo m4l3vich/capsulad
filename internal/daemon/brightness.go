@@ -95,6 +95,30 @@ func stepToward(current, target, step float64) float64 {
 	}
 }
 
+// resetAutoLevels drops cached sensor levels for resources whose brightness
+// mode changed. A level belongs to the automatic period that sampled it:
+// keeping it would let a re-enabled automatic display adopt a value from an
+// earlier period (possibly in a different room) before the next sample.
+func (d *Daemon) resetAutoLevels(prev, next *settings.UserSettings) {
+	if prev == nil || next == nil {
+		return
+	}
+	var changed []string
+	for _, info := range d.resources {
+		if prev.BrightnessMode[info.ResourceId] != next.BrightnessMode[info.ResourceId] {
+			changed = append(changed, info.ResourceId)
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
+	d.autoMu.Lock()
+	for _, id := range changed {
+		delete(d.autoLvl, id)
+	}
+	d.autoMu.Unlock()
+}
+
 // effectiveBrightness resolves the brightness for one resource: the constant
 // setting, or the latest sensor-derived level when the user chose "auto". The
 // bool reports whether a value exists at all, so callers can keep their own
