@@ -32,6 +32,7 @@ func main() {
 	fs.StringVar(&cfg.WebUIAddr, "web-addr", "127.0.0.1:8443", "HTTPS Web UI listen address; empty disables it")
 	fs.StringVar(&cfg.AppsDir, "apps-dir", "", "installed applications root (default <data-dir>/apps)")
 	fs.StringVar(&cfg.AssetsDir, "assets-dir", "", "shared read-only assets root (default <data-dir>/assets)")
+	fs.StringVar(&cfg.NativeLibDir, "native-lib-dir", "", "shared native SDK runtime directory (default <daemon-dir>/lib, else <daemon-dir>/../lib)")
 	fs.StringVar(&cfg.SandboxMode, "sandbox", "auto", "sandbox mode: auto, namespaces, mountns, uid, none")
 	fs.IntVar(&cfg.SandboxUIDBase, "sandbox-uid-base", 20000, "first host UID assigned to sandboxed apps")
 	fs.StringVar(&cfg.TrustedRootPath, "trusted-root", "", "offline Sigstore trusted_root.json for provenance verification")

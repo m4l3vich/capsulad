@@ -13,8 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	"capsulad/sdk/go/capsula"
+	"capsula/sdk/capsula"
 )
 
 func main() {
@@ -22,7 +21,7 @@ func main() {
 	env := capsula.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	client, err := capsula.Connect(ctx, env.Socket, env.RunID)
+	client, err := capsula.Connect(ctx, env)
 	if err != nil {
 		log.Fatalf("probe: connect: %v", err)
 	}
@@ -77,7 +76,7 @@ func main() {
 	ready := make(chan struct{}, 1)
 	client.SetHandlers(capsula.Handlers{
 		Ready: func() { ready <- struct{}{} },
-		Invocation: func(ctx context.Context, inv *frameworkv1.AppLaunchInvocation) {
+		Invocation: func(ctx context.Context, inv *capsula.LaunchInvocation) {
 			mode := ""
 			for _, a := range inv.Arguments {
 				if a.Name == "mode" {
@@ -98,17 +97,17 @@ func main() {
 			case "mic":
 				openMic(ctx, client)
 			case "touchpartial":
-				watchTouch(ctx, client, frameworkv1.TouchCaptureMode_TOUCH_PARTIAL_GESTURES, &touchCount)
+				watchTouch(ctx, client, capsula.CaptureModePartialGestures, &touchCount)
 			case "touchfull":
-				watchTouch(ctx, client, frameworkv1.TouchCaptureMode_TOUCH_FULL_RAW, &touchCount)
+				watchTouch(ctx, client, capsula.CaptureModeFullRaw, &touchCount)
 			}
-			_ = client.NotifyInvocationResult(inv.InvocationId, true, "probe "+mode)
+			_ = client.NotifyInvocationResult(inv.ID, true, "probe "+mode)
 		},
-		Activation: func(ctx context.Context, act *frameworkv1.AssistantActivation) {
-			log.Printf("activation %s", act.ActivationId)
-			assistantTurn(ctx, client, act.ActivationId)
+		Activation: func(ctx context.Context, act *capsula.Activation) {
+			log.Printf("activation %s", act.ID)
+			assistantTurn(ctx, client, act.ID)
 		},
-		TouchRelease: func(rel *frameworkv1.AssistantInputReleased) {},
+		TouchRelease: func(rel *capsula.InputReleased) {},
 	})
 
 	if env.AppID == "test.clock" {
@@ -138,7 +137,7 @@ func main() {
 	}
 }
 
-func watchTouch(ctx context.Context, client *capsula.Client, mode frameworkv1.TouchCaptureMode, count *atomic.Int64) {
+func watchTouch(ctx context.Context, client *capsula.Client, mode capsula.CaptureMode, count *atomic.Int64) {
 	cap, err := client.OpenCapture(ctx, "touch.panel.main", "", mode)
 	if err != nil {
 		log.Printf("touch capture: %v", err)
@@ -173,7 +172,7 @@ func holdRing(ctx context.Context, client *capsula.Client, d time.Duration) {
 	if err := p.Effect("system.ring.spinner", map[string]any{"speed": 1.0}); err != nil {
 		log.Printf("effect: %v", err)
 	}
-	cap, err := client.OpenCapture(ctx, "light.ring.main", p.ID(), frameworkv1.TouchCaptureMode_TOUCH_CAPTURE_MODE_UNSPECIFIED)
+	cap, err := client.OpenCapture(ctx, "light.ring.main", p.ID(), capsula.CaptureModeUnspecified)
 	if err != nil {
 		log.Printf("capture: %v", err)
 		return
@@ -217,12 +216,12 @@ func assistantTurn(ctx context.Context, client *capsula.Client, activationID str
 	}
 	defer p.Close()
 	_ = p.Effect("system.ring.spinner", map[string]any{"speed": 1.2})
-	cap, err := client.OpenCapture(turnCtx, "light.ring.main", p.ID(), frameworkv1.TouchCaptureMode_TOUCH_CAPTURE_MODE_UNSPECIFIED)
+	cap, err := client.OpenCapture(turnCtx, "light.ring.main", p.ID(), capsula.CaptureModeUnspecified)
 	if err != nil {
 		return
 	}
 	defer cap.Close()
-	mic, err := client.OpenMic(turnCtx, activationID, conv.ID)
+	mic, err := client.OpenMic(turnCtx, activationID, conv.ID())
 	if err != nil {
 		return
 	}

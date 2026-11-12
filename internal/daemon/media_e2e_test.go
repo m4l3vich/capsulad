@@ -2,40 +2,95 @@ package daemon
 
 import (
 	"context"
-	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/bluetooth"
 )
 
-const mediaService = "capsula.contracts.media.v1.MediaPlayerService"
+const (
+	mediaService  = "capsula.contracts.media.v1.MediaPlayerService"
+	mediaFixture  = "test.media"
+	mediaManifest = `
+id = "test.media"
+name = "Test media provider"
+version = "0.1.0"
+description = "Purpose-built media contract fixture."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
 
-// TestMediaProviderRoutedStreaming exercises the real media sample app through
-// the app bus: interface discovery, a unary ListPlayers, a server-streaming
-// WatchPlayers whose first event must be a snapshot, and command-driven state
-// updates arriving on that same stream.
+[entrypoint]
+runtime = "native"
+path = "mediafixture"
+architecture = "aarch64"
+abi = "linux-musl"
+
+[[interfaces]]
+service = "capsula.contracts.media.v1.MediaPlayerService"
+version = "1.0.0"
+descriptor = "schemas/media.protoset"
+`
+)
+
+// buildTestdataApp builds one of internal/daemon's test-only fixture programs.
+func buildTestdataApp(t *testing.T, name string) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), name)
+	args := []string{"build"}
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-ldflags", "-linkmode=external")
+	}
+	args = append(args, "-o", out, "./testdata/"+name)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = filepath.Join(moduleRoot(t), "internal", "daemon")
+	if outBytes, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build testdata/%s: %v\n%s", name, err, outBytes)
+	}
+	return out
+}
+
+// mediaDescriptorSet serializes the generated MediaPlayerService descriptor so
+// the registry can validate and advertise the fixture's interface exactly as
+// it would for an installed provider.
+func mediaDescriptorSet(t *testing.T) []byte {
+	t.Helper()
+	set := &descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{
+			protodesc.ToFileDescriptorProto(mediav1.File_capsula_contracts_media_v1_media_proto),
+		},
+	}
+	data, err := proto.Marshal(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestMediaProviderRoutedStreaming exercises a purpose-built media provider
+// through the generic app bus: interface discovery, a unary ListPlayers, a
+// server-streaming WatchPlayers whose first event must be a snapshot, and
+// command-driven state updates arriving on that same stream. A connected
+// Bluetooth source appears as a second player and commands reach the source.
 func TestMediaProviderRoutedStreaming(t *testing.T) {
-	binary := buildModuleApp(t, "apps/media")
-	manifest, err := os.ReadFile(filepath.Join(moduleRoot(t), "apps", "media", "manifest.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	descriptor, err := os.ReadFile(filepath.Join(moduleRoot(t), "apps", "media", "schemas", "media.protoset"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	binary := buildTestdataApp(t, "mediafixture")
 	d, _, _ := newTestDaemonWith(t, appInstall{
-		id: "org.capsula.media", binaryName: "media", binaryPath: binary,
-		manifest: manifest, files: map[string][]byte{"schemas/media.protoset": descriptor},
+		id: mediaFixture, binaryName: "mediafixture", binaryPath: binary,
+		manifest: []byte(mediaManifest),
+		files:    map[string][]byte{"schemas/media.protoset": mediaDescriptorSet(t)},
 	})
 	conn := dialTest(t, d.cfg.SocketPath)
-	_ = waitReady(t, d, "org.capsula.media", 10*time.Second)
+	_ = waitReady(t, d, mediaFixture, 10*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -46,16 +101,16 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 	}
 	advertised := false
 	for _, iface := range ifaces.GetInterfaces() {
-		if iface.AppId == "org.capsula.media" && iface.GrpcService == mediaService {
+		if iface.AppId == mediaFixture && iface.GrpcService == mediaService {
 			advertised = true
 		}
 	}
 	if !advertised {
-		t.Fatalf("media app did not advertise %s: %v", mediaService, ifaces.GetInterfaces())
+		t.Fatalf("media fixture did not advertise %s: %v", mediaService, ifaces.GetInterfaces())
 	}
 
 	listReq, _ := proto.Marshal(&mediav1.ListPlayersRequest{})
-	raw := routedCall(t, conn, "org.capsula.media", mediaService, "ListPlayers", [][]byte{listReq})
+	raw := routedCall(t, conn, mediaFixture, mediaService, "ListPlayers", [][]byte{listReq})
 	if len(raw) != 1 {
 		t.Fatalf("ListPlayers returned %d messages", len(raw))
 	}
@@ -77,7 +132,7 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := stream.Send(&frameworkv1.RoutedCallRequest{Message: &frameworkv1.RoutedCallRequest_Start{
-		Start: &frameworkv1.RoutedCallStart{TargetAppId: "org.capsula.media", GrpcService: mediaService, RpcName: "WatchPlayers", TimeoutMs: 12000},
+		Start: &frameworkv1.RoutedCallStart{TargetAppId: mediaFixture, GrpcService: mediaService, RpcName: "WatchPlayers", TimeoutMs: 12000},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +172,7 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 	initialRevision := snapshot.GetSnapshot().GetPlayers()[0].GetRevision()
 
 	playReq, _ := proto.Marshal(&mediav1.PlayerRequest{PlayerId: "local.player"})
-	raw = routedCall(t, conn, "org.capsula.media", mediaService, "Play", [][]byte{playReq})
+	raw = routedCall(t, conn, mediaFixture, mediaService, "Play", [][]byte{playReq})
 	var accepted mediav1.PlayerCommandResult
 	if err := proto.Unmarshal(raw[0], &accepted); err != nil {
 		t.Fatal(err)
@@ -153,7 +208,7 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 		t.Fatal("playing status has no media name")
 	}
 
-	raw = routedCall(t, conn, "org.capsula.media", mediaService, "Pause", [][]byte{playReq})
+	raw = routedCall(t, conn, mediaFixture, mediaService, "Pause", [][]byte{playReq})
 	if err := proto.Unmarshal(raw[0], &accepted); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +227,7 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 	listPlayers := func() []*mediav1.PlayerStatus {
 		t.Helper()
 		req, _ := proto.Marshal(&mediav1.ListPlayersRequest{})
-		reply := routedCall(t, conn, "org.capsula.media", mediaService, "ListPlayers", [][]byte{req})
+		reply := routedCall(t, conn, mediaFixture, mediaService, "ListPlayers", [][]byte{req})
 		if len(reply) != 1 {
 			t.Fatalf("ListPlayers returned %d messages", len(reply))
 		}
@@ -200,7 +255,7 @@ func TestMediaProviderRoutedStreaming(t *testing.T) {
 	}
 
 	btReq, _ := proto.Marshal(&mediav1.PlayerRequest{PlayerId: "bluetooth"})
-	raw = routedCall(t, conn, "org.capsula.media", mediaService, "Pause", [][]byte{btReq})
+	raw = routedCall(t, conn, mediaFixture, mediaService, "Pause", [][]byte{btReq})
 	if err := proto.Unmarshal(raw[0], &accepted); err != nil {
 		t.Fatal(err)
 	}

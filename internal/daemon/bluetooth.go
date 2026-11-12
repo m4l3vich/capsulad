@@ -12,7 +12,6 @@ import (
 
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/grpcpeer"
-	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
@@ -288,16 +287,16 @@ func (d *Daemon) pulseBluetoothRing() {
 		d.logs.Warnf("bluetooth", "", "pulse cue: %v", err)
 		return
 	}
-	// Reuse the framework's ring fallback presentation. Opening a second
-	// system presentation would create two eligible baselines and make the
-	// fallback selection depend on creation order.
-	pres := d.fallback[ringID]
-	if pres == nil {
+	// Reuse the internal ring baseline presentation. Opening a second
+	// framework presentation would create a competing baseline, and the
+	// internal one already carries the mode/microphone state machine.
+	ring := d.builtins.ring
+	if ring == nil {
 		return
 	}
 	d.btPulseMu.Lock()
 	if d.btPulseCap == "" {
-		cap, err := d.router.Acquire(ringID, routing.SystemAppID, "system", pres.ID, routing.TouchNone)
+		cap, err := d.router.Acquire(ringID, routing.BuiltinAppID, "system", ring.pres.ID, routing.TouchNone)
 		if err != nil {
 			d.btPulseMu.Unlock()
 			d.logs.Warnf("bluetooth", "", "pulse capture: %v", err)
@@ -305,9 +304,7 @@ func (d *Daemon) pulseBluetoothRing() {
 		}
 		d.btPulseCap = cap.ID
 	}
-	if err := d.pres.Update(pres, presentations.RingEffect("system.ring.pulse", params)); err != nil {
-		d.logs.Warnf("bluetooth", "", "pulse effect: %v", err)
-	}
+	ring.setPulse(params)
 	d.btPulseGen++
 	gen := d.btPulseGen
 	if d.btPulseTmr != nil {
@@ -333,11 +330,10 @@ func (d *Daemon) endBluetoothPulse(gen uint64) {
 			d.logs.Infof("bluetooth", "", "connection pulse was obscured by another ring capture")
 		}
 	}
-	// Restore the fallback effect the settings-driven state machine wants
-	// (blank, or the microphone-active pulse).
-	d.sysRingMu.Lock()
-	d.sysRingState = ""
-	d.sysRingMu.Unlock()
+	// Restore the internal baseline the settings-driven state machine wants.
+	if d.builtins != nil && d.builtins.ring != nil {
+		d.builtins.ring.clearPulse()
+	}
 	d.updateSystemRing()
 }
 

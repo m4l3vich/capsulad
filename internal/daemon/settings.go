@@ -12,9 +12,10 @@ import (
 	"capsulad/internal/settings"
 )
 
-// seedDefaults selects bundled providers on first run without overriding an
-// explicit user choice. Provides hints only populate dropdowns; they never
-// grant capabilities.
+// seedDefaults selects an installed custom provider on first run without
+// overriding an explicit user choice. The internal clock and ring baseline
+// need no registry entry, and removed sample providers are never re-seeded.
+// Provides hints only populate dropdowns; they never grant capabilities.
 func (d *Daemon) seedDefaults() {
 	snap := d.user.Get()
 	patch := snap.Values
@@ -34,7 +35,7 @@ func (d *Daemon) seedDefaults() {
 			continue
 		}
 		for _, app := range d.reg.List() {
-			if hasProvide(app.Manifest.Provides, want) {
+			if hasProvide(app.Manifest.Provides, want) && !isRetiredApp(app.Manifest.ID) {
 				if patch.DefaultAppByResource == nil {
 					patch.DefaultAppByResource = map[string]string{}
 				}
@@ -46,7 +47,7 @@ func (d *Daemon) seedDefaults() {
 	}
 	if patch.DefaultAssistantAppID == "" {
 		for _, app := range d.reg.List() {
-			if hasProvide(app.Manifest.Provides, "voice_assistant") {
+			if hasProvide(app.Manifest.Provides, "voice_assistant") && !isRetiredApp(app.Manifest.ID) {
 				patch.DefaultAssistantAppID = app.Manifest.ID
 				changed = true
 				break
@@ -69,6 +70,20 @@ func hasProvide(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// isRetiredApp reports the sample applications whose behavior moved into the
+// daemon or that were removed from the distribution. A package directory left
+// over from an upgrade is ignored at runtime but never deleted: it is excluded
+// from boot, default selection and explicit launches so it cannot compete with
+// the internal providers.
+func isRetiredApp(appID string) bool {
+	switch appID {
+	case legacyClockAppID, legacyRingAppID, legacyAssistantAppID, legacyMediaAppID:
+		return true
+	default:
+		return false
+	}
 }
 
 // watchSettings applies every durable settings snapshot to live subsystems.
@@ -99,6 +114,9 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	d.router.SetDefault("role.voice_assistant", v.DefaultAssistantAppID)
 	if d.launcher != nil {
 		d.launcher.SetTimezone(v.Timezone)
+	}
+	if d.builtins != nil && d.builtins.clock != nil {
+		d.builtins.clock.setDeviceTimezone(v.Timezone)
 	}
 	timezoneChanged := d.lastApplied != nil && d.lastApplied.Timezone != v.Timezone
 	d.audio.SetMasterVolume(v.MasterVolume)
@@ -424,46 +442,11 @@ func (d *Daemon) setMuted(muted bool) {
 	d.logs.Warnf("daemon", "", "could not update microphone mute")
 }
 
-// updateSystemRing maintains the safe framework fallback ring presentation:
-// a blue pulse while an app is capturing the microphone and no app has the
-// ring selected.
+// updateSystemRing reconciles the internal ring baseline with the microphone
+// mute state and active capture streams. The built-in provider owns the
+// default effect; external captures still take priority while held.
 func (d *Daemon) updateSystemRing() {
-	ringID := d.ringResourceID()
-	if ringID == "" {
-		return
+	if d.builtins != nil && d.builtins.ring != nil {
+		d.builtins.ring.update()
 	}
-	fallback := d.fallback[ringID]
-	if fallback == nil {
-		return
-	}
-	snap := d.user.Get().Values
-	state := "blank"
-	if snap.MicrophoneMuted {
-		state = "blank"
-	} else {
-		for _, s := range d.audio.ActiveStreams() {
-			if s.Input && s.AppID != "" && s.AppID != routing.SystemAppID {
-				state = "mic_active"
-				break
-			}
-		}
-	}
-	d.sysRingMu.Lock()
-	if state == d.sysRingState {
-		d.sysRingMu.Unlock()
-		return
-	}
-	d.sysRingState = state
-	d.sysRingMu.Unlock()
-	switch state {
-	case "mic_active":
-		params, err := presets.ValidateParams(mustPreset("system.ring.pulse"), presets.Params{
-			"speed": 0.9, "color": rgb(0, 136, 255), "min_intensity": 0.08,
-		})
-		if err == nil {
-			_ = d.pres.Update(fallback, presentations.RingEffect("system.ring.pulse", params))
-			return
-		}
-	}
-	_ = d.pres.Update(fallback, presentations.Blank())
 }

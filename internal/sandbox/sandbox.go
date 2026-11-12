@@ -11,6 +11,10 @@
 // The Rockchip stock kernel (4.4.167) must be probed for user/mount namespace
 // support before stronger claims are made; when the probe fails the daemon
 // falls back explicitly and reports the actual mode in diagnostics.
+//
+// The shared native SDK runtime is installed once on the host, mounted
+// read-only at /capsula/lib in namespace modes and exposed through
+// CAPSULA_LIBRARY. Apps never bundle a copy; see runtime.go.
 package sandbox
 
 import (
@@ -33,6 +37,10 @@ type Config struct {
 	SocketPath   string
 	AssetsDir    string
 	RuntimePaths []string
+	// LibraryDir is the host directory holding the shared native SDK runtime
+	// (libcapsula.so.1 and capsula-native.json). Empty means resolve beside
+	// the daemon binary: <exe-dir>/lib, then <exe-dir>/../lib.
+	LibraryDir   string
 	UIDBase      int
 	PIDNamespace bool
 	Seccomp      bool
@@ -49,6 +57,10 @@ type Launcher struct {
 	tz      string
 	uids    map[string]int
 	next    int
+
+	libOnce sync.Once
+	libDir  string
+	libErr  error
 }
 
 func New(cfg Config) *Launcher {
@@ -147,6 +159,16 @@ func (l *Launcher) setProbeResult(mode, detail string, seccomp bool) {
 	l.mu.Unlock()
 }
 
+// libraryDir resolves the shared native SDK directory once. An explicitly
+// configured but unusable directory is an operator error surfaced at launch;
+// an absent default directory simply means apps run without the SDK.
+func (l *Launcher) libraryDir() (string, error) {
+	l.libOnce.Do(func() {
+		l.libDir, l.libErr = ResolveLibraryDir(l.cfg.LibraryDir)
+	})
+	return l.libDir, l.libErr
+}
+
 // Command builds the app process command. Native binaries only: script
 // runtimes return an explicit unavailable error rather than fake execution.
 func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*exec.Cmd, error) {
@@ -172,15 +194,41 @@ func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*
 	l.mu.Lock()
 	mode := l.mode
 	l.mu.Unlock()
+
+	libDir, err := l.libraryDir()
+	if err != nil {
+		return nil, err
+	}
+	// Optional SDK use: discover the runtime for the environment but never
+	// fail an app that did not declare a requirement because the runtime is
+	// missing or its metadata is unusable.
+	rt, _ := findRuntime(libDir, false)
+	if m.NativeSDK != nil {
+		// Required SDK use: strict discovery requires an installed runtime and
+		// generated metadata, then the requirement preflight runs. This does
+		// not verify the library's exported ABI; the binding still does that.
+		rt, err = LocateRuntime(libDir)
+		if err != nil {
+			return nil, fmt.Errorf("app %s requires native SDK ABI %d.%d: %w", m.ID, m.NativeSDK.ABIMajor, m.NativeSDK.MinMinor, err)
+		}
+		if err := CheckRequirement(rt, *m.NativeSDK); err != nil {
+			return nil, fmt.Errorf("app %s: %w", m.ID, err)
+		}
+	}
+	env := append(l.env(), LibraryEnv(mode, rt)...)
+	mountLib := ""
+	if rt != nil {
+		mountLib = libDir
+	}
 	switch mode {
 	case "namespaces", "mountns":
-		return l.namespaceCommand(m, appDir, appPath, runID, appID)
+		return l.namespaceCommand(m, appDir, appPath, runID, appID, env, mountLib)
 	case "uid":
-		return l.uidCommand(appID, appPath)
+		return l.uidCommand(appID, appPath, env)
 	case "none":
 		cmd := exec.Command(appPath)
 		cmd.Dir = appDir
-		cmd.Env = baseEnv()
+		cmd.Env = env
 		return cmd, nil
 	default:
 		return nil, fmt.Errorf("sandbox has not been probed")
@@ -236,6 +284,7 @@ type execSpec struct {
 	AppPath       string   `json:"app_path"`
 	SocketPath    string   `json:"socket_path"`
 	AssetsDir     string   `json:"assets_dir"`
+	LibraryDir    string   `json:"library_dir"`
 	UID           int      `json:"uid"`
 	GID           int      `json:"gid"`
 	PIDNamespace  bool     `json:"pid_namespace"`
@@ -249,13 +298,16 @@ type execSpec struct {
 // In namespace modes the framework socket is bind-mounted at a fixed location
 // inside the app's mount namespace, so the host path does not resolve.
 func sandboxSocketEnv(mode, hostPath string) string {
-	if mode == "namespaces" || mode == "mountns" {
+	if namespaceMode(mode) {
 		return sandboxSocketPath
 	}
 	return hostPath
 }
 
-func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID, mode string) (string, error) {
+// specJSON builds the helper payload. env already contains the launch
+// environment including any native SDK variables; libraryDir is the host
+// directory the helper bind-mounts read-only at /capsula/lib.
+func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID, mode string, env []string, libraryDir string) (string, error) {
 	uid, gid := l.AssignUID(appID)
 	root := filepath.Join("/run/capsulad/sandbox", runID)
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -264,7 +316,9 @@ func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID,
 	// The socket is bind-mounted at a fixed in-namespace path, so namespace
 	// modes must not hand the app the host path the daemon listens on.
 	socket := sandboxSocketEnv(mode, l.cfg.SocketPath)
-	env := append(l.env(),
+	fullEnv := make([]string, 0, len(env)+4)
+	fullEnv = append(fullEnv, env...)
+	fullEnv = append(fullEnv,
 		"CAPSULA_SOCKET="+socket,
 		"CAPSULA_RUN_ID="+runID,
 		"CAPSULA_APP_ID="+appID,
@@ -272,9 +326,9 @@ func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID,
 	)
 	spec := execSpec{
 		Root: root, AppDir: appDir, AppPath: filepath.Join("/app", m.Entrypoint.Path),
-		SocketPath: l.cfg.SocketPath, AssetsDir: l.cfg.AssetsDir,
+		SocketPath: l.cfg.SocketPath, AssetsDir: l.cfg.AssetsDir, LibraryDir: libraryDir,
 		UID: uid, GID: gid, PIDNamespace: l.cfg.PIDNamespace, UserNamespace: mode == "namespaces",
-		Seccomp: l.Seccomp(), RuntimePaths: l.cfg.RuntimePaths, Env: env,
+		Seccomp: l.Seccomp(), RuntimePaths: l.cfg.RuntimePaths, Env: fullEnv,
 	}
 	data, err := json.Marshal(spec)
 	if err != nil {

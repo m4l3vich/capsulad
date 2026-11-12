@@ -1,0 +1,23 @@
+[package]
+name = "capsula"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Safe Rust consumer for the Capsula shared-engine C ABI"
+license = "MIT"
+
+[dependencies]
+libloading = "0.8"
+serde_json = "1"
+
+[[example]]
+name = "smoke_unary"
+
+[[example]]
+name = "smoke_stream"
+
+[[example]]
+name = "smoke_bus"
+
+[[example]]
+name = "smoke_routed"

@@ -14,7 +14,7 @@ import (
 
 // applyRouting reacts to capture/selection changes. Visibility is owned by the
 // router; this method handles touch ownership cancellation, diagnostics and
-// the framework ring fallback.
+// the internal clock/ring baseline state.
 func (d *Daemon) applyRouting(resourceID string) {
 	sel := d.router.Current(resourceID)
 	d.selMu.Lock()

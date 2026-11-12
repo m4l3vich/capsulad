@@ -1,0 +1,285 @@
+package sandbox
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"capsulad/internal/manifest"
+)
+
+func writeRuntime(t *testing.T, dir, metadata string, files ...string) {
+	t.Helper()
+	if metadata != "" {
+		if err := os.WriteFile(filepath.Join(dir, RuntimeMetadataFile), []byte(metadata), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("shared object"), 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestResolveLibraryDirExplicit(t *testing.T) {
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveLibraryDir(dir)
+	if err != nil {
+		t.Fatalf("explicit existing dir: %v", err)
+	}
+	if got != want {
+		t.Fatalf("explicit dir = %q, want canonical %q", got, want)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(cwd, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveLibraryDir(rel)
+	if err != nil {
+		t.Fatalf("relative explicit dir %q: %v", rel, err)
+	}
+	if got != want {
+		t.Fatalf("relative explicit dir = %q, want canonical %q", got, want)
+	}
+
+	if _, err := ResolveLibraryDir(filepath.Join("missing", "native-lib")); err == nil {
+		t.Fatal("missing relative native library directory must be rejected")
+	}
+	if _, err := ResolveLibraryDir(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing native library directory must be rejected")
+	}
+}
+
+func TestDefaultLibraryDirPrefersRuntimeBesideBinary(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	lib := filepath.Join(root, "lib")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRuntime(t, lib, `{"abi_major":1,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	wantLib, err := filepath.EvalSymlinks(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultLibraryDir(filepath.Join(bin, "capsulad")); got != wantLib {
+		t.Fatalf("build layout resolved %q, want %q", got, wantLib)
+	}
+
+	installed := t.TempDir()
+	installedLib := filepath.Join(installed, "lib")
+	if err := os.MkdirAll(installedLib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRuntime(t, installedLib, `{"abi_major":1,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	wantInstalled, err := filepath.EvalSymlinks(installedLib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultLibraryDir(filepath.Join(installed, "capsulad")); got != wantInstalled {
+		t.Fatalf("installed layout resolved %q, want %q", got, wantInstalled)
+	}
+
+	if got := defaultLibraryDir(filepath.Join(t.TempDir(), "bin", "capsulad")); got != "" {
+		t.Fatalf("absent runtime resolved %q, want empty", got)
+	}
+}
+
+func TestLocateRuntimeRequiresMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, "", "libcapsula.so.1")
+	_, err := LocateRuntime(dir)
+	if err == nil || !strings.Contains(err.Error(), RuntimeMetadataFile) {
+		t.Fatalf("missing metadata error = %v, want mention of %s", err, RuntimeMetadataFile)
+	}
+
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":2,"capabilities":["audio","events"],"library":"libcapsula.so.1"}`)
+	rt, err := LocateRuntime(dir)
+	if err != nil {
+		t.Fatalf("valid metadata: %v", err)
+	}
+	if rt.ABIMajor != 1 || rt.ABIMinor != 2 || !rt.Metadata || rt.File != "libcapsula.so.1" {
+		t.Fatalf("runtime = %+v", rt)
+	}
+	if !rt.Capabilities["audio"] || !rt.Capabilities["events"] {
+		t.Fatalf("capabilities = %v", rt.Capabilities)
+	}
+}
+
+func TestLocateRuntimeRejectsTraversalAndEscapingSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"library":"../capsula-native.json"}`)
+	if _, err := LocateRuntime(dir); err == nil || !strings.Contains(err.Error(), "not a file inside") {
+		t.Fatalf("traversal error = %v", err)
+	}
+
+	outside := t.TempDir()
+	target := filepath.Join(outside, "libcapsula.so.1")
+	if err := os.WriteFile(target, []byte("outside"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(linkDir, "libcapsula.so.1")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeRuntime(t, linkDir, `{"abi_major":1,"library":"libcapsula.so.1"}`)
+	if _, err := LocateRuntime(linkDir); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("escaping library error = %v", err)
+	}
+
+	metaDir := t.TempDir()
+	metaTarget := filepath.Join(outside, RuntimeMetadataFile)
+	if err := os.WriteFile(metaTarget, []byte(`{"abi_major":1,"library":"libcapsula.so.1"}`), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(metaTarget, filepath.Join(metaDir, RuntimeMetadataFile)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeRuntime(t, metaDir, "", "libcapsula.so.1")
+	if _, err := LocateRuntime(metaDir); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("escaping metadata error = %v", err)
+	}
+}
+
+func TestCheckRequirement(t *testing.T) {
+	rt := &Runtime{ABIMajor: 1, ABIMinor: 2, Capabilities: map[string]bool{"audio": true}}
+	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1}); err != nil {
+		t.Fatalf("same major: %v", err)
+	}
+	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 2}); err == nil || !strings.Contains(err.Error(), "major") {
+		t.Fatalf("major mismatch error = %v", err)
+	}
+	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1, MinMinor: 3}); err == nil || !strings.Contains(err.Error(), "1.3") {
+		t.Fatalf("minor mismatch error = %v", err)
+	}
+	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1, RequiredCapabilities: []string{"video"}}); err == nil || !strings.Contains(err.Error(), "video") {
+		t.Fatalf("capability mismatch error = %v", err)
+	}
+}
+
+func TestLibraryEnvModes(t *testing.T) {
+	rt := &Runtime{Dir: "/opt/capsula/lib", File: "libcapsula.so.1"}
+	wantLoader := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "darwin" {
+		wantLoader = "DYLD_LIBRARY_PATH"
+	}
+
+	host := strings.Join(LibraryEnv("none", rt), "\n")
+	for _, want := range []string{
+		"CAPSULA_LIBRARY=/opt/capsula/lib/libcapsula.so.1",
+		"CAPSULA_LIBRARY_DIR=/opt/capsula/lib",
+		wantLoader + "=/opt/capsula/lib",
+	} {
+		if !strings.Contains(host, want) {
+			t.Fatalf("host env missing %q:\n%s", want, host)
+		}
+	}
+
+	ns := strings.Join(LibraryEnv("namespaces", rt), "\n")
+	for _, want := range []string{
+		"CAPSULA_LIBRARY=" + NamespaceLibraryDir + "/libcapsula.so.1",
+		"CAPSULA_LIBRARY_DIR=" + NamespaceLibraryDir,
+		wantLoader + "=" + NamespaceLibraryDir,
+	} {
+		if !strings.Contains(ns, want) {
+			t.Fatalf("namespace env missing %q:\n%s", want, ns)
+		}
+	}
+
+	if env := LibraryEnv("none", nil); env != nil {
+		t.Fatalf("nil runtime env = %v, want nil", env)
+	}
+}
+
+func nativeApp(t *testing.T) (*Launcher, *manifest.Manifest) {
+	t.Helper()
+	appDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(appDir, "app"), []byte("#!/bin/sh\n"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	m := &manifest.Manifest{
+		ID: "org.example.native",
+		Entrypoint: manifest.Entrypoint{
+			Runtime: manifest.RuntimeNative,
+			Path:    "app",
+		},
+		Dir: appDir,
+	}
+	l := New(Config{Mode: "none"})
+	l.setMode("none", "test")
+	return l, m
+}
+
+func TestCommandStaticAppWithoutRuntime(t *testing.T) {
+	l, m := nativeApp(t)
+	l.cfg.LibraryDir = t.TempDir() // empty trusted dir, no runtime
+	cmd, err := l.Command(m, m.Dir, "run1", m.ID)
+	if err != nil {
+		t.Fatalf("static app without runtime: %v", err)
+	}
+	for _, entry := range cmd.Env {
+		if strings.HasPrefix(entry, "CAPSULA_LIBRARY") || strings.Contains(entry, "LIBRARY_PATH") {
+			t.Fatalf("static app received runtime env %q", entry)
+		}
+	}
+}
+
+func TestCommandRequiredRuntimeMissingOrIncompatible(t *testing.T) {
+	l, m := nativeApp(t)
+	l.cfg.LibraryDir = t.TempDir() // no metadata, no library
+	m.NativeSDK = &manifest.NativeSDK{ABIMajor: 1}
+	if _, err := l.Command(m, m.Dir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), RuntimeMetadataFile) {
+		t.Fatalf("missing runtime error = %v", err)
+	}
+
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":2,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	l2 := New(Config{Mode: "none", LibraryDir: dir})
+	l2.setMode("none", "test")
+	if _, err := l2.Command(m, m.Dir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), "major 1") {
+		t.Fatalf("incompatible requirement error = %v", err)
+	}
+}
+
+func TestCommandCompatibleRuntimeSetsEnvironment(t *testing.T) {
+	l, m := nativeApp(t)
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":3,"capabilities":["audio"],"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	l.cfg.LibraryDir = dir
+	m.NativeSDK = &manifest.NativeSDK{ABIMajor: 1, MinMinor: 1, RequiredCapabilities: []string{"audio"}}
+	cmd, err := l.Command(m, m.Dir, "run1", m.ID)
+	if err != nil {
+		t.Fatalf("compatible app: %v", err)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env, "CAPSULA_LIBRARY="+filepath.Join(canonical, "libcapsula.so.1")) {
+		t.Fatalf("CAPSULA_LIBRARY missing from env:\n%s", env)
+	}
+}
+
+func TestCommandRejectsExplicitInvalidLibraryDir(t *testing.T) {
+	l, m := nativeApp(t)
+	l.cfg.LibraryDir = filepath.Join(t.TempDir(), "missing")
+	if _, err := l.Command(m, m.Dir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), "native library directory") {
+		t.Fatalf("invalid explicit dir error = %v", err)
+	}
+}

@@ -1,6 +1,10 @@
 build/
 .capsula/
+_capsula-mini-deploy-backup/
 *.log
 .DS_Store
 __pycache__/
 *.pyc
+sdk/native/target/
+sdk/rust/target/
+sdk/rust/Cargo.lock

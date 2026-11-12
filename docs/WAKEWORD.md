@@ -1,6 +1,6 @@
 # Wakeword engine and personal training
 
-**Updated:** 2026-11-11. The detector now uses pretrained speech embeddings and a small personal
+**Updated:** 2026-11-12. The detector now uses pretrained speech embeddings and a small personal
 keyword head, following the architecture of
 [station-wakeword](https://github.com/tangenx/station-wakeword), not its unlicensed source code or
 non-commercial dataset. The raw-mel classifier and browser numerical trainer have been removed.
@@ -220,14 +220,17 @@ guarantee. After setup, evaluate new phrases, confusable words, distances, playb
 real-room backgrounds through the actual capture path. Do not report window accuracy as wakeword
 accuracy.
 
+Live use after this installation is reported by the user as "mostly works fine". That is informal
+field feedback, not a measured accuracy or daily false-alarm-rate result, and it does not claim
+perfect detection.
+
 ## Deployment state and cutover verification
 
-The warm cutover is installed and verified on the connected Mini (2026-11-11T11:51:05Z). PID 21406
-runs `/data/capsdemo/capsulad` with SHA-256
+At the warm cutover (2026-11-11T11:51:05Z), PID 21406 ran `/data/capsdemo/capsulad` with SHA-256
 `b3ec47eff84b662ab0efea2004cec74f3ffa04a923443379c0a31654d71d3098` (21,954,712 bytes), replacing
-`2035279e…`. The installed corpus is the gzip `CNEG0002` file
+`2035279e…`. At that point the installed corpus was the gzip `CNEG0002` file
 `fbdaf9b30a7d4e2b8a83eb1ef85b05e253272b447b259992b1735e09801f88c8` (24,386,227 bytes; logical
-26,558,985; 872 streams; 137,732 frames; strict 37,120-sample preroll). Its sidecar is
+26,558,985; 872 streams; 137,732 frames; strict 37,120-sample preroll). Its sidecar was
 `negatives.bin.provenance.json.gz`, 514,451 bytes, SHA-256
 `5041ec978799b29477eecad5f66acdd8e3c3c9c5a4a78d3276ba24147c826ced`; it decompresses to 5,120,812
 bytes (`fe13f5af…`) and the old 2.24 MB uncompressed JSON was removed only after that verification.
@@ -262,13 +265,13 @@ hop, two consecutive scores and 2.9-second cooldown. The daemon stayed at PID 21
 27,260 kB, VmHWM 96,496 kB), did not restart, logged zero ERROR-level lines, and kept wakeword
 enabled with the microphone unmuted. The scorer was removed from device tmpfs after the run.
 
-After installation, RPC reports `personal_available=true`, `selected="word.personal"`,
+Immediately after installation, RPC reported `personal_available=true`, `selected="word.personal"`,
 `wakeword_enabled=true`, `microphone_muted=false`, `hardware_mute=true` and `saved_samples=15`. The
-settings revision 1476 change is the single CAS migration `vendor.voice-agent` → `word.personal`;
-assistant app, master volume, timezone and brightness settings were preserved. All 15 user WAVs
-still match the protected snapshot. Clock and assistant are ready, the Web UI returns 303, and the
-watchdog is armed with a 21-second timeout. `/data` has 3,788 KiB free, `MemAvailable` is 119,448 kB
-and tmpfs has 85,128 KiB free.
+settings revision 1476 change was the single CAS migration `vendor.voice-agent` → `word.personal`;
+assistant app, master volume, timezone and brightness settings were preserved. At that point all 15
+user WAVs matched the protected snapshot, clock and assistant were ready, the Web UI returned 303,
+and the watchdog was armed with a 21-second timeout. `/data` then had 3,788 KiB free, `MemAvailable`
+was 119,448 kB and tmpfs had 85,128 KiB free.
 
 ### Post-cutover operations and storage
 
@@ -281,7 +284,7 @@ media provider start after a power cycle.
 
 The 24.4 MB corpus, its gzip sidecar and the 15 recordings were then moved to the host backup
 (`_capsula-mini-data-backup/`, git-excluded) to make room for the daemon upgrade and the media app.
-`/data` has about 5.2 MB free, the log is capped at 512 KiB plus one rotated copy, and new takes or
+`/data` has about 4.3 MB free, the log is capped at 512 KiB plus one rotated copy, and new takes or
 training are refused below 2 MiB free. Training therefore needs the corpus restored first, or the
 daemon started with `-wakeword-negatives /tmp/negatives.bin`:
 

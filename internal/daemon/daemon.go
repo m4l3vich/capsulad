@@ -81,6 +81,10 @@ type Config struct {
 	// stops the stock assistant stack on stock platforms, "off" leaves it
 	// running, any other value is a comma-separated process list.
 	Supersede string
+	// NativeLibDir is the host directory holding the shared libcapsula runtime
+	// and capsula-native.json. Empty means the launcher resolves it next to the
+	// daemon binary (<daemon-dir>/lib, else <daemon-dir>/../lib).
+	NativeLibDir string
 }
 
 func DefaultConfig() Config {
@@ -118,7 +122,7 @@ type Daemon struct {
 	resOrder  []string
 
 	pres     *presentations.Manager
-	fallback map[string]*presentations.Presentation
+	builtins *builtinProviders
 	router   *routing.Router
 
 	user       *settings.UserStore
@@ -158,7 +162,6 @@ type Daemon struct {
 	indicatorMu  sync.Mutex
 	recIndMu     sync.Mutex
 	selMu        sync.Mutex
-	sysRingMu    sync.Mutex
 	micCaptureID string
 	micIndicator *presentations.Presentation
 	recCaptureID string
@@ -193,7 +196,6 @@ type Daemon struct {
 	btStream      *a2dpStream
 	btStreamGen   uint64
 	btStreamStart bool
-	sysRingState  string
 
 	lastActivation string
 	lastActMu      sync.Mutex
@@ -281,7 +283,6 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	}
 	d := &Daemon{
 		cfg: cfg, ctx: ctx, cancel: cancel, clock: clock, logs: logs, bootID: ids.New("boot"),
-		fallback:    map[string]*presentations.Presentation{},
 		prov:        map[string]provenance.Result{},
 		invocations: map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
 		lastSel: map[string]string{},
@@ -331,6 +332,11 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if d.reg, err = registry.Open(cfg.AppsDir, logs); err != nil {
 		return nil, err
 	}
+	for _, app := range d.reg.List() {
+		if isRetiredApp(app.ID()) {
+			logs.Warnf("registry", app.ID(), "retired sample application is ignored; its package directory is left untouched")
+		}
+	}
 	d.user, err = settings.OpenUser(filepath.Join(cfg.DataDir, "settings.json"), logs, d.validateUserSettings)
 	if err != nil {
 		return nil, err
@@ -347,6 +353,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if err := d.websec.Load(); err != nil {
 		return nil, err
 	}
+	d.migrateLegacyState()
 	d.seedDefaults()
 	d.pres = presentations.NewManager(clock, logs, func(resourceID string) {
 		d.router.Recompute(resourceID, "presentation changed")
@@ -369,11 +376,11 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 			d.router.SetResourceClass(resourceID, "sensor")
 		}
 	}
-	d.createFallbacks()
+	d.builtins = newBuiltins(d)
 
 	d.launcher = sandbox.New(sandbox.Config{
 		Mode: cfg.SandboxMode, SocketPath: cfg.SocketPath, AssetsDir: cfg.AssetsDir,
-		UIDBase: cfg.SandboxUIDBase, Seccomp: true,
+		UIDBase: cfg.SandboxUIDBase, Seccomp: true, LibraryDir: cfg.NativeLibDir,
 	})
 	d.sup = supervisor.New(ctx, logs, clock, cfg.SocketPath, d.launcher)
 	d.bus = bus.New(logs, func(runID string) (string, int, bool) {
@@ -491,6 +498,7 @@ func (d *Daemon) Run() error {
 	}
 
 	d.applySettings(d.user.Get())
+	d.builtins.start()
 	d.startBootApps()
 	d.initBluetoothAudio()
 	go d.watchBluetooth()
@@ -693,25 +701,6 @@ func resourceForSubsystem(subsystem string) string {
 	}
 }
 
-func (d *Daemon) createFallbacks() {
-	for _, info := range d.resources {
-		var kind presentations.Kind
-		switch info.Kind {
-		case frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY:
-			kind = presentations.Segment
-		case frameworkv1.ResourceKind_RESOURCE_LED_RING:
-			kind = presentations.Ring
-		default:
-			continue
-		}
-		p := d.pres.Open(info.ResourceId, routing.SystemAppID, "system", kind)
-		if err := d.pres.Update(p, presentations.Blank()); err != nil {
-			d.logs.Errorf("daemon", "", "fallback presentation: %v", err)
-		}
-		d.fallback[info.ResourceId] = p
-	}
-}
-
 // --- helpers used by service handlers -------------------------------------
 
 func (d *Daemon) platformProto() frameworkv1.TargetPlatform {
@@ -789,6 +778,9 @@ func (d *Daemon) installedApp(appID string) (*registry.App, bool) {
 }
 
 func (d *Daemon) manifestSchema(appID string) (*settings.ManifestSchema, bool) {
+	if schema, ok := builtinManifestSchema(appID); ok {
+		return schema, true
+	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return nil, false
@@ -818,11 +810,17 @@ func (d *Daemon) validateUserSettings(v settings.UserSettings) error {
 		if appID == "" {
 			continue
 		}
+		if isRetiredApp(appID) {
+			return fmt.Errorf("application %s is retired and cannot be selected", appID)
+		}
 		if _, ok := d.reg.Get(appID); !ok {
 			return fmt.Errorf("application %s is not installed", appID)
 		}
 	}
 	if v.DefaultAssistantAppID != "" {
+		if isRetiredApp(v.DefaultAssistantAppID) {
+			return fmt.Errorf("assistant application %s is retired and cannot be selected", v.DefaultAssistantAppID)
+		}
 		if _, ok := d.reg.Get(v.DefaultAssistantAppID); !ok {
 			return fmt.Errorf("assistant application %s is not installed", v.DefaultAssistantAppID)
 		}

@@ -30,8 +30,10 @@ import (
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
+	"capsulad/internal/manifest"
 	"capsulad/internal/platform"
 	"capsulad/internal/registry"
+	"capsulad/internal/sandbox"
 	"capsulad/internal/version"
 	"capsulad/internal/websecurity"
 )
@@ -43,6 +45,7 @@ func main() {
 	dataDir := ""
 	socket := ""
 	securityDir := ""
+	nativeLibDir := ""
 	jsonOut := false
 	// Global flags may appear before the command.
 	args := os.Args[1:]
@@ -56,6 +59,9 @@ func main() {
 			args = args[2:]
 		case "-security-dir":
 			securityDir = args[1]
+			args = args[2:]
+		case "-native-lib-dir":
+			nativeLibDir = args[1]
 			args = args[2:]
 		case "-json":
 			jsonOut = true
@@ -78,7 +84,7 @@ command:
 	case "status", "doctor":
 		exit(runStatus(resolveSocket(dataDir, socket), jsonOut))
 	case "app":
-		exit(runApp(args, dataDir, socket))
+		exit(runApp(args, dataDir, socket, nativeLibDir))
 	case "settings":
 		exit(runSettings(args, resolveSocket(dataDir, socket), jsonOut))
 	case "logs":
@@ -104,7 +110,7 @@ command:
 func usage() {
 	fmt.Fprint(os.Stderr, `capsula — Capsula framework administration
 
-Global flags (before the command): -data-dir DIR, -socket PATH, -security-dir DIR, -json
+Global flags (before the command): -data-dir DIR, -socket PATH, -security-dir DIR, -native-lib-dir DIR, -json
 
 Commands:
   status                         device, resources and runs
@@ -156,6 +162,49 @@ func resolveDataDir(dataDir string) string {
 		return v
 	}
 	return ".capsula"
+}
+
+// resolveNativeLibDir locates the shared native SDK for install-time checks.
+// Precedence: -native-lib-dir, CAPSULA_NATIVE_LIB_DIR, <data-dir>/lib beside
+// the installed daemon, then the executable-adjacent launcher default.
+func resolveNativeLibDir(dataDir, explicit string) (string, error) {
+	if explicit == "" {
+		explicit = os.Getenv("CAPSULA_NATIVE_LIB_DIR")
+	}
+	if explicit != "" {
+		return sandbox.ResolveLibraryDir(explicit)
+	}
+	if abs, err := filepath.Abs(filepath.Join(resolveDataDir(dataDir), "lib")); err == nil {
+		if info, err := os.Stat(abs); err == nil && info.IsDir() && sandbox.HasRuntime(abs) {
+			return sandbox.ResolveLibraryDir(abs)
+		}
+	}
+	return sandbox.DefaultLibraryDir(), nil
+}
+
+// checkNativeSDKRequirement rejects an install whose declared native SDK
+// requirement the installed runtime cannot satisfy. Apps without a
+// [native_sdk] section are unaffected. This is a preflight check against the
+// runtime's generated metadata; the binding still verifies the library it
+// loads.
+func checkNativeSDKRequirement(m *manifest.Manifest, dataDir, nativeLibDir string) error {
+	dir, err := resolveNativeLibDir(dataDir, nativeLibDir)
+	if m.NativeSDK == nil {
+		// No requirement, but an explicitly configured directory must still be
+		// usable; a typo should not be silently ignored.
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("install rejected: app %s requires native SDK ABI %d.%d: %w", m.ID, m.NativeSDK.ABIMajor, m.NativeSDK.MinMinor, err)
+	}
+	rt, err := sandbox.LocateRuntime(dir)
+	if err != nil {
+		return fmt.Errorf("install rejected: app %s requires native SDK ABI %d.%d: %w", m.ID, m.NativeSDK.ABIMajor, m.NativeSDK.MinMinor, err)
+	}
+	if err := sandbox.CheckRequirement(rt, *m.NativeSDK); err != nil {
+		return fmt.Errorf("install rejected: app %s: %w", m.ID, err)
+	}
+	return nil
 }
 
 func resolveSocket(dataDir, socket string) string {
@@ -225,7 +274,7 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
-func runApp(args []string, dataDir, socket string) error {
+func runApp(args []string, dataDir, socket, nativeLibDir string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: capsula app <list|install|remove|start|stop|runs|provenance>")
 	}
@@ -235,6 +284,13 @@ func runApp(args []string, dataDir, socket string) error {
 	case "install":
 		if len(args) == 0 {
 			return fmt.Errorf("usage: capsula app install DIR")
+		}
+		m, err := manifest.Load(args[0], filepath.Join(args[0], registry.ManifestFile))
+		if err != nil {
+			return err
+		}
+		if err := checkNativeSDKRequirement(m, dataDir, nativeLibDir); err != nil {
+			return err
 		}
 		root := filepath.Join(resolveDataDir(dataDir), "apps")
 		logs, _ := logbus.New(ids.NewClock(), 100, "")

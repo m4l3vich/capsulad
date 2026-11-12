@@ -1,20 +1,0 @@
-
-×
-org/example/ring/v1/ring.protoorg.example.ring.v1"
-ListModesRequest"P
-RingMode
-id (	Rid
-name (	Rname 
-description (	Rdescription"H
-ListModesResponse3
-modes (2.org.example.ring.v1.RingModeRmodes"
-GetStateRequest")
-SetModeRequest
-mode_id (	RmodeId"d
-	RingState&
-current_mode_id (	RcurrentModeId/
-presentation_active (RpresentationActive2•
-RingControllerServiceZ
-	ListModes%.org.example.ring.v1.ListModesRequest&.org.example.ring.v1.ListModesResponseP
-GetState$.org.example.ring.v1.GetStateRequest.org.example.ring.v1.RingStateN
-SetMode#.org.example.ring.v1.SetModeRequest.org.example.ring.v1.RingStateB,Z*capsulad/gen/go/org/example/ring/v1;ringv1bproto3

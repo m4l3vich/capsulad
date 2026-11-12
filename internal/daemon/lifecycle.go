@@ -24,6 +24,9 @@ const (
 // singleton receives AppLaunchInvocation in place; a starting singleton holds
 // a bounded, expiring invocation; ordinary apps spawn a new supervised run.
 func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocationID string, spawned bool, err error) {
+	if isRetiredApp(appID) {
+		return "", "", false, fmt.Errorf("application %s is retired and ignored; remove its package directory to reclaim space", appID)
+	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return "", "", false, fmt.Errorf("application %s is not installed", appID)
@@ -210,7 +213,9 @@ func (d *Daemon) sendAppSettings(appID string) {
 	}
 	if err := d.bus.SendApp(appID, &frameworkv1.AppInbound{Message: &frameworkv1.AppInbound_SettingsChanged{SettingsChanged: msg}}); err != nil {
 		d.logs.Warnf("daemon", appID, "could not deliver settings: %v", err)
+		return
 	}
+	d.logs.Debugf("daemon", appID, "settings revision=%d enqueued", rev)
 }
 
 func (d *Daemon) onAppDisconnect(runID, appID string) {
@@ -331,20 +336,27 @@ func (d *Daemon) TriggerAction(appID, actionID string) (string, error) {
 
 // AppSettings push after a configuration change.
 func (d *Daemon) pushAppSettings(appID string, rev uint64, values map[string]json.RawMessage) {
+	if isBuiltinSettingsID(appID) {
+		// Built-in providers subscribe to the store directly; there is no app
+		// bus connection to deliver to.
+		return
+	}
 	msg := &frameworkv1.AppSettingsChanged{Revision: rev}
 	for key, raw := range values {
 		msg.Values = append(msg.Values, &frameworkv1.AppPrivateSetting{Key: key, ValueJson: string(raw)})
 	}
 	if err := d.bus.SendApp(appID, &frameworkv1.AppInbound{Message: &frameworkv1.AppInbound_SettingsChanged{SettingsChanged: msg}}); err != nil {
 		d.logs.Infof("daemon", appID, "settings stored; app not running (%v)", err)
+		return
 	}
+	d.logs.Debugf("daemon", appID, "settings revision=%d enqueued", rev)
 }
 
 // ensureRunning starts a background/selected app when it is installed but not
 // running. It never resurrects an app the user explicitly stopped mid-flight;
 // selection changes and boot are the triggers.
 func (d *Daemon) ensureRunning(appID string) {
-	if appID == "" {
+	if appID == "" || isRetiredApp(appID) {
 		return
 	}
 	if _, ok := d.reg.Get(appID); !ok {
@@ -360,6 +372,9 @@ func (d *Daemon) ensureRunning(appID string) {
 
 func (d *Daemon) startBootApps() {
 	for _, app := range d.reg.List() {
+		if isRetiredApp(app.Manifest.ID) {
+			continue
+		}
 		if app.Manifest.StartOnBoot || app.Manifest.Background {
 			d.ensureRunning(app.Manifest.ID)
 		}

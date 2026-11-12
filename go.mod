@@ -5,6 +5,7 @@ go 1.22.5
 toolchain go1.22.6
 
 require (
+	capsula/sdk v0.0.0
 	github.com/BurntSushi/toml v1.4.0
 	github.com/godbus/dbus/v5 v5.2.0
 	github.com/sigstore/protobuf-specs v0.3.2
@@ -93,3 +94,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 )
+
+replace capsula/sdk => ./sdk/go

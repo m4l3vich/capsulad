@@ -3,102 +3,145 @@ package capsula
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
-
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 )
 
-type CaptureEvent struct {
-	Selected bool
-	Reason   string
+const routingService = "capsula.framework.v1.RoutingService"
+
+type captureGrantedJSON struct {
+	Capture *CaptureInfo `json:"capture"`
 }
 
+type captureChangedJSON struct {
+	Selected bool   `json:"selected"`
+	Reason   string `json:"reason"`
+}
+
+type captureEventJSON struct {
+	Granted *captureGrantedJSON `json:"granted"`
+	Changed *captureChangedJSON `json:"changed"`
+}
+
+// Capture is one temporary routing selection.
 type Capture struct {
-	id       string
-	resource string
-	stream   frameworkv1.RoutingService_CaptureClient
-	cancel   context.CancelFunc
-	events   chan CaptureEvent
-	done     chan struct{}
+	call *callHandle
+
+	mu   sync.Mutex
+	info CaptureInfo
+
+	events chan CaptureEvent
+	done   chan struct{}
+	once   sync.Once
 }
 
-// OpenCapture acquires a runtime capture. mode must be UNSPECIFIED for
-// display/ring/assistant captures and set for touch captures.
-func (c *Client) OpenCapture(ctx context.Context, resourceID, presentationID string, mode frameworkv1.TouchCaptureMode) (*Capture, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	stream, err := frameworkv1.NewRoutingServiceClient(c.conn).Capture(runCtx, &frameworkv1.CaptureRequest{
-		ResourceId: resourceID, PresentationId: presentationID, TouchMode: mode,
-	})
+// OpenCapture acquires a capture. mode must be CaptureModeUnspecified for
+// display/ring/assistant captures and explicit for touch captures.
+func (c *Client) OpenCapture(ctx context.Context, resourceID, presentationID string,
+	mode CaptureMode) (*Capture, error) {
+	ctx = orBackground(ctx)
+	request := struct {
+		ResourceID     string      `json:"resourceId,omitempty"`
+		PresentationID string      `json:"presentationId,omitempty"`
+		TouchMode      CaptureMode `json:"touchMode,omitempty"`
+	}{ResourceID: resourceID, PresentationID: presentationID, TouchMode: mode}
+
+	call, err := c.startCall(ctx, "", routingService, "Capture", callKindServerStream, 0)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	cap := &Capture{resource: resourceID, stream: stream, cancel: cancel,
-		events: make(chan CaptureEvent, 8), done: make(chan struct{})}
-	ev, err := stream.Recv()
-	if err != nil {
-		cancel()
+	if err := call.sendJSON(request); err != nil {
+		call.release()
 		return nil, err
 	}
-	granted := ev.GetGranted()
-	if granted == nil {
-		cancel()
-		return nil, fmt.Errorf("capture was not granted")
+	if err := call.halfClose(); err != nil {
+		call.release()
+		return nil, err
 	}
-	cap.id = granted.Capture.CaptureId
-	if granted.Capture.Selected {
-		cap.events <- CaptureEvent{Selected: true, Reason: "granted"}
+	payload, err := call.recvJSONTimeout(timeoutMillis(ctx, 10*time.Second))
+	if err != nil {
+		call.release()
+		return nil, err
 	}
-	go func() {
-		defer close(cap.events)
-		defer close(cap.done)
-		for {
-			ev, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			if ch := ev.GetChanged(); ch != nil {
-				select {
-				case cap.events <- CaptureEvent{Selected: ch.Selected, Reason: ch.Reason}:
-				default:
-				}
-			}
-		}
-	}()
+	var event captureEventJSON
+	if err := unmarshalProtoJSON(payload, &event); err != nil {
+		call.release()
+		return nil, err
+	}
+	if event.Granted == nil || event.Granted.Capture == nil {
+		call.release()
+		return nil, fmt.Errorf("capsula: capture was not granted")
+	}
+
+	cap := &Capture{
+		call:   call,
+		info:   *event.Granted.Capture,
+		events: make(chan CaptureEvent, 8),
+		done:   make(chan struct{}),
+	}
+	if cap.info.Selected {
+		info := cap.info
+		cap.events <- CaptureEvent{Selected: true, Reason: "granted", Info: &info}
+	}
+	go cap.readLoop()
 	return cap, nil
 }
 
-func (c *Capture) ID() string                  { return c.id }
+func (c *Capture) readLoop() {
+	defer close(c.events)
+	defer close(c.done)
+	defer c.call.release()
+	for {
+		payload, err := c.call.recvJSON()
+		if err != nil {
+			return
+		}
+		var event captureEventJSON
+		if err := unmarshalProtoJSON(payload, &event); err != nil {
+			continue
+		}
+		if event.Changed == nil {
+			continue
+		}
+		c.mu.Lock()
+		info := c.info
+		info.Selected = event.Changed.Selected
+		c.mu.Unlock()
+		select {
+		case c.events <- CaptureEvent{Selected: event.Changed.Selected,
+			Reason: event.Changed.Reason, Info: &info}:
+		default:
+		}
+	}
+}
+
+// ID is the framework capture ID.
+func (c *Capture) ID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.info.CaptureID
+}
+
+// Info is a copy of the latest capture description.
+func (c *Capture) Info() CaptureInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.info
+}
+
+// Events reports selection changes; it closes when the capture ends.
 func (c *Capture) Events() <-chan CaptureEvent { return c.events }
 
-// Close releases the capture by ending its stream.
+// Done closes when the capture ends.
+func (c *Capture) Done() <-chan struct{} { return c.done }
+
+// Close releases the capture. It is idempotent and bounded.
 func (c *Capture) Close() {
-	c.cancel()
-	select {
-	case <-c.done:
-	case <-time.After(time.Second):
-	}
-}
-
-// UserSettings returns the device-wide settings snapshot.
-func (c *Client) UserSettings(ctx context.Context) (*frameworkv1.UserSettings, uint64, error) {
-	snap, err := frameworkv1.NewSettingsServiceClient(c.conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{})
-	if err != nil {
-		return nil, 0, err
-	}
-	return snap.Values, snap.Revision, nil
-}
-
-// AudioState returns the current mixer/mute state.
-func (c *Client) AudioState(ctx context.Context) (*frameworkv1.AudioState, error) {
-	return frameworkv1.NewAudioServiceClient(c.conn).GetAudioState(ctx, &frameworkv1.GetAudioStateRequest{})
-}
-
-// ListPresets discovers built-in effects/faces for a resource.
-func (c *Client) ListPresets(ctx context.Context, resourceID string) ([]*frameworkv1.PresentationPresetInfo, error) {
-	resp, err := frameworkv1.NewPresentationServiceClient(c.conn).ListPresets(ctx, &frameworkv1.ListPresentationPresetsRequest{ResourceId: resourceID})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Presets, nil
+	c.once.Do(func() {
+		_ = c.call.release()
+		select {
+		case <-c.done:
+		case <-time.After(time.Second):
+		}
+	})
 }

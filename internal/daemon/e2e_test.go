@@ -21,6 +21,18 @@ import (
 	"capsulad/internal/settings"
 )
 
+// nativeLibDir is the shared libcapsula runtime directory for daemon tests.
+// The test binary lives in a temporary directory, so exe-adjacent discovery
+// would never see the repo's build/lib. CAPSULA_NATIVE_LIB_DIR overrides the
+// repository default; the launcher still validates and loads real metadata.
+func nativeLibDir(t *testing.T) string {
+	t.Helper()
+	if dir := os.Getenv("CAPSULA_NATIVE_LIB_DIR"); dir != "" {
+		return dir
+	}
+	return filepath.Join(moduleRoot(t), "build", "lib")
+}
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -47,7 +59,8 @@ func buildProbe(t *testing.T) string {
 }
 
 // buildModuleApp builds one of the repository's sample applications for the
-// host so tests can exercise the real provider instead of a stand-in.
+// host so tests can exercise the real provider instead of a stand-in. The
+// optional assistant is a nested module with its own go.mod.
 func buildModuleApp(t *testing.T, pkg string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), filepath.Base(pkg))
@@ -55,9 +68,15 @@ func buildModuleApp(t *testing.T, pkg string) string {
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-ldflags", "-linkmode=external")
 	}
-	args = append(args, "-o", out, "./"+pkg)
+	dir := moduleRoot(t)
+	target := "./" + pkg
+	if pkg == "apps/dumbassistant" {
+		dir = filepath.Join(moduleRoot(t), "apps", "dumbassistant")
+		target = "./cmd/dumbassistant"
+	}
+	args = append(args, "-o", out, target)
 	cmd := exec.Command("go", args...)
-	cmd.Dir = moduleRoot(t)
+	cmd.Dir = dir
 	if outBytes, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", pkg, err, outBytes)
 	}
@@ -214,6 +233,7 @@ func newTestDaemonWith(t *testing.T, extras ...appInstall) (*Daemon, context.Can
 	cfg.AssetsDir = filepath.Join(base, "assets")
 	cfg.WebUIAddr = ""
 	cfg.SandboxMode = "none"
+	cfg.NativeLibDir = nativeLibDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	d, err := New(ctx, cfg)
 	if err != nil {

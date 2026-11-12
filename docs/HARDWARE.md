@@ -21,6 +21,8 @@ Source: `_capsula-mini-rockchip-backup/` (full backup of a jailbroken Capsula Mi
 
 - **SoC:** Rockchip RK3308 (aarch64). Device tree model: `RK3308-based Capsula-mini`.
 - **Kernel:** Linux 4.4.167, SMP PREEMPT, built 2025-03-03 with Linaro GCC 6.3.1.
+- **Userland libc:** glibc 2.33 with `/lib/ld-linux-aarch64.so.1`; native SDK and app binaries must
+  not require newer `GLIBC_*` symbols. This image is not musl.
 - **Root filesystem:** Buildroot 2022.11.1 SquashFS 4.0 (xz), mounted read-only, with an overlay
   (`S23overlayfs.sh`) whose upper/work directories live on the ext2 `userdata` partition.
 - **Boot:** Android boot image with kernel + ramdisk + DTB (`second`), page size 2048.
@@ -170,9 +172,25 @@ bring-up; the boot integration is now deployed:
   replacement `exec`s `/etc/init.d/S60capsulad start`. The vendor assistant scripts
   (`S97voice-agent.sh`, `S99sysmon.sh`) are whiteouted in the overlay and copied to
   `/data/capsdemo/vendor-init/`.
-- Verified across two power cycles on serial `03104B1D40E15C55`: `boot.log` records
-  `starting /data/capsdemo/capsulad` and `daemon healthy`, `capsulad -health` exits 0, clock,
-  assistant and media report `APP_READY`, and `/dev/watchdog armed, timeout=21s` appears.
+- Verified across two power cycles on serial `03104B1D40E15C55` at that deployment: `boot.log`
+  records `starting /data/capsdemo/capsulad` and `daemon healthy`, `capsulad -health` exits 0,
+  clock, assistant and media reported `APP_READY`, and `/dev/watchdog armed, timeout=21s` appears.
+  Those three were supervised packages at the time; current builds have no assistant or media
+  sample app and run the clock face and ring inside the daemon. This refactored build was
+  redeployed to the unit on 2026-11-12 (`capsulad` sha256 `86d131ae…fe604`): canonical
+  `S60capsulad` restart became healthy,
+  `capsulad -health` exits 0, `/dev/watchdog armed, timeout=21s` appears, and the boot scripts are
+  byte-identical to the deployed ones. The retired clock, assistant and media bundles were removed
+  after a host backup (the ring bundle was never installed); the migrated app settings were
+  preserved. The shared native SDK (`libcapsula.so.1`, sha256 `b8632b17…72b50d`, ABI 1.0,
+  35 capabilities) and its metadata are installed in `/data/capsdemo/lib`; a native app mapped it
+  at `/capsula/lib` under the mount namespace and reported `APP_READY`, and the optional
+  `org.capsula.dumbassistant` (sha256 `993f58ae…45686`) remains the selected default. One
+  `voice_key` activation drove the teal ring, a conversation and
+  PCM_S16LE 44.1 kHz stereo playback through to reply end and ring release; `master.monitor`
+  showed nonzero output (peak 913, RMS 436) at the configured 5 % volume — a loopback
+  measurement, not an acoustic recording. No reboot or power-cycle test was run for this
+  deployment.
 - A factory reset wipes the overlay: the device then boots the stock assistant and the deployment
   must be repeated.
 
@@ -181,16 +199,21 @@ In-place upgrades go through the same service:
 ```sh
 # on the device, with the new binary staged outside /data (tmpfs has 117 MB)
 capsula -data-dir /data/capsdemo daemon install -binary /tmp/capsulad.new
-capsula -data-dir /data/capsdemo daemon rollback     # restores capsulad.prev
+capsula -data-dir /data/capsdemo daemon rollback     # restores the previous binary only
 ```
 
 `daemon install` runs `<binary> -version`, stages beside the target, renames the live binary to
 `capsulad.prev`, activates by rename, restarts through `/etc/init.d/S60capsulad`, and requires the
 framework API to answer before it reports success; any failure puts the previous binary back. The
-`.prev` copy costs 21.9 MB on `/data`, so delete it only when the rollback copy is no longer wanted.
+`.prev` copy is 22,479,000 bytes on `/data` after the 2026-11-12 install, so delete it only when the
+rollback copy is no longer wanted. `daemon rollback` restores the binary only: a full return to the
+old app-based clock/ring/assistant also needs the old bundles and manifests from the host backup
+(`_capsula-mini-deploy-backup/20261112T181842/`), because the old daemon's strict manifest loader
+does not understand `[native_sdk]`.
 
 Because `/data` is 78.5 MB, the 24.4 MB negative-training corpus, its sidecar and the older
-recordings were moved to the host. `/data` currently has about 5.2 MB free. Restore training input
+recordings were moved to the host. After the 2026-11-12 deployment `/data` reported 24.7 MB free
+(69 % used) with the `.prev` retained. Restore training input
 before a new enrollment:
 
 ```sh
@@ -382,18 +405,25 @@ The LED nodes are the remaining shared surface: **two vendor processes hold `/de
 alongside them works, so the driver does not enforce exclusive ownership, but frame writes race the
 stock agent until it is stopped as well.
 
-`capsulad -platform rockchip-stock` starts on this image and reports `mode=mountns`; the sandboxed
-`org.capsula.clock` runs as a distinct UID in a private mount namespace and takes
-`display.segment.front` over the app bus.
+`capsulad -platform rockchip-stock` starts on this image and reports `mode=mountns`; the daemon's
+built-in clock and ring providers drive `display.segment.front` and the LED ring without separately
+installed clock or ring apps.
 
 ### Operating the unit without a service manager
 
-There is no init integration yet, so the daemon is started by hand. Two facts make that less trivial
+The init integration is deployed (`S99btctl.sh` execs `S60capsulad start`), so normal starts,
+restarts and upgrades go through the boot service; the manual sequence below remains the
+maintenance fallback when the overlay or boot hook is missing. Two facts make that less trivial
 than it looks:
 
-- **`/data` holds only 78.5 MB.** A stripped `capsulad` is 21.7 MB, the two sample apps 18.4 MB, and
-  recordings/logs grow. A deploy that keeps the old binary next to the new one needs ~43 MB free;
-  free space first (`df -h /data`), deploy to `*.new` and `mv` into place, and keep the log small.
+- **`/data` holds only 78.5 MB.** The current stripped `capsulad` is 22,610,180 bytes;
+  operator-installed app
+  packages, recordings and logs grow from there. A deploy that keeps the old binary next to the new
+  one needs the new binary's size free (22,610,180 bytes, or the same again for a retained
+  `.prev`); free space first (`df -h /data`), deploy to `*.new` and `mv` into place,
+  and keep the log small. Upgrading the daemon quarantines old installed sample bundles but keeps
+  their files; a manual `ls` may still show them even though they are not active. Removing those
+  directories is an explicit operator action to reclaim space.
 - **SIGHUP killed the daemon silently.** A shell that exits takes its child with it; the framework
   now ignores SIGHUP (`cmd/capsulad/signal_unix.go`) and should still be started with
   `nohup ... &`. Without the new owner the armed timer resets the board 21 s after the old process
@@ -454,9 +484,10 @@ at 7.4 lux, and the framework's implementation writes **13/255** at 7.3 lux (5 %
 truncation). The framework animates toward each new value at 0.06 per 100 ms tick, which matches the
 smooth stock transition.
 
-The clock app takes the timezone from its own `timezone` setting (IANA name, empty = device
-timezone). The sandbox no longer forces `TZ=UTC`; `/etc/localtime` and `/usr/share/zoneinfo` are
-bind-mounted so a scripted or native app can resolve zones.
+The built-in clock provider takes the timezone from the daemon's device timezone, unless the
+`capsula.clock` app-configuration `timezone` key overrides it; the sandbox no longer forces `TZ=UTC`;
+`/etc/localtime` and `/usr/share/zoneinfo` are bind-mounted so a scripted or native app can resolve
+zones.
 
 ## What must be verified on hardware before production
 
@@ -475,18 +506,22 @@ bind-mounted so a scripted or native app can resolve zones.
 3. evdev capabilities: coordinates, pressure and gesture keys cannot be checked on this unit — it
    has no touch panel, so only the five `gpio-keys` exist.
 4. ~~Namespace/seccomp support~~ measured: mount namespace only, no user/net/PID namespaces and no
-   seccomp filter. Remaining: app runtime dependencies inside the mount namespace (the static Go
-   sample apps need no libraries; Rust binaries with glibc may).
+   seccomp filter. ~~App runtime dependencies inside the mount namespace~~ verified 2026-11-12: a
+   native app mapped `libcapsula.so.1` (ABI 1.0) from `/capsula/lib` and reported `APP_READY`;
+   static Go app packages need no libraries, and other Rust binaries still need a matching libc and
+   loader.
 5. ~~GPIO 21 mute behavior~~ verified with the vendor agent stopped: `gpio21` goes 1→0 with the
    setting, `pactl get-source-mute speex` follows, and an acoustic loop shows the gate cuts the
    microphone (live capture RMS 1977, peak 9420 → RMS 38, peak 222 with PulseAudio unmuted, so the
    attenuation is the GPIO gate and not the mixer). The vendor assistant is now retired at boot, so
    this is the normal configuration.
 6. ~~Vendor daemon coexistence/ownership rules and boot ordering~~ done: `S99btctl.sh` execs
-   `S60capsulad start`, which health-gates and falls back to the preserved vendor chain; verified
-   across power cycles with clock, assistant and media `APP_READY`. Bluetooth connect, AVRCP
-   control and absolute volume are verified with a paired source without `voice-agent`/`btctl`.
-   Remaining: pair and unpair a throwaway device through the Web UI (unpair was deliberately not
-   run against the user's MacBook), exercise a source that publishes AVRCP track metadata, and
-   decide the boundary for the vendor helpers that still run (`okcall`, `stereoctl`, `telemetryd`,
-   `snapclient`).
+   `S60capsulad start`, which health-gates and falls back to the preserved vendor chain; that
+   deployment verified across power cycles with clock, assistant and media `APP_READY`. Current
+   builds do not include those sample packages; the clock and ring run inside the daemon, and this
+   build was redeployed on 2026-11-12 (health 0, canonical `S60capsulad` restart, watchdog 21 s;
+   no power-cycle test yet). Bluetooth connect, AVRCP control and absolute volume are verified
+   with a paired source without `voice-agent`/`btctl`. Remaining: pair and unpair a throwaway device
+   through the Web UI (unpair was deliberately not run against the user's MacBook), exercise a
+   source that publishes AVRCP track metadata, and decide the boundary for the vendor helpers that
+   still run (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).

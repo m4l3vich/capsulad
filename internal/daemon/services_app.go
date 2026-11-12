@@ -26,6 +26,9 @@ type applicationService struct {
 func (s *applicationService) ListApplications(ctx context.Context, _ *frameworkv1.ListApplicationsRequest) (*frameworkv1.ListApplicationsResponse, error) {
 	out := &frameworkv1.ListApplicationsResponse{}
 	for _, app := range s.d.reg.List() {
+		if isRetiredApp(app.ID()) {
+			continue
+		}
 		out.Applications = append(out.Applications, s.d.appProto(app))
 	}
 	return out, nil
@@ -123,6 +126,9 @@ type appConfigService struct {
 }
 
 func (s *appConfigService) Describe(ctx context.Context, req *frameworkv1.DescribeAppConfigurationRequest) (*frameworkv1.AppConfigurationSchema, error) {
+	if out, ok := builtinConfigurationSchema(req.AppId); ok {
+		return out, nil
+	}
 	app, ok := s.d.reg.Get(req.AppId)
 	if !ok {
 		return nil, status.Error(codes.NotFound, "application is not installed")
@@ -227,6 +233,9 @@ func (s *appInterfaceService) ListInterfaces(ctx context.Context, req *framework
 		apps = []*registry.App{app}
 	}
 	for _, app := range apps {
+		if isRetiredApp(app.ID()) {
+			continue
+		}
 		runID, running := s.d.bus.ReadyApp(app.ID())
 		if req.RunningOnly && !running {
 			continue

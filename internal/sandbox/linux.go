@@ -110,7 +110,7 @@ func seccompProbe() int {
 	return 0
 }
 
-func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID, appID string) (*exec.Cmd, error) {
+func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID, appID string, env []string, libraryDir string) (*exec.Cmd, error) {
 	exe, err := l.executable()
 	if err != nil {
 		return nil, err
@@ -118,7 +118,7 @@ func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID
 	l.mu.Lock()
 	mode := l.mode
 	l.mu.Unlock()
-	specJSON, err := l.specJSON(m, appDir, appPath, runID, appID, mode)
+	specJSON, err := l.specJSON(m, appDir, appPath, runID, appID, mode, env, libraryDir)
 	if err != nil {
 		return nil, err
 	}
@@ -148,10 +148,10 @@ func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID
 	return cmd, nil
 }
 
-func (l *Launcher) uidCommand(appID, appPath string) (*exec.Cmd, error) {
+func (l *Launcher) uidCommand(appID, appPath string, env []string) (*exec.Cmd, error) {
 	uid, gid := l.AssignUID(appID)
 	cmd := exec.Command(appPath)
-	cmd.Env = baseEnv()
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 		Credential: &syscall.Credential{
@@ -239,6 +239,22 @@ func setupAndExec(spec execSpec) error {
 		}
 		if err := bindReadOnly(resolved, dst); err != nil {
 			return fmt.Errorf("bind %s: %w", src, err)
+		}
+	}
+
+	// One host copy of the shared native SDK, mounted read-only at a fixed
+	// path. Only the trusted LibraryDir is ever a mount source; metadata is
+	// never allowed to name a host path.
+	if spec.LibraryDir != "" {
+		if !filepath.IsAbs(spec.LibraryDir) {
+			return fmt.Errorf("native SDK library directory %q is not absolute", spec.LibraryDir)
+		}
+		dst := filepath.Join(spec.Root, strings.TrimPrefix(NamespaceLibraryDir, "/"))
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return err
+		}
+		if err := bindReadOnly(spec.LibraryDir, dst); err != nil {
+			return fmt.Errorf("bind %s: %w", NamespaceLibraryDir, err)
 		}
 	}
 

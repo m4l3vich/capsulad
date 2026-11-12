@@ -2,59 +2,93 @@ package capsula
 
 import (
 	"context"
-
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"sync"
 )
 
-// BluetoothMediaStream is the app-facing view of the connected audio source's
-// AVRCP state. The first value is the current state, then one per change.
-type BluetoothMediaStream struct {
-	// C closes when the daemon stream ends or Close is called.
-	C <-chan *frameworkv1.BluetoothMediaState
-
-	cancel context.CancelFunc
-}
-
-// Close stops the stream. It is safe to call more than once.
-func (s *BluetoothMediaStream) Close() {
-	if s != nil && s.cancel != nil {
-		s.cancel()
-	}
-}
+const bluetoothMediaService = "capsula.framework.v1.BluetoothMediaService"
 
 // BluetoothMediaState reads the current connected-source state.
-func (c *Client) BluetoothMediaState(ctx context.Context) (*frameworkv1.BluetoothMediaState, error) {
-	return frameworkv1.NewBluetoothMediaServiceClient(c.conn).GetState(ctx, &frameworkv1.GetBluetoothMediaStateRequest{})
+func (c *Client) BluetoothMediaState(ctx context.Context) (BluetoothMediaState, error) {
+	var state BluetoothMediaState
+	err := c.unaryJSON(ctx, bluetoothMediaService, "GetState", struct{}{}, &state)
+	return state, err
+}
+
+// BluetoothMediaCommand sends one AVRCP transport command.
+func (c *Client) BluetoothMediaCommand(ctx context.Context,
+	command BluetoothMediaCommand) (BluetoothMediaState, error) {
+	var state BluetoothMediaState
+	err := c.unaryJSON(ctx, bluetoothMediaService, "Command", struct {
+		Command BluetoothMediaCommand `json:"command,omitempty"`
+	}{Command: command}, &state)
+	return state, err
+}
+
+// BluetoothMediaStream is the app-facing view of the connected source's AVRCP
+// state: the current state first, then one value per change.
+type BluetoothMediaStream struct {
+	// C closes when the stream ends or Close is called.
+	C <-chan BluetoothMediaState
+
+	call *callHandle
+	done chan struct{}
+	stop chan struct{}
+	once sync.Once
 }
 
 // WatchBluetoothMedia subscribes to connect/disconnect and track changes.
 func (c *Client) WatchBluetoothMedia(ctx context.Context) (*BluetoothMediaStream, error) {
-	streamCtx, cancel := context.WithCancel(ctx)
-	stream, err := frameworkv1.NewBluetoothMediaServiceClient(c.conn).WatchState(streamCtx, &frameworkv1.WatchBluetoothMediaStateRequest{})
+	ctx = orBackground(ctx)
+	call, err := c.startCall(ctx, "", bluetoothMediaService, "WatchState", callKindServerStream, 0)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	out := make(chan *frameworkv1.BluetoothMediaState, 8)
+	if err := call.sendJSON(struct{}{}); err != nil {
+		call.release()
+		return nil, err
+	}
+	if err := call.halfClose(); err != nil {
+		call.release()
+		return nil, err
+	}
+	states := make(chan BluetoothMediaState, 8)
+	stream := &BluetoothMediaStream{C: states, call: call, done: make(chan struct{}),
+		stop: make(chan struct{})}
 	go func() {
-		defer close(out)
-		defer cancel()
+		defer close(states)
+		defer close(stream.done)
+		defer call.release()
 		for {
-			state, err := stream.Recv()
+			payload, err := call.recvJSON()
 			if err != nil {
 				return
 			}
+			var state BluetoothMediaState
+			if err := unmarshalProtoJSON(payload, &state); err != nil {
+				continue
+			}
 			select {
-			case out <- state:
-			case <-streamCtx.Done():
+			case states <- state:
+			case <-stream.stop:
+				return
+			case <-call.ctx.Done():
 				return
 			}
 		}
 	}()
-	return &BluetoothMediaStream{C: out, cancel: cancel}, nil
+	return stream, nil
 }
 
-// BluetoothMediaCommand sends one AVRCP transport command to the source.
-func (c *Client) BluetoothMediaCommand(ctx context.Context, cmd frameworkv1.BluetoothMediaCommand) (*frameworkv1.BluetoothMediaState, error) {
-	return frameworkv1.NewBluetoothMediaServiceClient(c.conn).Command(ctx, &frameworkv1.BluetoothMediaCommandRequest{Command: cmd})
+// Done closes when the watch stream ends.
+func (s *BluetoothMediaStream) Done() <-chan struct{} { return s.done }
+
+// Close stops the stream. It is safe to call more than once.
+func (s *BluetoothMediaStream) Close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		close(s.stop)
+		_ = s.call.release()
+	})
 }

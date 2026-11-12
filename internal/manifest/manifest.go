@@ -80,6 +80,16 @@ type GitHubAttestation struct {
 	Workflow   string `toml:"workflow"`
 }
 
+// NativeSDK is an app's optional requirement on the shared native SDK
+// runtime. It is requirement metadata checked by the supervisor before an app
+// is installed or launched; it is not a negotiation. A binding that loads the
+// library still verifies the ABI independently at startup.
+type NativeSDK struct {
+	ABIMajor             int      `toml:"abi_major"`
+	MinMinor             int      `toml:"min_minor"`
+	RequiredCapabilities []string `toml:"required_capabilities"`
+}
+
 type Manifest struct {
 	ID                string             `toml:"id"`
 	Name              string             `toml:"name"`
@@ -95,6 +105,7 @@ type Manifest struct {
 	Actions           []Action           `toml:"actions"`
 	Arguments         []Argument         `toml:"arguments"`
 	Interfaces        []Interface        `toml:"interfaces"`
+	NativeSDK         *NativeSDK         `toml:"native_sdk"`
 	GitHubAttestation *GitHubAttestation `toml:"github_attestation"`
 
 	// Dir is the immutable package root the manifest was loaded from. It is
@@ -103,6 +114,17 @@ type Manifest struct {
 }
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+const capabilityPattern = "lowercase letters, digits, '.', '_' or '-'"
+
+var capabilityRe = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
+
+// ValidNativeCapability reports whether name is a well-formed capability
+// identifier. Capabilities are a shared vocabulary between apps and the native
+// runtime build, so the manifest and runtime metadata use one rule.
+func ValidNativeCapability(name string) bool {
+	return capabilityRe.MatchString(name)
+}
 
 var settingTypes = map[string]bool{
 	"text": true, "text_masked": true, "boolean": true,
@@ -157,6 +179,27 @@ func (m *Manifest) Validate() error {
 		}
 	default:
 		return fmt.Errorf("app %s: unknown runtime %q", m.ID, m.Entrypoint.Runtime)
+	}
+	if n := m.NativeSDK; n != nil {
+		if m.Entrypoint.Runtime != RuntimeNative {
+			return fmt.Errorf("app %s: native_sdk is only valid for a native entrypoint", m.ID)
+		}
+		if n.ABIMajor < 1 {
+			return fmt.Errorf("app %s: native_sdk.abi_major must be at least 1", m.ID)
+		}
+		if n.MinMinor < 0 {
+			return fmt.Errorf("app %s: native_sdk.min_minor must not be negative", m.ID)
+		}
+		seenCaps := map[string]bool{}
+		for _, c := range n.RequiredCapabilities {
+			if !ValidNativeCapability(c) {
+				return fmt.Errorf("app %s: native_sdk capability %q must match %s", m.ID, c, capabilityPattern)
+			}
+			if seenCaps[c] {
+				return fmt.Errorf("app %s: duplicate native_sdk capability %q", m.ID, c)
+			}
+			seenCaps[c] = true
+		}
 	}
 	if err := validateRelPath("entrypoint.path", m.Entrypoint.Path, true); err != nil {
 		return fmt.Errorf("app %s: %w", m.ID, err)
