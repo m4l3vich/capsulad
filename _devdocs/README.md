@@ -1,5 +1,10 @@
 # Capsula Universal Framework — architecture draft 0.5
 
+> **Historical design archive.** For work on the implemented project, start with
+> [agent/contributor guidance](../AGENTS.md), [current status](../docs/STATUS.md),
+> and [speaker behavior](../docs/SPEAKER_BEHAVIOR.md). The draft below records
+> earlier intent; its app, authentication, and runtime assumptions are not current requirements.
+
 A **draft specification**, not an implemented runtime or frozen API, for a local-only Protobuf/gRPC application framework and hardware abstraction layer for jailbroken VK Capsula Mini devices.
 
 ## Files

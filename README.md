@@ -14,8 +14,10 @@ the implementation is honest about what is verified on real hardware and what is
   device, settings, routing, presentation, audio, input, assistant, application,
   application-configuration, app-interface, app-bus, sensor, system, diagnostics, asset.
 - **Supervised native applications** with manifest validation, unique run IDs, graceful stop,
-  restart backoff, stdout/stderr collection and singleton invocation semantics (queued, bounded,
-  expiring).
+  immediate first restart then exponential backoff, stdout/stderr collection and singleton
+  invocation semantics (queued, bounded, expiring). A process that loses its framework connection
+  is a failure, not a deliberate stop: `restart_on_failure` apps, including the selected assistant,
+  are started again immediately instead of staying unavailable.
 - **Reverse-RPC app bus**: one long-lived `Connect` stream per app; routed unary and streaming
   `Call` relays with deadlines, cancellation and bounded queues. Apps never listen on IPC sockets.
 - **Shared native SDK**: a pure Rust `libcapsula` cdylib exposes a frozen C ABI v1 through one
@@ -57,7 +59,10 @@ the implementation is honest about what is verified on real hardware and what is
   only by the explicit `dumbassistant` target. It claims `voice_assistant`, consumes real
   microphone PCM, paints the whole ring teal with brightness tracking input level, ends the turn
   after a 700 ms post-speech silence or a hold-to-talk release, then fades to a blue chase for the
-  configured reply delay. `delay` accepts empty (0 ms), a constant, or an ascending inclusive
+  configured reply delay. Speech onset and end are relative to a learned room-noise floor, so a fan
+  or traffic does not keep a turn open until the listen cap. The circle key dismisses an in-flight
+  turn through the app's declared `dismiss` action, which aborts listening, delay and playback and
+  clears queued activations. `delay` accepts empty (0 ms), a constant, or an ascending inclusive
   range, 0–60000 ms; `reply_asset` is a path relative to the shared read-only app asset store (apps receive
   `CAPSULA_ASSETS=/assets` in namespace mode and the host store path otherwise; empty uses the
   packaged fallback). The daemon rejects absolute/traversal/symlink targets and files not registered
@@ -89,16 +94,28 @@ the implementation is honest about what is verified on real hardware and what is
   source, and its track metadata is read when the source exposes it. Volume is event-driven in both
   directions through the same `applyMasterVolume` path as the keys and application RPC; the daemon
   does not echo a transport value it just wrote. A provider app publishes this through the standard
-  `MediaPlayerService`, so the Web UI and other apps see a normal `bluetooth` player. Connect and
-  disconnect each play exactly three completed blue fade-in/out ring pulses, and the two rightmost
-  segment cells read `bt` for two seconds, through ordinary presentations and captures over the
-  selected baseline.
+  `MediaPlayerService`, so the Web UI and other apps see a normal `bluetooth` player. Connect plays
+  exactly three completed blue fade-in/out ring pulses and shows `bt` on the two rightmost segment
+  cells for two seconds; disconnect plays one pulse and no glyph, leaving the selected display
+  baseline untouched. Both notices go through ordinary presentations and captures over the selected
+  baseline. The A2DP sink endpoint is registered before pairing is enabled, is re-registered if
+  BlueZ or the adapter restarts, and the daemon never unloads PulseAudio's Bluetooth modules while
+  a source is connected.
 - **Physical controls**: the circle (play/pause) key is the talk button — hold it past 700 ms to summon
-  the assistant, release to end the turn, short taps do nothing. Volume keys step 5 %, ramp while held
-  (200 ms decaying to 60 ms) and stop at the bounds; each change plays a synthesized percussive tick at
+  the assistant, release to end the turn, short taps do nothing unless a stopwatch owns the button.
+  Pressing the circle while the assistant is answering dismisses that turn through the app's
+  `dismiss` action instead of starting a second one. While a stopwatch runs, a tap pauses or resumes
+  it and the configured hold or double tap resets it, never summoning the assistant. Volume keys step 5 %, ramp while held
+  (200 ms decaying to 60 ms) and stop at the bounds; each change plays the embedded volume cue at
   the new level and shows the percentage on the segment display for a second. Key, application and
   Bluetooth volume all write the same persisted setting and apply the same mixer/transport path; the
-  microphone key uses the same persistent mute path as `AudioService.SetMicrophoneMuted`.
+  microphone key uses the same persistent mute path as `AudioService.SetMicrophoneMuted` and plays
+  a distinct mute (warning) or unmute (info) cue.
+- **Embedded UI cues**: the startup jingle, volume cue and microphone cues are the CC BY-SA
+  `ubuntu-sounds` set compiled into the daemon from `internal/sounds` (with its `COPYING` preserved),
+  not operator/app assets. The startup jingle plays once on the first boot after installation and
+  afterwards only when `startup_sound_enabled` is on (off by default); it streams asynchronously and
+  never delays boot. Every cue uses the framework playback path, so it follows the master volume.
 - **Personal wakeword training from the browser**: record on the device, then run waveform
   augmentation, pretrained speech embeddings, hard-negative training and independent quality gates
   on the device. The browser only displays progress; no Python, ONNX runtime or GPU is needed there.
@@ -152,6 +169,9 @@ the implementation is honest about what is verified on real hardware and what is
 
 ## Build and run (simulator)
 
+For code or UX changes, start with [AGENTS.md](AGENTS.md) and the
+[speaker behavior change gate](docs/SPEAKER_BEHAVIOR.md#future-change-gate).
+
 ```sh
 make                 # release profile: daemon, CLI, Go/Rust SDK bindings, native library and header
 make debug           # same targets, unstripped
@@ -183,13 +203,23 @@ capsula -data-dir build/demo app start capsula.ring
 ```
 
 `capsula.clock` settings cover `blink` (boolean), `timezone` (IANA name; empty follows the device),
-`display_mode`, the timer duration and one alarm (label, hour, minute, weekday mask, timezone,
-enabled). `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle`),
+`display_mode`, the timer duration, the stopwatch reset gesture (`hold` or `double_tap`) and one
+alarm (label, hour, minute, weekday mask, timezone, enabled). `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle`),
 `palette`, `speed` and `brightness`; the legacy `mode` key is accepted only so an existing settings
 file still validates; it is migrated to `effect` and no longer offered. Legacy defaults `org.capsula.clock`,
 `org.example.ring-controller` and `org.capsula.assistant` migrate to these IDs at boot, and the old
 clock settings are copied to `capsula.clock` once. The Web UI default-provider dropdowns list
 installed packages and system apps; an empty selection means no default provider.
+
+Timers show the nearest countdown on the display and an orange ring that empties counterclockwise
+from the top. Completion displays 00:00 and repeats the alert until dismissed; a framework-owned
+panel/circle/talk press dismisses without also summoning the assistant. A running stopwatch shows
+its elapsed time and pulses the ring orange; a tap pauses (releasing the ring) and resumes, and the
+configured reset gesture — holding the button by default, or two quick taps — resets and dismisses
+it without summoning the assistant. Temporary outputs return to the selected baseline, or physically
+blank when none is selected. See
+[speaker behavior and audit](docs/SPEAKER_BEHAVIOR.md) for the interaction contract, regression
+coverage, and `-output-trace` hardware diagnostics.
 
 Brightness for an auto-managed display is floored at 5 %: darkness and malformed/stale sensor
 samples can never blank an enabled automatic display, while a manual brightness of 0 remains an
@@ -629,6 +659,7 @@ behavior starts a new major. Compatibility failures are explicit (`UNSUPPORTED_A
 | `internal/websecurity` | self-signed TLS, Argon2id password, API keys, sessions |
 | `internal/provenance` | Sigstore/GitHub attestation verification |
 | `internal/webui` | password/API-key HTML interface |
+| `internal/sounds` | embedded framework UI cue audio and its CC BY-SA `COPYING` |
 | `sdk/native` | Rust shared engine behind the stable C ABI (`libcapsula.so.1` / `.dylib`), header and C example |
 | `sdk/go` | nested Go module `capsula/sdk`; thin binding over the shared native library |
 | `sdk/rust` | Rust binding that dynamically loads the shared native library, with real-daemon smoke examples |
