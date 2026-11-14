@@ -10,10 +10,12 @@ package manifest
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -77,6 +79,18 @@ type Interface struct {
 	Docs       string `toml:"docs"`
 }
 
+// SettingsUI declares an application-provided settings surface. HTML is a
+// relative path to one self-contained HTML document inside the package root;
+// it is served to the Web UI as an untrusted, opaque-origin document and is
+// never granted host credentials, DOM access or arbitrary commands.
+type SettingsUI struct {
+	HTML string `toml:"html"`
+}
+
+// MaxSettingsUIBytes bounds the settings document. It is intentionally small:
+// the asset is a settings form, not a second application bundle.
+const MaxSettingsUIBytes = 512 << 10
+
 type GitHubAttestation struct {
 	Subject    string `toml:"subject"`
 	Bundle     string `toml:"bundle"`
@@ -109,6 +123,7 @@ type Manifest struct {
 	Actions           []Action           `toml:"actions"`
 	Arguments         []Argument         `toml:"arguments"`
 	Interfaces        []Interface        `toml:"interfaces"`
+	SettingsUI        *SettingsUI        `toml:"settings_ui"`
 	NativeSDK         *NativeSDK         `toml:"native_sdk"`
 	GitHubAttestation *GitHubAttestation `toml:"github_attestation"`
 
@@ -158,7 +173,52 @@ func Load(root, file string) (*Manifest, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
+	if m.SettingsUI != nil {
+		if _, err := ReadSettingsUIAsset(root, m.SettingsUI.HTML); err != nil {
+			return nil, fmt.Errorf("app %s: %w", m.ID, err)
+		}
+	}
 	return &m, nil
+}
+
+// ReadSettingsUIAsset reads one declared settings document from a package.
+// The relative path is opened component-by-component relative to the package
+// root with O_NOFOLLOW, so neither the final file nor any untrusted parent
+// directory can be swapped for a symlink between validation and the read.
+// Non-regular files, oversized files and invalid UTF-8 are rejected.
+func ReadSettingsUIAsset(root, rel string) ([]byte, error) {
+	if err := validateRelPath("settings_ui.html", rel, true); err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(filepath.Ext(rel), ".html") {
+		return nil, fmt.Errorf("settings_ui.html must be an .html document")
+	}
+	f, err := openContainedRelative(root, rel)
+	if err != nil {
+		return nil, fmt.Errorf("settings_ui.html: %w", err)
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("settings_ui.html: %w", err)
+	}
+	if !stat.Mode().IsRegular() {
+		return nil, fmt.Errorf("settings_ui.html must be a regular file")
+	}
+	if stat.Size() > MaxSettingsUIBytes {
+		return nil, fmt.Errorf("settings_ui.html is %d bytes; limit is %d", stat.Size(), MaxSettingsUIBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, MaxSettingsUIBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("settings_ui.html: %w", err)
+	}
+	if len(data) > MaxSettingsUIBytes {
+		return nil, fmt.Errorf("settings_ui.html exceeds the %d byte limit", MaxSettingsUIBytes)
+	}
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("settings_ui.html must be valid UTF-8")
+	}
+	return data, nil
 }
 
 // Validate enforces the manifest contract before an app can be installed.
@@ -180,6 +240,9 @@ func (m *Manifest) Validate() error {
 	case RuntimeQuickJS, RuntimeMicroPython:
 		if m.Entrypoint.Architecture != "" || m.Entrypoint.ABI != "" {
 			return fmt.Errorf("app %s: script entrypoint must not declare architecture/abi", m.ID)
+		}
+		if err := validateScriptPath(m.ID, m.Entrypoint.Runtime, m.Entrypoint.Path); err != nil {
+			return err
 		}
 	case RuntimeBuiltin:
 		if m.Entrypoint.Architecture != "" || m.Entrypoint.ABI != "" || m.Entrypoint.Path != "" {
@@ -277,9 +340,42 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("app %s: %w", m.ID, err)
 		}
 	}
+	if ui := m.SettingsUI; ui != nil {
+		if strings.TrimSpace(ui.HTML) == "" {
+			return fmt.Errorf("app %s: settings_ui.html is required", m.ID)
+		}
+		if err := validateRelPath("settings_ui.html", ui.HTML, true); err != nil {
+			return fmt.Errorf("app %s: %w", m.ID, err)
+		}
+		if !strings.EqualFold(filepath.Ext(ui.HTML), ".html") {
+			return fmt.Errorf("app %s: settings_ui.html must be an .html document", m.ID)
+		}
+		if len(m.Settings) == 0 {
+			return fmt.Errorf("app %s: settings_ui requires at least one declared setting", m.ID)
+		}
+	}
 	for _, p := range m.Provides {
 		if strings.TrimSpace(p) == "" {
 			return fmt.Errorf("app %s: empty provides hint", m.ID)
+		}
+	}
+	return nil
+}
+
+func validateScriptPath(appID string, runtime Runtime, p string) error {
+	if p == "" {
+		return fmt.Errorf("app %s: entrypoint.path is required", appID)
+	}
+	switch runtime {
+	case RuntimeQuickJS:
+		// The host evaluates the file as a classic script. ES modules are not
+		// advertised, so accepting .mjs would promise unsupported syntax.
+		if !strings.HasSuffix(p, ".js") {
+			return fmt.Errorf("app %s: QuickJS entrypoint must be a .js script", appID)
+		}
+	case RuntimeMicroPython:
+		if !strings.HasSuffix(p, ".py") {
+			return fmt.Errorf("app %s: MicroPython entrypoint must be a .py script", appID)
 		}
 	}
 	return nil

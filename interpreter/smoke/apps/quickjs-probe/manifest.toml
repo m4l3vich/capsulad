@@ -1,0 +1,13 @@
+id = "org.example.quickjs-smoke"
+name = "QuickJS Smoke Probe"
+version = "0.1.0"
+description = "Smoke probe for the QuickJS runtime: makes routed unary and cancelled stream calls."
+background = true
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "quickjs"
+path = "main.js"
+sdk = "0.5"

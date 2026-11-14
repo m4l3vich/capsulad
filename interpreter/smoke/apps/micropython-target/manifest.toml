@@ -1,0 +1,13 @@
+id = "org.example.micropython-smoke"
+name = "MicroPython Smoke Target"
+version = "0.1.0"
+description = "Smoke target for the MicroPython runtime: answers routed unary/stream calls."
+background = true
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "micropython"
+path = "main.py"
+sdk = "0.5"

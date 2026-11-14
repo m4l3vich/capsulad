@@ -67,7 +67,7 @@ NATIVE_LIBRARY := libcapsula.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsula.so.1
 endif
 
-.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsula sdk sdk-go sdk-rust native dumbassistant test test-sdk check-sdk-abi test-dumbassistant clean
+.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsula web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant test test-sdk check-sdk-abi test-dumbassistant clean
 
 all: release
 
@@ -97,6 +97,12 @@ capsula:
 	mkdir -p $(BINDIR)
 	rm -f $(BINDIR)/capsula
 	$(GOBUILD) -o $(BINDIR)/capsula ./cmd/capsula
+
+# Independently built browser SPA. Output is embedded by internal/webui, so
+# run this before rebuilding capsulad when frontend sources change. The built
+# dist is checked in, so ordinary Go builds do not need Node.
+web:
+	cd web && npm ci && npm run build
 
 # The Go SDK is its own module; it exposes the thin binding over libcapsula.
 # It uses cgo, so a cross build also needs a matching C toolchain.
@@ -141,6 +147,18 @@ else
 endif
 	cp $(NATIVE_HEADER) $(INCLUDEDIR)/capsula/capsula.h
 	sh $(NATIVE_METADATA_SCRIPT) $(LIBDIR)/capsula-native.json $(NATIVE_METADATA_LIBRARY)
+
+# Script runtimes. Optional because they build third-party engines from
+# pinned sources; stage the hosts beside libcapsula so the launcher can find
+# them. QUICKJS_SRC/MICROPYTHON_SRC may point at already extracted pinned trees.
+interpreter:
+	sh interpreter/build.sh
+
+interpreter-quickjs:
+	TARGETS=quickjs sh interpreter/build.sh
+
+interpreter-micropython:
+	TARGETS=micropython sh interpreter/build.sh
 
 # Optional first-party app. It is a separate nested module and is never part
 # of `all`, `release` or `debug`.

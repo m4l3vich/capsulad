@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -273,6 +274,182 @@ func TestCommandCompatibleRuntimeSetsEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(env, "CAPSULA_LIBRARY="+filepath.Join(canonical, "libcapsula.so.1")) {
 		t.Fatalf("CAPSULA_LIBRARY missing from env:\n%s", env)
+	}
+}
+
+func writeExecutable(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeDiscoversInstalledInterpreters(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\necho 'quickjs-ng 0.18.0'\n")
+	if err := os.WriteFile(filepath.Join(dir, InterpreterMicroPython), []byte("not executable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := LocateRuntime(dir)
+	if err != nil {
+		t.Fatalf("locate runtime: %v", err)
+	}
+	if _, ok := rt.Interpreters[manifest.RuntimeQuickJS]; !ok {
+		t.Fatal("QuickJS host was not discovered")
+	}
+	if _, ok := rt.Interpreters[manifest.RuntimeMicroPython]; ok {
+		t.Fatal("a non-executable MicroPython file must not be advertised")
+	}
+	interp, err := rt.Interpreter(manifest.RuntimeQuickJS)
+	if err != nil || interp.File != InterpreterQuickJS {
+		t.Fatalf("interpreter = %+v, err = %v", interp, err)
+	}
+	if _, err := rt.Interpreter(manifest.RuntimeMicroPython); err == nil || !strings.Contains(err.Error(), InterpreterMicroPython) {
+		t.Fatalf("missing MicroPython error = %v", err)
+	}
+
+	l := New(Config{Mode: "none", LibraryDir: dir})
+	l.setMode("none", "test")
+	status := l.RuntimeStatus(manifest.RuntimeQuickJS)
+	if !status.Available || status.ImplementationVersion != "quickjs-ng 0.18.0" {
+		t.Fatalf("QuickJS status = %+v", status)
+	}
+	if status.Detail == "" {
+		t.Fatal("available runtime must describe its implementation")
+	}
+	missing := l.RuntimeStatus(manifest.RuntimeMicroPython)
+	if missing.Available || !strings.Contains(missing.Detail, "MicroPython") {
+		t.Fatalf("MicroPython status = %+v", missing)
+	}
+
+	all := l.RuntimeStatuses()
+	if len(all) != 4 || all[0].Runtime != manifest.RuntimeNative || !all[0].Available ||
+		all[3].Runtime != manifest.RuntimeBuiltin || !all[3].Available {
+		t.Fatalf("runtime statuses = %+v", all)
+	}
+}
+
+func TestRuntimeStatusIsHonestWithoutRuntime(t *testing.T) {
+	l := New(Config{Mode: "none", LibraryDir: t.TempDir()})
+	l.setMode("none", "test")
+	status := l.RuntimeStatus(manifest.RuntimeQuickJS)
+	if status.Available {
+		t.Fatalf("QuickJS advertised without a runtime: %+v", status)
+	}
+	if !strings.Contains(status.Detail, RuntimeMetadataFile) {
+		t.Fatalf("detail does not explain the missing runtime: %q", status.Detail)
+	}
+}
+
+func TestCommandScriptRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\nexit 0\n")
+
+	appDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(appDir, "main.js"), []byte("capsula.start()\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &manifest.Manifest{
+		ID: "org.example.quickjs", Dir: appDir,
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeQuickJS, Path: "main.js"},
+	}
+	l := New(Config{Mode: "none", LibraryDir: dir})
+	l.setMode("none", "test")
+	cmd, err := l.Command(m, appDir, "run1", m.ID)
+	if err != nil {
+		t.Fatalf("script command: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHost := filepath.Join(canonical, InterpreterQuickJS)
+	if cmd.Path != wantHost {
+		t.Fatalf("exec path = %q, want %q", cmd.Path, wantHost)
+	}
+	wantScript, err := filepath.EvalSymlinks(filepath.Join(appDir, "main.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cmd.Args) != 2 || cmd.Args[1] != wantScript {
+		t.Fatalf("args = %v, want the package script %s", cmd.Args, wantScript)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{
+		"CAPSULA_LIBRARY=" + filepath.Join(canonical, "libcapsula.so.1"),
+		"CAPSULA_APP_DIR=" + appDir,
+		"CAPSULA_INTERPRETER=" + wantHost,
+	} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("script env missing %q:\n%s", want, env)
+		}
+	}
+}
+
+func TestCommandScriptRuntimeMissingHost(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	appDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(appDir, "main.py"), []byte("pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &manifest.Manifest{
+		ID: "org.example.micropython", Dir: appDir,
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeMicroPython, Path: "main.py"},
+	}
+	l := New(Config{Mode: "none", LibraryDir: dir})
+	l.setMode("none", "test")
+	if _, err := l.Command(m, appDir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), InterpreterMicroPython) {
+		t.Fatalf("missing host error = %v", err)
+	}
+}
+
+func TestCommandScriptRejectsEntrypointEscape(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\nexit 0\n")
+
+	outside := filepath.Join(t.TempDir(), "main.js")
+	if err := os.WriteFile(outside, []byte("capsula.start()\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appDir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(appDir, "main.js")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	m := &manifest.Manifest{
+		ID: "org.example.quickjs", Dir: appDir,
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeQuickJS, Path: "main.js"},
+	}
+	l := New(Config{Mode: "none", LibraryDir: dir})
+	l.setMode("none", "test")
+	if _, err := l.Command(m, appDir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("escaping entrypoint error = %v", err)
+	}
+}
+
+func TestSpecJSONCarriesInterpreterExecPathAndArgs(t *testing.T) {
+	l := New(Config{Mode: "namespaces", SocketPath: "/run/hal.sock", LibraryDir: "/rt", SandboxRoot: t.TempDir()})
+	l.setMode("namespaces", "test")
+	raw, err := l.specJSON("/apps/demo", "/capsula/lib/capsula-quickjs", []string{"/app/main.js"}, "run1", "org.example.demo", "namespaces", nil, "/rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec execSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.AppPath != "/capsula/lib/capsula-quickjs" {
+		t.Fatalf("spec app path = %q", spec.AppPath)
+	}
+	if len(spec.Args) != 1 || spec.Args[0] != "/app/main.js" {
+		t.Fatalf("spec args = %v", spec.Args)
+	}
+	if spec.LibraryDir != "/rt" {
+		t.Fatalf("spec library dir = %q", spec.LibraryDir)
 	}
 }
 

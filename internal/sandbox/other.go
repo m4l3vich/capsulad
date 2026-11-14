@@ -16,15 +16,15 @@ func (l *Launcher) Probe(ctx context.Context) error {
 	return nil
 }
 
-func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID, appID string, env []string, libraryDir string) (*exec.Cmd, error) {
-	cmd := exec.Command(appPath)
+func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, execPath string, args []string, runID, appID string, env []string, libraryDir string) (*exec.Cmd, error) {
+	cmd := exec.Command(execPath, args...)
 	cmd.Dir = appDir
 	cmd.Env = env
 	return cmd, nil
 }
 
-func (l *Launcher) uidCommand(appID, appPath string, env []string) (*exec.Cmd, error) {
-	cmd := exec.Command(appPath)
+func (l *Launcher) uidCommand(appID, appPath string, args []string, env []string) (*exec.Cmd, error) {
+	cmd := exec.Command(appPath, args...)
 	cmd.Env = env
 	return cmd, nil
 }

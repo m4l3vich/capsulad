@@ -45,6 +45,9 @@ type Config struct {
 	PIDNamespace bool
 	Seccomp      bool
 	Executable   string // daemon binary used for the in-namespace helper
+	// SandboxRoot is the per-run helper root. Tests override it; production
+	// uses the fixed /run path below so the helper can wipe a dead run.
+	SandboxRoot string
 }
 
 type Launcher struct {
@@ -179,28 +182,24 @@ func (l *Launcher) libraryDir() (string, error) {
 	return l.libDir, l.libErr
 }
 
-// Command builds the app process command. Native binaries only: script
-// runtimes return an explicit unavailable error rather than fake execution.
-func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*exec.Cmd, error) {
-	if m.Entrypoint.Runtime != manifest.RuntimeNative {
-		return nil, fmt.Errorf("runtime %s is not available in this build", m.Entrypoint.Runtime)
+func (l *Launcher) sandboxRoot() string {
+	if l.cfg.SandboxRoot != "" {
+		return l.cfg.SandboxRoot
 	}
+	return "/run/capsulad/sandbox"
+}
+
+// Command builds the app process command. Native entrypoints run their own
+// binary; script entrypoints run the installed interpreter host with the
+// package script as its first argument. Both paths use the same shared SDK
+// environment and the same sandbox modes. A script runtime without its real
+// engine host is an explicit unavailable error, never a stand-in interpreter.
+func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*exec.Cmd, error) {
 	absDir, err := filepath.Abs(appDir)
 	if err != nil {
 		return nil, err
 	}
 	appDir = absDir
-	appPath, err := filepath.Abs(filepath.Join(appDir, m.Entrypoint.Path))
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(appPath)
-	if err != nil {
-		return nil, fmt.Errorf("entrypoint: %w", err)
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("entrypoint %s is a directory", m.Entrypoint.Path)
-	}
 	l.mu.Lock()
 	mode := l.mode
 	l.mu.Unlock()
@@ -209,40 +208,126 @@ func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*
 	if err != nil {
 		return nil, err
 	}
-	// Optional SDK use: discover the runtime for the environment but never
-	// fail an app that did not declare a requirement because the runtime is
-	// missing or its metadata is unusable.
-	rt, _ := findRuntime(libDir, false)
-	if m.NativeSDK != nil {
-		// Required SDK use: strict discovery requires an installed runtime and
-		// generated metadata, then the requirement preflight runs. This does
-		// not verify the library's exported ABI; the binding still does that.
-		rt, err = LocateRuntime(libDir)
+
+	switch m.Entrypoint.Runtime {
+	case manifest.RuntimeNative:
+		appPath, err := filepath.Abs(filepath.Join(appDir, m.Entrypoint.Path))
 		if err != nil {
-			return nil, fmt.Errorf("app %s requires native SDK ABI %d.%d: %w", m.ID, m.NativeSDK.ABIMajor, m.NativeSDK.MinMinor, err)
+			return nil, err
 		}
-		if err := CheckRequirement(rt, *m.NativeSDK); err != nil {
+		info, err := os.Stat(appPath)
+		if err != nil {
+			return nil, fmt.Errorf("entrypoint: %w", err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("entrypoint %s is a directory", m.Entrypoint.Path)
+		}
+		// Optional SDK use: discover the runtime for the environment but never
+		// fail an app that did not declare a requirement because the runtime is
+		// missing or its metadata is unusable.
+		rt, _ := findRuntime(libDir, false)
+		if m.NativeSDK != nil {
+			// Required SDK use: strict discovery requires an installed runtime and
+			// generated metadata, then the requirement preflight runs. This does
+			// not verify the library's exported ABI; the binding still does that.
+			rt, err = LocateRuntime(libDir)
+			if err != nil {
+				return nil, fmt.Errorf("app %s requires native SDK ABI %d.%d: %w", m.ID, m.NativeSDK.ABIMajor, m.NativeSDK.MinMinor, err)
+			}
+			if err := CheckRequirement(rt, *m.NativeSDK); err != nil {
+				return nil, fmt.Errorf("app %s: %w", m.ID, err)
+			}
+		}
+		env := append(l.env(), LibraryEnv(mode, rt)...)
+		mountLib := ""
+		if rt != nil {
+			mountLib = libDir
+		}
+		switch mode {
+		case "namespaces", "mountns":
+			return l.namespaceCommand(m, appDir, filepath.Join("/app", m.Entrypoint.Path), nil, runID, appID, env, mountLib)
+		case "uid":
+			return l.uidCommand(appID, appPath, nil, env)
+		case "none":
+			cmd := exec.Command(appPath)
+			cmd.Dir = appDir
+			cmd.Env = env
+			return cmd, nil
+		default:
+			return nil, fmt.Errorf("sandbox has not been probed")
+		}
+
+	case manifest.RuntimeQuickJS, manifest.RuntimeMicroPython:
+		if m.NativeSDK != nil {
+			return nil, fmt.Errorf("app %s: native_sdk is only valid for a native entrypoint", m.ID)
+		}
+		scriptPath, err := scriptPath(appDir, m.Entrypoint.Path)
+		if err != nil {
+			return nil, err
+		}
+		rt, err := LocateRuntime(libDir)
+		if err != nil {
+			return nil, fmt.Errorf("app %s requires the %s runtime: %w", m.ID, m.Entrypoint.Runtime, err)
+		}
+		if rt.ABIMajor != 1 {
+			return nil, fmt.Errorf("app %s requires the %s runtime: installed native SDK ABI major %d is not supported", m.ID, m.Entrypoint.Runtime, rt.ABIMajor)
+		}
+		interp, err := rt.Interpreter(m.Entrypoint.Runtime)
+		if err != nil {
 			return nil, fmt.Errorf("app %s: %w", m.ID, err)
 		}
-	}
-	env := append(l.env(), LibraryEnv(mode, rt)...)
-	mountLib := ""
-	if rt != nil {
-		mountLib = libDir
-	}
-	switch mode {
-	case "namespaces", "mountns":
-		return l.namespaceCommand(m, appDir, appPath, runID, appID, env, mountLib)
-	case "uid":
-		return l.uidCommand(appID, appPath, env)
-	case "none":
-		cmd := exec.Command(appPath)
-		cmd.Dir = appDir
-		cmd.Env = env
-		return cmd, nil
+		env := append(l.env(), LibraryEnv(mode, rt)...)
+		switch mode {
+		case "namespaces", "mountns":
+			execPath := filepath.Join(NamespaceLibraryDir, interp.File)
+			env = append(env,
+				"CAPSULA_APP_DIR=/app",
+				"CAPSULA_INTERPRETER="+execPath,
+			)
+			return l.namespaceCommand(m, appDir, execPath, []string{filepath.Join("/app", m.Entrypoint.Path)}, runID, appID, env, libDir)
+		case "uid":
+			host := filepath.Join(libDir, interp.File)
+			env = append(env,
+				"CAPSULA_APP_DIR="+appDir,
+				"CAPSULA_INTERPRETER="+host,
+			)
+			return l.uidCommand(appID, host, []string{scriptPath}, env)
+		case "none":
+			host := filepath.Join(libDir, interp.File)
+			cmd := exec.Command(host, scriptPath)
+			cmd.Dir = appDir
+			cmd.Env = append(env,
+				"CAPSULA_APP_DIR="+appDir,
+				"CAPSULA_INTERPRETER="+host,
+			)
+			return cmd, nil
+		default:
+			return nil, fmt.Errorf("sandbox has not been probed")
+		}
 	default:
-		return nil, fmt.Errorf("sandbox has not been probed")
+		return nil, fmt.Errorf("runtime %s is not available in this build", m.Entrypoint.Runtime)
 	}
+}
+
+// scriptPath resolves a package script and rejects symlink escapes. The
+// interpreter executes only a regular file inside the immutable package root.
+func scriptPath(appDir, entry string) (string, error) {
+	full := filepath.Join(appDir, entry)
+	resolved, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		return "", fmt.Errorf("entrypoint: %w", err)
+	}
+	if !withinDir(appDir, resolved) {
+		return "", fmt.Errorf("entrypoint %s resolves outside the package root", entry)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("entrypoint: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("entrypoint %s is not a regular file", entry)
+	}
+	return resolved, nil
 }
 
 // baseEnv is the environment every sandboxed app starts with. The timezone is
@@ -292,6 +377,7 @@ type execSpec struct {
 	Root          string   `json:"root"`
 	AppDir        string   `json:"app_dir"`
 	AppPath       string   `json:"app_path"`
+	Args          []string `json:"args,omitempty"`
 	SocketPath    string   `json:"socket_path"`
 	AssetsDir     string   `json:"assets_dir"`
 	LibraryDir    string   `json:"library_dir"`
@@ -316,10 +402,12 @@ func sandboxSocketEnv(mode, hostPath string) string {
 
 // specJSON builds the helper payload. env already contains the launch
 // environment including any native SDK variables; libraryDir is the host
-// directory the helper bind-mounts read-only at /capsula/lib.
-func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID, mode string, env []string, libraryDir string) (string, error) {
+// directory the helper bind-mounts read-only at /capsula/lib. execPath is the
+// absolute path the helper executes after pivot_root; args are passed to it
+// verbatim (a script host receives the in-namespace script path).
+func (l *Launcher) specJSON(appDir, execPath string, args []string, runID, appID, mode string, env []string, libraryDir string) (string, error) {
 	uid, gid := l.AssignUID(appID)
-	root := filepath.Join("/run/capsulad/sandbox", runID)
+	root := filepath.Join(l.sandboxRoot(), runID)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
@@ -335,7 +423,7 @@ func (l *Launcher) specJSON(m *manifest.Manifest, appDir, appPath, runID, appID,
 		"CAPSULA_SDK="+version.SDKVersion,
 	)
 	spec := execSpec{
-		Root: root, AppDir: appDir, AppPath: filepath.Join("/app", m.Entrypoint.Path),
+		Root: root, AppDir: appDir, AppPath: execPath, Args: args,
 		SocketPath: l.cfg.SocketPath, AssetsDir: l.cfg.AssetsDir, LibraryDir: libraryDir,
 		UID: uid, GID: gid, PIDNamespace: l.cfg.PIDNamespace, UserNamespace: mode == "namespaces",
 		Seccomp: l.Seccomp(), RuntimePaths: l.cfg.RuntimePaths, Env: fullEnv,

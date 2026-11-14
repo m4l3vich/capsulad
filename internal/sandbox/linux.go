@@ -110,7 +110,7 @@ func seccompProbe() int {
 	return 0
 }
 
-func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID, appID string, env []string, libraryDir string) (*exec.Cmd, error) {
+func (l *Launcher) namespaceCommand(_ *manifest.Manifest, appDir, execPath string, args []string, runID, appID string, env []string, libraryDir string) (*exec.Cmd, error) {
 	exe, err := l.executable()
 	if err != nil {
 		return nil, err
@@ -118,7 +118,7 @@ func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID
 	l.mu.Lock()
 	mode := l.mode
 	l.mu.Unlock()
-	specJSON, err := l.specJSON(m, appDir, appPath, runID, appID, mode, env, libraryDir)
+	specJSON, err := l.specJSON(appDir, execPath, args, runID, appID, mode, env, libraryDir)
 	if err != nil {
 		return nil, err
 	}
@@ -148,9 +148,9 @@ func (l *Launcher) namespaceCommand(m *manifest.Manifest, appDir, appPath, runID
 	return cmd, nil
 }
 
-func (l *Launcher) uidCommand(appID, appPath string, env []string) (*exec.Cmd, error) {
+func (l *Launcher) uidCommand(appID, appPath string, args []string, env []string) (*exec.Cmd, error) {
 	uid, gid := l.AssignUID(appID)
-	cmd := exec.Command(appPath)
+	cmd := exec.Command(appPath, args...)
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -163,7 +163,7 @@ func (l *Launcher) uidCommand(appID, appPath string, env []string) (*exec.Cmd, e
 
 // CleanupRun removes an empty per-run root directory left by a dead namespace.
 func (l *Launcher) CleanupRun(runID string) {
-	_ = os.RemoveAll(filepath.Join("/run/capsulad/sandbox", runID))
+	_ = os.RemoveAll(filepath.Join(l.sandboxRoot(), runID))
 }
 
 func runExecHelper() int {
@@ -302,7 +302,10 @@ func setupAndExec(spec execSpec) error {
 	if len(env) == 0 {
 		env = baseEnv()
 	}
-	return syscall.Exec(spec.AppPath, []string{spec.AppPath}, env)
+	argv := make([]string, 0, len(spec.Args)+1)
+	argv = append(argv, spec.AppPath)
+	argv = append(argv, spec.Args...)
+	return syscall.Exec(spec.AppPath, argv, env)
 }
 
 func bindReadOnly(src, dst string) error {

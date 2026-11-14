@@ -1,13 +1,16 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"capsulad/internal/manifest"
 )
@@ -24,7 +27,34 @@ const (
 	// NamespaceLibraryDir is the fixed read-only location of the runtime
 	// inside an app mount namespace.
 	NamespaceLibraryDir = "/capsula/lib"
+
+	// InterpreterQuickJS is the script host executable installed beside the
+	// native runtime. It embeds QuickJS and drives the public C ABI.
+	InterpreterQuickJS = "capsula-quickjs"
+
+	// InterpreterMicroPython is the script host executable installed beside the
+	// native runtime. It embeds MicroPython and drives the public C ABI.
+	InterpreterMicroPython = "capsula-micropython"
 )
+
+// Interpreter is one script host installed in the shared runtime directory.
+// File is relative to Runtime.Dir; Version is reported by the host's
+// --version flag and is only filled by RuntimeStatus.
+type Interpreter struct {
+	Runtime manifest.Runtime
+	File    string
+	Version string
+}
+
+// RuntimeStatus is the honest answer to ListRuntimes for one runtime. A
+// script runtime is available only when its host executable is actually
+// installed beside a compatible native SDK runtime.
+type RuntimeStatus struct {
+	Runtime               manifest.Runtime
+	Available             bool
+	ImplementationVersion string
+	Detail                string
+}
 
 // RuntimeInfo is the on-disk metadata format. Unknown fields are ignored so a
 // newer native build can add diagnostics without breaking the supervisor.
@@ -43,6 +73,10 @@ type Runtime struct {
 	ABIMinor     int
 	Capabilities map[string]bool
 	Metadata     bool // capsula-native.json was present and valid
+	// Interpreters maps a script runtime to its installed host executable.
+	// A runtime without a host is absent from the map; that is the only
+	// truthful answer until the host is staged beside the library.
+	Interpreters map[manifest.Runtime]Interpreter
 }
 
 // ResolveLibraryDir returns the host directory that holds the shared native
@@ -197,7 +231,10 @@ func findRuntime(dir string, strict bool) (*Runtime, error) {
 		return nil, nil
 	}
 
-	rt := &Runtime{Dir: dir, Capabilities: map[string]bool{}}
+	rt := &Runtime{
+		Dir: dir, Capabilities: map[string]bool{},
+		Interpreters: map[manifest.Runtime]Interpreter{},
+	}
 	metaPath := filepath.Join(dir, RuntimeMetadataFile)
 	metaOK := true
 	if resolved, err := filepath.EvalSymlinks(metaPath); err == nil {
@@ -296,7 +333,79 @@ func findRuntime(dir string, strict bool) (*Runtime, error) {
 		return nil, nil
 	}
 	rt.File = name
+	discoverInterpreters(rt)
 	return rt, nil
+}
+
+// interpreterCandidates lists the installed host names for a script runtime.
+// The unsuffixed name is the device layout; the .exe spelling keeps a host
+// directory usable when it was staged on a Windows development machine.
+func interpreterCandidates(rt manifest.Runtime) []string {
+	switch rt {
+	case manifest.RuntimeQuickJS:
+		return []string{InterpreterQuickJS, InterpreterQuickJS + ".exe"}
+	case manifest.RuntimeMicroPython:
+		return []string{InterpreterMicroPython, InterpreterMicroPython + ".exe"}
+	default:
+		return nil
+	}
+}
+
+// discoverInterpreters records executable script hosts that live beside the
+// shared library. A host is optional: native apps never need one, so a missing
+// or non-executable host simply leaves that runtime unavailable.
+func discoverInterpreters(rt *Runtime) {
+	for _, scriptRuntime := range []manifest.Runtime{manifest.RuntimeQuickJS, manifest.RuntimeMicroPython} {
+		file, ok := findInterpreterFile(rt.Dir, scriptRuntime)
+		if !ok {
+			continue
+		}
+		rt.Interpreters[scriptRuntime] = Interpreter{Runtime: scriptRuntime, File: file}
+	}
+}
+
+func findInterpreterFile(dir string, scriptRuntime manifest.Runtime) (string, bool) {
+	for _, name := range interpreterCandidates(scriptRuntime) {
+		full := filepath.Join(dir, name)
+		resolved, err := filepath.EvalSymlinks(full)
+		if err != nil || !withinDir(dir, resolved) {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return name, true
+	}
+	return "", false
+}
+
+// Interpreter returns the installed host for a script runtime.
+func (rt *Runtime) Interpreter(scriptRuntime manifest.Runtime) (Interpreter, error) {
+	if rt == nil {
+		return Interpreter{}, fmt.Errorf("%s runtime is unavailable: the shared native SDK runtime is not installed", scriptRuntime)
+	}
+	if interp, ok := rt.Interpreters[scriptRuntime]; ok {
+		return interp, nil
+	}
+	want := strings.Join(interpreterCandidates(scriptRuntime), " or ")
+	return Interpreter{}, fmt.Errorf("%s runtime is unavailable: %s is not installed in %s", scriptRuntime, want, rt.Dir)
+}
+
+// interpreterVersion asks the host for its embedded engine version. The host
+// prints it without loading the shared library or touching the app bus.
+func interpreterVersion(dir, file string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, filepath.Join(dir, file), "--version").Output()
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(version, '\n'); i >= 0 {
+		version = strings.TrimSpace(version[:i])
+	}
+	return version
 }
 
 // validateMetadata checks the generated metadata contract. It describes what
@@ -403,6 +512,70 @@ func LibraryEnv(mode string, rt *Runtime) []string {
 		"CAPSULA_LIBRARY=" + file,
 		"CAPSULA_LIBRARY_DIR=" + dir,
 		loader + "=" + dir,
+	}
+}
+
+// RuntimeStatus reports whether one runtime can actually start an app on this
+// host. It is the source of truth for ApplicationService.ListRuntimes: a
+// script runtime is never advertised as available until its real embedded
+// engine host is installed beside a compatible shared SDK.
+func (l *Launcher) RuntimeStatus(r manifest.Runtime) RuntimeStatus {
+	status := RuntimeStatus{Runtime: r}
+	switch r {
+	case manifest.RuntimeNative:
+		status.Available = true
+		status.Detail = "native entrypoints run directly in the probed sandbox"
+		return status
+	case manifest.RuntimeBuiltin:
+		status.Available = true
+		status.Detail = "compiled into capsulad; no child process"
+		return status
+	case manifest.RuntimeQuickJS, manifest.RuntimeMicroPython:
+	default:
+		status.Detail = "unknown runtime"
+		return status
+	}
+
+	name := "QuickJS"
+	if r == manifest.RuntimeMicroPython {
+		name = "MicroPython"
+	}
+	dir, err := l.libraryDir()
+	if err != nil {
+		status.Detail = fmt.Sprintf("no %s host runner: %v", name, err)
+		return status
+	}
+	rt, err := LocateRuntime(dir)
+	if err != nil {
+		status.Detail = fmt.Sprintf("no %s host runner: %v", name, err)
+		return status
+	}
+	if rt.ABIMajor != 1 {
+		status.Detail = fmt.Sprintf("no %s host runner: installed native SDK ABI %d is not supported (need major 1)", name, rt.ABIMajor)
+		return status
+	}
+	interp, err := rt.Interpreter(r)
+	if err != nil {
+		status.Detail = fmt.Sprintf("no %s host runner is built for this target; script packages are rejected rather than executed without bindings (install %s in %s)", name, strings.Join(interpreterCandidates(r), " or "), dir)
+		return status
+	}
+	status.Available = true
+	status.ImplementationVersion = interpreterVersion(dir, interp.File)
+	status.Detail = fmt.Sprintf("%s host %s with shared native SDK ABI %d.%d", name, interp.File, rt.ABIMajor, rt.ABIMinor)
+	if status.ImplementationVersion == "" {
+		status.Detail += "; engine version did not report from --version"
+	}
+	return status
+}
+
+// RuntimeStatuses lists every runtime in the order the framework API has
+// always used: native, QuickJS, MicroPython, built-in.
+func (l *Launcher) RuntimeStatuses() []RuntimeStatus {
+	return []RuntimeStatus{
+		l.RuntimeStatus(manifest.RuntimeNative),
+		l.RuntimeStatus(manifest.RuntimeQuickJS),
+		l.RuntimeStatus(manifest.RuntimeMicroPython),
+		l.RuntimeStatus(manifest.RuntimeBuiltin),
 	}
 }
 
