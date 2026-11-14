@@ -476,24 +476,20 @@ func TestSimulatorVerticalSlice(t *testing.T) {
 		return d.router.Current("light.ring.main").SelectedAppID != "test.probe"
 	})
 
-	// Microphone watchdog: no visible indication → the stream is terminated.
+	// A microphone capture without a visible indication is denied before any
+	// audio flows; the watchdog still terminates a later loss after a start.
 	micRun, _, _, err := d.Launch("test.probe", map[string]string{"mode": "mic"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 3*time.Second, "mic stream opened", func() bool {
-		return hasInputStream(d, "test.probe")
+	waitFor(t, 3*time.Second, "microphone denial logged", func() bool {
+		return strings.Contains(logText(d), "capture denied") &&
+			strings.Contains(logText(d), "visible")
 	})
-	waitFor(t, 9*time.Second, "watchdog termination", func() bool {
-		return !hasInputStream(d, "test.probe")
-	})
-	if _, ok := d.sup.Get(micRun); ok {
-		// The probe exits after reporting the notice; tolerate either state but
-		// require the stream to be gone.
+	if hasInputStream(d, "test.probe") {
+		t.Fatal("microphone capture opened without a visible indication")
 	}
-	if !strings.Contains(logText(d), "WATCHDOG_EXPIRED") {
-		t.Fatalf("watchdog reason missing from logs:\n%s", logText(d))
-	}
+	d.sup.Stop(micRun)
 
 	// Wakeword activation reaches the selected assistant, which captures the
 	// ring and microphone, then explicitly releases both.

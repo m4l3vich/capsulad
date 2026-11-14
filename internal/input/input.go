@@ -1,13 +1,20 @@
 // Package input interprets the physical touch panel.
 //
-// The framework owns gesture interpretation. Partial capture forwards semantic
-// gestures to the capturing app while the framework still handles volume and
-// microphone-toggle controls; full/raw capture forwards backend touch samples
-// and disables every built-in interpretation for the duration. A gesture in
-// progress is cancelled cleanly when capture ownership changes.
+// On Capsula Mini the panel is five discrete keys: microphone mute (north),
+// volume up (east), play/pause (south), volume down (west) and an unmarked
+// neutral centre. The play/pause circle is the talk key. There are no raw
+// coordinates; swipe and circle gestures are inferred from ordered press
+// sequences of those keys, never from invented positions.
 //
-// A sounding framework alert (a clock timer or alarm) takes priority: a primary
-// or talk-key press dismisses it and is consumed, so one press cannot both
+// The framework owns gesture interpretation. Partial capture forwards the
+// circle/play-pause and centre keys plus semantic gestures to the capturing
+// app, while volume and microphone stay framework controls. Full capture
+// forwards every key and gesture and disables every built-in side effect,
+// including mute, volume, media transport and assistant activation. A gesture
+// in progress is cancelled cleanly when capture ownership changes.
+//
+// A sounding framework alert (a clock timer or alarm) takes priority: a circle
+// or centre press dismisses it and is consumed, so one press cannot both
 // silence the alert and summon the assistant. Volume and microphone keys keep
 // their safety behaviour and never dismiss an alert.
 package input
@@ -69,6 +76,14 @@ type Handlers struct {
 	// "double_tap" or "hold". Returning true means the interaction belonged to
 	// the framework and no assistant activation is produced.
 	PrimaryGesture func(kind string) bool
+	// MediaToggle, MediaPrevious and MediaNext drive the current standard
+	// media provider. A short circle tap toggles playback; inferred left and
+	// right swipes select the previous and next item. They are never called
+	// during a full capture or from a gesture whose constituent key effects
+	// were deferred.
+	MediaToggle   func()
+	MediaPrevious func()
+	MediaNext     func()
 }
 
 // State reports the currently effective touch capture.
@@ -114,6 +129,26 @@ type Manager struct {
 	// end of a hold that dismissed an alert instead.
 	gestureHeld     bool
 	gestureConsumed bool
+
+	// panelMu owns the discrete-panel sequence recognizer. It is separate from
+	// mu so sequence resolution can call the existing key helpers without
+	// lock inversion.
+	// panelExecMu serializes a panel state transition with the effects it
+	// produces. A timeout and the matching release must not interleave between
+	// "state changed" and "press action applied", or the release could be
+	// processed before the press it belongs to.
+	panelExecMu  sync.Mutex
+	panelMu      sync.Mutex
+	panelSeq     *panelSequence
+	panelDown    map[string]bool
+	panelSwallow map[string]bool
+	panelForward map[string]string
+	panelHandled map[string]bool
+	fullSeq      []string
+	fullOverlap  []bool
+	fullDown     map[string]bool
+	fullStartNS  uint64
+	fullLastNS   uint64
 }
 
 type sequence struct {
@@ -130,13 +165,21 @@ type sequence struct {
 	// framework marks a contact owned by a framework interaction (a stopwatch
 	// pause/reset). Its gestures go to PrimaryGesture, not the assistant.
 	framework bool
+	// summon is false for the neutral centre key: it dismisses alerts and
+	// drives stopwatch gestures but never activates the assistant.
+	summon bool
 }
 
 func NewManager(parent context.Context, clock *ids.Clock, logs *logbus.Bus, caps backend.TouchCaps, state State, h Handlers) *Manager {
 	ctx, cancel := context.WithCancel(parent)
 	return &Manager{
 		ctx: ctx, cancel: cancel, clock: clock, logs: logs, caps: caps, state: state, h: h,
-		subs: map[string]map[int]chan backend.InputEvent{},
+		subs:         map[string]map[int]chan backend.InputEvent{},
+		panelDown:    map[string]bool{},
+		panelSwallow: map[string]bool{},
+		panelForward: map[string]string{},
+		panelHandled: map[string]bool{},
+		fullDown:     map[string]bool{},
 	}
 }
 
@@ -144,6 +187,16 @@ func (m *Manager) Capabilities() backend.TouchCaps { return m.caps }
 
 // Handle consumes one backend input event.
 func (m *Manager) Handle(e backend.InputEvent) {
+	// The backend may know how old the kernel event was when it managed to read
+	// it. Anchor that age to this manager's clock so a delayed read preserves
+	// the physical inter-contact gap and the hold deadline (both compared with
+	// clock.NowNS) instead of collapsing everything to read time. A zero or
+	// impossible age keeps the read-time path.
+	if e.MonotonicNS == 0 && e.EventAgeNS != 0 {
+		if now := m.clock.NowNS(); e.EventAgeNS < now {
+			e.MonotonicNS = now - e.EventAgeNS
+		}
+	}
 	switch {
 	case e.Report != nil:
 		m.handleReport(e)
@@ -164,55 +217,31 @@ func (m *Manager) handleReport(e backend.InputEvent) {
 }
 
 func (m *Manager) handleKey(e backend.InputEvent) {
+	// Read ownership under the same lock that serializes panel state
+	// transitions. A capture takeover cannot clear bookkeeping between this
+	// snapshot and the bookkeeping below; a key sampled before full capture
+	// acquired the panel is routed to the full owner under the current state.
+	m.panelExecMu.Lock()
+	defer m.panelExecMu.Unlock()
 	captureID, appID, mode := m.state()
 	key := e.Key.Key
 	pressed := e.Key.Pressed
 	if mode == routing.TouchFull {
+		if isPanelKey(key) {
+			m.fullPanelKey(key, pressed, eventNS(m.clock, e.MonotonicNS), captureID)
+		}
 		m.logs.Debugf("input", "", "key %s pressed=%t forwarded to capture %s (full)", key, pressed, captureID)
 		m.deliver(captureID, e)
 		return
 	}
 	switch key {
-	case "volume_up", "volume_down":
-		step := m.h.VolumeUp
-		if key == "volume_down" {
-			step = m.h.VolumeDown
-		}
-		if pressed {
-			m.logs.Infof("input", "", "key %s press (mode=%s)", key, mode)
-			m.pressVolume(key, step)
-			return
-		}
-		m.logs.Debugf("input", "", "key %s release (mode=%s)", key, mode)
-		m.releaseVolume(key)
-	case "mic_toggle":
-		if pressed {
-			// Microphone mute is a safety control: it keeps working while an
-			// alert sounds and never dismisses the alert.
-			m.logs.Infof("input", "", "key mic_toggle press (mode=%s)", mode)
-			if m.h.MicToggle != nil {
-				m.h.MicToggle()
-			}
-		} else {
-			m.logs.Debugf("input", "", "key mic_toggle release (mode=%s)", mode)
-		}
-	case "voice", "play_pause":
-		// Stock uses the play/pause (circle) button as the talk button and
-		// activates on a hold: short taps do nothing, holding past the
-		// threshold summons, releasing ends the turn. The device tree also
-		// declares a voice key, so both keys behave the same. A sounding alert
-		// takes the press instead: it is dismissed and the press is consumed,
-		// so a held key cannot also summon the assistant or pause media.
-		if pressed {
-			if m.pressTalkKey(key) {
-				return
-			}
-			m.beginKeyActivation(keyOrigin(key))
-			return
-		}
-		m.releaseTalkKey(key)
+	case "volume_up", "volume_down", "mic_toggle", "play_pause", "center":
+		m.handlePanelKey(e, captureID, appID, mode)
 	case "primary":
-		m.handlePrimary(e, captureID, appID, mode)
+		// "primary" is the generic logical panel control (simulator and
+		// hardware that really exposes one). Capsula Mini's unmarked centre
+		// key is "center" instead: it never activates the assistant.
+		m.handlePrimary(e, captureID, appID, mode, true)
 	}
 }
 
@@ -253,7 +282,7 @@ func (m *Manager) primaryGesture(kind string) {
 // assistant turn, or because a framework interaction (a stopwatch) owns the
 // button. Checking the held state first is what keeps an alert that starts
 // during a genuine hold from consuming that hold's release.
-func (m *Manager) pressTalkKey(key string) bool {
+func (m *Manager) pressTalkKey(key string, startNS uint64) bool {
 	m.mu.Lock()
 	armed := m.actTimer != nil
 	consumed := m.actConsumed
@@ -288,7 +317,7 @@ func (m *Manager) pressTalkKey(key string) bool {
 	// A running interaction (a stopwatch) owns the button: its tap, double tap
 	// and hold are handled later, and this press never summons the assistant.
 	if m.primaryActive() {
-		m.beginFrameworkKey(key)
+		m.beginFrameworkKey(key, startNS)
 		m.logs.Infof("input", "", "key %s press: framework gesture armed (assistant not summoned)", key)
 		return true
 	}
@@ -298,7 +327,7 @@ func (m *Manager) pressTalkKey(key string) bool {
 // beginFrameworkKey arms the hold timer for a press the framework owns. The
 // hold is delivered at the threshold so a configured hold-to-reset acts while
 // the button is still down; the release delivers a tap or double tap.
-func (m *Manager) beginFrameworkKey(key string) {
+func (m *Manager) beginFrameworkKey(key string, startNS uint64) {
 	m.mu.Lock()
 	if m.actTimer != nil {
 		m.mu.Unlock()
@@ -307,8 +336,8 @@ func (m *Manager) beginFrameworkKey(key string) {
 	}
 	m.actFired = false
 	m.actFramework = true
-	m.actStartNS = m.clock.NowNS()
-	m.actTimer = time.AfterFunc(keyActivationHold, func() {
+	m.actStartNS = startNS
+	m.actTimer = time.AfterFunc(remainingHold(m.clock, startNS, keyActivationHold), func() {
 		m.mu.Lock()
 		held := m.actTimer != nil && m.actFramework
 		if held {
@@ -326,7 +355,7 @@ func (m *Manager) beginFrameworkKey(key string) {
 // releaseTalkKey swallows the release that follows a dismissing press, routes
 // a framework-owned release as a tap or double tap, and otherwise ends the
 // assistant activation as before.
-func (m *Manager) releaseTalkKey(key string) {
+func (m *Manager) releaseTalkKey(key string, ts uint64) {
 	m.mu.Lock()
 	consumed := m.actConsumed
 	framework := m.actFramework
@@ -339,7 +368,7 @@ func (m *Manager) releaseTalkKey(key string) {
 	fired := m.actFired
 	timer := m.actTimer
 	start := m.actStartNS
-	now := m.clock.NowNS()
+	now := ts
 	var doubleTap bool
 	if framework && timer != nil && !fired {
 		held := time.Duration(int64(now) - int64(start))
@@ -372,7 +401,7 @@ func (m *Manager) releaseTalkKey(key string) {
 }
 
 // beginKeyActivation arms the hold-to-talk timer for a key press.
-func (m *Manager) beginKeyActivation(origin string) {
+func (m *Manager) beginKeyActivation(origin string, startNS uint64) {
 	m.mu.Lock()
 	if m.actTimer != nil {
 		fired := m.actFired
@@ -385,7 +414,8 @@ func (m *Manager) beginKeyActivation(origin string) {
 		return
 	}
 	m.actFired = false
-	m.actTimer = time.AfterFunc(keyActivationHold, func() {
+	m.actStartNS = startNS
+	m.actTimer = time.AfterFunc(remainingHold(m.clock, startNS, keyActivationHold), func() {
 		m.mu.Lock()
 		held := m.actTimer != nil
 		m.actFired = held
@@ -417,7 +447,12 @@ func (m *Manager) endKeyActivation() {
 	timer.Stop()
 	holdToTalk := m.h.HoldToTalk != nil && m.h.HoldToTalk()
 	if !fired {
-		m.logs.Infof("input", "", "talk release: pending activation cancelled")
+		// A circle tap is not a hold: it toggles the current media provider
+		// instead of summoning the assistant.
+		m.logs.Infof("input", "", "talk release: short tap toggles media")
+		if m.h.MediaToggle != nil {
+			m.h.MediaToggle()
+		}
 		return
 	}
 	if holdToTalk {
@@ -431,12 +466,7 @@ func (m *Manager) endKeyActivation() {
 }
 
 // keyOrigin names the activation source for diagnostics.
-func keyOrigin(key string) string {
-	if key == "play_pause" {
-		return "play_pause_key"
-	}
-	return "voice_key"
-}
+func keyOrigin(string) string { return "play_pause_key" }
 
 // pressVolume applies one step and starts a ramp for key. A duplicate press of
 // the same key (backend repeat or a lost release) is ignored so the value does
@@ -530,7 +560,7 @@ func (m *Manager) endVolumeRepeat(key string, stop chan struct{}) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) handlePrimary(e backend.InputEvent, captureID, appID string, mode routing.TouchMode) {
+func (m *Manager) handlePrimary(e backend.InputEvent, captureID, appID string, mode routing.TouchMode, summon bool) {
 	owner := captureID
 	if mode != routing.TouchPartial {
 		owner = ""
@@ -591,7 +621,7 @@ func (m *Manager) handlePrimary(e backend.InputEvent, captureID, appID string, m
 		}
 		seq := &sequence{
 			owner: owner, appID: appID, mode: mode, startNS: e.MonotonicNS,
-			holdToTalk: m.h.HoldToTalk != nil && m.h.HoldToTalk(),
+			holdToTalk: m.h.HoldToTalk != nil && m.h.HoldToTalk(), summon: summon,
 		}
 		now := e.MonotonicNS
 		doubleTap := m.lastTap != 0 && time.Duration(int64(now-m.lastTap)) < 350*time.Millisecond
@@ -603,7 +633,7 @@ func (m *Manager) handlePrimary(e backend.InputEvent, captureID, appID string, m
 		if doubleTap {
 			m.deliver(owner, backend.InputEvent{MonotonicNS: e.MonotonicNS, Gesture: &backend.GestureEvent{ID: "double_tap", Phase: "start"}})
 		}
-		if owner == "" && !seq.holdToTalk {
+		if summon && owner == "" && !seq.holdToTalk {
 			if m.h.Activation != nil {
 				m.logs.Infof("input", "", "key primary press: activating assistant (touch)")
 				m.h.Activation("touch")
@@ -660,7 +690,7 @@ func (m *Manager) handlePrimary(e backend.InputEvent, captureID, appID string, m
 	if doubleTap {
 		m.deliver(seq.owner, backend.InputEvent{MonotonicNS: e.MonotonicNS, Gesture: &backend.GestureEvent{ID: "double_tap", Phase: "end"}})
 	}
-	if seq.owner == "" {
+	if seq.summon && seq.owner == "" {
 		if seq.holdFired && seq.holdToTalk {
 			if m.h.Release != nil {
 				m.logs.Infof("input", "", "key primary hold release: turn released (hold-to-talk)")
@@ -687,7 +717,7 @@ func (m *Manager) holdElapsed(seq *sequence) {
 	}
 	m.logs.Infof("input", "", "key primary hold: gesture start (owner=%s)", owner)
 	m.deliver(owner, backend.InputEvent{MonotonicNS: m.clock.NowNS(), Gesture: &backend.GestureEvent{ID: "hold", Phase: "start"}})
-	if owner == "" && seq.holdToTalk && m.h.Activation != nil {
+	if seq.summon && owner == "" && seq.holdToTalk && m.h.Activation != nil {
 		m.logs.Infof("input", "", "key primary hold: activating assistant (touch)")
 		m.h.Activation("touch")
 	}
@@ -732,6 +762,20 @@ func (m *Manager) handleGesture(e backend.InputEvent) {
 				return
 			}
 			m.primaryGesture("double_tap")
+		case "swipe_left":
+			if e.Gesture.Phase == "end" {
+				m.logs.Infof("input", "", "gesture swipe_left end: previous media")
+				if m.h.MediaPrevious != nil {
+					m.h.MediaPrevious()
+				}
+			}
+		case "swipe_right":
+			if e.Gesture.Phase == "end" {
+				m.logs.Infof("input", "", "gesture swipe_right end: next media")
+				if m.h.MediaNext != nil {
+					m.h.MediaNext()
+				}
+			}
 		case "hold":
 			switch e.Gesture.Phase {
 			case "start":
@@ -882,10 +926,13 @@ func (e errString) Error() string { return string(e) }
 
 // OnRoutingChanged cancels any gesture in progress if the effective owner
 // would change, and closes subscriptions for captures that lost selection.
-// Full capture also takes the physical keys over, so pending hold state and any
-// volume ramp are dropped instead of firing later against the new owner.
+// Any capture mode takes the circle/centre keys over, so a pending talk or
+// neutrally-armed centre press is dropped. Full capture also takes volume and
+// microphone, so their ramps and deferred panel sequences are dropped instead
+// of firing later against the new owner.
 func (m *Manager) OnRoutingChanged() {
 	captureID, _, mode := m.state()
+	m.cancelPanelForRouting(captureID, mode)
 	m.mu.Lock()
 	seq := m.seq
 	var cancelTo string
@@ -897,7 +944,7 @@ func (m *Manager) OnRoutingChanged() {
 		cancelTo = seq.owner
 		// A framework-owned hold that already summoned must end its turn: the
 		// matching release now belongs to the new owner and will never arrive.
-		seqRelease = seq.owner == "" && seq.holdFired && seq.holdToTalk && !seq.dismissed
+		seqRelease = seq.summon && seq.owner == "" && seq.holdFired && seq.holdToTalk && !seq.dismissed
 		m.seq = nil
 	}
 	var actTimer *time.Timer
@@ -912,7 +959,9 @@ func (m *Manager) OnRoutingChanged() {
 		m.gestureHeld = false
 		m.gestureConsumed = false
 	}
-	if mode == routing.TouchFull {
+	if mode != routing.TouchNone {
+		// Partial capture owns circle/play-pause and centre, so an armed talk
+		// or framework gesture press must not keep running behind the app.
 		actTimer = m.actTimer
 		actFired = m.actFired
 		actConsumed = m.actConsumed
@@ -920,6 +969,8 @@ func (m *Manager) OnRoutingChanged() {
 		m.actFired = false
 		m.actConsumed = false
 		m.actFramework = false
+	}
+	if mode == routing.TouchFull {
 		volStop = m.volStop
 		m.volStop = nil
 		m.volKey = ""
@@ -954,9 +1005,9 @@ func (m *Manager) OnRoutingChanged() {
 	}
 	if actTimer != nil {
 		if !actFired {
-			m.logs.Infof("input", "", "full capture took the talk key: pending activation cancelled")
+			m.logs.Infof("input", "", "capture took the talk key: pending activation cancelled")
 		} else if !actConsumed && m.h.HoldToTalk != nil && m.h.HoldToTalk() && m.h.Release != nil {
-			m.logs.Infof("input", "", "full capture took the talk key: turn released (hold-to-talk)")
+			m.logs.Infof("input", "", "capture took the talk key: turn released (hold-to-talk)")
 			m.h.Release()
 		}
 	}
@@ -964,6 +1015,7 @@ func (m *Manager) OnRoutingChanged() {
 
 func (m *Manager) Close() {
 	m.cancel()
+	m.cancelPanelSequence("manager closed")
 	m.mu.Lock()
 	actTimer := m.actTimer
 	m.actTimer = nil

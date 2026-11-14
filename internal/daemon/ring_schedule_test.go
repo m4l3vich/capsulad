@@ -3,11 +3,10 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
 	"capsulad/internal/backend"
@@ -162,10 +161,12 @@ func TestRingActiveWindowBlanksBaseline(t *testing.T) {
 	if ringActive(t, app) {
 		t.Fatal("RingService reports active at 20:00 outside a 09:00-17:00 window")
 	}
-	// The empty state must be observable: proto3 would otherwise omit a false
-	// field and the Web UI could not distinguish it from an unreported value.
-	if raw := ringStateJSON(t, app); !strings.Contains(raw, `"active":false`) {
-		t.Fatalf("closed window did not report active=false: %s", raw)
+	// The closed window is an explicit blank baseline, not an absent provider:
+	// the reported state stays observable as inactive with its configured
+	// effect, schedule and revision.
+	if state := ringState(t, app); state.GetActive() || state.GetEffect() == "" ||
+		state.GetScheduleEnd() != "17:00" || state.GetSettingsRevision() == 0 {
+		t.Fatalf("closed window state = %+v", state)
 	}
 	if px := ringBaselinePixels(t, d); len(px) == 0 {
 		t.Fatal("blank baseline rendered no pixels")
@@ -283,24 +284,27 @@ func ringBaselinePixels(t *testing.T, d *Daemon) []backend.RGB {
 	return px
 }
 
-func ringStateJSON(t *testing.T, app *builtinRing) string {
+func ringState(t *testing.T, app *builtinRing) *ringv1.RingState {
 	t.Helper()
-	out, err := app.handleCall(context.Background(), ringServiceName, "GetState", nil)
-	if err != nil {
+	var out []byte
+	if err := app.handleCall(context.Background(), ringServiceName, "GetState", nil,
+		func(payload []byte) error {
+			out = payload
+			return nil
+		}); err != nil {
 		t.Fatal(err)
 	}
-	return string(out[0])
+	if out == nil {
+		t.Fatal("ring GetState emitted no response")
+	}
+	var state ringv1.RingState
+	if err := proto.Unmarshal(out, &state); err != nil {
+		t.Fatalf("ring GetState is not binary protobuf: %v", err)
+	}
+	return &state
 }
 
 func ringActive(t *testing.T, app *builtinRing) bool {
 	t.Helper()
-	out, err := app.handleCall(context.Background(), ringServiceName, "GetState", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state ringv1.RingState
-	if err := protojson.Unmarshal(out[0], &state); err != nil {
-		t.Fatal(err)
-	}
-	return state.Active
+	return ringState(t, app).GetActive()
 }

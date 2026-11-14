@@ -22,6 +22,17 @@ import (
 	"capsulad/internal/version"
 )
 
+// Clock supplies monotonic nanoseconds. The daemon passes ids.Clock; tests use
+// a controlled clock so backoff/readiness transitions need no wall-clock wait.
+type Clock interface {
+	NowNS() uint64
+}
+
+// stableReadyUptimeNS is how long a run must stay READY before a later exit
+// resets the crash-loop backoff. A provider that reports READY and dies
+// immediately must keep backing off instead of looping at zero delay.
+const stableReadyUptimeNS uint64 = uint64(30 * time.Second)
+
 type State int
 
 const (
@@ -64,15 +75,39 @@ type Run struct {
 	Virtual bool
 
 	cmd *exec.Cmd
+	// exited is closed once Wait has reaped the child. The graceful-stop
+	// escalation timer waits on it instead of reading cmd.ProcessState, which
+	// Wait writes without synchronization.
+	exited chan struct{}
 	// restartAfterStop marks a run the framework terminated because it lost its
 	// bus connection (a crash). A deliberate Stop leaves it false: only a
 	// failure restarts, so an explicitly stopped app stays stopped.
 	restartAfterStop bool
+	// readySinceNS records when the run became READY. The crash-loop backoff is
+	// reset only when that readiness lasted long enough to be considered
+	// stable, so a READY-then-crash loop still backs off. The clock origin can
+	// legitimately be 0, so presence is tracked separately.
+	readySinceNS  uint64
+	readySinceSet bool
+	// selectionOrigin records that the run was an installed, selected default
+	// when the framework began stopping it for a lost connection. The selection
+	// is sampled before SIGTERM so a deselection or uninstall during a delayed
+	// termination still suppresses the scheduled relaunch, even when the
+	// manifest asks for restart_on_failure.
+	selectionOrigin bool
+	// restartForced marks a run the daemon stopped as a recovery step for the
+	// operator-selected default provider. That run is started again even when
+	// its manifest does not declare restart_on_failure: the selection, not the
+	// manifest, is what the operator asked to keep available. The scheduled
+	// relaunch still re-checks that selection, so a concurrent deselection or
+	// uninstall wins.
+	restartForced bool
 }
 
 func (r *Run) clone() Run {
 	cp := *r
 	cp.cmd = nil
+	cp.exited = nil
 	return cp
 }
 
@@ -88,7 +123,7 @@ type Supervisor struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	logs    *logbus.Bus
-	clock   *ids.Clock
+	clock   Clock
 	sock    string
 	spawner Spawner
 
@@ -98,11 +133,24 @@ type Supervisor struct {
 	virtual map[string]func()
 	onState func(Run)
 	onExit  func(Run)
-	backoff map[string]int
-	wg      sync.WaitGroup
+	// restartPolicy can require a restart the manifest did not ask for. The
+	// daemon uses it to keep an operator-selected provider alive after an
+	// abnormal exit or a lost framework connection.
+	restartPolicy func(appID string) bool
+	backoff       map[string]int
+	wg            sync.WaitGroup
+
+	// startMu/stopping/startWG separate "a Start is in flight" from
+	// wg.Wait: Shutdown blocks new starts, waits for in-flight Start calls to
+	// finish registering their goroutines, and only then waits on wg. Without
+	// this, a restart racing Shutdown could Add to wg while it is being
+	// waited on.
+	startMu  sync.Mutex
+	stopping bool
+	startWG  sync.WaitGroup
 }
 
-func New(parent context.Context, logs *logbus.Bus, clock *ids.Clock, sock string, spawner Spawner) *Supervisor {
+func New(parent context.Context, logs *logbus.Bus, clock Clock, sock string, spawner Spawner) *Supervisor {
 	ctx, cancel := context.WithCancel(parent)
 	return &Supervisor{
 		ctx: ctx, cancel: cancel, logs: logs, clock: clock, sock: sock, spawner: spawner,
@@ -117,6 +165,25 @@ func (s *Supervisor) SetCallbacks(onState, onExit func(Run)) {
 	s.mu.Unlock()
 }
 
+// SetRestartPolicy installs the daemon's selected-provider predicate. It is
+// consulted at crash time, not at launch: a provider that stopped being the
+// operator's selection (deselected, uninstalled) is not resurrected, while an
+// installed selected default is restarted even when its manifest does not ask
+// for restart_on_failure. The predicate reads daemon state only; it must not
+// call back into the supervisor.
+func (s *Supervisor) SetRestartPolicy(fn func(appID string) bool) {
+	s.mu.Lock()
+	s.restartPolicy = fn
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) restartAllowed(appID string) bool {
+	s.mu.Lock()
+	fn := s.restartPolicy
+	s.mu.Unlock()
+	return fn != nil && fn(appID)
+}
+
 func (s *Supervisor) notifyState(r Run) {
 	s.mu.Lock()
 	fn := s.onState
@@ -129,9 +196,14 @@ func (s *Supervisor) notifyState(r Run) {
 // Start spawns an app process. invocationID is recorded so the daemon can
 // deliver the initial AppLaunchInvocation after the app reports READY.
 func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, error) {
-	if s.ctx.Err() != nil {
+	s.startMu.Lock()
+	if s.stopping || s.ctx.Err() != nil {
+		s.startMu.Unlock()
 		return nil, fmt.Errorf("supervisor is shutting down")
 	}
+	s.startWG.Add(1)
+	s.startMu.Unlock()
+	defer s.startWG.Done()
 	runID := ids.New("run")
 	cmd, err := s.spawner.Command(m, m.Dir, runID, m.ID)
 	if err != nil {
@@ -160,6 +232,7 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 		RunID: runID, AppID: m.ID, PID: cmd.Process.Pid, State: Starting,
 		StartedNS: s.clock.NowNS(), Runtime: m.Entrypoint.Runtime,
 		Sandbox: s.spawner.Mode(), InvocationID: invocationID, cmd: cmd, ExitCode: -1,
+		exited: make(chan struct{}),
 	}
 	s.mu.Lock()
 	s.runs[runID] = run
@@ -195,6 +268,10 @@ func (s *Supervisor) pump(run *Run, r io.Reader, stream string) {
 func (s *Supervisor) wait(run *Run, m *manifest.Manifest) {
 	defer s.wg.Done()
 	err := run.cmd.Wait()
+	close(run.exited)
+	// Read the daemon's selection before taking the lock: the predicate reads
+	// settings and the registry, never the supervisor.
+	selected := s.restartAllowed(run.AppID)
 
 	s.mu.Lock()
 	prev := run.State
@@ -222,7 +299,27 @@ func (s *Supervisor) wait(run *Run, m *manifest.Manifest) {
 		run.Detail = detail
 	}
 	run.ExitCode = code
-	shouldRestart := (prev != Stopping || run.restartAfterStop) && m.RestartOnFailure && s.ctx.Err() == nil
+	// An abnormal exit or a lost framework connection is a failure. A selected
+	// default provider is recovered even when its manifest does not ask for
+	// restart_on_failure; a deliberate Stop stays stopped unless the daemon
+	// explicitly requested recovery for the selected provider. Shutdown cancels
+	// the context first and suppresses every restart.
+	recovered := prev != Stopping || run.restartAfterStop
+	manifestRestart := m.RestartOnFailure && recovered
+	selectedRestart := selected && recovered
+	shouldRestart := s.ctx.Err() == nil && (run.restartForced || manifestRestart || selectedRestart)
+	// A stable READY period proves the app can run, so a later crash starts a
+	// fresh backoff. READY-then-immediate-crash keeps accumulating.
+	if now := s.clock.NowNS(); run.readySinceSet && now >= run.readySinceNS &&
+		now-run.readySinceNS >= stableReadyUptimeNS {
+		s.backoff[run.AppID] = 0
+	}
+	// A restart caused by the provider's selection (a selected-origin crash or
+	// a forced recovery stop) must re-check that selection at the scheduled
+	// start, regardless of restart_on_failure: a deselection or uninstall
+	// racing the stop or the backoff delay must not resurrect it. A manifest
+	// restart of an app that was never selected keeps its ordinary contract.
+	requireSelection := selectedRestart || run.selectionOrigin || run.restartForced
 	delete(s.runs, run.RunID)
 	list := s.byApp[run.AppID]
 	for i, id := range list {
@@ -245,11 +342,11 @@ func (s *Supervisor) wait(run *Run, m *manifest.Manifest) {
 		fn(snapshot)
 	}
 	if shouldRestart {
-		go s.restart(m)
+		go s.restart(m, requireSelection)
 	}
 }
 
-func (s *Supervisor) restart(m *manifest.Manifest) {
+func (s *Supervisor) restart(m *manifest.Manifest, requireSelection bool) {
 	s.mu.Lock()
 	s.backoff[m.ID]++
 	exp := s.backoff[m.ID]
@@ -276,6 +373,10 @@ func (s *Supervisor) restart(m *manifest.Manifest) {
 	if s.ctx.Err() != nil {
 		return
 	}
+	if requireSelection && !s.restartAllowed(m.ID) {
+		s.logs.Infof("supervisor", m.ID, "not restarting the provider: it is no longer selected")
+		return
+	}
 	if delay == 0 {
 		s.logs.Infof("supervisor", m.ID, "restarting after failure immediately")
 	} else {
@@ -287,14 +388,16 @@ func (s *Supervisor) restart(m *manifest.Manifest) {
 }
 
 // MarkReady records that the supervised app completed its AppReady handshake.
+// It never resets the crash-loop backoff: that happens only when a run is
+// reaped after a stable READY period, so an app that reports READY and dies
+// immediately still backs off.
 func (s *Supervisor) MarkReady(runID string) bool {
 	s.mu.Lock()
 	run, ok := s.runs[runID]
-	if ok {
-		if run.State == Starting {
-			run.State = Ready
-		}
-		s.backoff[run.AppID] = 0
+	if ok && run.State == Starting {
+		run.State = Ready
+		run.readySinceNS = s.clock.NowNS()
+		run.readySinceSet = true
 	}
 	var snapshot Run
 	if ok {
@@ -397,19 +500,46 @@ func (s *Supervisor) BindBuiltinStop(runID string, stop func()) {
 
 // Stop requests graceful termination and escalates to SIGKILL after timeout.
 func (s *Supervisor) Stop(runID string) bool {
-	return s.stop(runID, false)
+	return s.stop(runID, false, false)
 }
 
 // StopCrashed terminates a run that lost its framework connection. It is a
 // deliberate stop from the process's point of view, but the exit is treated as
-// a failure: a restart_on_failure application is started again immediately
-// instead of remaining unavailable. A compiled-in app has no process to
-// restart, so it is stopped like Stop.
+// a failure: a restart_on_failure application, or the daemon's selected
+// provider, is started again immediately instead of remaining unavailable. A
+// compiled-in app has no process to restart, so it is stopped like Stop.
 func (s *Supervisor) StopCrashed(runID string) bool {
-	return s.stop(runID, true)
+	return s.stop(runID, true, false)
 }
 
-func (s *Supervisor) stop(runID string, crashed bool) bool {
+// StopForRestart terminates the run of the operator-selected default provider
+// and starts it again without asking the manifest. The daemon has already
+// decided that the provider must remain available; deselecting it, shutting
+// down or uninstalling it is the way to keep it stopped, so the scheduled
+// relaunch re-checks the restart policy and is suppressed when the provider is
+// no longer selected. A compiled-in app has no child process here: the daemon
+// re-registers built-in providers itself.
+func (s *Supervisor) StopForRestart(runID string) bool {
+	return s.stop(runID, true, true)
+}
+
+func (s *Supervisor) stop(runID string, crashed, forced bool) bool {
+	// Sample the provider selection before SIGTERM. A process may ignore or
+	// delay the signal for up to the graceful-stop timeout; a deselection or
+	// uninstall during that window must not downgrade a selected-origin
+	// recovery into an ungated manifest restart.
+	selectedAtStop := false
+	if crashed {
+		s.mu.Lock()
+		appID := ""
+		if run, ok := s.runs[runID]; ok {
+			appID = run.AppID
+		}
+		s.mu.Unlock()
+		if appID != "" {
+			selectedAtStop = s.restartAllowed(appID)
+		}
+	}
 	s.mu.Lock()
 	run, ok := s.runs[runID]
 	if !ok {
@@ -452,19 +582,60 @@ func (s *Supervisor) stop(runID string, crashed bool) bool {
 	}
 	run.State = Stopping
 	run.restartAfterStop = run.restartAfterStop || crashed
+	run.selectionOrigin = run.selectionOrigin || selectedAtStop
+	run.restartForced = run.restartForced || forced
 	proc := run.cmd.Process
 	appID := run.AppID
-	cmd := run.cmd
 	s.mu.Unlock()
 
 	s.logs.Infof("supervisor", appID, "stopping run=%s pid=%d", runID, proc.Pid)
 	_ = proc.Signal(syscall.SIGTERM)
 	time.AfterFunc(5*time.Second, func() {
-		if cmd.ProcessState == nil {
-			s.logs.Warnf("supervisor", appID, "run=%s did not exit; killing", runID)
-			_ = proc.Kill()
+		select {
+		case <-run.exited:
+			return
+		default:
 		}
+		s.logs.Warnf("supervisor", appID, "run=%s did not exit; killing", runID)
+		_ = proc.Kill()
 	})
+	return true
+}
+
+// FailBuiltin marks a compiled-in run failed, tears it down through the bound
+// stop hook and notifies the exit callback. It is used when the run's internal
+// output stream dies; the daemon then owns restart with its normal policy.
+func (s *Supervisor) FailBuiltin(runID, detail string) bool {
+	s.mu.Lock()
+	run, ok := s.runs[runID]
+	if !ok || !run.Virtual || run.State == Failed || run.State == Stopping {
+		s.mu.Unlock()
+		return false
+	}
+	run.State = Failed
+	run.ExitCode = -1
+	run.Detail = detail
+	appID := run.AppID
+	stop := s.virtual[runID]
+	delete(s.runs, runID)
+	delete(s.virtual, runID)
+	list := s.byApp[appID]
+	for i, id := range list {
+		if id == runID {
+			s.byApp[appID] = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	snapshot := run.clone()
+	s.mu.Unlock()
+	s.logs.Errorf("supervisor", appID, "failed built-in run=%s: %s", runID, detail)
+	s.notifyState(snapshot)
+	if stop != nil {
+		stop()
+	}
+	if fn := s.onExit; fn != nil {
+		fn(snapshot)
+	}
 	return true
 }
 
@@ -482,6 +653,13 @@ func (s *Supervisor) StopApp(appID string) int {
 // crash and restart an app while the daemon is going away.
 func (s *Supervisor) Shutdown(timeout time.Duration) {
 	s.cancel()
+	// Refuse new starts and wait for Start calls already in flight to register
+	// their goroutines before waiting on wg. The runs they added are included
+	// in the stop pass below.
+	s.startMu.Lock()
+	s.stopping = true
+	s.startMu.Unlock()
+	s.startWG.Wait()
 	s.mu.Lock()
 	ids := make([]string, 0, len(s.runs))
 	for id := range s.runs {

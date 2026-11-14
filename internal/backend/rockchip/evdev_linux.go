@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -34,6 +35,15 @@ const (
 	absMTPressure = 0x3a
 
 	btnTouch = 0x14a
+
+	// eviocsetClockID is EVIOCSCLOCKID: _IOW('E', 0xa0, int). It selects the
+	// clock an evdev device stamps its events with.
+	eviocsetClockID = 0x400445a0
+
+	// maxEventAge bounds how old a kernel timestamp may be before it is treated
+	// as unusable. Beyond it the event cannot contribute to a gesture or a hold
+	// anyway, and read time is the safer fallback.
+	maxEventAge = 5 * time.Second
 )
 
 type evdevTouch struct {
@@ -52,6 +62,10 @@ type evdevDevice struct {
 	hasPressure bool
 	touching    bool
 	pressure    float32
+	// monotonic is true when the device accepted EVIOCSCLOCKID(CLOCK_MONOTONIC)
+	// and therefore stamps kernel events on the monotonic clock. Otherwise the
+	// default CLOCK_REALTIME timestamps are used.
+	monotonic bool
 }
 
 type axis struct {
@@ -75,9 +89,15 @@ func (a axis) norm(v int32) float32 {
 func (t *evdevTouch) Caps() backend.TouchCaps {
 	caps := backend.TouchCaps{
 		PartialGestures:  true,
-		SemanticGestures: []string{"tap", "double_tap", "hold", "swipe_left", "swipe_right", "swipe_up", "swipe_down", "primary"},
+		SemanticGestures: []string{"tap", "double_tap", "hold", "swipe_left", "swipe_right", "swipe_up", "swipe_down", "circle_cw", "circle_ccw", "primary"},
 	}
 	for _, d := range t.devices {
+		// The Mini has no touch panel, only gpio-keys, so full capture can
+		// still receive every key and inferred gesture while raw coordinates
+		// remain unavailable.
+		if len(d.keys) > 0 {
+			caps.FullPanel = true
+		}
 		if d.hasAbs {
 			caps.Coordinates = true
 			caps.FullRaw = true
@@ -85,6 +105,9 @@ func (t *evdevTouch) Caps() backend.TouchCaps {
 		if d.hasPressure {
 			caps.Pressure = true
 		}
+	}
+	if len(t.devices) > 0 {
+		caps.FullPanel = true
 	}
 	return caps
 }
@@ -121,7 +144,7 @@ func openEvdev(path string, keys keyMap) (*evdevDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	dev := &evdevDevice{path: path, fd: fd, keys: keys}
+	dev := &evdevDevice{path: path, fd: fd, keys: keys, monotonic: setEventClock(fd)}
 	if bitSet(fd, evAbs, absX) || bitSet(fd, evAbs, absMTPosX) {
 		dev.hasAbs = true
 		dev.x = absAxis(fd, absMTPosX)
@@ -209,6 +232,64 @@ func (t *evdevTouch) Close() error {
 	return nil
 }
 
+// setEventClock asks the device for CLOCK_MONOTONIC event timestamps. The
+// default input_event timeval is CLOCK_REALTIME, which can jump and does not
+// share an origin with the framework clock; monotonic timestamps let the
+// framework recover the real age of an event it read late. The ioctl is
+// per-file-descriptor and sets only the timestamp source.
+func setEventClock(fd int) bool {
+	clockID := int32(unix.CLOCK_MONOTONIC)
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), eviocsetClockID, uintptr(unsafe.Pointer(&clockID)))
+	return errno == 0
+}
+
+// eventAgeNS converts one kernel timestamp into an age on the same clock. Zero
+// means the timestamp cannot be trusted (driver zeroed it, clock mismatch, or
+// implausible skew) and the reader must keep its own read time.
+func (d *evdevDevice) eventAgeNS(sec, usec int64) uint64 {
+	clockID := int32(unix.CLOCK_REALTIME)
+	if d.monotonic {
+		clockID = int32(unix.CLOCK_MONOTONIC)
+	}
+	var now unix.Timespec
+	if err := unix.ClockGettime(clockID, &now); err != nil {
+		return 0
+	}
+	age := now.Nano() - (sec*1e9 + usec*1e3)
+	if age <= 0 || age > int64(maxEventAge) {
+		return 0
+	}
+	return uint64(age)
+}
+
+// evdevFrame is one decoded input_event, including the kernel timestamp's age.
+type evdevFrame struct {
+	typ   uint16
+	code  uint16
+	value int32
+	ageNS uint64
+}
+
+func (d *evdevDevice) decode(buf []byte, size int) evdevFrame {
+	var sec, usec int64
+	if size >= 24 {
+		sec = int64(binary.LittleEndian.Uint64(buf[0:8]))
+		usec = int64(binary.LittleEndian.Uint64(buf[8:16]))
+	} else {
+		sec = int64(int32(binary.LittleEndian.Uint32(buf[0:4])))
+		usec = int64(int32(binary.LittleEndian.Uint32(buf[4:8])))
+	}
+	// input_event is timeval + type(u16) + code(u16) + value(s32); the tail is
+	// identical for 32- and 64-bit time_t, only its offset differs.
+	off := size - 8
+	return evdevFrame{
+		typ:   binary.LittleEndian.Uint16(buf[off : off+2]),
+		code:  binary.LittleEndian.Uint16(buf[off+2 : off+4]),
+		value: int32(binary.LittleEndian.Uint32(buf[off+4 : off+8])),
+		ageNS: d.eventAgeNS(sec, usec),
+	}
+}
+
 func (t *evdevTouch) readLoop(ctx context.Context, d *evdevDevice, emit func(backend.InputEvent)) {
 	size := 24
 	if unsafe.Sizeof(uintptr(0)) == 4 {
@@ -232,32 +313,33 @@ func (t *evdevTouch) readLoop(ctx context.Context, d *evdevDevice, emit func(bac
 		if n < size {
 			continue
 		}
-		typ := binary.LittleEndian.Uint16(buf[16:18])
-		code := binary.LittleEndian.Uint16(buf[18:20])
-		value := int32(binary.LittleEndian.Uint32(buf[20:24]))
-		switch typ {
+		frame := d.decode(buf, size)
+		switch frame.typ {
 		case evKey:
-			if int(code) == btnTouch {
-				d.touching = value != 0
+			if int(frame.code) == btnTouch {
+				d.touching = frame.value != 0
 				continue
 			}
-			if name, ok := d.keys[int(code)]; ok {
-				emit(backend.InputEvent{Key: &backend.KeyEvent{Key: name, Pressed: value != 0}})
+			if name, ok := d.keys[int(frame.code)]; ok {
+				emit(backend.InputEvent{
+					EventAgeNS: frame.ageNS,
+					Key:        &backend.KeyEvent{Key: name, Pressed: frame.value != 0},
+				})
 			}
 		case evAbs:
-			switch int(code) {
+			switch int(frame.code) {
 			case absX, absMTPosX:
-				x = d.x.norm(value)
+				x = d.x.norm(frame.value)
 			case absY, absMTPosY:
-				y = d.y.norm(value)
+				y = d.y.norm(frame.value)
 			case absPressure, absMTPressure:
-				p := float32(value)
+				p := float32(frame.value)
 				d.pressure = p
 			case absMTTracking:
-				d.touching = value >= 0
+				d.touching = frame.value >= 0
 			}
 		case evSyn:
-			if code != synReport || !d.hasAbs {
+			if frame.code != synReport || !d.hasAbs {
 				continue
 			}
 			var pressure *float32
@@ -272,7 +354,7 @@ func (t *evdevTouch) readLoop(ctx context.Context, d *evdevDevice, emit func(bac
 				CoordinatesValid: true,
 				SampleFormat:     "evdev.contact.v1",
 			}
-			emit(backend.InputEvent{Report: report})
+			emit(backend.InputEvent{EventAgeNS: frame.ageNS, Report: report})
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -68,6 +69,90 @@ func (d *Daemon) playUISoundWhen(clip sounds.Clip, onStart func()) {
 // playVolumeCue plays the volume-step cue, so its loudness follows the volume
 // that was just selected.
 func (d *Daemon) playVolumeCue() { d.playUISound(sounds.Volume()) }
+
+// audibleMicIndication is the audible half of the live-microphone indication
+// for supervised application captures. It returns an error instead of letting
+// a capture proceed silently: no output device, an explicit zero volume or
+// mute, a cue the mixer cannot open, or a cue that never drains all deny the
+// capture. The mixer makes this playback the exclusive source while it runs,
+// and the caller waits for the stream to drain to the output sink rather than
+// accepting queue admission as proof.
+func (d *Daemon) audibleMicIndication(appID string) error {
+	if d.dev == nil || d.dev.Audio() == nil {
+		return fmt.Errorf("no audio output for the microphone indication")
+	}
+	if d.audio == nil || d.audio.MasterVolume() <= 0 {
+		return fmt.Errorf("master volume is zero; raise it to enable microphone capture")
+	}
+	if d.audio.Muted() {
+		return fmt.Errorf("microphone is globally muted")
+	}
+	if err := d.playMicCue(); err != nil {
+		d.logs.Warnf("audio", appID, "microphone capture refused: %v", err)
+		return err
+	}
+	d.logs.Infof("audio", appID, "microphone live cue consumed by the mixer")
+	return nil
+}
+
+// playMicCue plays the microphone-live cue as the exclusive mixer source and
+// waits until the mixer has drained it. Exclusivity freezes application
+// playbacks for the cue's duration, so a flood cannot mask the indication.
+func (d *Daemon) playMicCue() error {
+	clip := sounds.MicrophoneLive()
+	if len(clip.PCM) == 0 {
+		return fmt.Errorf("the microphone cue is unavailable")
+	}
+	format := backend.AudioFormat{Format: backend.S16LE, RateHz: clip.RateHz, Channels: clip.Channels}
+	p, err := d.openAppPlayback(routing.SystemAppID, "", "audio.output.speaker", format, "")
+	if err != nil {
+		return fmt.Errorf("the microphone cue could not be opened: %w", err)
+	}
+	defer p.Close()
+	d.audio.BeginIndicationCue(p.ID())
+	defer d.audio.EndIndicationCue(p.ID())
+	p.SetTrim(uiSoundTrim)
+	frameBytes := clip.Channels * 2
+	for off := 0; off < len(clip.PCM); off += uiSoundChunk {
+		end := off + uiSoundChunk
+		if end > len(clip.PCM) {
+			end = len(clip.PCM)
+		}
+		end -= (end - off) % frameBytes
+		if err := p.Write(clip.PCM[off:end]); err != nil {
+			return fmt.Errorf("the microphone cue could not be queued: %w", err)
+		}
+	}
+	p.CloseInput()
+
+	// The mixer closes the stream only after it has pulled the remaining
+	// frames and written them to the output sink. A notice other than normal
+	// completion, or a volume/mute change during the cue, is a hard failure.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	health := time.NewTicker(25 * time.Millisecond)
+	defer health.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return fmt.Errorf("the microphone cue was not consumed by the mixer")
+		case <-health.C:
+			if d.audio.MasterVolume() <= 0 {
+				return fmt.Errorf("master volume dropped to zero during the microphone cue")
+			}
+			if d.audio.Muted() {
+				return fmt.Errorf("the microphone was muted during the cue")
+			}
+		case ev, ok := <-p.Events():
+			if !ok {
+				return nil
+			}
+			if ev.Notice != nil && ev.Notice.Code != "STREAM_CLOSED" {
+				return fmt.Errorf("the microphone cue stopped: %s: %s", ev.Notice.Code, ev.Notice.Detail)
+			}
+		}
+	}
+}
 
 // startupSoundMarker records that the installation startup cue has already
 // played. Its absence is what defines the first boot of this daemon on a data

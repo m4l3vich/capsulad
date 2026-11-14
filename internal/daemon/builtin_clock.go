@@ -5,25 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
+	"capsulad/internal/dcron"
 	"capsulad/internal/presets"
 	"capsulad/internal/settings"
 )
 
 const (
-	defaultAlarmID = "default"
-	maxTimerMS     = uint64(30 * 24 * 60 * 60 * 1000)
-	tickInterval   = 200 * time.Millisecond
+	maxTimerMS   = uint64(30 * 24 * 60 * 60 * 1000)
+	tickInterval = 200 * time.Millisecond
 
 	// Alerts repeat until the user dismisses them. These are the silences
 	// between clips, not lifetimes.
@@ -56,15 +56,27 @@ type clockTimer struct {
 }
 
 type clockAlarm struct {
-	id              string
-	label           string
-	hour            int
-	minute          int
-	days            uint8
-	enabled         bool
-	tz              string
-	next            time.Time
-	lastTriggeredMS uint64
+	// id is the stable alarm identity (expression + immutable modifiers);
+	// text is the canonical persisted entry.
+	id       string
+	text     string
+	expr     string
+	zone     string
+	label    string
+	once     bool
+	disabled bool
+	sched    dcron.Schedule
+	next     time.Time
+	// lastTriggerKey identifies the local wall-clock minute in which this
+	// schedule last fired. Wall time (not UTC) deduplicates the repeated hour
+	// at a fall-back DST transition and still prevents a 200 ms tick from
+	// re-ringing the same minute.
+	lastTriggerKey string
+	lastTriggeredMS   uint64
+}
+
+func (a *clockAlarm) entry() dcron.Entry {
+	return dcron.Entry{Expr: a.expr, Zone: a.zone, Once: a.once, Disabled: a.disabled}
 }
 
 type clockAlertKind int
@@ -133,17 +145,41 @@ type builtinClock struct {
 	alertOrder []string
 	nextID     int
 
-	applied        clockDisplay
-	appliedOK      bool
-	defaultDisable bool
-	alertGen       uint64
-	alertMu        sync.Mutex
-	alertPres      map[string]*appPresentation
-	alertCap       map[string]*appCapture
-	alertSig       map[string]clockDisplay
-	alertRingSig   string
-	alertErrAt     time.Time
-	audioCache     map[string][]byte
+	applied   clockDisplay
+	appliedOK bool
+	// settingsMu serializes settings application so an older watcher snapshot
+	// cannot overwrite a newer synchronous mutation.
+	settingsMu       sync.Mutex
+	settingsLoaded   bool
+	settingsRevision uint64
+	// runGen invalidates watcher callbacks from a previous start/stop.
+	runGen uint64
+	// frameMu serializes baseline frame compute+send so concurrent publishes
+	// cannot reorder frames or mark a failed write as applied.
+	frameMu sync.Mutex
+	// failOnce bounds one stream-failure recovery per run generation.
+	failOnce sync.Once
+	// pendingOnce collects one-shot alarms that fired; tick persists their
+	// disabled marker outside the clock lock.
+	pendingOnce []string
+	// selfDisabledIDs marks one-shots the clock disarmed. Explicit
+	// settings-driven disables dismiss the alert; these keep ringing.
+	selfDisabledIDs map[string]bool
+	// watchRevision increments on every observable state change and is
+	// carried by snapshots. watchSig deduplicates the once-per-second stream
+	// while a stopwatch or timer is running.
+	watchRevision uint64
+	watchSig      string
+	watchers      map[int]chan *clockv1.ClockState
+	nextWatcher   int
+	alertGen      uint64
+	alertMu       sync.Mutex
+	alertPres     map[string]*appPresentation
+	alertCap      map[string]*appCapture
+	alertSig      map[string]clockDisplay
+	alertRingSig  string
+	alertErrAt    time.Time
+	audioCache    map[string][]byte
 
 	// countdown* is the clock's normal ring capture while a timer runs. It is
 	// distinct from the alert overlay so the ring baseline returns as soon as
@@ -175,22 +211,29 @@ func newBuiltinClock(d *Daemon, segmentID string) *builtinClock {
 		alerts:    map[string]*clockAlert{},
 		alertPres: map[string]*appPresentation{}, alertCap: map[string]*appCapture{},
 		alertSig: map[string]clockDisplay{}, audioCache: map[string][]byte{},
-		now:  time.Now,
-		mono: func() uint64 { return d.clock.NowNS() },
+		watchers:        map[int]chan *clockv1.ClockState{},
+		selfDisabledIDs: map[string]bool{},
+		now:      time.Now,
+		mono:     func() uint64 { return d.clock.NowNS() },
 	}
-	c.alarms[defaultAlarmID] = &clockAlarm{id: defaultAlarmID, label: "Alarm", hour: 7}
-	c.alarmOrder = []string{defaultAlarmID}
 	c.ringID = d.ringResourceID()
 	return c
 }
 
 func (c *builtinClock) start() {
+	c.settingsMu.Lock()
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
+		c.settingsMu.Unlock()
 		return
 	}
 	c.running = true
+	c.runGen++
+	gen := c.runGen
+	c.settingsLoaded = false
+	c.settingsRevision = 0
+	c.failOnce = sync.Once{}
 	c.runID = c.d.SystemAppRunID(clockAppID)
 	c.ctx, c.cancel = context.WithCancel(c.d.ctx)
 	c.stopwatch.running = false
@@ -215,47 +258,93 @@ func (c *builtinClock) start() {
 	c.countLogLit = -1
 	c.countErrAt = time.Time{}
 	c.appliedOK = false
-	if a := c.alarms[defaultAlarmID]; a != nil {
-		c.alarms = map[string]*clockAlarm{defaultAlarmID: a}
-		c.alarmOrder = []string{defaultAlarmID}
-	} else {
-		c.alarms = map[string]*clockAlarm{}
-		c.alarmOrder = nil
-	}
+	c.watchSig = ""
+	c.alarms = map[string]*clockAlarm{}
+	c.alarmOrder = nil
+	c.selfDisabledIDs = map[string]bool{}
+	c.pendingOnce = nil
 	c.client = newBuiltinAppClient(c.d, clockAppID)
+	client := c.client
+	ctx := c.ctx
+	c.mu.Unlock()
+	c.settingsMu.Unlock()
+	client.SetFailureHandler(func(err error) { c.failRun(gen, err) })
+
+	// Open the internal streams outside lifecycle/settings locks. A slow
+	// daemon endpoint must not block Launch/Stop, RPCs or settings updates.
+	var pres *appPresentation
+	var openErr error
 	if c.segmentID != "" {
-		pres, err := c.client.OpenPresentation(c.ctx, c.segmentID)
-		if err != nil {
-			c.d.logs.Errorf(clockAppID, "", "open baseline presentation: %v", err)
-		} else {
-			c.pres = pres
-		}
+		pres, openErr = client.OpenPresentation(ctx, c.segmentID)
 	}
-	if format, err := c.client.PlaybackFormat(c.ctx); err == nil {
+	format, formatErr := client.PlaybackFormat(ctx)
+
+	c.mu.Lock()
+	if !c.running || c.client != client {
+		c.mu.Unlock()
+		if pres != nil {
+			pres.Close()
+		}
+		client.Close()
+		return
+	}
+	if pres != nil {
+		c.pres = pres
+	}
+	if formatErr == nil {
 		c.audioFormat = format
 	} else {
-		c.d.logs.Warnf(clockAppID, "", "playback format unavailable: %v", err)
-	}
-	ctx := c.ctx
-	for _, a := range c.alarms {
-		a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
+		c.d.logs.Warnf(clockAppID, "", "playback format unavailable: %v", formatErr)
 	}
 	c.mu.Unlock()
+	if openErr != nil {
+		c.d.logs.Errorf(clockAppID, "", "open baseline presentation: %v", openErr)
+		c.failRun(gen, openErr)
+		return
+	}
 
-	c.loadSettings(ctx)
+	c.d.markSystemHealthy(clockAppID)
+	c.loadSettings(ctx, gen)
 	c.publish()
 	go c.loop(ctx)
+}
+
+// failRun recovers an internal stream failure by failing this run; the daemon
+// schedules a bounded restart. A stale callback from an earlier generation is
+// ignored, and a normal stop (running=false) never triggers recovery.
+func (c *builtinClock) failRun(gen uint64, err error) {
+	c.settingsMu.Lock()
+	current := c.runGen
+	c.settingsMu.Unlock()
+	if current != gen {
+		return
+	}
+	c.mu.Lock()
+	running := c.running
+	c.mu.Unlock()
+	if !running {
+		return
+	}
+	c.failOnce.Do(func() {
+		c.d.logs.Errorf(clockAppID, "", "internal stream failed: %v; recovering run", err)
+		c.d.recoverSystemApp(clockAppID)
+	})
 }
 
 func (c *builtinClock) stop() {
 	c.alertMu.Lock()
 	defer c.alertMu.Unlock()
+	c.settingsMu.Lock()
 	c.mu.Lock()
 	if !c.running {
 		c.mu.Unlock()
+		c.settingsMu.Unlock()
 		return
 	}
 	c.running = false
+	c.runGen++
+	c.settingsLoaded = false
+	c.settingsRevision = 0
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -294,9 +383,16 @@ func (c *builtinClock) stop() {
 	c.timerOrder = nil
 	c.alerts = map[string]*clockAlert{}
 	c.alertOrder = nil
+	c.selfDisabledIDs = map[string]bool{}
+	c.pendingOnce = nil
 	c.appliedOK = false
 	c.alertGen++
+	for id, ch := range c.watchers {
+		delete(c.watchers, id)
+		close(ch)
+	}
 	c.mu.Unlock()
+	c.settingsMu.Unlock()
 
 	c.stopAlertAudio()
 	for _, cap := range caps {
@@ -331,13 +427,13 @@ func (c *builtinClock) loop(ctx context.Context) {
 
 // --- settings ---------------------------------------------------------------
 
-func (c *builtinClock) loadSettings(ctx context.Context) {
+func (c *builtinClock) loadSettings(ctx context.Context, gen uint64) {
 	snap, ch, cancel, err := c.d.appCfg.WatchApp(clockAppID)
 	if err != nil {
 		c.d.logs.Warnf(clockAppID, "", "settings unavailable: %v", err)
 		return
 	}
-	c.applySettings(snap.Values)
+	c.applySettingsGen(gen, snap.Revision, snap.Values)
 	go func() {
 		defer cancel()
 		for {
@@ -348,26 +444,47 @@ func (c *builtinClock) loadSettings(ctx context.Context) {
 				if !ok {
 					return
 				}
-				c.applySettings(next.Values)
+				c.applySettingsGen(gen, next.Revision, next.Values)
 			}
 		}
 	}()
 }
 
-func (c *builtinClock) applySettings(values []settings.AppSettingView) {
+// applySettings applies settings for the current run. Mutating callers use it
+// so their committed snapshot is visible synchronously.
+func (c *builtinClock) applySettings(revision uint64, values []settings.AppSettingView) {
+	c.settingsMu.Lock()
+	gen := c.runGen
+	c.settingsMu.Unlock()
+	c.applySettingsGen(gen, revision, values)
+}
+
+// applySettingsGen drops callbacks from a previous run and enforces monotonic
+// store revisions for this run. revision 0 is an unversioned local apply
+// (initial tests); persisted revisions are always >= 1.
+func (c *builtinClock) applySettingsGen(gen, revision uint64, values []settings.AppSettingView) {
+	c.settingsMu.Lock()
+	if gen != c.runGen {
+		c.settingsMu.Unlock()
+		return
+	}
+	if revision != 0 {
+		c.mu.Lock()
+		if c.settingsLoaded && revision <= c.settingsRevision {
+			c.mu.Unlock()
+			c.settingsMu.Unlock()
+			return
+		}
+		c.settingsLoaded = true
+		c.settingsRevision = revision
+		c.mu.Unlock()
+	}
 	c.mu.Lock()
 	blink := c.blink
 	tz := c.appTZ
 	mode := c.displayMode
 	timerSecs := c.timerSecs
 	resetGesture := c.stopwatchReset
-	a := c.alarms[defaultAlarmID]
-	alarmLabel, alarmHour, alarmMinute := "Alarm", 7, 0
-	alarmDays, alarmTZ, alarmEnabled := 0, "", false
-	if a != nil {
-		alarmLabel, alarmHour, alarmMinute = a.label, a.hour, a.minute
-		alarmDays, alarmTZ, alarmEnabled = int(a.days), a.tz, a.enabled
-	}
 	c.mu.Unlock()
 
 	decodeSetting(values, "blink", &blink)
@@ -378,29 +495,17 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	if decodeSetting(values, "timer_seconds", &secs) && secs > 0 {
 		timerSecs = uint64(secs)
 	}
-	var label string
-	if decodeSetting(values, "alarm_label", &label) && label != "" {
-		alarmLabel = label
+	var alarmText string
+	if !decodeSetting(values, "alarms", &alarmText) {
+		alarmText = ""
 	}
-	var hour int64
-	if decodeSetting(values, "alarm_hour", &hour) && hour >= 0 && hour < 24 {
-		alarmHour = int(hour)
-	}
-	var minute int64
-	if decodeSetting(values, "alarm_minute", &minute) && minute >= 0 && minute < 60 {
-		alarmMinute = int(minute)
-	}
-	var days int64
-	if decodeSetting(values, "alarm_days", &days) && days >= 0 && days < 128 {
-		alarmDays = int(days)
-	}
-	var atz string
-	if decodeSetting(values, "alarm_timezone", &atz) {
-		alarmTZ = atz
-	}
-	var enabled bool
-	if decodeSetting(values, "alarm_enabled", &enabled) {
-		alarmEnabled = enabled
+	alarmLabels := map[string]string{}
+	var labelsText string
+	if decodeSetting(values, "alarm_labels", &labelsText) && labelsText != "" {
+		if err := json.Unmarshal([]byte(labelsText), &alarmLabels); err != nil {
+			c.d.logs.Warnf(clockAppID, "", "invalid alarm_labels setting: %v", err)
+			alarmLabels = map[string]string{}
+		}
 	}
 
 	switch mode {
@@ -416,17 +521,28 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	if timerSecs == 0 {
 		timerSecs = 300
 	}
-
 	if tz != "" {
 		if _, err := time.LoadLocation(tz); err != nil {
 			c.d.logs.Warnf(clockAppID, "", "timezone %q unavailable (%v); using the device timezone", tz, err)
 		}
 	}
-	if alarmTZ != "" {
-		if _, err := time.LoadLocation(alarmTZ); err != nil {
-			c.d.logs.Warnf(clockAppID, "", "alarm timezone %q unavailable (%v); using the device timezone", alarmTZ, err)
+
+	entries, err := dcron.ParseEntries(alarmText)
+	if err != nil {
+		// The synchronous settings validator rejects this shape, so a value
+		// that reaches here is a hand-edited file. Keep the running schedule
+		// instead of silently dropping alarms.
+		c.d.logs.Warnf(clockAppID, "", "invalid alarms setting: %v", err)
+		c.mu.Lock()
+		entries = entries[:0]
+		for _, id := range c.alarmOrder {
+			if a := c.alarms[id]; a != nil {
+				entries = append(entries, a.entry())
+			}
 		}
+		c.mu.Unlock()
 	}
+
 	c.mu.Lock()
 	c.blink = blink
 	c.appTZ = tz
@@ -434,32 +550,87 @@ func (c *builtinClock) applySettings(values []settings.AppSettingView) {
 	c.displayMode = mode
 	c.timerSecs = timerSecs
 	c.stopwatchReset = resetGesture
-	a = c.alarms[defaultAlarmID]
-	if a == nil {
-		a = &clockAlarm{id: defaultAlarmID}
-		c.alarms[defaultAlarmID] = a
-		c.alarmOrder = append(c.alarmOrder, defaultAlarmID)
-	}
-	changed := a.label != alarmLabel || a.hour != alarmHour || a.minute != alarmMinute ||
-		int(a.days) != alarmDays || a.tz != alarmTZ || a.enabled != alarmEnabled
-	wasEnabled := a.enabled
+	loc := c.alarmLocationLocked()
+	now := c.now()
+	previous := c.alarms
+	next := make(map[string]*clockAlarm, len(entries))
+	order := make([]string, 0, len(entries))
 	removed := 0
-	if changed {
-		a.label, a.hour, a.minute = alarmLabel, alarmHour, alarmMinute
-		a.days, a.tz, a.enabled = uint8(alarmDays), alarmTZ, alarmEnabled
-		a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
-		if wasEnabled && !alarmEnabled {
-			removed = c.removeAlertsLocked(func(alert *clockAlert) bool {
-				return alert.kind == alertAlarm && alert.sourceID == defaultAlarmID
+	for _, entry := range entries {
+		sched, err := dcron.Parse(entry.Expr)
+		if err != nil {
+			c.d.logs.Warnf(clockAppID, "", "skip alarm %q: %v", entry.Expr, err)
+			continue
+		}
+		if entry.Zone != "" {
+			if _, err := time.LoadLocation(entry.Zone); err != nil {
+				c.d.logs.Warnf(clockAppID, "", "alarm %q timezone %q unavailable; using the device timezone", entry.Expr, entry.Zone)
+				entry.Zone = ""
+			}
+		}
+		id := entry.ID()
+		if _, dup := next[id]; dup {
+			continue
+		}
+		a := previous[id]
+		if a == nil {
+			a = &clockAlarm{id: id}
+		}
+		a.text, a.expr, a.zone = entry.Canonical(), entry.Expr, entry.Zone
+		a.label = alarmLabels[id]
+		if a.label == "" {
+			a.label = "Alarm"
+		}
+		a.once, a.disabled = entry.Once, entry.Disabled
+		if entry.Disabled {
+			if !c.selfDisabledIDs[id] {
+				// An explicit settings disable (ApplicationConfiguration or
+				// the friendly editor) dismisses the alert. Only the clock's
+				// own one-shot disarm keeps its alert ringing.
+				removed += c.removeAlertsLocked(func(alert *clockAlert) bool {
+					return alert.kind == alertAlarm && alert.sourceID == id
+				})
+			}
+		} else {
+			delete(c.selfDisabledIDs, id)
+		}
+		a.sched = sched
+		a.next = sched.Next(now, alarmLocation(a, loc))
+		next[id] = a
+		order = append(order, id)
+	}
+	for id := range previous {
+		if next[id] == nil {
+			removed += c.removeAlertsLocked(func(alert *clockAlert) bool {
+				return alert.kind == alertAlarm && alert.sourceID == id
 			})
 		}
 	}
+	for _, a := range next {
+		if a.disabled {
+			a.next = time.Time{}
+		}
+	}
+	c.alarms = next
+	c.alarmOrder = order
 	c.mu.Unlock()
+	c.settingsMu.Unlock()
 	if removed > 0 {
-		c.d.logs.Infof(clockAppID, "", "default alarm disabled; %d active alert(s) dismissed", removed)
+		c.d.logs.Infof(clockAppID, "", "alarm schedule change dismissed %d active alert(s)", removed)
 		c.reconcileAlertAudio()
 	}
 	c.publish()
+}
+
+// alarmLocation returns the zone an entry is evaluated in: its own IANA zone
+// when present, otherwise the device zone.
+func alarmLocation(a *clockAlarm, device *time.Location) *time.Location {
+	if a != nil && a.zone != "" {
+		if loc, err := time.LoadLocation(a.zone); err == nil {
+			return loc
+		}
+	}
+	return device
 }
 
 // setDeviceTimezone follows the device-wide setting; an alarm without its own
@@ -474,8 +645,12 @@ func (c *builtinClock) setDeviceTimezone(name string) {
 	c.deviceTZ = name
 	c.loc = c.resolveLocationLocked()
 	now := c.now()
+	device := c.alarmLocationLocked()
 	for _, a := range c.alarms {
-		a.next = nextAlarmTrigger(a, now, c.alarmLocationLocked(a))
+		if a.disabled {
+			continue
+		}
+		a.next = a.sched.Next(now, alarmLocation(a, device))
 	}
 	c.mu.Unlock()
 	c.publish()
@@ -497,12 +672,10 @@ func (c *builtinClock) resolveLocationLocked() *time.Location {
 	return loadLocationOrDefault(c.deviceTZ)
 }
 
-func (c *builtinClock) alarmLocationLocked(a *clockAlarm) *time.Location {
-	if a != nil && a.tz != "" {
-		if loc, err := time.LoadLocation(a.tz); err == nil {
-			return loc
-		}
-	}
+// alarmLocationLocked returns the zone alarm expressions are evaluated in.
+// Alarm schedules use the device wall clock; the app's display timezone does
+// not move them.
+func (c *builtinClock) alarmLocationLocked() *time.Location {
 	return loadLocationOrDefault(c.deviceTZ)
 }
 
@@ -535,12 +708,10 @@ func (c *builtinClock) tick() {
 	now := c.now()
 	mono := c.mono()
 	c.advanceLocked(now, mono)
-	persistDisable := c.defaultDisable
-	c.defaultDisable = false
+	once := c.pendingOnce
+	c.pendingOnce = nil
 	c.mu.Unlock()
-	if persistDisable {
-		c.persistDefaultDisabled()
-	}
+	c.disableAlarmEntries(once)
 	c.publish()
 }
 
@@ -558,23 +729,35 @@ func (c *builtinClock) advanceLocked(now time.Time, mono uint64) {
 		alertID := c.addAlertLocked(alertTimer, t.id, t.label, now)
 		c.d.logs.Infof(clockAppID, "", "timer %s (%s) completed; alert %s rings until dismissed", t.id, t.label, alertID)
 	}
+	device := c.alarmLocationLocked()
 	for _, id := range c.alarmOrder {
 		a := c.alarms[id]
-		if a == nil || !a.enabled || a.next.IsZero() || now.Before(a.next) {
+		if a == nil || a.disabled {
 			continue
 		}
+		loc := alarmLocation(a, device)
+		if !a.sched.Matches(now, loc) {
+			continue
+		}
+		key := now.In(loc).Format("2006-01-02T15:04")
+		if a.lastTriggerKey == key {
+			continue
+		}
+		a.lastTriggerKey = key
 		a.lastTriggeredMS = uint64(now.UnixMilli())
-		if a.days == 0 {
-			a.enabled = false
+		if a.once {
+			// Match the previous one-shot alarm: it rings once at the next
+			// occurrence and is then disabled; the alert waits for dismissal.
+			a.disabled = true
+			c.selfDisabledIDs[a.id] = true
 			a.next = time.Time{}
-			if id == defaultAlarmID {
-				c.defaultDisable = true
-			}
+			a.text = a.entry().Canonical()
+			c.pendingOnce = append(c.pendingOnce, a.id)
 		} else {
-			a.next = nextAlarmTrigger(a, now.Add(time.Second), c.alarmLocationLocked(a))
+			a.next = a.sched.Next(now, loc)
 		}
 		alertID := c.addAlertLocked(alertAlarm, a.id, a.label, now)
-		c.d.logs.Infof(clockAppID, "", "alarm %s (%s) fired; alert %s rings until dismissed", a.id, a.label, alertID)
+		c.d.logs.Infof(clockAppID, "", "alarm %s fired; alert %s rings until dismissed", a.id, alertID)
 	}
 }
 
@@ -639,13 +822,19 @@ func (c *builtinClock) removeAlertsLocked(match func(*clockAlert) bool) int {
 }
 
 func (c *builtinClock) dismissAlert(id string) bool {
+	return c.dismissAlertCount(id) > 0
+}
+
+// dismissAlertCount stops one alert or every alert and reports how many were
+// dismissed. The public DismissAlert response carries that count.
+func (c *builtinClock) dismissAlertCount(id string) uint32 {
 	c.mu.Lock()
 	if id == "" {
-		if len(c.alertOrder) == 0 {
+		count := uint32(len(c.alertOrder))
+		if count == 0 {
 			c.mu.Unlock()
-			return false
+			return 0
 		}
-		count := len(c.alertOrder)
 		for _, cur := range append([]string(nil), c.alertOrder...) {
 			c.removeAlertLocked(cur)
 		}
@@ -653,12 +842,12 @@ func (c *builtinClock) dismissAlert(id string) bool {
 		c.d.logs.Infof(clockAppID, "", "%d active alert(s) dismissed", count)
 		c.reconcileAlertAudio()
 		c.publish()
-		return true
+		return count
 	}
 	alert := c.alerts[id]
 	if alert == nil {
 		c.mu.Unlock()
-		return false
+		return 0
 	}
 	kind, sourceID := alert.kind, alert.sourceID
 	c.removeAlertLocked(id)
@@ -666,7 +855,7 @@ func (c *builtinClock) dismissAlert(id string) bool {
 	c.d.logs.Infof(clockAppID, "", "%s alert %s (%s) dismissed", clockAlertKindName(kind), id, sourceID)
 	c.reconcileAlertAudio()
 	c.publish()
-	return true
+	return 1
 }
 
 func (c *builtinClock) activeAlertLocked() *clockAlert {
@@ -678,55 +867,6 @@ func (c *builtinClock) activeAlertLocked() *clockAlert {
 	return nil
 }
 
-// nextAlarmTrigger returns the next instant the alarm should fire. days is a
-// bitmask with bit 0 Monday; zero means the next occurrence only. The search
-// spans eight days so a time that already passed today still finds the next
-// matching weekday.
-func nextAlarmTrigger(a *clockAlarm, now time.Time, loc *time.Location) time.Time {
-	if a == nil || !a.enabled || loc == nil {
-		return time.Time{}
-	}
-	today := now.In(loc)
-	for offset := 0; offset <= 8; offset++ {
-		day := today.AddDate(0, 0, offset)
-		cand := alarmCandidate(day, a.hour, a.minute, loc)
-		if !cand.After(now) {
-			continue
-		}
-		if a.days == 0 {
-			return cand
-		}
-		bit := (int(cand.Weekday()) + 6) % 7
-		if a.days&(1<<uint(bit)) != 0 {
-			return cand
-		}
-	}
-	return time.Time{}
-}
-
-// alarmCandidate builds the wall-clock instant for one day. A spring-forward
-// transition can make the requested time nonexistent; in that case the alarm
-// fires at the first valid instant after the gap instead of being skipped or
-// silently shifted backward into the previous offset.
-func alarmCandidate(day time.Time, hour, minute int, loc *time.Location) time.Time {
-	year, month, date := day.Date()
-	cand := time.Date(year, month, date, hour, minute, 0, 0, loc)
-	local := cand.In(loc)
-	if local.Hour() == hour && local.Minute() == minute {
-		return cand
-	}
-	target := hour*60 + minute
-	probe := time.Date(year, month, date, hour, 0, 0, 0, loc)
-	for range 240 {
-		at := probe.In(loc)
-		if at.Day() == date && at.Hour()*60+at.Minute() >= target {
-			return probe
-		}
-		probe = probe.Add(time.Minute)
-	}
-	return cand
-}
-
 // --- rendering --------------------------------------------------------------
 
 func (c *builtinClock) publish() {
@@ -736,29 +876,50 @@ func (c *builtinClock) publish() {
 		return
 	}
 	now := c.now()
-	mono := c.mono()
-	base := c.baselineDisplayLocked(now, mono)
 	alert := c.activeAlertLocked()
 	var alertDisplay clockDisplay
 	haveAlert := alert != nil
 	if haveAlert {
 		alertDisplay = c.alertDisplayLocked(alert, now)
 	}
-	baseChanged := !c.appliedOK || base != c.applied
-	c.applied = base
-	c.appliedOK = true
 	gen := c.alertGen
-	pres := c.pres
 	c.mu.Unlock()
 
 	c.reconcileAlertAudio()
-	if pres != nil && baseChanged {
-		if err := pres.UpdateFrame(segmentPresentationFrame(base.cells[:], base.colon)); err != nil && c.d.ctx.Err() == nil {
-			c.d.logs.Debugf(clockAppID, "", "baseline update: %v", err)
-		}
-	}
+	c.sendBaseline()
 	c.publishAlert(alertDisplay, haveAlert, gen)
 	c.publishCountdown()
+	c.broadcastState()
+}
+
+// sendBaseline serializes compute+send so concurrent publishes cannot deliver
+// frames out of order. applied is updated only after a successful write, so a
+// failed stream is retried on the next publish instead of freezing old content.
+func (c *builtinClock) sendBaseline() {
+	c.frameMu.Lock()
+	defer c.frameMu.Unlock()
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return
+	}
+	base := c.baselineDisplayLocked(c.now(), c.mono())
+	pres := c.pres
+	if pres == nil || (c.appliedOK && base == c.applied) {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	if err := pres.UpdateFrame(segmentPresentationFrame(base.cells[:], base.colon)); err != nil {
+		if c.d.ctx.Err() == nil {
+			c.d.logs.Debugf(clockAppID, "", "baseline update: %v", err)
+		}
+		return
+	}
+	c.mu.Lock()
+	c.applied = base
+	c.appliedOK = true
+	c.mu.Unlock()
 }
 
 func (c *builtinClock) publishAlert(display clockDisplay, active bool, gen uint64) {
@@ -1141,8 +1302,15 @@ func (c *builtinClock) nearestRunningTimerLocked() *clockTimer {
 
 func (c *builtinClock) alertDisplayLocked(a *clockAlert, now time.Time) clockDisplay {
 	if a.kind == alertAlarm {
-		if alarm := c.alarms[a.sourceID]; alarm != nil {
-			return clockDisplay{cells: fourDigits(alarm.hour*100 + alarm.minute), colon: now.UnixMilli()/500%2 == 0}
+		if alarm := c.alarms[a.sourceID]; alarm != nil && alarm.lastTriggeredMS != 0 {
+			// Show when the alarm actually fired in its evaluation zone, not
+			// the current wall clock.
+			loc := alarmLocation(alarm, c.alarmLocationLocked())
+			at := time.UnixMilli(int64(alarm.lastTriggeredMS)).In(loc)
+			return clockDisplay{
+				cells: fourDigits(at.Hour()*100 + at.Minute()),
+				colon: now.UnixMilli()/500%2 == 0,
+			}
 		}
 	}
 	cells := fourDigits(0)
@@ -1211,16 +1379,18 @@ func validateClockSettings(values map[string]json.RawMessage) error {
 			return fmt.Errorf("timezone %q is not an IANA zone", tz)
 		}
 	}
-	if tz, ok := text("alarm_timezone"); ok && tz != "" {
-		if _, err := time.LoadLocation(tz); err != nil {
-			return fmt.Errorf("alarm_timezone %q is not an IANA zone", tz)
-		}
-	}
 	if mode, ok := text("display_mode"); ok {
 		switch mode {
 		case "clock", "stopwatch", "timer":
 		default:
 			return fmt.Errorf("display_mode %q is not a supported mode", mode)
+		}
+	}
+	if gesture, ok := text("stopwatch_reset_gesture"); ok {
+		switch gesture {
+		case "hold", "double_tap":
+		default:
+			return fmt.Errorf("stopwatch_reset_gesture %q is not supported", gesture)
 		}
 	}
 	if raw, ok := values["timer_seconds"]; ok {
@@ -1229,22 +1399,40 @@ func validateClockSettings(values map[string]json.RawMessage) error {
 			return fmt.Errorf("timer_seconds must be between 1 and 86400")
 		}
 	}
-	if raw, ok := values["alarm_hour"]; ok {
-		var n int64
-		if json.Unmarshal(raw, &n) != nil || n < 0 || n > 23 {
-			return fmt.Errorf("alarm_hour must be between 0 and 23")
+	if alarms, ok := text("alarms"); ok {
+		entries, err := dcron.ParseEntries(alarms)
+		if err != nil {
+			return fmt.Errorf("alarms: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.Zone != "" {
+				if _, err := time.LoadLocation(entry.Zone); err != nil {
+					return fmt.Errorf("alarms: %q is not an IANA zone", entry.Zone)
+				}
+			}
 		}
 	}
-	if raw, ok := values["alarm_minute"]; ok {
-		var n int64
-		if json.Unmarshal(raw, &n) != nil || n < 0 || n > 59 {
-			return fmt.Errorf("alarm_minute must be between 0 and 59")
+	if raw, ok := values["alarm_labels"]; ok {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return fmt.Errorf("alarm_labels must be text")
 		}
-	}
-	if raw, ok := values["alarm_days"]; ok {
-		var n int64
-		if json.Unmarshal(raw, &n) != nil || n < 0 || n > 127 {
-			return fmt.Errorf("alarm_days must be between 0 and 127")
+		var labels map[string]string
+		if text != "" {
+			if err := json.Unmarshal([]byte(text), &labels); err != nil {
+				return fmt.Errorf("alarm_labels must be a JSON object of identity to label: %w", err)
+			}
+		}
+		if len(labels) > 64 {
+			return fmt.Errorf("alarm_labels has too many entries")
+		}
+		for id, label := range labels {
+			if _, err := dcron.ParseEntry(id); err != nil {
+				return fmt.Errorf("alarm_labels key %q is not an alarm identity", id)
+			}
+			if len(label) > 80 {
+				return fmt.Errorf("alarm label for %q is too long", id)
+			}
 		}
 	}
 	return nil
@@ -1252,98 +1440,146 @@ func validateClockSettings(values map[string]json.RawMessage) error {
 
 // --- service calls ----------------------------------------------------------
 
-func (c *builtinClock) handleCall(ctx context.Context, service, rpc string, request []byte) ([][]byte, error) {
+// handleCall answers the public ClockService over the app bus. System-app
+// calls are in-process, but the wire shape is identical to a supervised app's
+// SDK: binary protobuf requests and responses, including every WatchState
+// snapshot.
+func (c *builtinClock) handleCall(ctx context.Context, service, rpc string, request []byte, emit func([]byte) error) error {
 	if service != clockServiceName {
-		return nil, status.Errorf(codes.Unimplemented, "clock app does not implement %s", service)
+		return status.Errorf(codes.Unimplemented, "clock app does not implement %s", service)
 	}
 	c.mu.Lock()
 	running := c.running
 	c.mu.Unlock()
 	if !running {
-		return nil, status.Error(codes.FailedPrecondition, "clock app is not running")
+		return status.Error(codes.FailedPrecondition, "clock app is not running")
 	}
-	var (
-		resp proto.Message
-		err  error
-	)
+	var resp proto.Message
 	switch rpc {
 	case "GetState":
-		if err = decodeClockRequest(request, &clockv1.GetStateRequest{}); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, &clockv1.GetStateRequest{}); err != nil {
+			return err
 		}
 		resp = c.state()
+	case "WatchState":
+		if err := decodeClockRequest(request, &clockv1.WatchStateRequest{}); err != nil {
+			return err
+		}
+		return c.watchState(ctx, emit)
 	case "StopwatchStart", "StopwatchPause", "StopwatchResume", "StopwatchReset":
-		if err = decodeClockRequest(request, &clockv1.StopwatchCommandRequest{}); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, &clockv1.StopwatchCommandRequest{}); err != nil {
+			return err
 		}
 		resp = c.stopwatchCommand(rpc)
 	case "StartTimer":
 		req := &clockv1.StartTimerRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
 		}
 		if req.DurationMs == 0 || req.DurationMs > maxTimerMS {
-			return nil, status.Errorf(codes.InvalidArgument, "duration_ms must be between 1 and %d", maxTimerMS)
+			return status.Errorf(codes.InvalidArgument, "duration_ms must be between 1 and %d", maxTimerMS)
 		}
 		resp = c.startTimer(req.DurationMs, req.Label)
 	case "CancelTimer":
 		req := &clockv1.CancelTimerRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
 		}
-		resp, err = c.cancelTimer(req.TimerId)
+		timer, err := c.cancelTimer(req.TimerId)
+		if err != nil {
+			return err
+		}
+		resp = timer
 	case "ListTimers":
-		if err = decodeClockRequest(request, &clockv1.ListTimersRequest{}); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, &clockv1.ListTimersRequest{}); err != nil {
+			return err
 		}
 		resp = c.listTimers()
-	case "SetAlarm":
-		req := &clockv1.SetAlarmRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
-		}
-		resp, err = c.setAlarm(req)
-	case "SetAlarmEnabled":
-		req := &clockv1.SetAlarmEnabledRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
-		}
-		resp, err = c.setAlarmEnabled(req.AlarmId, req.Enabled)
-	case "DeleteAlarm":
-		req := &clockv1.DeleteAlarmRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
-		}
-		resp, err = c.deleteAlarm(req.AlarmId)
 	case "ListAlarms":
-		if err = decodeClockRequest(request, &clockv1.ListAlarmsRequest{}); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, &clockv1.ListAlarmsRequest{}); err != nil {
+			return err
 		}
 		resp = c.listAlarms()
+	case "AddAlarm":
+		req := &clockv1.AddAlarmRequest{}
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
+		}
+		alarm, err := c.addAlarm(req.Schedule, req.Timezone, req.Label, req.OneShot, req.Disabled, req.ExpectedRevision)
+		if err != nil {
+			return err
+		}
+		resp = alarm
+	case "DeleteAlarm":
+		req := &clockv1.DeleteAlarmRequest{}
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
+		}
+		out, err := c.deleteAlarm(req.AlarmId, req.ExpectedRevision)
+		if err != nil {
+			return err
+		}
+		resp = out
+	case "SetAlarmEnabled":
+		req := &clockv1.SetAlarmEnabledRequest{}
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
+		}
+		alarm, err := c.setAlarmEnabled(req.AlarmId, req.Enabled, req.ExpectedRevision)
+		if err != nil {
+			return err
+		}
+		resp = alarm
 	case "DismissAlert":
 		req := &clockv1.DismissAlertRequest{}
-		if err = decodeClockRequest(request, req); err != nil {
-			return nil, err
+		if err := decodeClockRequest(request, req); err != nil {
+			return err
 		}
-		resp = &clockv1.DismissAlertResponse{Dismissed: c.dismissAlert(req.AlertId)}
+		resp = &clockv1.DismissAlertResponse{Dismissed: c.dismissAlertCount(req.AlertId)}
 	default:
-		return nil, status.Errorf(codes.Unimplemented, "unknown ClockService method %s", rpc)
+		return status.Errorf(codes.Unimplemented, "unknown ClockService method %s", rpc)
 	}
+	payload, err := encodeClockResponse(resp)
 	if err != nil {
-		return nil, err
+		return status.Error(codes.Internal, err.Error())
 	}
-	payload, err := encodeProtoResponse(resp)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	return [][]byte{payload}, nil
+	return emit(payload)
 }
 
-func decodeClockRequest(request []byte, msg proto.Message) error {
-	if len(request) == 0 {
-		return nil
+// watchState streams a full snapshot first and then every observable change.
+// A bounded one-slot subscription means a slow caller converges on the newest
+// state instead of growing a backlog of stale transitions.
+func (c *builtinClock) watchState(ctx context.Context, emit func([]byte) error) error {
+	ch, cancel := c.subscribeState()
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case snap, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			payload, err := encodeClockResponse(snap)
+			if err != nil {
+				return status.Error(codes.Internal, err.Error())
+			}
+			if err := emit(payload); err != nil {
+				return err
+			}
+		}
 	}
-	if err := protojson.Unmarshal(request, msg); err != nil {
+}
+
+func encodeClockResponse(msg proto.Message) ([]byte, error) {
+	return proto.Marshal(msg)
+}
+
+// decodeClockRequest parses the request exactly as it arrives on AppBus. The
+// public wire is binary protobuf; an empty request is a valid empty message
+// for the RPCs that take no fields.
+func decodeClockRequest(request []byte, msg proto.Message) error {
+	if err := proto.Unmarshal(request, msg); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	return nil
@@ -1352,13 +1588,19 @@ func decodeClockRequest(request []byte, msg proto.Message) error {
 func (c *builtinClock) state() *clockv1.ClockState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.stateLocked(c.mono())
+}
+
+// stateLocked builds the authoritative snapshot. Callers hold c.mu.
+func (c *builtinClock) stateLocked(mono uint64) *clockv1.ClockState {
 	now := c.now()
-	mono := c.mono()
 	loc := c.locationLocked()
 	out := &clockv1.ClockState{
 		LocalTimeRfc3339: now.In(loc).Format(time.RFC3339),
 		Timezone:         loc.String(),
 		Stopwatch:        c.stopwatchInfoLocked(mono),
+		Revision:         c.watchRevision,
+		AlarmsSetting:    c.alarmTextLocked(),
 	}
 	out.Timers = c.timersLocked(mono)
 	out.Alarms = c.alarmsLocked()
@@ -1379,7 +1621,95 @@ func (c *builtinClock) state() *clockv1.ClockState {
 	return out
 }
 
-func (c *builtinClock) stopwatchCommand(rpc string) *clockv1.StopwatchInfo {
+func (c *builtinClock) alarmTextLocked() string {
+	entries := make([]dcron.Entry, 0, len(c.alarmOrder))
+	for _, id := range c.alarmOrder {
+		if a := c.alarms[id]; a != nil {
+			entries = append(entries, a.entry())
+		}
+	}
+	return dcron.FormatEntries(entries)
+}
+
+// subscribeState registers a converging snapshot stream. The first snapshot is
+// always delivered; a slow subscriber keeps only the newest one.
+func (c *builtinClock) subscribeState() (<-chan *clockv1.ClockState, func()) {
+	ch := make(chan *clockv1.ClockState, 1)
+	c.mu.Lock()
+	c.nextWatcher++
+	id := c.nextWatcher
+	c.watchers[id] = ch
+	ch <- c.stateLocked(c.mono())
+	c.mu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if cur, ok := c.watchers[id]; ok {
+				delete(c.watchers, id)
+				close(cur)
+			}
+			c.mu.Unlock()
+		})
+	}
+}
+
+// broadcastState advances the watch revision on an observable change and
+// pushes the newest snapshot to every subscriber.
+func (c *builtinClock) broadcastState() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.running {
+		return
+	}
+	sig := c.watchSignatureLocked()
+	if sig == c.watchSig {
+		// Idle state is unchanged: do not allocate a snapshot or wake watchers.
+		return
+	}
+	c.watchSig = sig
+	c.watchRevision++
+	if len(c.watchers) == 0 {
+		return
+	}
+	snap := c.stateLocked(c.mono())
+	// Sends are non-blocking and happen under the same lock that closes
+	// subscription channels, so a cancel can never race into a send-on-closed.
+	for _, ch := range c.watchers {
+		pushLatest(ch, snap)
+	}
+}
+
+// watchSignatureLocked captures every watch-visible transition. Local time is
+// included to the minute while idle and to the second while a stopwatch or
+// timer is running, so an idle clock does not stream once per tick.
+func (c *builtinClock) watchSignatureLocked() string {
+	loc := c.locationLocked()
+	now := c.now().In(loc)
+	granularity := "2006-01-02T15:04"
+	sw := c.stopwatchInfoLocked(c.mono())
+	if sw.Status != clockv1.StopwatchStatus_STOPWATCH_STATUS_IDLE {
+		granularity = "2006-01-02T15:04:05"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%s|%d|%d", now.Format(granularity), loc, sw.Status, sw.ElapsedMs)
+	for _, t := range c.timersLocked(c.mono()) {
+		fmt.Fprintf(&b, "|t:%s:%d:%d", t.TimerId, t.Status, t.RemainingMs)
+	}
+	for _, id := range c.alertOrder {
+		if a := c.alerts[id]; a != nil {
+			fmt.Fprintf(&b, "|a:%s:%d", a.id, a.startedMS)
+		}
+	}
+	for _, id := range c.alarmOrder {
+		if a := c.alarms[id]; a != nil {
+			fmt.Fprintf(&b, "|m:%s:%d:%d:%s", a.id, a.next.Unix(), a.lastTriggeredMS, c.alertForAlarmLocked(id))
+		}
+	}
+	return b.String()
+}
+
+func (c *builtinClock) stopwatchCommand(rpc string) *clockv1.StopwatchState {
 	c.mu.Lock()
 	mono := c.mono()
 	switch rpc {
@@ -1487,7 +1817,7 @@ func (c *builtinClock) primaryGesture(kind string) bool {
 	return false
 }
 
-func (c *builtinClock) stopwatchInfoLocked(mono uint64) *clockv1.StopwatchInfo {
+func (c *builtinClock) stopwatchInfoLocked(mono uint64) *clockv1.StopwatchState {
 	elapsed := c.stopwatch.elapsedNS
 	state := clockv1.StopwatchStatus_STOPWATCH_STATUS_IDLE
 	if c.stopwatch.running {
@@ -1496,12 +1826,12 @@ func (c *builtinClock) stopwatchInfoLocked(mono uint64) *clockv1.StopwatchInfo {
 	} else if elapsed > 0 {
 		state = clockv1.StopwatchStatus_STOPWATCH_STATUS_PAUSED
 	}
-	return &clockv1.StopwatchInfo{
-		State: state, ElapsedMs: elapsed / 1_000_000, StartedUnixMs: c.stopwatch.startedMS,
+	return &clockv1.StopwatchState{
+		Status: state, ElapsedMs: elapsed / 1_000_000, StartedUnixMs: c.stopwatch.startedMS,
 	}
 }
 
-func (c *builtinClock) startTimer(durationMS uint64, label string) *clockv1.TimerInfo {
+func (c *builtinClock) startTimer(durationMS uint64, label string) *clockv1.Timer {
 	c.mu.Lock()
 	c.nextID++
 	id := fmt.Sprintf("tmr_%d", c.nextID)
@@ -1524,7 +1854,7 @@ func (c *builtinClock) startTimer(durationMS uint64, label string) *clockv1.Time
 	return out
 }
 
-func (c *builtinClock) cancelTimer(id string) (*clockv1.TimerInfo, error) {
+func (c *builtinClock) cancelTimer(id string) (*clockv1.Timer, error) {
 	if id == "" {
 		return nil, status.Error(codes.InvalidArgument, "timer_id is required")
 	}
@@ -1563,8 +1893,8 @@ func (c *builtinClock) listTimers() *clockv1.ListTimersResponse {
 	return &clockv1.ListTimersResponse{Timers: c.timersLocked(c.mono())}
 }
 
-func (c *builtinClock) timersLocked(mono uint64) []*clockv1.TimerInfo {
-	out := make([]*clockv1.TimerInfo, 0, len(c.timerOrder))
+func (c *builtinClock) timersLocked(mono uint64) []*clockv1.Timer {
+	out := make([]*clockv1.Timer, 0, len(c.timerOrder))
 	for _, id := range c.timerOrder {
 		t := c.timers[id]
 		if t == nil {
@@ -1575,7 +1905,7 @@ func (c *builtinClock) timersLocked(mono uint64) []*clockv1.TimerInfo {
 	return out
 }
 
-func timerInfo(t *clockTimer, mono uint64) *clockv1.TimerInfo {
+func timerInfo(t *clockTimer, mono uint64) *clockv1.Timer {
 	remaining := uint64(0)
 	if t.status == timerRunning && t.deadlineNS > mono {
 		remaining = (t.deadlineNS - mono) / 1_000_000
@@ -1587,7 +1917,7 @@ func timerInfo(t *clockTimer, mono uint64) *clockv1.TimerInfo {
 	case timerCancelled:
 		status = clockv1.TimerStatus_TIMER_STATUS_CANCELLED
 	}
-	return &clockv1.TimerInfo{
+	return &clockv1.Timer{
 		TimerId: t.id, Label: t.label, DurationMs: t.durationNS / 1_000_000,
 		RemainingMs: remaining, Status: status, StartedUnixMs: t.startedMS,
 		FinishedUnixMs: t.finishedMS,
@@ -1605,170 +1935,326 @@ func timerStatusName(s clockTimerStatus) string {
 	}
 }
 
-func (c *builtinClock) setAlarm(req *clockv1.SetAlarmRequest) (*clockv1.AlarmInfo, error) {
-	if req.Hour > 23 || req.Minute > 59 || req.DaysOfWeek > 127 {
-		return nil, status.Error(codes.InvalidArgument, "hour must be 0-23, minute 0-59 and days_of_week 0-127")
+// alarmEntriesSetting returns the current canonical entries and revision.
+func (c *builtinClock) alarmEntriesSetting() ([]dcron.Entry, uint64, error) {
+	snap, err := c.d.appCfg.Snapshot(clockAppID)
+	if err != nil {
+		return nil, 0, err
 	}
-	if req.Timezone != "" {
-		if _, err := time.LoadLocation(req.Timezone); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "timezone %q: %v", req.Timezone, err)
+	for _, v := range snap.Values {
+		if v.Key != "alarms" {
+			continue
+		}
+		var text string
+		if v.HasValue && json.Unmarshal([]byte(v.Value), &text) == nil {
+			entries, err := dcron.ParseEntries(text)
+			return entries, snap.Revision, err
 		}
 	}
-	c.mu.Lock()
-	id := req.AlarmId
-	if id == "" {
-		c.nextID++
-		id = fmt.Sprintf("alm_%d", c.nextID)
-	}
-	a := c.alarms[id]
-	if a == nil {
-		a = &clockAlarm{id: id}
-		c.alarms[id] = a
-		c.alarmOrder = append(c.alarmOrder, id)
-	}
-	label := req.Label
-	if label == "" {
-		label = "Alarm"
-	}
-	a.label, a.hour, a.minute = label, int(req.Hour), int(req.Minute)
-	a.days, a.tz, a.enabled = uint8(req.DaysOfWeek), req.Timezone, req.Enabled
-	a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
-	out := alarmInfo(a, c.alarmLocationLocked(a))
-	c.mu.Unlock()
-
-	if id == defaultAlarmID {
-		c.persistDefaultAlarm(label, int(req.Hour), int(req.Minute), int(req.DaysOfWeek), req.Timezone, req.Enabled)
-	}
-	c.publish()
-	return out, nil
+	return nil, snap.Revision, nil
 }
 
-func (c *builtinClock) setAlarmEnabled(id string, enabled bool) (*clockv1.AlarmInfo, error) {
-	if id == "" {
-		return nil, status.Error(codes.InvalidArgument, "alarm_id is required")
+func (c *builtinClock) alarmLabelSetting() (map[string]string, error) {
+	snap, err := c.d.appCfg.Snapshot(clockAppID)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range snap.Values {
+		if v.Key != "alarm_labels" || !v.HasValue {
+			continue
+		}
+		var text string
+		if json.Unmarshal([]byte(v.Value), &text) != nil || text == "" {
+			return map[string]string{}, nil
+		}
+		var labels map[string]string
+		if err := json.Unmarshal([]byte(text), &labels); err != nil {
+			return nil, err
+		}
+		return labels, nil
+	}
+	return map[string]string{}, nil
+}
+
+func (c *builtinClock) writeAlarmState(entries []dcron.Entry, labels map[string]string, expected uint64) (settings.AppSnapshot, error) {
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return settings.AppSnapshot{}, err
+	}
+	snap, _, _, err := c.d.appCfg.Update(clockAppID, expected, []settings.Change{
+		{Key: "alarms", Value: dcron.FormatEntries(entries)},
+		{Key: "alarm_labels", Value: string(encoded)},
+	})
+	return snap, err
+}
+
+// addAlarm appends one schedule to the canonical `alarms` app setting. The
+// store's normal CAS and validator decide whether the new value is accepted,
+// and the settings watcher rebuilds the running alarm table.
+func (c *builtinClock) addAlarm(schedule, zone, label string, oneShot, disabled bool, expectedRevision uint64) (*clockv1.Alarm, error) {
+	sched, err := dcron.Parse(schedule)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "schedule: %v", err)
+	}
+	if zone != "" {
+		if _, err := time.LoadLocation(zone); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "timezone %q is not an IANA zone", zone)
+		}
+	}
+	entry := dcron.Entry{Expr: sched.Text, Zone: zone, Once: oneShot, Disabled: disabled}
+	current, rev, err := c.alarmEntriesSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	labels, err := c.alarmLabelSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if expectedRevision != 0 && expectedRevision != rev {
+		return nil, status.Errorf(codes.Aborted, "app settings revision %d is stale (current %d)", expectedRevision, rev)
+	}
+	if label != "" {
+		labels[entry.ID()] = label
+	}
+	for _, existing := range current {
+		if existing.ID() == entry.ID() {
+			snap, err := c.writeAlarmState(current, labels, rev)
+			if err != nil {
+				return nil, appSettingsStatus(err)
+			}
+			c.applySettings(snap.Revision, snap.Values)
+			return c.alarmInfoForEntry(existing), nil
+		}
+	}
+	next := append(append([]dcron.Entry(nil), current...), entry)
+	snap, err := c.writeAlarmState(next, labels, rev)
+	if err != nil {
+		return nil, appSettingsStatus(err)
+	}
+	// Apply synchronously so a GetState immediately after AddAlarm observes
+	// the new entry; the settings watcher will apply the same revision again.
+	c.applySettings(snap.Revision, snap.Values)
+	return c.alarmInfoForEntry(entry), nil
+}
+
+// deleteAlarm removes an alarm by its stable entry identity.
+func (c *builtinClock) deleteAlarm(alarmID string, expectedRevision uint64) (*clockv1.DeleteAlarmResponse, error) {
+	target, err := dcron.ParseEntry(alarmID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "alarm_id: %v", err)
+	}
+	current, rev, err := c.alarmEntriesSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	labels, err := c.alarmLabelSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if expectedRevision != 0 && expectedRevision != rev {
+		return nil, status.Errorf(codes.Aborted, "app settings revision %d is stale (current %d)", expectedRevision, rev)
+	}
+	next := make([]dcron.Entry, 0, len(current))
+	found := false
+	for _, existing := range current {
+		if existing.ID() == target.ID() {
+			found = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	if !found {
+		return nil, status.Errorf(codes.NotFound, "alarm %s not found", target.ID())
+	}
+	delete(labels, target.ID())
+	snap, err := c.writeAlarmState(next, labels, rev)
+	if err != nil {
+		return nil, appSettingsStatus(err)
 	}
 	c.mu.Lock()
-	a := c.alarms[id]
-	if a == nil {
-		c.mu.Unlock()
-		return nil, status.Errorf(codes.NotFound, "alarm %s not found", id)
+	delete(c.selfDisabledIDs, target.ID())
+	c.mu.Unlock()
+	c.applySettings(snap.Revision, snap.Values)
+	c.dropAlarmAlert(target.ID())
+	return &clockv1.DeleteAlarmResponse{Deleted: true}, nil
+}
+
+// setAlarmEnabled toggles the persisted disabled marker. An explicit disable
+// dismisses that alarm's active alert; the clock's own one-shot disable does
+// not, so a ringing one-shot still waits for the user's dismissal.
+func (c *builtinClock) setAlarmEnabled(alarmID string, enabled bool, expectedRevision uint64) (*clockv1.Alarm, error) {
+	target, err := dcron.ParseEntry(alarmID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "alarm_id: %v", err)
 	}
-	a.enabled = enabled
-	a.next = nextAlarmTrigger(a, c.now(), c.alarmLocationLocked(a))
-	out := alarmInfo(a, c.alarmLocationLocked(a))
-	label, hour, minute, days, tz := a.label, a.hour, a.minute, int(a.days), a.tz
-	dismissed := 0
+	current, rev, err := c.alarmEntriesSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	labels, err := c.alarmLabelSetting()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if expectedRevision != 0 && expectedRevision != rev {
+		return nil, status.Errorf(codes.Aborted, "app settings revision %d is stale (current %d)", expectedRevision, rev)
+	}
+	found := false
+	next := make([]dcron.Entry, 0, len(current))
+	for _, existing := range current {
+		if existing.ID() == target.ID() {
+			found = true
+			existing.Disabled = !enabled
+			target = existing
+		}
+		next = append(next, existing)
+	}
+	if !found {
+		return nil, status.Errorf(codes.NotFound, "alarm %s not found", target.ID())
+	}
+	snap, err := c.writeAlarmState(next, labels, rev)
+	if err != nil {
+		return nil, appSettingsStatus(err)
+	}
+	// Clear the one-shot self-disable marker only after the write commits.
+	// A stale/failed CAS therefore leaves the ringing one-shot untouched.
+	c.mu.Lock()
+	delete(c.selfDisabledIDs, target.ID())
+	c.mu.Unlock()
+	c.applySettings(snap.Revision, snap.Values)
 	if !enabled {
-		dismissed = c.removeAlertsLocked(func(alert *clockAlert) bool {
-			return alert.kind == alertAlarm && alert.sourceID == id
-		})
+		c.dropAlarmAlert(target.ID())
 	}
-	c.mu.Unlock()
-	if dismissed > 0 {
-		c.d.logs.Infof(clockAppID, "", "alarm %s disabled; %d active alert(s) dismissed", id, dismissed)
-		c.reconcileAlertAudio()
-	}
-	if id == defaultAlarmID {
-		c.persistDefaultAlarm(label, hour, minute, days, tz, enabled)
-	}
-	c.publish()
-	return out, nil
+	return c.alarmInfoForEntry(target), nil
 }
 
-func (c *builtinClock) deleteAlarm(id string) (*clockv1.DeleteAlarmResponse, error) {
-	if id == "" {
-		return nil, status.Error(codes.InvalidArgument, "alarm_id is required")
+// disableAlarmEntries persists the !disabled marker after a one-shot fires.
+// The alert keeps ringing until the user dismisses it, matching the previous
+// one-shot alarm behavior.
+func (c *builtinClock) disableAlarmEntries(ids []string) {
+	if len(ids) == 0 {
+		return
 	}
-	if id == defaultAlarmID {
-		return nil, status.Error(codes.FailedPrecondition, "the default alarm is managed by app settings and cannot be deleted")
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
 	}
-	c.mu.Lock()
-	if c.alarms[id] == nil {
-		c.mu.Unlock()
-		return nil, status.Errorf(codes.NotFound, "alarm %s not found", id)
-	}
-	delete(c.alarms, id)
-	for i, cur := range c.alarmOrder {
-		if cur == id {
-			c.alarmOrder = append(c.alarmOrder[:i], c.alarmOrder[i+1:]...)
-			break
+	// A concurrent settings edit can invalidate the read revision; retry a
+	// bounded number of times before leaving the in-memory disable in place.
+	for range 3 {
+		current, rev, err := c.alarmEntriesSetting()
+		if err != nil {
+			c.d.logs.Warnf(clockAppID, "", "disable one-shot alarms: %v", err)
+			return
+		}
+		labels, err := c.alarmLabelSetting()
+		if err != nil {
+			c.d.logs.Warnf(clockAppID, "", "disable one-shot alarms: %v", err)
+			return
+		}
+		changed := false
+		for i := range current {
+			if want[current[i].ID()] && !current[i].Disabled {
+				current[i].Disabled = true
+				changed = true
+			}
+		}
+		if !changed {
+			return
+		}
+		if _, err := c.writeAlarmState(current, labels, rev); err == nil {
+			return
 		}
 	}
+	c.d.logs.Warnf(clockAppID, "", "could not persist one-shot alarm disable after concurrent settings changes")
+}
+
+func (c *builtinClock) dropAlarmAlert(id string) {
+	c.mu.Lock()
 	dismissed := c.removeAlertsLocked(func(alert *clockAlert) bool {
 		return alert.kind == alertAlarm && alert.sourceID == id
 	})
 	c.mu.Unlock()
 	if dismissed > 0 {
-		c.d.logs.Infof(clockAppID, "", "alarm %s deleted; %d active alert(s) dismissed", id, dismissed)
+		c.d.logs.Infof(clockAppID, "", "alarm %s disabled; %d active alert(s) dismissed", id, dismissed)
 		c.reconcileAlertAudio()
 		c.publish()
 	}
-	return &clockv1.DeleteAlarmResponse{Deleted: true}, nil
 }
 
 func (c *builtinClock) listAlarms() *clockv1.ListAlarmsResponse {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]*clockv1.AlarmInfo, 0, len(c.alarmOrder))
-	for _, id := range c.alarmOrder {
-		a := c.alarms[id]
-		if a == nil {
-			continue
-		}
-		out = append(out, alarmInfo(a, c.alarmLocationLocked(a)))
-	}
-	return &clockv1.ListAlarmsResponse{Alarms: out}
+	return &clockv1.ListAlarmsResponse{Alarms: c.alarmsLocked()}
 }
 
-func (c *builtinClock) alarmsLocked() []*clockv1.AlarmInfo {
-	out := make([]*clockv1.AlarmInfo, 0, len(c.alarmOrder))
+func (c *builtinClock) alarmsLocked() []*clockv1.Alarm {
+	device := c.alarmLocationLocked()
+	out := make([]*clockv1.Alarm, 0, len(c.alarmOrder))
 	for _, id := range c.alarmOrder {
 		a := c.alarms[id]
 		if a == nil {
 			continue
 		}
-		out = append(out, alarmInfo(a, c.alarmLocationLocked(a)))
+		out = append(out, alarmInfo(a, alarmLocation(a, device), c.alertForAlarmLocked(id)))
 	}
 	return out
 }
 
-func alarmInfo(a *clockAlarm, loc *time.Location) *clockv1.AlarmInfo {
-	out := &clockv1.AlarmInfo{
-		AlarmId: a.id, Label: a.label, Hour: uint32(a.hour), Minute: uint32(a.minute),
-		DaysOfWeek: uint32(a.days), Enabled: a.enabled, Timezone: a.tz,
-		EffectiveTimezone: loc.String(), LastTriggeredUnixMs: a.lastTriggeredMS,
+func (c *builtinClock) alertForAlarmLocked(id string) string {
+	for _, alertID := range c.alertOrder {
+		if alert := c.alerts[alertID]; alert != nil && alert.kind == alertAlarm && alert.sourceID == id {
+			return alert.id
+		}
+	}
+	return ""
+}
+
+// alarmInfoForEntry builds the response for an entry the settings watcher may
+// not have applied yet.
+func (c *builtinClock) alarmInfoForEntry(entry dcron.Entry) *clockv1.Alarm {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a := c.alarms[entry.ID()]; a != nil {
+		return alarmInfo(a, alarmLocation(a, c.alarmLocationLocked()), c.alertForAlarmLocked(a.id))
+	}
+	sched, err := dcron.Parse(entry.Expr)
+	if err != nil {
+		return nil
+	}
+	a := &clockAlarm{
+		id: entry.ID(), text: entry.Canonical(), expr: entry.Expr, label: "Alarm",
+		zone: entry.Zone, once: entry.Once, disabled: entry.Disabled, sched: sched,
+	}
+	device := c.alarmLocationLocked()
+	a.next = sched.Next(c.now(), alarmLocation(a, device))
+	if entry.Disabled {
+		a.next = time.Time{}
+	}
+	return alarmInfo(a, alarmLocation(a, device), c.alertForAlarmLocked(a.id))
+}
+
+func (c *builtinClock) alarmState(id string) *clockv1.Alarm {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a := c.alarms[id]
+	if a == nil {
+		return nil
+	}
+	return alarmInfo(a, alarmLocation(a, c.alarmLocationLocked()), c.alertForAlarmLocked(id))
+}
+
+func alarmInfo(a *clockAlarm, loc *time.Location, alertID string) *clockv1.Alarm {
+	out := &clockv1.Alarm{
+		AlarmId: a.id, Schedule: a.expr, Timezone: a.zone, Label: a.label,
+		Enabled: !a.disabled, OneShot: a.once,
+		EffectiveTimezone:   loc.String(),
+		LastTriggeredUnixMs: a.lastTriggeredMS, AlertId: alertID, Ringing: alertID != "",
 	}
 	if !a.next.IsZero() {
 		out.NextTriggerUnixMs = uint64(a.next.UnixMilli())
 		out.NextTriggerRfc3339 = a.next.In(loc).Format(time.RFC3339)
 	}
 	return out
-}
-
-func (c *builtinClock) persistDefaultDisabled() {
-	c.mu.Lock()
-	a := c.alarms[defaultAlarmID]
-	if a == nil {
-		c.mu.Unlock()
-		return
-	}
-	label, hour, minute, days, tz := a.label, a.hour, a.minute, int(a.days), a.tz
-	c.mu.Unlock()
-	c.persistDefaultAlarm(label, hour, minute, days, tz, false)
-}
-
-func (c *builtinClock) persistDefaultAlarm(label string, hour, minute, days int, tz string, enabled bool) {
-	changes := []settings.Change{
-		{Key: "alarm_label", Value: label},
-		{Key: "alarm_hour", Value: hour},
-		{Key: "alarm_minute", Value: minute},
-		{Key: "alarm_days", Value: days},
-		{Key: "alarm_timezone", Value: tz},
-		{Key: "alarm_enabled", Value: enabled},
-	}
-	if _, _, _, err := c.d.appCfg.Update(clockAppID, 0, changes); err != nil {
-		c.d.logs.Warnf(clockAppID, "", "persist alarm settings: %v", err)
-	}
 }
 
 // --- actions ----------------------------------------------------------------
@@ -1809,14 +2295,6 @@ func (c *builtinClock) action(ctx context.Context, actionID string) error {
 			if _, err := c.cancelTimer(id); err != nil {
 				return err
 			}
-		}
-	case "alarm_enable":
-		if _, err := c.setAlarmEnabled(defaultAlarmID, true); err != nil {
-			return err
-		}
-	case "alarm_disable":
-		if _, err := c.setAlarmEnabled(defaultAlarmID, false); err != nil {
-			return err
 		}
 	case "alert_dismiss":
 		c.dismissAlert("")

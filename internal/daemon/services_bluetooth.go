@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/bluetooth"
@@ -24,6 +25,26 @@ func bluetoothMediaProto(m bluetooth.MediaState) *frameworkv1.BluetoothMediaStat
 		DurationMs: m.DurationMS, PositionMs: m.PositionMS,
 		Revision: m.Revision, Detail: m.Detail,
 	}
+}
+
+// bluetoothMediaAppView removes the connected source's address and name before
+// a supervised app sees the state. Transport state and now-playing metadata are
+// needed by a media provider/UI; the speaker's peer address is not.
+func bluetoothMediaAppView(state *frameworkv1.BluetoothMediaState) *frameworkv1.BluetoothMediaState {
+	if state == nil {
+		return nil
+	}
+	out := proto.Clone(state).(*frameworkv1.BluetoothMediaState)
+	out.DeviceAddress, out.DeviceName = "", ""
+	return out
+}
+
+func (s *bluetoothMediaService) mediaView(ctx context.Context, state *frameworkv1.BluetoothMediaState) *frameworkv1.BluetoothMediaState {
+	if appID, isApp := s.d.applicationCaller(ctx); isApp {
+		s.d.logs.Debugf("bluetooth", appID, "media state redacted for an application caller")
+		return bluetoothMediaAppView(state)
+	}
+	return state
 }
 
 func bluetoothStatusError(err error) error {
@@ -45,7 +66,7 @@ func (s *bluetoothMediaService) GetState(ctx context.Context, _ *frameworkv1.Get
 	if err != nil {
 		return nil, bluetoothStatusError(err)
 	}
-	return bluetoothMediaProto(state), nil
+	return s.mediaView(ctx, bluetoothMediaProto(state)), nil
 }
 
 // WatchState sends the current state, then one message per change. Connect and
@@ -64,7 +85,17 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 	if err != nil {
 		return bluetoothStatusError(err)
 	}
-	if err := stream.Send(bluetoothMediaProto(initial)); err != nil {
+	appScoped := false
+	if _, isApp := s.d.applicationCaller(ctx); isApp {
+		appScoped = true
+	}
+	sendState := func(state *frameworkv1.BluetoothMediaState) error {
+		if appScoped {
+			state = bluetoothMediaAppView(state)
+		}
+		return stream.Send(state)
+	}
+	if err := sendState(bluetoothMediaProto(initial)); err != nil {
 		return err
 	}
 	last := initial.Revision
@@ -84,7 +115,7 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 				continue
 			}
 			last = ev.Media.Revision
-			if err := stream.Send(bluetoothMediaProto(ev.Media)); err != nil {
+			if err := sendState(bluetoothMediaProto(ev.Media)); err != nil {
 				return err
 			}
 		}
@@ -117,5 +148,5 @@ func (s *bluetoothMediaService) Command(ctx context.Context, req *frameworkv1.Bl
 	if err != nil {
 		return nil, bluetoothStatusError(err)
 	}
-	return bluetoothMediaProto(state), nil
+	return s.mediaView(ctx, bluetoothMediaProto(state)), nil
 }

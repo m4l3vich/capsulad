@@ -31,6 +31,56 @@ func TestVolumeCellsRightAligned(t *testing.T) {
 	}
 }
 
+// The microphone indication must wait for the mixer to consume and drain the
+// cue, and an inaudible configuration must be refused.
+func TestMicrophoneCueIsConsumedBeforeCapture(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := ids.NewClock()
+	logs, err := logbus.New(clock, 100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	sim := backend.NewSimulator(backend.SimulatorOptions{})
+	defer sim.Close()
+	manager := audio.NewManager(ctx, clock, logs, sim.Audio(), audio.Options{})
+	if err := manager.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	d := &Daemon{ctx: ctx, audio: manager, dev: sim, logs: logs}
+
+	manager.SetMasterVolume(0.5)
+	if err := d.audibleMicIndication("test.app"); err != nil {
+		t.Fatalf("microphone cue: %v", err)
+	}
+	raw := sim.Audio().(interface{ LastOutput() []byte }).LastOutput()
+	peak := 0
+	for i := 0; i+1 < len(raw); i += 2 {
+		v := int(int16(binary.LittleEndian.Uint16(raw[i:])))
+		if v < 0 {
+			v = -v
+		}
+		if v > peak {
+			peak = v
+		}
+	}
+	if peak == 0 {
+		t.Fatal("the drained microphone cue produced no digital output")
+	}
+
+	manager.SetMasterVolume(0)
+	if err := d.audibleMicIndication("test.app"); err == nil {
+		t.Fatal("zero master volume was accepted as an audible indication")
+	}
+	manager.SetMasterVolume(0.5)
+	manager.SetMuted(true)
+	if err := d.audibleMicIndication("test.app"); err == nil {
+		t.Fatal("a muted microphone was accepted as an audible indication")
+	}
+}
+
 // TestStartupCueFollowsMarkerAndSetting covers the installation contract: the
 // first boot on a data directory always plays the cue and records the marker;
 // every later boot follows the off-by-default setting.

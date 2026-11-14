@@ -29,7 +29,7 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 	writeKeyNode(t, gpio, "volumeup-key", keyVolumeUp, "volup")
 	writeKeyNode(t, gpio, "playpause-key", keyPlayPause, "play-pause")
 	writeKeyNode(t, gpio, "volumedown-key", keyVolumeDown, "voldown")
-	// The two stock DTBs disagree on the voice key label; the node name is
+	// The two stock DTBs disagree on the centre key label; the node name is
 	// authoritative.
 	writeKeyNode(t, gpio, "voice-key", keyHappy, "happy")
 
@@ -39,7 +39,7 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 		keyVolumeUp:   "volume_up",
 		keyPlayPause:  "play_pause",
 		keyVolumeDown: "volume_down",
-		keyHappy:      "voice",
+		keyHappy:      "center",
 	}
 	for code, name := range want {
 		if keys[code] != name {
@@ -48,10 +48,10 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 	}
 }
 
-func TestProbeKeyMapFallbackCoversBothVoiceCodes(t *testing.T) {
+func TestProbeKeyMapFallbackCoversBothCentreCodes(t *testing.T) {
 	keys := probeKeyMap(t.TempDir())
-	if keys[keyVoiceCmd] != "voice" || keys[keyHappy] != "voice" {
-		t.Fatalf("voice codes = %q/%q", keys[keyVoiceCmd], keys[keyHappy])
+	if keys[keyVoiceCmd] != "center" || keys[keyHappy] != "center" {
+		t.Fatalf("centre codes = %q/%q", keys[keyVoiceCmd], keys[keyHappy])
 	}
 	if keys[keyPlayPause] != "play_pause" {
 		t.Fatalf("play/pause = %q", keys[keyPlayPause])
@@ -62,8 +62,9 @@ func TestKeySemantic(t *testing.T) {
 	for _, tc := range []struct {
 		node, label, want string
 	}{
-		{"voice-key", "happy", "voice"},
-		{"voice-key", "GPIO Volume Voice-assistant", "voice"},
+		{"voice-key", "happy", "center"},
+		{"voice-key", "GPIO Volume Voice-assistant", "center"},
+		{"center-key", "unmarked", "center"},
 		{"micmute-key", "mute", "mic_toggle"},
 		{"volumeup-key", "GPIO Volume Up", "volume_up"},
 		{"volumedown-key", "GPIO Volume Down", "volume_down"},

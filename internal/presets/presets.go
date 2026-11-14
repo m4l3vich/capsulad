@@ -85,11 +85,21 @@ var catalog = []Info{
 		},
 	},
 	{
-		ID: "system.ring.rainbow", Kind: KindRingEffect, DisplayName: "Rainbow",
-		Description: "Hue rotation around the ring.",
+		ID: "system.ring.static", Kind: KindRingEffect, DisplayName: "Static",
+		Description: "A solid, non-animated colour. The palette's first colour is used.",
 		Params: []ParamDef{
-			{Name: "speed", Description: "Hue rotations per second.", Type: "number", Default: 0.2, HasMin: true, Min: 0, HasMax: true, Max: 3},
-			{Name: "saturation", Description: "Color saturation.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
+			{Name: "color", Description: "Solid colour.", Type: "rgb", Default: backend.RGB{R: 0, G: 220, B: 180}},
+			{Name: "intensity", Description: "Overall brightness.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
+		},
+	},
+	{
+		ID: "system.ring.rainbow", Kind: KindRingEffect, DisplayName: "Rainbow",
+		Description: "Rotates the palette colours around the ring instead of inventing hues.",
+		Params: []ParamDef{
+			{Name: "speed", Description: "Palette rotations per second.", Type: "number", Default: 0.2, HasMin: true, Min: 0, HasMax: true, Max: 3},
+			{Name: "color", Description: "Palette colour at 0%.", Type: "rgb", Default: backend.RGB{R: 0, G: 220, B: 180}},
+			{Name: "color_b", Description: "Palette colour at 1/3.", Type: "rgb", Default: backend.RGB{R: 40, G: 175, B: 217}},
+			{Name: "color_c", Description: "Palette colour at 2/3.", Type: "rgb", Default: backend.RGB{R: 80, G: 130, B: 255}},
 			{Name: "brightness", Description: "Overall brightness.", Type: "number", Default: 1.0, HasMin: true, Min: 0, HasMax: true, Max: 1},
 		},
 	},
@@ -329,13 +339,20 @@ func RingFrame(presetID string, params Params, pixels int, t float64) ([]backend
 		for i := range out {
 			out[i] = scale(color, lvl*0.9)
 		}
+	case "system.ring.static":
+		color := scale(paramRGB(vals, "color"), paramFloat(vals, "intensity"))
+		for i := range out {
+			out[i] = color
+		}
 	case "system.ring.rainbow":
 		speed := paramFloat(vals, "speed")
-		sat := paramFloat(vals, "saturation")
 		level := paramFloat(vals, "brightness")
+		stops := [3]backend.RGB{
+			paramRGB(vals, "color"), paramRGB(vals, "color_b"), paramRGB(vals, "color_c"),
+		}
 		for i := range pixels {
-			hue := math.Mod(t*speed+float64(i)/float64(pixels), 1)
-			out[i] = hsv(hue, sat, level)
+			pos := math.Mod(t*speed+float64(i)/float64(pixels), 1)
+			out[i] = scale(paletteAt(stops, pos), level)
 		}
 	case "system.ring.comet":
 		speed := paramFloat(vals, "speed")
@@ -452,32 +469,18 @@ func scale(c backend.RGB, lvl float64) backend.RGB {
 	}
 }
 
-func hsv(h, s, v float64) backend.RGB {
-	h = math.Mod(h, 1)
-	if h < 0 {
-		h += 1
+// paletteAt interpolates a closed 3-stop palette. Position wraps so the first
+// colour returns after the last one, keeping the rotation seamless.
+func paletteAt(stops [3]backend.RGB, pos float64) backend.RGB {
+	pos = pos - math.Floor(pos)
+	scaled := pos * 3
+	seg := int(scaled)
+	if seg > 2 {
+		seg = 2
 	}
-	i := int(h * 6)
-	f := h*6 - float64(i)
-	p := v * (1 - s)
-	q := v * (1 - f*s)
-	t := v * (1 - (1-f)*s)
-	var r, g, b float64
-	switch i % 6 {
-	case 0:
-		r, g, b = v, t, p
-	case 1:
-		r, g, b = q, v, p
-	case 2:
-		r, g, b = p, v, t
-	case 3:
-		r, g, b = p, q, v
-	case 4:
-		r, g, b = t, p, v
-	default:
-		r, g, b = v, p, q
-	}
-	return backend.RGB{R: uint8(r * 255), G: uint8(g * 255), B: uint8(b * 255)}
+	f := scaled - float64(seg)
+	next := (seg + 1) % 3
+	return lerpRGB(stops[seg], stops[next], f)
 }
 
 // lerpRGB blends two colors by t in [0,1].

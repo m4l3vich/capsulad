@@ -1,29 +1,37 @@
 package daemon
 
 import (
-	_ "embed"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/dcron"
 	"capsulad/internal/manifest"
 	"capsulad/internal/registry"
+	"capsulad/internal/ringpalette"
 	"capsulad/internal/settings"
 )
 
 // Clock and ring are compiled-in system applications. They live in the same
 // registry, bus and application-configuration surfaces as installed packages:
-// they are listed, launched, stopped and discovered like any other app, and
-// present content exclusively through presentations and captures. Only their
+// they are listed, launched and stopped like any other app, and present
+// content exclusively through presentations and captures. Only their
 // packaging differs: they cannot be installed, removed or shadowed by a
 // package, and their runtime is the daemon itself.
+//
+// They publish standard clock and ring contracts under
+// proto/capsula/contracts. Those services are advertised through
+// AppInterfaceService and reachable by any supervised app via the normal app
+// bus, exactly like an installed app's declared interface. Their settings,
+// actions and hardware gestures remain the primary product surface.
 const (
 	clockAppID = "capsula.clock"
 	ringAppID  = "capsula.ring"
-
-	clockServiceName = "capsula.contracts.clock.v1.ClockService"
-	ringServiceName  = "capsula.contracts.ring.v1.RingService"
 
 	// Legacy IDs from the removed sample applications. They are used only to
 	// migrate persisted state, never to launch or resolve a provider.
@@ -37,12 +45,6 @@ const (
 	builtinClockSettingsID = clockAppID
 	builtinRingSettingsID  = ringAppID
 )
-
-//go:embed builtinschemas/clock.protoset
-var clockDescriptorSet []byte
-
-//go:embed builtinschemas/ring.protoset
-var ringDescriptorSet []byte
 
 type builtinProviders struct {
 	clock *builtinClock
@@ -120,6 +122,7 @@ func clockManifest() *manifest.Manifest {
 		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
 		Provides:   []string{"segment_display_provider"},
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
+		SettingsUI: &manifest.SettingsUI{HTML: "clock.html"},
 		Settings: []manifest.Setting{
 			{Key: "blink", Label: "Blink colon", Type: "boolean", Default: true},
 			{Key: "timezone", Label: "Timezone", Type: "text", Default: "",
@@ -140,17 +143,10 @@ func clockManifest() *manifest.Manifest {
 					{Value: "hold", Label: "Hold the button"},
 					{Value: "double_tap", Label: "Double tap the button"},
 				}},
-			{Key: "alarm_label", Label: "Alarm label", Type: "text", Default: "Alarm"},
-			{Key: "alarm_hour", Label: "Alarm hour", Type: "integer", Default: 7,
-				Min: numberPtr(0), Max: numberPtr(23)},
-			{Key: "alarm_minute", Label: "Alarm minute", Type: "integer", Default: 0,
-				Min: numberPtr(0), Max: numberPtr(59)},
-			{Key: "alarm_days", Label: "Alarm days", Type: "integer", Default: 0,
-				Description: "Weekday bitmask: bit 0 Monday through bit 6 Sunday. 0 fires once at the next occurrence and then disables.",
-				Min:         numberPtr(0), Max: numberPtr(127)},
-			{Key: "alarm_timezone", Label: "Alarm timezone", Type: "text", Default: "",
-				Description: "IANA zone for the alarm. Empty follows the device timezone."},
-			{Key: "alarm_enabled", Label: "Alarm enabled", Type: "boolean", Default: false},
+			{Key: "alarms", Label: "Alarms", Type: "text", Default: "",
+				Description: "Comma-separated five-field dcron schedules (minute hour day-of-month month day-of-week), evaluated in the device timezone. Optional modifiers: @IANA-zone, !once, !disabled. Example: \"0,30 7 * * 1,3,5, 15 8 * * *\". Commas inside a field are literal; an entry separator is a comma followed by whitespace."},
+			{Key: "alarm_labels", Label: "Alarm labels", Type: "text", Default: "{}",
+				Description: "Display labels keyed by canonical alarm identity. Schedule semantics live only in the alarms setting."},
 		},
 		Actions: []manifest.Action{
 			{ID: "stopwatch_start", Label: "Start stopwatch"},
@@ -159,13 +155,8 @@ func clockManifest() *manifest.Manifest {
 			{ID: "stopwatch_reset", Label: "Reset stopwatch"},
 			{ID: "timer_start", Label: "Start timer"},
 			{ID: "timer_cancel", Label: "Cancel timer"},
-			{ID: "alarm_enable", Label: "Enable alarm"},
-			{ID: "alarm_disable", Label: "Disable alarm"},
 			{ID: "alert_dismiss", Label: "Dismiss alert"},
 		},
-		Interfaces: []manifest.Interface{{
-			Service: clockServiceName, Version: "v1",
-		}},
 	}
 }
 
@@ -176,9 +167,10 @@ func ringManifest() *manifest.Manifest {
 		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
 		Provides:   []string{"led_ring_controller"},
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
+		SettingsUI: &manifest.SettingsUI{HTML: "ring.html"},
 		Settings: []manifest.Setting{
 			{Key: "effect", Label: "Ring effect", Type: "select", Default: "breathe",
-				Description: "Baseline effect while no application or system indication owns the ring.",
+				Description: "Baseline effect while no application or system indication owns the ring. Static is one solid colour.",
 				Choices: []manifest.Choice{
 					{Value: "breathe", Label: "Breathe"},
 					{Value: "spinner", Label: "Spinner"},
@@ -186,16 +178,11 @@ func ringManifest() *manifest.Manifest {
 					{Value: "pulse", Label: "Pulse"},
 					{Value: "comet", Label: "Comet"},
 					{Value: "sparkle", Label: "Sparkle"},
+					{Value: "static", Label: "Static colour"},
 				}},
-			{Key: "palette", Label: "Palette", Type: "select", Default: "aurora",
-				Choices: []manifest.Choice{
-					{Value: "aurora", Label: "Aurora"},
-					{Value: "ocean", Label: "Ocean"},
-					{Value: "sunset", Label: "Sunset"},
-					{Value: "ember", Label: "Ember"},
-					{Value: "mono", Label: "Mono"},
-					{Value: "spectrum", Label: "Spectrum"},
-				}},
+			{Key: "palette", Label: "Palette", Type: "text",
+				Default:     "linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)",
+				Description: "Canonical gradient: linear-gradient(<angle>deg, #RRGGBB <pct>%, ...) or a solid #RRGGBB."},
 			{Key: "brightness", Label: "Brightness", Type: "number", Default: 1.0,
 				Min: numberPtr(0), Max: numberPtr(1)},
 			{Key: "speed", Label: "Speed", Type: "number", Default: 1.0,
@@ -207,105 +194,10 @@ func ringManifest() *manifest.Manifest {
 			{Key: "schedule_end", Label: "Active until", Type: "text", Default: "07:00",
 				Description: "HH:MM in the device timezone. Outside the window the app presents a blank frame instead of the effect."},
 		},
-		Interfaces: []manifest.Interface{{
-			Service: ringServiceName, Version: "v1",
-		}},
 	}
 }
 
 func numberPtr(v float64) *float64 { return &v }
-
-func clockInterface() registry.Interface {
-	names := []string{
-		"GetState", "StopwatchStart", "StopwatchPause", "StopwatchResume", "StopwatchReset",
-		"StartTimer", "CancelTimer", "ListTimers", "SetAlarm", "SetAlarmEnabled",
-		"DeleteAlarm", "ListAlarms", "DismissAlert",
-	}
-	methods := make([]registry.Method, 0, len(names))
-	for _, name := range names {
-		methods = append(methods, registry.Method{Name: name})
-	}
-	return registry.Interface{
-		Service: clockServiceName, Version: "v1",
-		Summary:    "Stopwatch, timers and alarms for the built-in segment clock.",
-		Descriptor: clockDescriptorSet, Methods: methods, Docs: clockServiceDocs,
-	}
-}
-
-func ringInterface() registry.Interface {
-	return registry.Interface{
-		Service: ringServiceName, Version: "v1",
-		Summary:    "Current palette-driven effect rendered by the built-in ring app.",
-		Descriptor: ringDescriptorSet,
-		Methods:    []registry.Method{{Name: "GetState"}},
-		Docs:       ringServiceDocs,
-	}
-}
-
-const clockServiceDocs = `# ClockService
-Stopwatch, timer and alarm control for the built-in Clock system app.
-All calls are unary and routed with AppBusService.Call targeting app_id capsula.clock.
-Requests and responses are protobuf JSON (snake_case fields).
-
-## GetState
-Returns local time, the effective timezone, stopwatch, timers, alarms and active alerts.
-
-## StopwatchStart
-Starts a stopwatch at zero when idle; no-op while already running.
-
-## StopwatchPause
-Pauses a running stopwatch and preserves monotonic elapsed time.
-
-## StopwatchResume
-Continues a paused stopwatch. On an idle stopwatch it starts at zero.
-
-## StopwatchReset
-Stops the stopwatch and clears elapsed time.
-
-## StartTimer
-Starts a countdown. duration_ms must be positive. The completion is also
-announced audibly and on the segment/ring display through normal captures.
-
-## CancelTimer
-Cancels a running timer by ID. Unknown IDs return NOT_FOUND.
-
-## ListTimers
-Lists running timers and completed timers whose alert is still active.
-
-## SetAlarm
-Creates an alarm with an empty alarm_id or updates one in place. days_of_week
-bit 0 is Monday through bit 6 Sunday; 0 is a one-shot alarm that disables after
-firing. timezone is an IANA name; empty follows the device timezone. The alarm
-ID "default" is additionally managed by this app's settings.
-
-## SetAlarmEnabled
-Enables or disables an alarm and recomputes its next trigger.
-
-## DeleteAlarm
-Deletes a service-created alarm. The settings-managed "default" alarm cannot be deleted.
-
-## ListAlarms
-Lists alarms with effective timezone and next trigger.
-
-## DismissAlert
-Stops the visible/audible alert for a timer or alarm immediately.
-`
-
-const ringServiceDocs = `# RingService
-Current state of the built-in Ring system app. Calls are unary and routed with
-AppBusService.Call targeting app_id capsula.ring.
-
-## GetState
-Returns the effective effect, palette, brightness, speed, the owned baseline
-presentation ID and whether the baseline is currently lit. State changes are
-made through application settings.
-
-The optional active window (schedule_enabled, schedule_start, schedule_end) is
-evaluated against local wall-clock time in the device timezone. Outside the
-window the app presents an explicit blank frame on its normal baseline
-presentation, so the ring goes dark and returns at the next boundary without
-losing ownership; system and app indications still preempt it as usual.
-`
 
 // --- legacy state migration -------------------------------------------------
 
@@ -314,10 +206,14 @@ losing ownership; system and app indications still preempt it as usual.
 // boot before defaults are seeded, so a migrated empty default does not get
 // replaced by a stale provider hint.
 func (d *Daemon) migrateLegacyState() {
+	d.migrateLegacyFlatAppSettings(clockAppID)
+	d.migrateLegacyFlatAppSettings(ringAppID)
 	d.migrateLegacyDefaults()
 	d.migrateLegacyAppSettings(legacyClockAppID, clockAppID)
 	d.migrateLegacyAppSettings(legacyRingAppID, ringAppID)
 	d.migrateLegacyRingMode()
+	d.migrateLegacyRingPalette()
+	d.migrateLegacyClockAlarms()
 }
 
 func (d *Daemon) migrateLegacyDefaults() {
@@ -368,6 +264,31 @@ func systemAppForResource(d *Daemon, resourceID string) string {
 	return clockAppID
 }
 
+// migrateLegacyFlatAppSettings converts the older deployed layout
+// app-settings/<id>.json into the canonical directory layout once. An existing
+// canonical file is authoritative and is never overwritten; the flat source is
+// left in place so a downgrade still finds its preferences.
+func (d *Daemon) migrateLegacyFlatAppSettings(appID string) {
+	root := filepath.Join(d.cfg.DataDir, "app-settings")
+	flat := filepath.Join(root, appID+".json")
+	canonical := filepath.Join(root, appID, "settings.json")
+	if _, err := os.Stat(canonical); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		d.logs.Warnf(appID, "", "settings migration: %v", err)
+		return
+	}
+	doc, ok := readAppSettingsDoc(flat)
+	if !ok {
+		return
+	}
+	if !writeAppSettingsDoc(canonical, doc) {
+		d.logs.Warnf(appID, "", "could not convert flat settings file")
+		return
+	}
+	d.logs.Infof(appID, "", "converted legacy flat settings file to the canonical layout")
+}
+
 // migrateLegacyAppSettings copies a retired app's settings file into the
 // system app namespace once. An existing destination is authoritative.
 func (d *Daemon) migrateLegacyAppSettings(srcID, dstID string) {
@@ -388,11 +309,7 @@ func (d *Daemon) migrateLegacyAppSettings(srcID, dstID string) {
 		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		d.logs.Warnf(dstID, "", "settings migration: %v", err)
-		return
-	}
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
+	if err := writeFileAtomic(dst, data, 0o600); err != nil {
 		d.logs.Warnf(dstID, "", "settings migration: %v", err)
 		return
 	}
@@ -444,14 +361,241 @@ func (d *Daemon) migrateLegacyRingMode() {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
-	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
+	if err := writeFileAtomic(path, out, 0o600); err != nil {
 		d.logs.Warnf(ringAppID, "", "mode migration: %v", err)
 		return
 	}
 	d.logs.Infof(ringAppID, "", "removed obsolete ring mode setting")
+}
+
+// migrateLegacyClockAlarms converts the retired single-alarm settings into the
+// canonical `alarms` entry list once. Time, recurrence, IANA timezone, one-shot
+// semantics and the enabled state are all preserved: the old weekday bitmask
+// (Monday is bit 0) becomes a dcron day-of-week list, days==0 becomes a daily
+// expression carrying !once, and enabled=false becomes !disabled.
+func (d *Daemon) migrateLegacyClockAlarms() {
+	path := filepath.Join(d.cfg.DataDir, "app-settings", clockAppID, "settings.json")
+	doc, ok := readAppSettingsDoc(path)
+	if !ok {
+		return
+	}
+	legacy := []string{"alarm_label", "alarm_hour", "alarm_minute", "alarm_days", "alarm_timezone", "alarm_enabled"}
+	present := false
+	for _, key := range legacy {
+		if _, ok := doc.Values[key]; ok {
+			present = true
+		}
+	}
+	if !present {
+		return
+	}
+	if _, has := doc.Values["alarms"]; !has {
+		hour, minute, days := 7, 0, 0
+		textInt(doc.Values["alarm_hour"], &hour)
+		textInt(doc.Values["alarm_minute"], &minute)
+		textInt(doc.Values["alarm_days"], &days)
+		if hour < 0 || hour > 23 {
+			hour = 7
+		}
+		if minute < 0 || minute > 59 {
+			minute = 0
+		}
+		var enabled bool
+		if raw, ok := doc.Values["alarm_enabled"]; ok {
+			_ = json.Unmarshal(raw, &enabled)
+		}
+		var zone string
+		if raw, ok := doc.Values["alarm_timezone"]; ok {
+			_ = json.Unmarshal(raw, &zone)
+		}
+		if zone != "" {
+			if _, err := time.LoadLocation(zone); err != nil {
+				d.logs.Warnf(clockAppID, "", "legacy alarm timezone %q is unavailable; alarm will follow the device timezone", zone)
+				zone = ""
+			}
+		}
+		entry := dcron.Entry{
+			Expr: legacyAlarmSchedule(hour, minute, days), Zone: zone,
+			Once: days == 0, Disabled: !enabled,
+		}
+		text, err := json.Marshal(dcron.FormatEntries([]dcron.Entry{entry}))
+		if err == nil {
+			doc.Values["alarms"] = text
+		}
+		var label string
+		if raw, ok := doc.Values["alarm_label"]; ok {
+			_ = json.Unmarshal(raw, &label)
+		}
+		if label == "" {
+			label = "Alarm"
+		}
+		labels := map[string]string{}
+		if raw, ok := doc.Values["alarm_labels"]; ok {
+			var stored string
+			if json.Unmarshal(raw, &stored) == nil && stored != "" {
+				_ = json.Unmarshal([]byte(stored), &labels)
+			}
+		}
+		if _, exists := labels[entry.ID()]; !exists {
+			labels[entry.ID()] = label
+			if encoded, err := json.Marshal(labels); err == nil {
+				if wrapped, err := json.Marshal(string(encoded)); err == nil {
+					doc.Values["alarm_labels"] = wrapped
+				}
+			}
+		}
+	}
+	for _, key := range legacy {
+		delete(doc.Values, key)
+	}
+	if writeAppSettingsDoc(path, doc) {
+		d.logs.Infof(clockAppID, "", "migrated legacy alarm settings to the alarms schedule list")
+	}
+}
+
+// legacyAlarmSchedule builds one five-field expression from the old hour,
+// minute and Monday-first weekday bitmask. days==0 was a one-shot alarm; the
+// caller adds !once so the daily expression fires at its next occurrence and
+// then disables itself.
+func legacyAlarmSchedule(hour, minute, days int) string {
+	if days == 0 {
+		return fmt.Sprintf("%d %d * * *", minute, hour)
+	}
+	dow := make([]string, 0, 7)
+	if days&(1<<6) != 0 {
+		dow = append(dow, "0")
+	}
+	for bit := 0; bit < 6; bit++ {
+		if days&(1<<uint(bit)) != 0 {
+			dow = append(dow, strconv.Itoa(bit+1))
+		}
+	}
+	if len(dow) == 0 {
+		return fmt.Sprintf("%d %d * * *", minute, hour)
+	}
+	return fmt.Sprintf("%d %d * * %s", minute, hour, strings.Join(dow, ","))
+}
+
+// migrateLegacyRingPalette rewrites a named legacy palette to its canonical
+// gradient. Explicit gradient strings are already canonical and are untouched.
+func (d *Daemon) migrateLegacyRingPalette() {
+	path := filepath.Join(d.cfg.DataDir, "app-settings", ringAppID, "settings.json")
+	doc, ok := readAppSettingsDoc(path)
+	if !ok {
+		return
+	}
+	raw, exists := doc.Values["palette"]
+	if !exists {
+		return
+	}
+	var name string
+	if json.Unmarshal(raw, &name) != nil {
+		return
+	}
+	gradient, legacy := legacyPaletteGradients[name]
+	if !legacy {
+		if _, err := ringpalette.Parse(name); err != nil {
+			// A hand-edited malformed value must not block normal startup;
+			// the app falls back to the default and the validator rejects the
+			// next edit until it is corrected.
+			return
+		}
+		return
+	}
+	encoded, err := json.Marshal(gradient)
+	if err != nil {
+		return
+	}
+	doc.Values["palette"] = encoded
+	if writeAppSettingsDoc(path, doc) {
+		d.logs.Infof(ringAppID, "", "migrated legacy palette %q to a canonical gradient", name)
+	}
+}
+
+var legacyPaletteGradients = map[string]string{
+	"aurora":   "linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)",
+	"ocean":    "linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)",
+	"sunset":   "linear-gradient(90deg, #FF7828 0%, #FF3C96 100%)",
+	"ember":    "linear-gradient(90deg, #FF2814 0%, #FFAA14 100%)",
+	"mono":     "linear-gradient(90deg, #FFFFFF 0%, #969696 100%)",
+	"spectrum": "linear-gradient(90deg, #FF46D2 0%, #46C8FF 100%)",
+}
+
+type appSettingsDoc struct {
+	Revision uint64                     `json:"revision"`
+	Values   map[string]json.RawMessage `json:"values"`
+}
+
+func readAppSettingsDoc(path string) (appSettingsDoc, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return appSettingsDoc{}, false
+	}
+	var doc appSettingsDoc
+	if json.Unmarshal(data, &doc) != nil || doc.Values == nil {
+		return appSettingsDoc{}, false
+	}
+	return doc, true
+}
+
+func writeAppSettingsDoc(path string, doc appSettingsDoc) bool {
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return false
+	}
+	if err := writeFileAtomic(path, out, 0o600); err != nil {
+		return false
+	}
+	return true
+}
+
+// writeFileAtomic replaces path with data using a same-directory temp file,
+// fsync and rename. A crash during a migration can therefore never truncate an
+// existing settings file into an unparseable one.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+	return nil
+}
+
+func textInt(raw json.RawMessage, out *int) {
+	if len(raw) == 0 {
+		return
+	}
+	var n int64
+	if json.Unmarshal(raw, &n) == nil {
+		*out = int(n)
+	}
 }
 
 // decodeSetting unmarshals one raw setting value from the app store.

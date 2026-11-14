@@ -36,10 +36,16 @@ type provider struct {
 	revision uint64
 	changed  chan struct{}
 	bt       *capsula.BluetoothMediaState
+
+	tracks []string
+	track  int
 }
 
 func newProvider(ctx context.Context, client *capsula.Client) *provider {
-	return &provider{ctx: ctx, client: client, changed: make(chan struct{})}
+	return &provider{
+		ctx: ctx, client: client, changed: make(chan struct{}),
+		tracks: []string{"Aurora", "Borealis", "Cirrus"},
+	}
 }
 
 func (p *provider) localStatusLocked() *mediav1.PlayerStatus {
@@ -61,8 +67,8 @@ func (p *provider) localStatusLocked() *mediav1.PlayerStatus {
 		},
 		AppName:    "Media",
 		SourceName: "Fixture playlist",
-		MediaName:  proto.String("Aurora — Capsula"),
-		Title:      proto.String("Aurora"),
+		MediaName:  proto.String(p.localTitleLocked() + " — Capsula"),
+		Title:      proto.String(p.localTitleLocked()),
 		Artist:     proto.String("Capsula"),
 		Album:      proto.String("Capsula samples"),
 		Revision:   p.revision,
@@ -169,6 +175,25 @@ func (p *provider) pause() {
 	p.notifyLocked()
 }
 
+func (p *provider) localTitleLocked() string {
+	if len(p.tracks) == 0 {
+		return "Aurora"
+	}
+	return p.tracks[p.track%len(p.tracks)]
+}
+
+// skip moves the fixture playlist so next/previous have an observable public
+// Track/Title outcome, not just an accepted command.
+func (p *provider) skip(delta int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.tracks) == 0 {
+		return
+	}
+	p.track = (p.track + delta + len(p.tracks)) % len(p.tracks)
+	p.notifyLocked()
+}
+
 func (p *provider) startBluetooth(ctx context.Context) {
 	stream, err := p.client.WatchBluetoothMedia(ctx)
 	if err != nil {
@@ -255,6 +280,7 @@ func (p *provider) register(client *capsula.Client) {
 			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaNext)))
 			return
 		}
+		p.skip(1)
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "next"}))
 	})
 	client.Handle(service, "SkipPrevious", func(ctx context.Context, call *capsula.ServerCall) {
@@ -263,6 +289,7 @@ func (p *provider) register(client *capsula.Client) {
 			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaPrevious)))
 			return
 		}
+		p.skip(-1)
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "previous"}))
 	})
 }

@@ -172,6 +172,13 @@ func validateDescriptorSet(data []byte) error {
 	return nil
 }
 
+// MethodsForService exposes the method list for one service in a serialized
+// FileDescriptorSet. Compiled-in providers build their discovery metadata from
+// generated descriptors at runtime and use this to match installed packages.
+func MethodsForService(data []byte, serviceName string) []Method {
+	return methodsForService(data, serviceName)
+}
+
 func methodsForService(data []byte, serviceName string) []Method {
 	var set descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(data, &set); err != nil {

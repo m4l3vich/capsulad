@@ -311,10 +311,11 @@ type simTouch struct {
 func newSimTouch() *simTouch {
 	return &simTouch{caps: TouchCaps{
 		PartialGestures:  true,
+		FullPanel:        true,
 		FullRaw:          true,
 		Coordinates:      true,
 		Pressure:         false,
-		SemanticGestures: []string{"tap", "double_tap", "hold", "swipe_left", "swipe_right", "swipe_up", "swipe_down", "primary"},
+		SemanticGestures: []string{"tap", "double_tap", "hold", "swipe_left", "swipe_right", "swipe_up", "swipe_down", "circle_cw", "circle_ccw", "primary"},
 	}}
 }
 

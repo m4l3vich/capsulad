@@ -142,7 +142,10 @@ type AudioDevice interface {
 
 // TouchCaps is the discovered gesture/raw surface for one panel.
 type TouchCaps struct {
-	PartialGestures  bool
+	PartialGestures bool
+	// FullPanel means full capture can receive every panel key and inferred
+	// gesture even if raw coordinates or contact samples are unavailable.
+	FullPanel        bool
 	FullRaw          bool
 	Coordinates      bool
 	Pressure         bool
@@ -181,9 +184,15 @@ type GestureEvent struct {
 
 type InputEvent struct {
 	MonotonicNS uint64
-	Key         *KeyEvent
-	Report      *RawReport
-	Gesture     *GestureEvent
+	// EventAgeNS is how long before the backend emitted this event the kernel
+	// recorded it, measured on a clock the backend actually supports. The
+	// framework anchors it to its own monotonic clock so a late read does not
+	// collapse real inter-contact gaps or restart a hold deadline. Zero means
+	// the backend has no usable kernel timestamp and read time is authoritative.
+	EventAgeNS uint64
+	Key        *KeyEvent
+	Report     *RawReport
+	Gesture    *GestureEvent
 }
 
 type TouchDevice interface {

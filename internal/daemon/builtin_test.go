@@ -12,12 +12,17 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
+	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
 	"capsulad/internal/backend"
+	"capsulad/internal/dcron"
 	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
+	"capsulad/internal/ringpalette"
 	"capsulad/internal/routing"
+	"capsulad/internal/settings"
 	"capsulad/internal/supervisor"
 )
 
@@ -87,7 +92,7 @@ func TestBuiltinSystemAppsWithoutInstalledPackages(t *testing.T) {
 			t.Fatalf("system app %s is not marked built-in", id)
 		}
 		if len(app.Interfaces) == 0 {
-			t.Fatalf("system app %s publishes no interfaces", id)
+			t.Fatalf("system app %s does not publish its public contract", id)
 		}
 	}
 	if app, _ := d.reg.Get(clockAppID); !hasProvide(app.Manifest.Provides, "segment_display_provider") {
@@ -265,7 +270,16 @@ func TestBuiltinClockMigratesLegacySettings(t *testing.T) {
 }
 
 func TestRingEffectsMapSettings(t *testing.T) {
-	r := &builtinRing{effect: "breathe", palette: "ocean", brightness: 0.5, speed: 1}
+	mustGradient := func(text string) ringpalette.Gradient {
+		t.Helper()
+		g, err := ringpalette.Parse(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	ocean := mustGradient("linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)")
+	r := &builtinRing{effect: "breathe", palette: ocean.Format(), gradient: ocean, brightness: 0.5, speed: 1}
 	id, params, sig := r.contentLocked()
 	if id != "system.ring.breathe" {
 		t.Fatalf("breathe mapped to %q", id)
@@ -275,8 +289,10 @@ func TestRingEffectsMapSettings(t *testing.T) {
 	}
 	firstSig := sig
 
+	sunset := mustGradient("linear-gradient(90deg, #FF7828 0%, #FF3C96 100%)")
 	r.effect = "comet"
-	r.palette = "sunset"
+	r.palette = sunset.Format()
+	r.gradient = sunset
 	id, params, sig = r.contentLocked()
 	if id != "system.ring.comet" {
 		t.Fatalf("comet mapped to %q", id)
@@ -288,21 +304,28 @@ func TestRingEffectsMapSettings(t *testing.T) {
 		t.Fatal("comet head and tail use the same palette color")
 	}
 
+	mono := mustGradient("linear-gradient(90deg, #FFFFFF 0%, #969696 100%)")
 	r.effect = "rainbow"
-	r.palette = "mono"
+	r.palette = mono.Format()
+	r.gradient = mono
 	id, params, _ = r.contentLocked()
 	if id != "system.ring.rainbow" {
 		t.Fatalf("rainbow mapped to %q", id)
 	}
-	if sat, _ := params["saturation"].(float64); sat != 0 {
-		t.Fatalf("mono rainbow saturation = %v, want 0", sat)
+	for _, key := range []string{"color", "color_b", "color_c"} {
+		c, ok := params[key].(backend.RGB)
+		if !ok || c.R != c.G || c.G != c.B {
+			t.Fatalf("mono rainbow %s = %#v, want a grayscale palette colour", key, params[key])
+		}
 	}
 
 	if _, ok := presets.Lookup("system.ring.sparkle"); !ok {
 		t.Fatal("sparkle preset is not in the catalog")
 	}
+	aurora := mustGradient("linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)")
 	r.effect = "sparkle"
-	r.palette = "aurora"
+	r.palette = aurora.Format()
+	r.gradient = aurora
 	r.brightness = 1
 	id, _, _ = r.contentLocked()
 	if id != "system.ring.sparkle" {
@@ -344,7 +367,9 @@ func testClockTimes(t *testing.T, d *Daemon) (app *builtinClock, advance func(ti
 		app = d.builtins.clock
 		app.mu.Lock()
 		defer app.mu.Unlock()
-		return app.running
+		// Wait for the initial settings apply so a later watcher snapshot
+		// cannot overwrite the alarm schedule installed by the test.
+		return app.running && app.settingsLoaded
 	})
 	var wall atomic.Int64
 	var mono atomic.Int64
@@ -353,6 +378,11 @@ func testClockTimes(t *testing.T, d *Daemon) (app *builtinClock, advance func(ti
 	app.mu.Lock()
 	app.now = func() time.Time { return time.UnixMilli(wall.Load()).UTC() }
 	app.mono = func() uint64 { return uint64(mono.Load()) }
+	// Alarm schedules are evaluated in the device zone. The simulated wall
+	// clock is UTC, so pin the device zone to make firing deterministic on
+	// hosts with any time.Local.
+	app.deviceTZ = "UTC"
+	app.loc = time.UTC
 	app.mu.Unlock()
 	return app, func(step time.Duration) {
 		wall.Add(step.Milliseconds())
@@ -360,22 +390,44 @@ func testClockTimes(t *testing.T, d *Daemon) (app *builtinClock, advance func(ti
 	}
 }
 
-func TestClockServiceStopwatchSemantics(t *testing.T) {
+// setTestAlarms applies the canonical alarms setting synchronously, without
+// waiting for the app-settings watcher goroutine.
+func setTestAlarms(t *testing.T, app *builtinClock, exprs ...string) {
+	t.Helper()
+	raw, err := json.Marshal(dcron.FormatList(exprs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.applySettings(0, []settings.AppSettingView{{Key: "alarms", Value: string(raw)}})
+}
+
+// setTestAlarmEntries applies canonical entries (including !once / @zone /
+// !disabled) synchronously, without waiting for the settings watcher.
+func setTestAlarmEntries(t *testing.T, app *builtinClock, entries ...dcron.Entry) {
+	t.Helper()
+	raw, err := json.Marshal(dcron.FormatEntries(entries))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.applySettings(0, []settings.AppSettingView{{Key: "alarms", Value: string(raw)}})
+}
+
+func TestBuiltinClockStopwatchSemantics(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
 	info := app.stopwatchCommand("StopwatchStart")
-	if info.State != clockv1.StopwatchStatus_STOPWATCH_STATUS_RUNNING {
-		t.Fatalf("state = %v", info.State)
+	if info.Status != clockv1.StopwatchStatus_STOPWATCH_STATUS_RUNNING {
+		t.Fatalf("state = %v", info.Status)
 	}
 	advance(2500 * time.Millisecond)
 	info = app.stopwatchCommand("StopwatchPause")
-	if info.State != clockv1.StopwatchStatus_STOPWATCH_STATUS_PAUSED || info.ElapsedMs != 2500 {
+	if info.Status != clockv1.StopwatchStatus_STOPWATCH_STATUS_PAUSED || info.ElapsedMs != 2500 {
 		t.Fatalf("paused = %+v", info)
 	}
 	advance(5 * time.Second)
 	info = app.stopwatchCommand("StopwatchResume")
-	if info.State != clockv1.StopwatchStatus_STOPWATCH_STATUS_RUNNING || info.ElapsedMs != 2500 {
+	if info.Status != clockv1.StopwatchStatus_STOPWATCH_STATUS_RUNNING || info.ElapsedMs != 2500 {
 		t.Fatalf("resumed = %+v", info)
 	}
 	advance(500 * time.Millisecond)
@@ -384,12 +436,12 @@ func TestClockServiceStopwatchSemantics(t *testing.T) {
 		t.Fatalf("elapsed = %d, want 3000", state.Stopwatch.ElapsedMs)
 	}
 	info = app.stopwatchCommand("StopwatchReset")
-	if info.State != clockv1.StopwatchStatus_STOPWATCH_STATUS_IDLE || info.ElapsedMs != 0 {
+	if info.Status != clockv1.StopwatchStatus_STOPWATCH_STATUS_IDLE || info.ElapsedMs != 0 {
 		t.Fatalf("reset = %+v", info)
 	}
 }
 
-func TestClockServiceTimerCompletionAndCancel(t *testing.T) {
+func TestBuiltinClockTimerCompletionAndCancel(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
@@ -433,22 +485,28 @@ func TestClockServiceTimerCompletionAndCancel(t *testing.T) {
 	}
 }
 
-func TestAlarmNextTriggerHandlesWeekdaysAndDST(t *testing.T) {
+func TestAlarmScheduleHandlesWeekdaysAndDST(t *testing.T) {
 	ny, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		t.Skipf("timezone database unavailable: %v", err)
 	}
 	// Thursday 2026-11-12 06:00 EST.
 	now := time.Date(2026, 11, 12, 6, 0, 0, 0, ny)
-	daily := &clockAlarm{hour: 7, minute: 0, enabled: true}
-	next := nextAlarmTrigger(daily, now, ny)
+	daily, err := dcron.Parse("0 7 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := daily.Next(now, ny)
 	if !next.Equal(time.Date(2026, 11, 12, 7, 0, 0, 0, ny)) {
 		t.Fatalf("daily next = %v", next)
 	}
 
-	fridayBit := uint8(1 << 4) // bit 0 Monday, so Friday is bit 4
-	weekly := &clockAlarm{hour: 7, minute: 0, enabled: true, days: fridayBit}
-	next = nextAlarmTrigger(weekly, now, ny)
+	// Friday is 5 in five-field dcron (0 and 7 are Sunday).
+	weekly, err := dcron.Parse("0 7 * * 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next = weekly.Next(now, ny)
 	if next.Weekday() != time.Friday {
 		t.Fatalf("weekly next weekday = %v", next.Weekday())
 	}
@@ -456,85 +514,74 @@ func TestAlarmNextTriggerHandlesWeekdaysAndDST(t *testing.T) {
 		t.Fatalf("weekly next = %v", next)
 	}
 
-	// 02:30 does not exist on 2026-03-08 in New York. The alarm must still fire
-	// at the first valid instant after the gap instead of being skipped.
+	// 02:30 does not exist on 2026-03-08 in New York. The next matching wall
+	// time is the following day rather than a nonexistent instant.
+	gap, err := dcron.Parse("30 2 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
 	gapNow := time.Date(2026, 3, 8, 1, 0, 0, 0, ny)
-	gap := &clockAlarm{hour: 2, minute: 30, enabled: true}
-	next = nextAlarmTrigger(gap, gapNow, ny)
+	next = gap.Next(gapNow, ny)
 	if next.IsZero() || !next.After(gapNow) {
 		t.Fatalf("gap next = %v", next)
 	}
-	if next.Hour() != 3 || next.Minute() != 0 {
-		t.Fatalf("gap normalized to %v, want 03:00 (first valid instant)", next)
+	if next.Hour() != 2 || next.Minute() != 30 {
+		t.Fatalf("gap next = %v, want 02:30 on the next real day", next)
 	}
 
-	// A disabled alarm and a zone-less alarm that cannot load still yield an
-	// empty trigger rather than a bogus instant.
-	disabled := &clockAlarm{hour: 7, enabled: false}
-	if !nextAlarmTrigger(disabled, now, ny).IsZero() {
-		t.Fatal("disabled alarm returned a trigger")
-	}
-	if !nextAlarmTrigger(daily, now, nil).IsZero() {
-		t.Fatal("nil location returned a trigger")
-	}
-
-	// A zone-specific alarm is computed in that zone, not the caller's.
-	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	// A weekday list matches only the listed days.
+	listed, err := dcron.Parse("0 7 * * 1,3,5")
 	if err != nil {
-		t.Skipf("timezone database unavailable: %v", err)
+		t.Fatal(err)
 	}
-	alarm := &clockAlarm{hour: 9, minute: 0, enabled: true, tz: "Asia/Tokyo"}
-	next = nextAlarmTrigger(alarm, now, tokyo)
-	if got := next.In(tokyo).Format("15:04"); got != "09:00" {
-		t.Fatalf("Tokyo trigger = %s", got)
+	if !listed.Matches(time.Date(2026, 11, 13, 7, 0, 0, 0, ny), ny) {
+		t.Fatal("Friday did not match a Mon/Wed/Fri list")
+	}
+	if listed.Matches(time.Date(2026, 11, 12, 7, 0, 0, 0, ny), ny) {
+		t.Fatal("Thursday matched a Mon/Wed/Fri list")
+	}
+	if listed.Matches(time.Date(2026, 11, 14, 7, 0, 0, 0, ny), ny) {
+		t.Fatal("Saturday matched a Mon/Wed/Fri list")
 	}
 }
 
-func TestClockServiceAlarmTriggerAndDisable(t *testing.T) {
+func TestBuiltinClockAlarmTriggerAndDismiss(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
-	base := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
-	info, err := app.setAlarm(&clockv1.SetAlarmRequest{
-		AlarmId: "svc", Label: "Tea", Hour: uint32(base.Hour()), Minute: uint32(base.Minute() + 1),
-		DaysOfWeek: 0, Timezone: "UTC", Enabled: true,
-	})
-	if err != nil {
-		t.Fatalf("set alarm: %v", err)
+	setTestAlarms(t, app, "1 9 * * *")
+	alarms := app.listAlarms().GetAlarms()
+	if len(alarms) != 1 || alarms[0].GetNextTriggerUnixMs() == 0 {
+		t.Fatalf("alarms = %+v", alarms)
 	}
-	if info.NextTriggerUnixMs == 0 {
-		t.Fatal("alarm has no next trigger")
-	}
-	advance(2 * time.Minute)
+	advance(time.Minute)
 	app.tick()
 
 	state := app.state()
 	if len(state.ActiveAlerts) != 1 || state.ActiveAlerts[0].Kind != clockv1.AlertKind_ALERT_KIND_ALARM {
 		t.Fatalf("alarm alert = %+v", state.ActiveAlerts)
 	}
-	app.mu.Lock()
-	alarm := app.alarms["svc"]
-	fired := alarm.lastTriggeredMS != 0
-	enabled := alarm.enabled
-	app.mu.Unlock()
-	if !fired || enabled {
-		t.Fatalf("one-shot alarm fired=%v enabled=%v", fired, enabled)
+	if state.GetAlarms()[0].GetRinging() == false || state.GetAlarms()[0].GetAlertId() == "" {
+		t.Fatalf("alarm did not report its ringing alert: %+v", state.GetAlarms())
 	}
-	if _, err := app.setAlarmEnabled("svc", true); err != nil {
-		t.Fatalf("enable: %v", err)
+	// A dcron alarm is recurring: firing does not disable it.
+	if state.GetAlarms()[0].GetNextTriggerUnixMs() == 0 {
+		t.Fatal("recurring alarm lost its next trigger")
 	}
-	app.mu.Lock()
-	reenabled := app.alarms["svc"].enabled
-	app.mu.Unlock()
-	if !reenabled {
-		t.Fatal("alarm did not re-enable")
+	// The same minute must not queue a second alert across ticks.
+	app.tick()
+	if got := app.state(); len(got.ActiveAlerts) != 1 {
+		t.Fatalf("ticks duplicated the alarm alert: %+v", got.ActiveAlerts)
 	}
 	if !app.dismissAlert("") {
 		t.Fatal("alarm alert was not dismissed")
 	}
+	if got := app.state(); len(got.ActiveAlerts) != 0 || got.GetAlarms()[0].GetRinging() {
+		t.Fatalf("state after dismiss = %+v", got)
+	}
 }
 
-func TestClockServiceRPCAndRingState(t *testing.T) {
+func TestBuiltinPublicContractState(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	waitFor(t, 5*time.Second, "clock app running", func() bool {
 		if d.builtins == nil || d.builtins.clock == nil {
@@ -544,15 +591,95 @@ func TestClockServiceRPCAndRingState(t *testing.T) {
 		defer d.builtins.clock.mu.Unlock()
 		return d.builtins.clock.running
 	})
-	payloads, err := d.builtins.clock.handleCall(context.Background(), clockServiceName, "GetState", nil)
-	if err != nil {
+	var payloads [][]byte
+	emit := func(payload []byte) error {
+		payloads = append(payloads, payload)
+		return nil
+	}
+	ctx := context.Background()
+	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "GetState", nil, emit); err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	if len(payloads) != 1 || !strings.Contains(string(payloads[0]), "\"local_time_rfc3339\"") {
-		t.Fatalf("GetState payload = %s", payloads)
+	if err := d.builtins.clock.handleCall(ctx, "capsula.internal.clock.v1.ClockService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("retired private ClockService name code = %v, want Unimplemented", status.Code(err))
 	}
-	if _, err := d.builtins.clock.handleCall(context.Background(), clockServiceName, "StartTimer", []byte(`{}`)); status.Code(err) != codes.InvalidArgument {
+	if len(payloads) != 1 {
+		t.Fatalf("GetState payload count = %d, want 1", len(payloads))
+	}
+	var got clockv1.ClockState
+	if err := proto.Unmarshal(payloads[0], &got); err != nil {
+		t.Fatalf("GetState is not binary protobuf: %v", err)
+	}
+	if got.GetLocalTimeRfc3339() == "" || got.GetTimezone() == "" {
+		t.Fatalf("GetState payload = %+v", &got)
+	}
+	// An empty request message is a zero duration; a protojson body is not the
+	// public wire and must be rejected.
+	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "StartTimer", nil, emit); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("empty StartTimer code = %v", status.Code(err))
+	}
+	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "StartTimer", []byte(`{}`), emit); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("JSON StartTimer code = %v", status.Code(err))
+	}
+
+	// A non-empty binary request must decode and reach the real handler. The
+	// device defect was exactly this path: a JSON-only decoder rejected it.
+	payloads = nil
+	startReq, err := proto.Marshal(&clockv1.StartTimerRequest{DurationMs: 2000, Label: "tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "StartTimer", startReq, emit); err != nil {
+		t.Fatalf("binary StartTimer: %v", err)
+	}
+	var timer clockv1.Timer
+	if len(payloads) != 1 || proto.Unmarshal(payloads[0], &timer) != nil {
+		t.Fatalf("StartTimer payload = %v", payloads)
+	}
+	if timer.GetDurationMs() != 2000 || timer.GetLabel() != "tea" || timer.GetStatus() != clockv1.TimerStatus_TIMER_STATUS_RUNNING {
+		t.Fatalf("StartTimer response = %+v", &timer)
+	}
+	cancelReq, err := proto.Marshal(&clockv1.CancelTimerRequest{TimerId: timer.GetTimerId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads = nil
+	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "CancelTimer", cancelReq, emit); err != nil {
+		t.Fatalf("binary CancelTimer: %v", err)
+	}
+	var cancelled clockv1.Timer
+	if len(payloads) != 1 || proto.Unmarshal(payloads[0], &cancelled) != nil {
+		t.Fatalf("CancelTimer payload = %v", payloads)
+	}
+	if cancelled.GetStatus() != clockv1.TimerStatus_TIMER_STATUS_CANCELLED {
+		t.Fatalf("CancelTimer response = %+v", &cancelled)
+	}
+
+	// WatchState must emit its snapshot before any transition arrives.
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	watched := make(chan []byte, 4)
+	go func() {
+		_ = d.builtins.clock.handleCall(watchCtx, clockServiceName, "WatchState", nil,
+			func(payload []byte) error {
+				select {
+				case watched <- payload:
+				default:
+				}
+				return nil
+			})
+	}()
+	select {
+	case payload := <-watched:
+		var state clockv1.ClockState
+		if err := proto.Unmarshal(payload, &state); err != nil {
+			t.Fatalf("watch snapshot is not binary protobuf: %v", err)
+		}
+		if state.GetTimezone() == "" || state.GetRevision() == 0 {
+			t.Fatalf("watch snapshot = %+v", &state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchState did not emit an initial snapshot")
 	}
 
 	waitFor(t, 5*time.Second, "ring app running", func() bool {
@@ -563,19 +690,19 @@ func TestClockServiceRPCAndRingState(t *testing.T) {
 		defer d.builtins.ring.mu.Unlock()
 		return d.builtins.ring.running
 	})
-	payloads, err = d.builtins.ring.handleCall(context.Background(), ringServiceName, "GetState", nil)
-	if err != nil {
+	payloads = nil
+	if err := d.builtins.ring.handleCall(ctx, ringServiceName, "GetState", nil, emit); err != nil {
 		t.Fatalf("ring GetState: %v", err)
 	}
-	var ring struct {
-		Effect  string `json:"effect"`
-		Palette string `json:"palette"`
+	if err := d.builtins.ring.handleCall(ctx, "capsula.internal.ring.v1.RingService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("retired private RingService name code = %v, want Unimplemented", status.Code(err))
 	}
-	if err := json.Unmarshal(payloads[0], &ring); err != nil {
-		t.Fatalf("ring state json: %v", err)
+	var ring ringv1.RingState
+	if err := proto.Unmarshal(payloads[0], &ring); err != nil {
+		t.Fatalf("ring state is not binary protobuf: %v", err)
 	}
-	if ring.Effect == "" || ring.Palette == "" {
-		t.Fatalf("ring state = %+v", ring)
+	if ring.GetEffect() == "" || !strings.HasPrefix(ring.GetPalette(), "linear-gradient(") {
+		t.Fatalf("ring state = %+v", &ring)
 	}
 }
 

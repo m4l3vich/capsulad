@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,11 +134,7 @@ func TestDumbAssistantSpeechEndedReply(t *testing.T) {
 		})
 		waitAssistantListening(t, d, attempt)
 
-		sim, ok := d.dev.(*backend.Simulator)
-		if !ok {
-			t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
-		}
-		stopTone := startToneInjector(sim, 100)
+		stopSpeech := startSpeechInjector(t, d)
 		waitFor(t, 2*time.Second, "teal input-level ring", func() bool {
 			return ringShowsTeal(d, 30)
 		})
@@ -147,7 +144,7 @@ func TestDumbAssistantSpeechEndedReply(t *testing.T) {
 		// Let voiced time exceed minSpeech (140 ms) before the injector stops;
 		// otherwise the short burst is rejected and no end-of-speech follows.
 		time.Sleep(300 * time.Millisecond)
-		stopTone()
+		stopSpeech()
 
 		waitSpeechEnd(t, d, attempt)
 		speechEnded := time.Now()
@@ -189,6 +186,206 @@ func TestDumbAssistantSpeechEndedReply(t *testing.T) {
 	if got := strings.Count(text, "speech ended"); got != 2 {
 		t.Fatalf("log shows %d speech ends, want 2:\n%s", got, text)
 	}
+}
+
+// Intended contract for the reported regression — a substantial colored room
+// (fan/AC hum plus low-frequency rumble whose level swings) around a real
+// utterance:
+//
+//	trigger: the wakeword activation, then a voice in the 300-3400 Hz band whose
+//	  level is modulated, mixed over that room.
+//	feedback: teal level ring while listening; after the voice stops, 700 ms of
+//	  unmodulated room audio ends listening and starts the blue delay chase.
+//	owner: the assistant's turn; capture, ring and conversation are released at
+//	  the end of the turn.
+//	interruption: the same gap/mute/dismiss/cap behaviour as any turn.
+//	dismissal: room audio is never an utterance; a noise-only hypothesis is
+//	  rejected without a reply.
+//	final state: exactly one reply, every stream released, microphone closed.
+//
+// The old detector needed a high zero-crossing rate to call audio stationary
+// background, so this room stayed "speech" until the listen cap.
+func TestDumbAssistantEndsAfterSpeechOverColoredRoom(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+
+	// One timeline: the room already running before the activation (so the
+	// daemon's pre-roll carries the room, as it does in the real room), then
+	// the utterance over the same room, then the room again. 1.2 s pre-roll +
+	// 0.6 s room + 1.2 s speech + 3 s room.
+	room := roomNoisePCMFrames(16000, 16000)
+	speech := speechPCMFrames(16000, 16000*12/10)
+	over := mixPCMStreams(speech, roomNoisePCMFrames(16000, len(speech)/2))
+	timeline := append(append(append([]byte{}, room[:16000*2]...), room[:16000*2*6/10]...), over...)
+	timeline = append(timeline, roomNoisePCMFrames(16000, 16000*3)...)
+	stopSpeech := startPCMInjector(t, d, timeline)
+	defer stopSpeech()
+	time.Sleep(1100 * time.Millisecond)
+
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
+	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream open", func() bool {
+		return inputOpen(d, appID)
+	})
+	waitAssistantListening(t, d, 1)
+
+	waitFor(t, 3*time.Second, "speech detected over the room", func() bool {
+		return strings.Contains(logText(d), "speech detected")
+	})
+	waitSpeechEnd(t, d, 1)
+	if strings.Contains(logText(d), "steady room noise; speech hypothesis rejected") &&
+		!strings.Contains(logText(d), "speech ended") {
+		t.Fatalf("the room was rejected as noise instead of ending real speech:\n%s", logText(d))
+	}
+	waitFor(t, 5*time.Second, "reply playback open", func() bool {
+		return playbackOpen(d, appID)
+	})
+	waitFor(t, 5*time.Second, "reply playback finished", func() bool {
+		return !playbackOpen(d, appID)
+	})
+	waitFor(t, 3*time.Second, "ring released", func() bool {
+		return strings.Contains(logText(d), "ring released")
+	})
+	waitFor(t, 3*time.Second, "microphone stream closed", func() bool {
+		return !inputOpen(d, appID)
+	})
+	if got := strings.Count(logText(d), "playing reply for activation="); got != 1 {
+		t.Fatalf("log shows %d replies, want 1:\n%s", got, logText(d))
+	}
+}
+
+// Colored room noise with no utterance must never produce a reply. The turn is
+// bounded by the no-speech window or the listen cap, and every stream is
+// released.
+func TestDumbAssistantColoredRoomNoiseProducesNoReply(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	// Fresh daemon and app: no capture has existed yet, so the drop total (and
+	// any retained snapshot) must already be zero before a capture is created.
+	// This baseline cannot hide an unobserved early drop.
+	if drops := d.audio.CaptureDroppedFrames(appID); drops != 0 {
+		t.Fatalf("fresh app already reports %d dropped frames before any capture", drops)
+	}
+	// The fan/AC room runs before the activation so the pre-roll carries it.
+	stopRoom := startPCMInjectorConsumed(t, d, roomNoisePCMFrames(16000, 16000*6))
+	defer stopRoom()
+	time.Sleep(1100 * time.Millisecond)
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
+	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream open", func() bool {
+		return inputOpen(d, appID)
+	})
+	waitAssistantListening(t, d, 1)
+	// Cumulative capture drops for this app: the negative must prove the app
+	// heard a continuous room, not that its stream was dropped into an abort.
+	// The active count must still be zero (no drop between capture creation and
+	// this read); the post-close read below must also be zero.
+	if dropsBefore := d.audio.CaptureDroppedFrames(appID); dropsBefore != 0 {
+		t.Fatalf("the app capture dropped %d frames before the room was observed", dropsBefore)
+	}
+
+	// Structural evidence that the app actually heard the room: its teal level
+	// ring is driven by the PCM it receives. A capture that dropped its stream
+	// before classification would leave the level at silence and could satisfy
+	// the no-speech/cap exit vacuously.
+	waitFor(t, 3*time.Second, "teal level from the room audio", func() bool {
+		return ringShowsTeal(d, 20)
+	})
+
+	// The turn must end by the app's own no-speech/cap path, observed
+	// structurally: the app closes its capture and releases the ring. A reply
+	// would appear as an active playback stream instead.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if playbackOpen(d, appID) {
+			stopRoom()
+			t.Fatalf("colored room noise produced reply playback; daemon log:\n%s", logText(d))
+		}
+		if !inputOpen(d, appID) {
+			break
+		}
+		if time.Now().After(deadline) {
+			stopRoom()
+			t.Fatalf("noise-only turn did not finish (capture still open); daemon log:\n%s", logText(d))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stopRoom()
+	// Read the capture-drop total after the capture is gone: the accessor
+	// retains the removed capture's cumulative total for its app, so a drop in
+	// the final chunks before close cannot be lost to polling. The negative is
+	// valid only when the app heard a continuous room (total zero).
+	if drops := d.audio.CaptureDroppedFrames(appID); drops != 0 {
+		t.Fatalf("the app capture dropped %d frames during the noise-only turn", drops)
+	}
+	if playbackOpen(d, appID) {
+		t.Fatal("colored room noise produced reply playback")
+	}
+	if owner := d.router.Current("light.ring.main").SelectedAppID; owner == appID {
+		t.Fatal("ring ownership was not released after the noise-only turn")
+	}
+	if _, ok := d.sup.ReadyRun(appID); !ok {
+		t.Fatal("the assistant is no longer ready after the noise-only turn")
+	}
+}
+
+// The simulator answers an empty capture queue with a silent read, so a starved
+// producer splices silence into the room stream. That splice is the only
+// nondeterminism a loaded host can add to these acoustic scenarios, and it must
+// never become a reply: the pause is a level drop, the room is rejected, and the
+// turn ends through the app's own safety window.
+//
+// Trigger: sustained colored room whose producer stalls 250 ms after 1 s.
+// Feedback: teal listening. Owner: the assistant turn. Interruption: the app's
+// no-speech window or 10 s cap. Final state: no reply, streams released.
+func TestDumbAssistantRoomSpliceDoesNotReply(t *testing.T) {
+	d, appID := startDumbAssistant(t)
+	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
+		t.Fatal("simulator wakeword trigger failed")
+	}
+	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
+		return d.router.Current("light.ring.main").SelectedAppID == appID
+	})
+	waitFor(t, 3*time.Second, "microphone stream open", func() bool {
+		return inputOpen(d, appID)
+	})
+	waitAssistantListening(t, d, 1)
+
+	stopRoom := startPCMInjectorStalled(t, d, roomNoisePCMFrames(16000, 16000*6), 50, 250*time.Millisecond)
+	defer stopRoom()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if playbackOpen(d, appID) || strings.Contains(logText(d), "playing reply for activation=") {
+			stopRoom()
+			t.Fatalf("a room-stream splice produced a reply; daemon log:\n%s", logText(d))
+		}
+		text := logText(d)
+		if strings.Contains(text, "no speech within") || strings.Contains(text, "listen window elapsed") {
+			break
+		}
+		if time.Now().After(deadline) {
+			stopRoom()
+			t.Fatalf("room-splice turn did not finish; daemon log:\n%s", text)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stopRoom()
+	if strings.Contains(logText(d), "playing reply for activation=") {
+		t.Fatal("room-stream splice produced a reply log entry")
+	}
+	waitFor(t, 3*time.Second, "ring released", func() bool {
+		return strings.Contains(logText(d), "ring released")
+	})
+	waitFor(t, 3*time.Second, "microphone stream closed", func() bool {
+		return !inputOpen(d, appID)
+	})
 }
 
 // TestDumbAssistantNoSpeechCancels proves silence never becomes a reply and
@@ -268,7 +465,7 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "voice", Pressed: true}})
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "play_pause", Pressed: true}})
 	waitFor(t, 3*time.Second, "ring captured for listening", func() bool {
 		return d.router.Current("light.ring.main").SelectedAppID == appID
 	})
@@ -276,12 +473,8 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 		return inputOpen(d, appID)
 	})
 	waitAssistantListening(t, d, 1)
-	sim, ok := d.dev.(*backend.Simulator)
-	if !ok {
-		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
-	}
-	stopTone := startToneInjector(sim, 200)
-	defer stopTone()
+	stopSpeech := startSpeechInjector(t, d)
+	defer stopSpeech()
 	waitFor(t, 2*time.Second, "speech detected", func() bool {
 		return strings.Contains(logText(d), "speech detected")
 	})
@@ -289,7 +482,7 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	// key remains held. A turn that ignored the hold-to-talk mode would end on
 	// the 700 ms silence and open its reply after the configured delay.
 	time.Sleep(300 * time.Millisecond)
-	stopTone()
+	stopSpeech()
 	quiet := time.Now()
 	for time.Since(quiet) < 2600*time.Millisecond {
 		if playbackOpen(d, appID) {
@@ -299,7 +492,7 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	}
 
 	// Deliver a wakeword activation while the key turn is held and listening.
-	// The release below belongs to the voice key; a release path that tags the
+	// The release below belongs to the circle key; a release path that tags the
 	// most recently delivered activation would end the wrong turn and leave
 	// this one listening until the safety cap.
 	if _, ok := d.wake.Trigger("api", "sim.wakeword.manual"); !ok {
@@ -307,7 +500,7 @@ func TestDumbAssistantTalkReleaseEndsTurn(t *testing.T) {
 	}
 
 	released := time.Now()
-	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "voice", Pressed: false}})
+	d.simTouchSignal(backend.InputEvent{Key: &backend.KeyEvent{Key: "play_pause", Pressed: false}})
 	waitFor(t, 2*time.Second, "talk button release", func() bool {
 		return strings.Contains(logText(d), "talk button released")
 	})
@@ -409,12 +602,8 @@ func TestDumbAssistantContinuousSpeechCancels(t *testing.T) {
 		return inputOpen(d, appID)
 	})
 	waitAssistantListening(t, d, 1)
-	sim, ok := d.dev.(*backend.Simulator)
-	if !ok {
-		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
-	}
-	stopTone := startToneInjector(sim, 200)
-	defer stopTone()
+	stopSpeech := startSpeechInjector(t, d)
+	defer stopSpeech()
 	capDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(capDeadline) && !strings.Contains(logText(d), "listen window elapsed") {
 		time.Sleep(50 * time.Millisecond)
@@ -422,7 +611,7 @@ func TestDumbAssistantContinuousSpeechCancels(t *testing.T) {
 	if !strings.Contains(logText(d), "listen window elapsed") {
 		t.Fatalf("listen cap cancellation not logged; daemon log:\n%s", logText(d))
 	}
-	stopTone()
+	stopSpeech()
 	if playbackOpen(d, appID) {
 		t.Fatal("continuous speech at the listen cap produced a reply")
 	}
@@ -469,18 +658,14 @@ func TestDumbAssistantZeroDelayTransitionsDuringReply(t *testing.T) {
 		return inputOpen(d, appID)
 	})
 	waitAssistantListening(t, d, 1)
-	sim, ok := d.dev.(*backend.Simulator)
-	if !ok {
-		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
-	}
-	stopTone := startToneInjector(sim, 100)
-	defer stopTone()
+	stopSpeech := startSpeechInjector(t, d)
+	defer stopSpeech()
 	waitFor(t, 2*time.Second, "speech detected", func() bool {
 		return strings.Contains(logText(d), "speech detected")
 	})
 	// Let voiced time exceed minSpeech (140 ms) before the injector stops.
 	time.Sleep(300 * time.Millisecond)
-	stopTone()
+	stopSpeech()
 	waitSpeechEnd(t, d, 1)
 	speechEnded := time.Now()
 	sawIntermediate := false
@@ -541,12 +726,12 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
 	}
 
-	tone := startToneInjector(sim, 100)
+	lead := startSpeechInjector(t, d)
 	waitFor(t, 2*time.Second, "speech before the gap", func() bool {
 		return strings.Contains(logText(d), "speech detected")
 	})
 	time.Sleep(300 * time.Millisecond)
-	tone()
+	lead()
 
 	// Pause the real consumer while a voiced burst exceeds the transport
 	// window. Preserved pre-gap chunks must remain voiced: enough known
@@ -571,9 +756,14 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 	frames, unsubscribe := d.audio.SubscribeFrames(8192)
 	defer unsubscribe()
 	const burstFrames = 16000 * 120
-	sim.InjectPCM(tonePCMFrames(16000, burstFrames))
+	sim.InjectPCM(repeatPCM(speechPCMFrames(16000, 16000*2), burstFrames))
 	drained := 0
-	deadline := time.After(2 * time.Second)
+	// The full 120 s burst must still be drained: that is what overflows the
+	// paused assistant's transport and produces the drop/gap assertion. The
+	// processed capture tap and the race detector both add per-chunk dispatch
+	// cost, so the old 2 s deadline measured the fixture's throughput rather
+	// than the product. This remains a bounded wait, not an unbounded one.
+	deadline := time.After(20 * time.Second)
 	for drained < burstFrames {
 		select {
 		case f := <-frames:
@@ -586,8 +776,8 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	paused = false
-	speech := startToneInjector(sim, 200)
-	defer speech()
+	resumed := startSpeechInjector(t, d)
+	defer resumed()
 	gapDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(gapDeadline) && !strings.Contains(logText(d), "audio gap") {
 		time.Sleep(50 * time.Millisecond)
@@ -603,7 +793,7 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	speech()
+	resumed()
 	endDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(endDeadline) && !strings.Contains(logText(d), "speech ended") {
 		time.Sleep(50 * time.Millisecond)
@@ -665,7 +855,10 @@ func waitAssistantListening(t *testing.T, d *Daemon, count int) {
 
 func waitSpeechEnd(t *testing.T, d *Daemon, count int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// A wait only; the delay is measured after the end is observed. Five
+	// seconds keeps host contention (e.g. a concurrent cross-build) from
+	// looking like a missing end.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && strings.Count(logText(d), "speech ended") < count {
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -737,11 +930,10 @@ func jsonString(value string) string {
 	return string(data)
 }
 
-// tonePCM builds real 16 kHz mono 16-bit PCM for the simulator microphone.
-func tonePCM(rate, durationMS int) []byte {
-	return tonePCMFrames(rate, rate*durationMS/1000)
-}
-
+// tonePCMFrames builds a steady 440 Hz tone. It remains the reply-asset
+// waveform (its duration is all those tests need); microphone fixtures use
+// speechPCMFrames, because the assistant measures a *modulated* speech band and
+// a steady tone is deliberately not speech evidence.
 func tonePCMFrames(rate, frames int) []byte {
 	pcm := make([]byte, frames*2)
 	for i := range frames {
@@ -751,23 +943,179 @@ func tonePCMFrames(rate, frames int) []byte {
 	return pcm
 }
 
-// startToneInjector feeds short tone steps in real time. The simulator source
-// returns queued bytes as fast as it is read, so one large blob becomes a burst
-// that overflows the capture queue and looks like a gap; paced steps model a
-// continuously speaking microphone instead.
-func startToneInjector(sim *backend.Simulator, stepMS int) func() {
+// pcmAtLevel normalizes samples to the requested full-scale RMS and encodes
+// 16-bit little-endian mono PCM.
+func pcmAtLevel(samples []float64, level float64) []byte {
+	sum := 0.0
+	for _, s := range samples {
+		sum += s * s
+	}
+	scale := 1.0
+	if rms := math.Sqrt(sum / float64(len(samples))); rms > 0 {
+		scale = level / rms
+	}
+	pcm := make([]byte, len(samples)*2)
+	for i, s := range samples {
+		v := s * scale
+		if v > 1 {
+			v = 1
+		}
+		if v < -1 {
+			v = -1
+		}
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(v*32767)))
+	}
+	return pcm
+}
+
+// speechPCMFrames renders deterministic, copyright-free speech-like audio for
+// the simulator microphone: a glottal harmonic stack with a moving spectral
+// tilt, a 4.5 Hz syllable envelope, and periodic fricative bursts. That is the
+// structure the assistant's speech-band modulation test is about; a pure tone
+// has none of it.
+func speechPCMFrames(rate, frames int) []byte {
+	samples := make([]float64, frames)
+	rng := rand.New(rand.NewPCG(0x51ed270b, 0xc2b2ae35))
+	var phase float64
+	for i := range samples {
+		t := float64(i) / float64(rate)
+		f0 := 118 + 10*math.Sin(2*math.Pi*0.9*t)
+		phase += 2 * math.Pi * f0 / float64(rate)
+		tilt := 0.85 + 0.45*math.Sin(2*math.Pi*1.3*t+0.8)
+		src := 0.0
+		for k := 1; k <= 40; k++ {
+			if 130*k > rate/2 {
+				break
+			}
+			src += math.Sin(float64(k)*phase+float64(k)*0.7) / math.Pow(float64(k), tilt)
+		}
+		env := math.Max(0, math.Sin(2*math.Pi*4.5*t+0.2))
+		samples[i] = math.Pow(env, 0.5) * src
+	}
+	burst := rate * 50 / 1000
+	for start := rate * 60 / 1000; start < frames; start += rate / 4 {
+		for j := 0; j < burst && start+j < frames; j++ {
+			samples[start+j] += 0.6 * (rng.Float64()*2 - 1) * float64(burst-j) / float64(burst)
+		}
+	}
+	return pcmAtLevel(samples, 0.2)
+}
+
+// roomNoisePCMFrames renders a colored, non-stationary room: a low-frequency
+// harmonic hum with slow wobble, shaped hiss, and fan buffeting that moves the
+// level by several times. It is the ambient class that made the old
+// zero-crossing escape useless.
+func roomNoisePCMFrames(rate, frames int) []byte {
+	samples := make([]float64, frames)
+	rng := rand.New(rand.NewPCG(0x9e3779b9, 0x85ebca6b))
+	var shaped [3]float64
+	for i := range samples {
+		t := float64(i) / float64(rate)
+		hum := 0.0
+		for k, tone := range [][2]float64{{95, 1}, {145, .7}, {205, .5}, {310, .35}, {430, .25}, {620, .15}} {
+			wobble := 1 + 0.02*math.Sin(2*math.Pi*0.11*t+float64(k)*1.7)
+			hum += tone[1] * math.Sin(2*math.Pi*tone[0]*wobble*t+float64(k)*1.3)
+		}
+		white := rng.Float64()*2 - 1
+		for k := range shaped {
+			shaped[k] += (white - shaped[k]) * 0.25
+		}
+		// A synthetic fan/AC room matched to the authorized capture's band
+		// statistics: band/full RMS 0.39, 160 ms band-level relative deviation
+		// 0.118 median / 0.180 at the 90th percentile. (That capture is external
+		// music, not a fan and not speech-free; only its level statistics are
+		// borrowed here, not a noise label.) Fan buffeting moves the low hum,
+		// in-band air movement wanders the hiss, and the room breathes slightly.
+		am := 1 + 0.28*math.Sin(2*math.Pi*0.17*t) + 0.18*math.Sin(2*math.Pi*3.7*t+1.1)
+		wander := 1 + 0.4*math.Sin(2*math.Pi*0.23*t+0.7) + 0.2*math.Sin(2*math.Pi*4.3*t+2.1)
+		glob := 1 + 0.25*math.Sin(2*math.Pi*0.31*t+1.9) + 0.15*math.Sin(2*math.Pi*6.7*t)
+		// The authorized capture's 99th-percentile deviation came from music
+		// from external speakers, not from the fan this fixture models; its
+		// p50/p90 (matched above) are the noise profile to preserve.
+		samples[i] = (hum*am + shaped[2]*wander) * glob
+	}
+	return pcmAtLevel(samples, 0.06)
+}
+
+// mixPCMStreams adds two PCM streams over their common length, clamping to full
+// scale. Speech over the same room is the reported real-world case.
+func mixPCMStreams(a, b []byte) []byte {
+	n := min(len(a), len(b))
+	out := make([]byte, n)
+	for i := 0; i+1 < n; i += 2 {
+		sum := int32(int16(binary.LittleEndian.Uint16(a[i:]))) +
+			int32(int16(binary.LittleEndian.Uint16(b[i:])))
+		if sum > math.MaxInt16 {
+			sum = math.MaxInt16
+		}
+		if sum < math.MinInt16 {
+			sum = math.MinInt16
+		}
+		binary.LittleEndian.PutUint16(out[i:], uint16(int16(sum)))
+	}
+	return out
+}
+
+// repeatPCM tiles pcm to exactly frames samples.
+func repeatPCM(pcm []byte, frames int) []byte {
+	out := make([]byte, frames*2)
+	for i := range frames {
+		out[i*2] = pcm[(i*2)%len(pcm)]
+		out[i*2+1] = pcm[(i*2+1)%len(pcm)]
+	}
+	return out
+}
+
+// micFrameBytes is one processed capture frame at 16 kHz: 20 ms.
+const micFrameBytes = 16000 * 20 / 1000 * 2
+
+// injectorLead bounds the unread audio queued in the simulator. The simulator
+// answers a read with a silent frame after a 20 ms timeout when its queue is
+// empty, so a wall-clock paced producer can splice silence into the stream when
+// the host is loaded — that splice, not the assistant, is the only
+// nondeterminism in these acoustic scenarios. Keeping a small consumption-
+// driven lead means the capture pipeline always has the next frame queued.
+const injectorLead = 4
+
+// startPCMInjector streams pcm into the simulator microphone, looping, under a
+// bounded consumption-driven lead. The producer queues at most injectorLead
+// frames (bounded memory and latency), refills one frame for each frame the
+// capture pipeline actually consumed, and blocks when the lead is full
+// (backpressure, not an unbounded burst). The audio therefore advances with
+// consumption instead of racing a wall-clock timer.
+// startPCMInjector streams pcm in real time (10 ms steps) for the speech
+// journeys, where the application must keep up with continuous audio and its
+// bounded capture queue drops rather than blocking. A wall-clock producer can
+// be starved under host load; the no-reply journeys use the consumption-driven
+// injector below instead, and the deliberate-stall test bounds that hazard.
+func startPCMInjector(t *testing.T, d *Daemon, pcm []byte) func() {
+	t.Helper()
+	sim, ok := d.dev.(*backend.Simulator)
+	if !ok {
+		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
+	}
+	const stepBytes = 16000 * 10 / 1000 * 2 // 10 ms of audio
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		offset := 0
 		for {
 			select {
 			case <-stop:
 				return
-			default:
+			case <-time.After(10 * time.Millisecond):
 			}
-			sim.InjectPCM(tonePCM(16000, stepMS))
-			time.Sleep(time.Duration(stepMS) * time.Millisecond)
+			end := offset + stepBytes
+			var chunk []byte
+			if end <= len(pcm) {
+				chunk = pcm[offset:end]
+				offset = end
+			} else {
+				chunk = append(append([]byte{}, pcm[offset:]...), pcm[:end-len(pcm)]...)
+				offset = end - len(pcm)
+			}
+			sim.InjectPCM(chunk)
 		}
 	}()
 	var once sync.Once
@@ -775,6 +1123,90 @@ func startToneInjector(sim *backend.Simulator, stepMS int) func() {
 		once.Do(func() { close(stop) })
 		<-done
 	}
+}
+
+// startPCMInjectorConsumed streams pcm under a bounded consumption-driven lead;
+// the no-reply journeys use it because it cannot splice silence into the room
+// under host load.
+func startPCMInjectorConsumed(t *testing.T, d *Daemon, pcm []byte) func() {
+	return startPCMInjectorStalled(t, d, pcm, 0, 0)
+}
+
+// startPCMInjectorStalled is startPCMInjector with one deliberate producer
+// stall after stallAfterChunks frames. The simulator answers the resulting
+// empty queue with silent reads, which reproduces the only splice a loaded host
+// can create; acoustic tests use it to prove that splice cannot become a reply.
+func startPCMInjectorStalled(t *testing.T, d *Daemon, pcm []byte, stallAfterChunks int, stallFor time.Duration) func() {
+	t.Helper()
+	sim, ok := d.dev.(*backend.Simulator)
+	if !ok {
+		t.Fatalf("test daemon backend is %T, want *backend.Simulator", d.dev)
+	}
+	if len(pcm) < micFrameBytes {
+		t.Fatalf("injector fixture is %d bytes, shorter than one %d-byte frame", len(pcm), micFrameBytes)
+	}
+	frames, unsubscribe := d.audio.SubscribeFrames(256)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer unsubscribe()
+		pos := 0
+		injected, consumed := 0, 0
+		emit := func() {
+			end := pos + micFrameBytes
+			var chunk []byte
+			if end <= len(pcm) {
+				chunk = pcm[pos:end]
+				pos = end
+			} else {
+				chunk = append(append([]byte{}, pcm[pos:]...), pcm[:end-len(pcm)]...)
+				pos = end - len(pcm)
+			}
+			sim.InjectPCM(chunk)
+			injected++
+		}
+		prime := min(injectorLead, len(pcm)/micFrameBytes)
+		for i := 0; i < prime; i++ {
+			emit()
+		}
+		// Both a bounded lead and a rate limit: emit at most one 20 ms frame per
+		// 18 ms (just faster than the source's 20 ms silent-read timeout, so the
+		// queue cannot empty into a splice, and slow enough that the application
+		// consumer's bounded capture queue does not drop). The lead still absorbs
+		// short producer stalls.
+		ticker := time.NewTicker(18 * time.Millisecond)
+		defer ticker.Stop()
+		stalled := false
+		for {
+			select {
+			case <-stop:
+				return
+			case <-frames:
+				consumed++
+				continue
+			case <-ticker.C:
+			}
+			if stallFor > 0 && !stalled && injected >= stallAfterChunks {
+				stalled = true
+				time.Sleep(stallFor)
+			}
+			if injected-consumed < injectorLead {
+				emit()
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
+}
+
+// startSpeechInjector streams the speech fixture until the returned stop
+// function is called.
+func startSpeechInjector(t *testing.T, d *Daemon) func() {
+	return startPCMInjector(t, d, speechPCMFrames(16000, 16000*2))
 }
 
 // toneWAV wraps tone PCM in a PCM 16-bit mono WAV so tests can install a real

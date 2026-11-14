@@ -21,12 +21,17 @@ const (
 	keyEnter      = 28  // KEY_ENTER
 	keyOK         = 0x160
 	keyBtn0       = 0x100
-	keyVoiceCmd   = 0x246 // KEY_VOICECOMMAND (boot_b device tree)
-	keyHappy      = 0x2c0 // BTN_TRIGGER_HAPPY1 (boot_a device tree)
+	// The two stock DTBs use different codes and labels for the same unmarked
+	// centre key. It is not a voice key: on Capsula Mini the circle/play-pause
+	// key is the talk button and the centre key is neutral.
+	keyVoiceCmd = 0x246 // KEY_VOICECOMMAND label on the boot_b DTB
+	keyHappy    = 0x2c0 // BTN_TRIGGER_HAPPY1 label on the boot_a DTB
 )
 
 // defaultKeyMap is used when the live device tree cannot be read. It covers
-// both stock device-tree variants seen in the boot image.
+// both stock device-tree variants seen in the boot image. KEY_VOICECOMMAND and
+// BTN_TRIGGER_HAPPY1 name the same unmarked centre key on the Mini, so both map
+// to the neutral centre control rather than to an assistant activation.
 func defaultKeyMap() keyMap {
 	return keyMap{
 		keyVolumeDown: "volume_down",
@@ -36,15 +41,15 @@ func defaultKeyMap() keyMap {
 		keyEnter:      "primary",
 		keyOK:         "primary",
 		keyBtn0:       "primary",
-		keyVoiceCmd:   "voice",
-		keyHappy:      "voice",
+		keyVoiceCmd:   "center",
+		keyHappy:      "center",
 	}
 }
 
 // probeKeyMap reads the gpio-keys node and maps each declared linux,code to a
 // semantic name using the node name and label. Node names are authoritative
 // because the two stock DTBs use different labels ("happy" vs "GPIO Volume
-// Voice-assistant") for the same voice key.
+// Voice-assistant") for the same unmarked centre key.
 func probeKeyMap(prefix string) keyMap {
 	keys := defaultKeyMap()
 	base := deviceTreeBase(prefix)
@@ -107,8 +112,11 @@ func keySemantic(nodeName, label string) string {
 		return "volume_down"
 	case has("playpause", "play-pause", "play/pause", "play"):
 		return "play_pause"
-	case has("voice", "assistant"):
-		return "voice"
+	case has("center", "centre", "happy", "voice", "assistant"):
+		// The Mini's stock centre key is labelled "happy" in one DTB and
+		// "GPIO Volume Voice-assistant" in the other. It is neutral: the
+		// play/pause circle is the talk button.
+		return "center"
 	case has("primary", "enter", "ok"):
 		return "primary"
 	}

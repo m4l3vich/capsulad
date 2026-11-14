@@ -8,6 +8,19 @@ self-signed HTTPS Web UI protected by an admin password and static API keys, and
 This is an **initial vertical slice**, not a frozen v1. The wire schemas are the draft v0.5 protobufs;
 the implementation is honest about what is verified on real hardware and what is not.
 
+## Documentation
+
+- [docs/GLOSSARY.md](docs/GLOSSARY.md) — project terms (daemon, HAL, app, run, presentation,
+  capture, AppBus, revision, native SDK, …) as this codebase uses them.
+- [docs/APP_API.md](docs/APP_API.md) — current application API: packaging/manifest, startup and
+  identity, AppBus events and routed calls, framework services and streaming shapes, presentations,
+  captures, audio, input, settings, interfaces and assets.
+- [docs/SPEAKER_BEHAVIOR.md](docs/SPEAKER_BEHAVIOR.md) — user-facing interaction contract and proof
+  levels; [docs/STATUS.md](docs/STATUS.md) — implemented versus unverified matrix;
+  [docs/HARDWARE.md](docs/HARDWARE.md) and [docs/WAKEWORD.md](docs/WAKEWORD.md) — hardware and
+  wakeword evidence.
+- [AGENTS.md](AGENTS.md) — repository working rules and verification gates.
+
 ## What runs today
 
 - **One Unix-socket gRPC API** (`/run/capsulad/hal.sock`) implementing all 15 draft services:
@@ -16,8 +29,15 @@ the implementation is honest about what is verified on real hardware and what is
 - **Supervised native applications** with manifest validation, unique run IDs, graceful stop,
   immediate first restart then exponential backoff, stdout/stderr collection and singleton
   invocation semantics (queued, bounded, expiring). A process that loses its framework connection
-  is a failure, not a deliberate stop: `restart_on_failure` apps, including the selected assistant,
-  are started again immediately instead of staying unavailable.
+  is a failure, not a deliberate stop. A **selected default provider** — display, ring or
+  assistant — is recovery-managed regardless of its manifest: stopping, killing or disconnecting it
+  relaunches it immediately. Later abnormal exits back off 1, 2, 4 and 8 s; the counter resets only
+  after the run has stayed READY for 30 s, so a ready-then-crash loop keeps backing off instead of
+  spinning. Stopping a selected provider is therefore a restart, not a switch-off; the Web UI labels
+  it **Restart**. Deselecting it (including choosing **none**), uninstalling it or shutting the
+  daemon down is the durable off switch: any selected-origin or forced relaunch re-checks selection
+  before starting, regardless of `restart_on_failure`. A manifest-declared restart of an app that
+  was never selected keeps its ordinary contract.
 - **Reverse-RPC app bus**: one long-lived `Connect` stream per app; routed unary and streaming
   `Call` relays with deadlines, cancellation and bounded queues. Apps never listen on IPC sockets.
 - **Shared native SDK**: a pure Rust `libcapsula` cdylib exposes a frozen C ABI v1 through one
@@ -28,40 +48,202 @@ the implementation is honest about what is verified on real hardware and what is
   runtime or per-language transport stack is linked into the library.
 - **Dynamic presentations and captures** with exact first-content readiness, last-eligible-capture
   wins, baseline fallback, out-of-order release, force release and process-exit cleanup.
-- **Touch partial/full modes** with mutually exclusive ownership, framework volume/microphone
-  controls, raw/gesture delivery and clean cancellation on ownership changes.
+- **Touch partial/full modes** with mutually exclusive ownership and clean cancellation on
+  ownership changes. The Mini panel is five discrete keys, not a coordinate panel: **N** microphone
+  mute, **E** volume up, **S** circle/play-pause (the talk key), **W** volume down and **C** the
+  unmarked neutral centre. A partial capture receives circle and centre key events plus inferred
+  semantic gestures while volume and microphone remain framework controls; a full capture receives
+  every key and gesture with no system volume, mute, media or assistant action. Swipe and circle
+  gestures are inferred from ordered presses — no raw positions are invented. Raw coordinate
+  samples are delivered only when the backend actually has a coordinate panel, so the Mini reports
+  `coordinates_available=false` while `full_panel_available=true`.
 - **Audio mixer/fan-out** with software mixing, conversation ducking, bounded capture queues,
   discontinuities, pre-roll for activations and the visible-indication microphone watchdog.
-- **Four-page Web UI**: Overview (Bluetooth state and discoverability, now-playing metadata, volume,
-  installed applications including built-in system apps), Settings (default display/ring selection
-  among installed applications and system apps, with an explicit "none" choice; brightness,
-  assistant and touch behaviour, microphone and muted indication, device timezone), Access (admin
-  password, static API keys, public certificate download), Diagnostics (hardware, firmware,
-  software, runs, resources, logs).
+- **Application microphone DSP**: `audio.input.microphone` is a bounded streaming cleanup for the
+  production S16LE mono 16 kHz source — 80 Hz high-pass, adaptive spectral suppression capped at
+  12 dB, unity gain with no AGC, and a −1 dBFS peak limiter (256-sample frame / 128 hop, about
+  15.9 ms). The noise estimate is learned from aggregate frame energy relative to a fast-down /
+  slow-up floor and a very-slow-up average, so colored steady room noise is admitted; spectral
+  flatness no longer gates learning. It has fixed state and output length, is chunk-boundary
+  invariant, and resets on mute, source reopen or a capture gap. Wakeword inference and enrollment
+  now consume this same processed tap (`framework.dsp.v1`), not the raw vendor stream; the
+  unprocessed stream is available only at the explicit `audio.input.microphone.raw` endpoint.
+  On the one authorized 10 s background recording — mostly music played through a Mac's own or
+  external speakers, not the Capsula Bluetooth path — cleanup measured about 2.9 dB overall and
+  2.7 dB in 80–300 Hz. That recording is unannotated and has no local playback reference to cancel
+  the music, so it does not validate fan/traffic noise, music immunity, the new location, or a zero
+  false-activation rate. The estimator also has a cold-start guard: a voice or word at 0 dB relative
+  to the learned reference is not absorbed, while ordinary speech re-engages the floor.
+- **daisyUI Web console with a realtime binary WebSocket API**: the browser is an independently
+  built Vue 3 SPA (`web/`) with Tailwind CSS 3.4.17 and daisyUI 4.12.23, a local light-neutral
+  muted-teal `capsula` theme and no CDN or external fonts, served by the daemon and embedded at
+  build time. A top navigation bar exposes four destinations — Main, Settings, Access and
+  Diagnostics — plus Sign out; application detail and its settings open over Main in a dialog.
+  One session-only `/ws` carries `capsula.web.v1` protobuf frames with revisioned topic snapshots,
+  bounded events and an explicit resync signal, plus a typed command allowlist. Main shows
+  Bluetooth state, incoming connections and discoverability, now-playing metadata, volume,
+  microphone state and installed applications including built-in system apps. Settings covers the
+  voice assistant (default app or none from installed apps that declare `voice_assistant`,
+  hold-to-summon or hold-to-talk touch behaviour, embedded guided wakeword training and the real
+  last 20 engine detections), display/ring defaults from apps that declare
+  `segment_display_provider`/`led_ring_controller` and brightness, microphone mute and
+  muted-indication hiding, Bluetooth policy and paired devices, Wi-Fi, a timezone view that opens
+  with the current setting, a phone/computer suggestion and UTC (matching cities appear only after
+  a search; raw identifiers and firmware defaults stay under Technical details), network name,
+  startup sound and master volume. A saved provider that no longer declares the matching role
+  remains selected and is never rewritten automatically. Access covers admin password, static API
+  keys and the public certificate; Diagnostics covers hardware, firmware, software, runs, resources,
+  routing, audio, logs and read-only Linux host metrics with an explicit unsupported-platform state
+  elsewhere. Per-application pages keep lifecycle, declared settings, actions, runs, provenance,
+  interfaces, logs and clock/ring controls. There is no generic AppBus/Capture/Audio/Asset proxy:
+  the browser cannot request PCM, download enrollment takes, read another app's logs or call an
+  arbitrary service.
+- **Custom application settings UIs**: an app may declare one self-contained
+  `[settings_ui] html = "…"` document (≤512 KiB, relative, regular, valid UTF-8). The Web UI loads
+  the session-authenticated document URL directly as an iframe `src` and renders it in an
+  **opaque-origin iframe with `sandbox="allow-scripts"` only**, under a restrictive CSP that
+  forbids network, forms, frames, navigation helpers and external resources. The host page allows
+  only same-origin frame URLs (`frame-src 'self'`); normal host routes keep
+  `X-Frame-Options: DENY`, and only the settings-document route omits it. Since browsers do not
+  support CSP `navigate-to`, self-navigation is not claimed to be CSP-blocked: the bridge owner
+  detects any iframe load after the initial ready, treats it as a violation, disposes the frame,
+  points it at `about:blank` and never re-sends init/token/schema/values. A 10 s ready timeout
+  reports a visible error and disposes the frame; retry creates a fresh frame and token. The daemon
+  injects the local system UI kit and a bridge (`capsula.settings-ui/1`); the parent accepts only
+  messages from that exact frame with its per-frame random channel token and size/schema limits,
+  and forwards only declared setting-value patches for the hosting app through the normal
+  revision-checked app-settings path. There is no generic command, AppBus, capture, audio or
+  cross-app operation, and no host cookie/WebSocket/DOM access for the frame. Built-in Clock and
+  Ring use this same route.
+- **Live Web UI controls with explicit saves**: selects, sliders, checkboxes and the microphone gate
+  apply immediately after local validation as field-scoped updates (display default app, brightness
+  and brightness mode; assistant app and touch behaviour; microphone mute; muted-indicator
+  mode/delay; volume; startup sound; timezone; hostname) through one serialized compare-and-swap
+  queue with one in-flight request per group and coalescing of rapid slider input. A visible
+  pending state reports in-flight work, a failure shows the error and re-reads the snapshot instead
+  of keeping an optimistic value, and external/hardware changes update the controls live without
+  polling. Drafts (network name, timezone selection, Wi-Fi passphrase) stay local until their
+  explicit Save/Apply; a live control in another group never submits or validates a dirty draft,
+  and an incoming push never overwrites one. The muted-indication hide delay offers
+  “Never (keep the light visible)” (the stored `none` mode: keep the indication until unmuted, the
+  device default), 1 minute, 10 minutes and 30 minutes; a stored non-preset mode or delay is shown
+  as a labelled current value and is never rewritten merely by loading the page or changing another
+  control. Timezone is a searchable city/region chooser with a
+  current UTC-offset/local-time preview; the browser zone is only a suggestion and is applied only
+  after an explicit Apply. Diagnostics host metrics are Linux-only: an unsupported host shows an
+  explicit state and reason rather than zero measurements, and each metric domain is independently
+  marked available. Partial log/metric frames never suppress an older-reserved full snapshot: full
+  fields and host metrics keep independent watermarks, logs are unioned, deduplicated, sorted and
+  capped at 400 entries (200 while paused), and a within-connection resync never discards newer
+  streamed entries; reconnecting starts a new monotonic epoch, clears the log and paused buffers and
+  preserves the pause choice. Wakeword history lists the real last 20 engine activations, not
+  manual-button, simulator or API events.
+- **Wi-Fi with AP fallback provisioning**: a Linux Wi-Fi manager joins saved networks in the
+  background in priority order with a bounded 25 s startup attempt (7 s per network); if none
+  connect it brings up a WPA2 provisioning AP whose SSID is the live Bluetooth adapter alias (saved
+  host name only when Bluetooth has no name) and whose password is the documented `capsulad`. On a
+  first Linux run the manager imports existing stock `/etc/wpa_supplicant.conf` networks once into
+  its private store (derived PSKs, `.stock-imported` marker, active network preferred; a private
+  network wins a duplicate SSID). If the stock file is unreadable and the private store is empty,
+  it leaves the stock association untouched and reports an error instead of killing it. The
+  AP uses channel 1, `192.168.4.1/24`, DHCP `192.168.4.10–100`, DNS hijack and a portal on port 80;
+  stock `wpa_supplicant` AP mode and a separate `dnsmasq` are used (no hostapd), with a best-effort
+  firewall chain limiting the setup network to DHCP/DNS/portal. The portal has only Wi-Fi
+  status/saved list, explicit Scan and Connect (no administrator login, no system/app mutation); it
+  is restricted to the AP subnet, checks Host/Origin and an HMAC token bound to the client address
+  and valid for 15 minutes (reusable within that window, **not** single-use), and uses
+  a no-script CSP. The authenticated Web UI shows the active network, known networks with Forget
+  (portal forget is not offered), and nearby networks only after an explicit Scan; subscribing or
+  opening Settings never scans. `scan_supported` is capability-driven, not hardcoded: station mode
+  reports it when `wpa_cli` is available, and AP mode disables Scan when the supplicant refuses and
+  no `iw` fallback exists, while manual SSID entry still works. Supplicant control-socket
+  CONNECTED/DISCONNECTED/roam events reconcile live state into the snapshot and Web UI without
+  polling. A successful association tears the AP down; a failed station connect restores the
+  previous/saved association, or raises the setup AP boundedly and reports the original error.
+  Passphrases derive a PSK and are never returned or written in plaintext. This is
+  source/HTTP-fixture and simulator coverage; physical RF association, stock AP-mode scanning,
+  DHCP/firewall behavior, captive detection and the target's Wi-Fi drivers are not verified here.
+- **Local-only privilege boundary.** The gRPC API is a Unix socket only; there is no network gRPC
+  listener. The Web UI is a local administrator client of that socket, but its authenticated
+  browser/API-key surface is not a second privilege plane: API keys stay confined to read-only
+  status and certificate endpoints and cannot reach recording, diagnostics or credential mutation.
+  Supervised apps are identified by the supervisor run ID plus Linux `SO_PEERCRED`; an app that
+  omits its run ID is still rejected by its sandbox UID or supervised PID, and a built-in run ID
+  additionally requires the daemon's per-boot token. Device settings, diagnostics/log history,
+  forced capture release, microphone mute/volume, wakeword takes/training, Bluetooth
+  incoming-connection/discoverable policy and unpair, application launch/stop and foreign-app
+  configuration are
+  administrator operations; per-app settings, actions and run listings are scoped to the calling
+  app. Microphone capture requires both a selected visible non-blank ring/segment presentation at
+  non-zero brightness and a microphone-live cue the mixer consumed and drained; the cue is the
+  exclusive mixer source while it runs, and frames are withheld whenever either half is absent.
+  Pre-roll follows only a framework-issued, one-shot activation for that app. Shared assets are
+  listed only from regular non-symlink files inside the asset root, and the Bluetooth media view
+  redacts the connected peer address/name for app callers.
 - **Built-in clock and ring system apps** (`capsula.clock`, `capsula.ring`): compiled into
   `capsulad` but otherwise normal application identities. They appear in `ApplicationService`,
   the Web UI and default-provider selections, have a run lifecycle (`Launch`/`Stop`/`WatchRuns`),
-  app settings through `ApplicationConfigurationService`, and routed app-bus services. Only their
+  app settings through `ApplicationConfigurationService`, actions and hardware gestures. Only their
   packaging is special: no package directory, no child process, and no install/uninstall.
-  The clock exposes `capsula.contracts.clock.v1.ClockService` (stopwatch, timers, alarms) and the
-  ring exposes `capsula.contracts.ring.v1.RingService`; both are unary. Clock settings cover
-  colon blink, timezone, display mode, timer duration and one alarm; ring settings cover effect,
-  palette, speed, brightness and an optional wall-clock active window (for a nightlight, or to
-  keep the ring dark at night). Legacy `org.capsula.clock` / `org.example.ring-controller` state
-  migrates to these IDs. Rendering always goes through presentations/captures, so an external
-  capture preempts a system app and its baseline resumes on release.
+  They publish **public standard contracts** discoverable through `AppInterfaceService` and
+  callable by any supervised app through `AppBusService.Call`: `capsula.contracts.clock.v1.ClockService`
+  (state/watch, stopwatch start/pause/resume/reset, timers start/cancel/list, alarms
+  list/add/delete/enable and alert dismissal) and `capsula.contracts.ring.v1.RingService` (state/watch,
+  settings get/update/watch with compare-and-swap for every declared setting). The daemon's own Web UI
+  uses the same path; there is no private token-only service. Clock alarms are stored in the app setting
+  `alarms` as five-field dcron entries separated by a comma after the fifth field (and any suffixes),
+  so comma lists inside fields such as `0,30 7 * * 1-5` remain one schedule; an entry may carry
+  `@IANA-zone`, `!once` and `!disabled` suffixes, and the stable alarm ID is `expr [@zone] [!once]`.
+  Migration preserves time, recurrence, explicit timezone, one-shot behavior and enabled/disabled
+  state (`!once` persists `!disabled` after firing; alerts ring until dismissed). The settings UI
+  edits friendly times/repeat days and serializes them. Ring `palette` is a canonical gradient
+  (`linear-gradient(<angle>deg, #RRGGBB [pct%], …)`) or a solid `#RRGGBB`, and the `static` effect
+  shows one solid colour without animation; `rainbow` rotates/interpolates the palette's actual
+  samples at 0, 1/3 and 2/3 and invents no unrelated hues, so a mono palette produces a grayscale
+  rotation. Named legacy palettes migrate to equivalent gradients. Clock settings also cover colon
+  blink, timezone, display mode, timer duration and the stopwatch reset gesture; ring settings also
+  cover brightness, speed and an optional wall-clock active window (for a nightlight, or to keep the
+  ring dark at night). Legacy
+  `org.capsula.clock` / `org.example.ring-controller` state migrates to these IDs. Rendering always
+  goes through presentations/captures, so an external capture preempts a system app and its
+  baseline resumes on release.
 - **Media-player contract without a bundled provider**: the standard
   `capsula.contracts.media.v1.MediaPlayerService` app-bus plumbing remains available to external
   apps — unary commands plus a server-streaming `WatchPlayers` whose first event is a snapshot — but
   this repository no longer ships a sample media app. The Web UI and `capsula media list` show
-  whatever providers an operator installs; no app listens on its own socket.
+  whatever providers an operator installs; no app listens on its own socket. The physical circle
+  key and left/right swipes still control media with no app installed: a standard provider that is
+  playing, then one that is paused, wins; with neither, a connected Bluetooth source is driven
+  through the public `BluetoothMediaService`; only then does another standard provider (for
+  example, stopped) receive the command. Bluetooth control uses only public BlueZ interfaces and
+  the advertised connected device: `MediaPlayer1` when the source exports it, otherwise the
+  deprecated-but-public `MediaControl1` on the same device. `MediaControl1` publishes no playback
+  status, so toggle direction is resolved from `MediaPlayer1.Status` when present, then that
+  device's A2DP transport `active` state, then the framework sink's own monotonic packet-receipt
+  evidence for the current stream (500 ms freshness, per connection, cleared on stop/error/new
+  source). Commands never write this evidence, and no state is invented when the evidence is
+  absent — an unknown direction sends Play, never a false "pause" claim. A private-bus BlueZ
+  fixture on Bullseye verified the actual `MediaControl1` object/method call on the wire; that path
+  is in the daemon deployed on 2026-11-13, though it has not been re-exercised with a real peer
+  since deployment.
 - **Optional dumb assistant** (`org.capsula.dumbassistant`): an ordinary first-party package, not a
   system app and not part of the default build. It lives in its own nested Go module and is built
-  only by the explicit `dumbassistant` target. It claims `voice_assistant`, consumes real
-  microphone PCM, paints the whole ring teal with brightness tracking input level, ends the turn
-  after a 700 ms post-speech silence or a hold-to-talk release, then fades to a blue chase for the
-  configured reply delay. Speech onset and end are relative to a learned room-noise floor, so a fan
-  or traffic does not keep a turn open until the listen cap. The circle key dismisses an in-flight
+  only by the explicit `dumbassistant` target. It claims `voice_assistant`, consumes the framework's
+  processed application microphone tap, paints the whole ring teal with brightness tracking input
+  level, and ends the turn when the 300–3400 Hz band level has fallen clearly below the recent
+  voiced level for 700 ms (a sustained voiced vowel keeps its level and is preserved), or on a
+  hold-to-talk release; it then fades to a blue chase for the configured reply delay. A reply needs
+  either 140 ms of modulated speech-band time or 400 ms of steady voiced level well above the
+  learned floor; a cold-start guard keeps first speech out of the floor. This is a level-based
+  endpointer, not a speech classifier: a new steady loud noise at or above voice level that starts
+  mid-turn is bounded by the 10 s cap and cancelled; a steady hiss/tone held above 2.5× the floor
+  for 400 ms can be answered; and a sustained quiet vowel below that multiple is not confirmed.
+  The canonical raw check on external music plus a full-level word (one DSP pass, no normalization,
+  calibrated at the actual input level) recovered 1 reliable, 1 marginal and 4 buried words — an
+  accepted music/quiet-speech limitation, not an accuracy benchmark. Loud music or lyrics can open
+  or satisfy a turn, quiet speech can be missed, and the app does not cancel music, perform AEC or
+  identify speakers. The current activation mode is preserved; no hold-to-talk change is made.
+  The circle key dismisses an in-flight
   turn through the app's declared `dismiss` action, which aborts listening, delay and playback and
   clears queued activations. `delay` accepts empty (0 ms), a constant, or an ascending inclusive
   range, 0–60000 ms; `reply_asset` is a path relative to the shared read-only app asset store (apps receive
@@ -84,29 +266,82 @@ the implementation is honest about what is verified on real hardware and what is
 - **Bounded operational footprint**: the daemon log rotates at 512 KiB and keeps one backup, the
   negative-training corpus path is configurable and is not a runtime dependency, and new wakeword
   recordings or training are refused below 2 MiB of free `/data`.
-- **Bluetooth through BlueZ**: the daemon owns adapter power, discoverability and pairability over
-  the system D-Bus, lists paired devices and unpairs them from the Web UI (an administrator-only
-  operation, refused for supervised apps). A headless BlueZ pairing agent (NoInputNoOutput) lets a
-  new source bond without the retired vendor `btctl`; new bonds are accepted only while the
-  persisted `bluetooth_pairable` switch is on, and an already-paired source may always authorize
-  services. It loads PulseAudio's Bluetooth discovery so the adapter advertises A2DP Sink and
-  accepts an audio source, then routes that source to the speaker.
+- **Bluetooth through BlueZ**: the daemon owns adapter power, discoverability and pairing over
+  the system D-Bus and the two policy controls, lists paired devices and unpairs them from the Web UI
+  (an administrator-only operation, refused for supervised apps). **Incoming connections** (persisted
+  as `bluetooth_incoming_connections`, default on) controls whether new inbound BR/EDR links are
+  accepted, including from paired devices; turning it off denies inbound connections through the
+  public Linux Bluetooth management socket `Set Connectable` and also clears the kernel action list
+  (`Remove Device`), so BlueZ's known-device allow-list cannot bypass the deny. Connectability is
+  not a D-Bus property (BlueZ 5.65 has no `Adapter1.Connectable`), while the adapter
+  and BLE radio stay
+  powered for applications, and links that are already connected are not torn down. **Discoverable**
+  (`bluetooth_discoverable`, default off) is a D-Bus adapter property and lets new devices find,
+  connect and pair; enabling it implies incoming connections, and turning incoming off clears it. A headless BlueZ pairing agent
+  (NoInputNoOutput) lets a new source bond without the retired vendor `btctl`; new pairing
+  authorization requires both incoming connections and discoverability, while an already-paired source may authorize services
+  on an existing link. The obsolete `bluetooth_pairable` switch is migrated (true → incoming and
+  discoverable both on; false or absent → incoming on, discoverable off). It registers a native
+  A2DP Sink endpoint through the public BlueZ `Media1` APIs and verifies that the registration is
+  still armed for the current adapter generation **before** the adapter is made connectable or
+  discoverable, and before an API request can enable either. A
+  failed or lost registration is never reported ready: both enabling actions are refused with
+  the real reason, and `BluetoothStatus.Detail` says the audio profile is not advertised. If native
+  registration fails, PulseAudio's Bluetooth discovery is the fallback owner. PulseAudio endpoints
+  are removed only after the native sink is armed and never while an active source is routed
+  through them; the switch completes when that source disconnects. A BlueZ restart or adapter power
+  cycle invalidates the registration, which is repaired before the next connect. If BlueZ
+  autopowers the adapter before `capsulad` starts, a paired source can still open the first ACL in
+  that pre-daemon window; the incoming-connect handler requests the audio profiles over that same
+  link, but recovery of a peer that already abandoned A2DP is device-dependent and remains a
+  hardware gate. The two policy toggles, their persistence and observed status are implemented and
+  covered by D-Bus-fixture tests; `Set Connectable`/pairing behavior on the target device is not
+  physically verified here.
 - **Bluetooth media mode**: AVRCP play/pause/next/previous and absolute volume go to the connected
   source, and its track metadata is read when the source exposes it. Volume is event-driven in both
   directions through the same `applyMasterVolume` path as the keys and application RPC; the daemon
   does not echo a transport value it just wrote. A provider app publishes this through the standard
-  `MediaPlayerService`, so the Web UI and other apps see a normal `bluetooth` player. Connect plays
-  exactly three completed blue fade-in/out ring pulses and shows `bt` on the two rightmost segment
-  cells for two seconds; disconnect plays one pulse and no glyph, leaving the selected display
-  baseline untouched. Both notices go through ordinary presentations and captures over the selected
-  baseline. The A2DP sink endpoint is registered before pairing is enabled, is re-registered if
-  BlueZ or the adapter restarts, and the daemon never unloads PulseAudio's Bluetooth modules while
-  a source is connected.
-- **Physical controls**: the circle (play/pause) key is the talk button — hold it past 700 ms to summon
-  the assistant, release to end the turn, short taps do nothing unless a stopwatch owns the button.
-  Pressing the circle while the assistant is answering dismisses that turn through the app's
-  `dismiss` action instead of starting a second one. While a stopwatch runs, a tap pauses or resumes
-  it and the configured hold or double tap resets it, never summoning the assistant. Volume keys step 5 %, ramp while held
+  `MediaPlayerService`, so the Web UI and other apps see a normal `bluetooth` player; the physical
+  controls reach AVRCP through the public `BluetoothMediaService` even when no provider app is
+  installed. Connect plays exactly three completed blue fade-in/out ring pulses and shows `bt` on
+  the two rightmost segment cells for two seconds; disconnect plays one pulse and no glyph, leaving
+  the selected display baseline untouched. Both notices go through ordinary presentations and
+  captures over the selected baseline.
+- **Physical controls**: the Mini panel is five discrete keys — microphone mute at north, volume up
+  at east, the circle/play-pause talk key at south, volume down at west, and the unmarked neutral
+  centre. Hold the circle past 700 ms to summon the assistant; in hold-to-talk mode its release
+  ends the turn. A short circle tap toggles the current media: a playing standard provider, then a
+  paused one, then a connected Bluetooth source through the public `BluetoothMediaService`, then
+  another standard provider. Pressing the circle while an alert or an assistant turn is in flight
+  dismisses it through the framework/app `dismiss` action instead of starting a second action. The
+  centre is neutral: it dismisses alerts and assistant turns and drives stopwatch gestures, but it
+  never summons the assistant. While a stopwatch runs, a circle or centre tap pauses or resumes it
+  and the configured hold or double tap resets it, never summoning the assistant.
+  Swipes and circles are inferred from ordered presses, never from invented coordinates. The
+  user's panel map is authoritative — east is volume up and west is volume down — and direction is
+  not inverted from any single passive trace. A completed swipe may be the full
+  opposite → centre → direction form (W/C/E right, E/C/W left, S/C/N up, N/C/S down) or the
+  minimum two-contact opposite-edge pair without the centre (W then E = right, E then W = left),
+  where the first contact must still be down when the second is pressed — a physical overlap.
+  Sequential opposite taps and a circle-then-microphone pair remain deliberate key actions. The
+  vertical two-contact pair is recognized only in full capture; partial and none modes keep
+  circle and microphone as deliberate keys. An unambiguous centre-first half swipe is also
+  accepted, and a closed perimeter traversal from any corner is `circle_cw`/`circle_ccw`
+  (N→E→S→W→N or reverse). A crossing that reports zero or one contact is indistinguishable from a
+  key press or from no input and is not treated as a gesture.
+  When a multi-contact sequence fails, its prefix contacts are suppressed — no volume step, mute or
+  summon leaks — and only the newest contact may still resolve as a single action, while a
+  standalone volume tap or held ramp keeps its normal behavior. An unfinished multi-key gesture
+  produces no framework effect; a partial capture may still receive its app-owned circle/centre key
+  contacts. A partial capture receives circle/centre key events and completed gestures, while
+  volume and microphone stay framework controls; a full capture receives every key and gesture
+  with all system effects suppressed, including mute, volume, media and assistant activation. Gesture
+  contacts are deferred by up to 250 ms (total gesture budget 1.5 s) so a swipe/circle cannot leak
+  its constituent mute, volume or summon actions. This deliberately adds up to 250 ms latency to a
+  single-key action; a hold and the gesture windows use the kernel event timestamp converted to the
+  daemon clock (a receive-time fallback applies only to an invalid, >5 s stale event), and a
+  timed-out prefix
+  produces exactly one action with no duplicate tap. Volume keys step 5 %, ramp while held
   (200 ms decaying to 60 ms) and stop at the bounds; each change plays the embedded volume cue at
   the new level and shows the percentage on the segment display for a second. Key, application and
   Bluetooth volume all write the same persisted setting and apply the same mixer/transport path; the
@@ -120,16 +355,59 @@ the implementation is honest about what is verified on real hardware and what is
 - **Personal wakeword training from the browser**: record on the device, then run waveform
   augmentation, pretrained speech embeddings, hard-negative training and independent quality gates
   on the device. The browser only displays progress; no Python, ONNX runtime or GPU is needed there.
+  Inference and enrollment consume the shared processed capture tap, and each take carries a
+  processing-provenance sidecar; legacy raw takes are converted in memory under that declared
+  policy rather than silently relabeled. The installed raw-trained model stays installed and
+  selected on processed input and logs an explicit unverified-threshold warning; weights and
+  selection are not rewritten. On the settled current profile, a warm classifier replay of the
+  unchanged legacy model — 2.32 s of its own same-session ambient audio, the word, and a 1 s tail —
+  fires 6/6 raw and 6/6 processed. That is legacy-model usability only, not calibration or an
+  accuracy certificate. External `CNEG` embeddings are auxiliary off-policy examples: they cannot
+  certify processed-audio quality, but a false activation on that broad corpus remains a hard
+  acceptance veto, and only local processed held-out takes decide threshold calibration and the
+  pass/fail certificate.
 - **Muted-microphone indication** on the ring: a red run on the bottom three pixels that fades in
   and out, independent of the mute state itself. The microphone key is a press-edge toggle; volume
   keys step once per press.
 - **Device timezone** set in the Web UI, inherited by apps as `TZ`; the built-in clock system app
   follows it, and changing it restarts boot applications to apply the new zone.
+- **mDNS network name**: a single DNS label (default `capsula`), stored as a typed setting and
+  advertised as `<label>.local`. On the stock Linux image Avahi remains the sole mDNS owner;
+  `capsulad` reads `GetState`/`GetHostName` on the system bus and calls
+  `org.freedesktop.Avahi.Server.SetHostName` only when the saved label is not already active,
+  confirming an active label through `GetHostNameFqdn` with no redundant write. A zero-write
+  success requires the responder to be RUNNING. After a write the daemon waits a bounded interval
+  and confirms the name, and a coalesced worker replays the latest RUNNING edge instead of dropping
+  it behind a blocking apply; Close cancels without publishing a health warning. A successful write
+  whose FQDN cannot be read back is reported as applied-but-unconfirmed, never as a fabricated
+  advertisement. A redundant-write reply, or a concurrent writer reaching the name first, is
+  accepted only after the responder reports the requested label; write-time collisions, invalid
+  labels and responder failures remain visible with the observed name instead of claiming an old
+  registration is live. The latest saved
+  label is reconciled at startup and when the responder restarts. `GET /settings` is read-only: it
+  renders the stored status and never applies a name or saves configuration. The simulator and
+  other unsupported platforms report mDNS as unavailable and never rename the host; the saved label
+  is retained. No second responder or 5353 socket is opened. A browser proof drove the production
+  Web UI/auth/TLS/settings path against a successful responder fixture (not the simulator's
+  unsupported status): startup, two GETs and a same-name save issued **zero** `SetHostName` calls
+  with a clean “Advertised as capsula.local” and no warning; changing the label issued exactly one
+  setter call; a colliding label stayed visible with no advertised claim and no writes from the GET;
+  and saving the original label recovered. That is fixture-backed browser evidence, not real-device
+  `.local` resolution.
 - **Typed settings** with compare-and-swap revisions, partial updates, masked storage and delivery
   to the owning app only.
 - **HTTPS Web UI** with a self-signed server certificate, Argon2id admin password with
   server-side sessions, static opaque API keys for automation, CSRF/origin defenses, local
-  credential management and read-only security diagnostics.
+  credential management and read-only security diagnostics. The Vue SPA (built from `web/` and
+  embedded by `go:embed`) drives the daemon exclusively through the typed `/ws` protocol; the
+  socket requires a session cookie and a matching HTTPS origin, rejects non-binary or oversized
+  frames, and closes on logout, revocation or session expiry. Overview, Settings, Application,
+  Wakeword, Diagnostics and Access subscriptions carry authoritative revisioned views; wakeword
+  catalog and API-key changes are pushed to every authenticated session, and a topic-less resync
+  makes every subscription re-request its snapshot after an overflow. Credential changes made by
+  the local `capsula auth` CLI in another process are watched and applied live; a password change
+  revokes sessions and closes sockets. Static API keys remain
+  limited to `GET /api/status` and the public certificate download, never the console or socket.
   This intentionally replaces the draft's mandatory client-certificate mTLS at the project
   owner's request. API keys protect only the HTTP surface; the HAL/app bus remains Unix-socket
   only.
@@ -140,13 +418,55 @@ the implementation is honest about what is verified on real hardware and what is
   development injection hooks.
 - **Rockchip WS2812B ring and IS31FL3236 segment output** using the ioctl ABI and wiring
   permutations recovered from the stock `voice-agent`, with sysfs and in-memory fallbacks.
-- **Rockchip device-tree-driven input and sensors**: all five gpio-keys (volume, microphone,
-  play/pause, voice) plus ambient-light and SoC/logic thermal sensors.
+- **Rockchip device-tree-driven input and sensors**: all five gpio-keys (microphone mute, volume up,
+  play/pause, volume down, neutral centre) plus ambient-light and SoC/logic thermal sensors.
 
 ## What is intentionally not claimed
 
-- **QuickJS and MicroPython host runners are not implemented.** `ListRuntimes` reports them
-  unavailable and the supervisor refuses those packages. No fake interpreter is shipped.
+- **Privacy indication is a software boundary, not a measurement.** The audible microphone cue
+  proves the framework mixer consumed a cue at the selected master gain and wrote it to the
+  configured output sink; it does not measure perceived loudness, and audio already buffered in the
+  hardware/PulseAudio sink can still overlap it. Visible brightness is a backend statement, not
+  measured light. Zero brightness or zero volume denies capture rather than recording quietly.
+  Root/physical access and `-sandbox none` development runs are outside the cooperative model.
+
+- **The 2026-11-13 follow-up fixes are deployed; their physical paths are not certified.**
+  Panel/media control, wakeword preprocessing, the assistant endpointer and mDNS idempotence are in
+  the installed daemon (sha256 `ff3646bc…`) and assistant (`141da876…`) as of 2026-11-13 16:19 MSK.
+  The health gate, ready clock/ring/assistant runs, preserved user settings, model, activation mode
+  and reply asset, and a normal restart are verified on the unit. No microphone capture was made,
+  so wakeword/noise behavior and the endpointer under the current room are not acoustically
+  verified; physical gesture/media-recency behavior, real-peer Bluetooth, Avahi collisions and a
+  power-cycle remain hardware gates. See the dated entry in [STATUS.md](docs/STATUS.md).
+- **The 2026-11-14 public-contract/settings-UI/Wi-Fi stack plus the clock/ring wire correction are
+  deployed; their physical paths are not certified.** Corrected daemon `fce5c506…`, runtime
+  `394ed875…` (descriptor now includes the public clock/ring services), assistant `ee27cc0a…`,
+  and the rebuilt embedded SPA are installed through the canonical boot service, with full
+  host/on-device `.prev` backups and versioned backup directories (see the dated entries in
+  [STATUS.md](docs/STATUS.md)). Health, ready clock/ring/assistant runs, public interface
+  discovery, preserved settings/credentials/network/pairings, the new SPA bytes and 401-gated API
+  were verified on the unit. An on-device native-SDK proof through the installed runtime now
+  succeeds: clock `GetState`, a non-empty `CancelTimer`, ring `GetSettings` plus a same-value CAS
+  update, and a snapshot-first `WatchState`/cancel all convert through
+  `call_send_json`/`call_recv_json`, and the authenticated Web UI WebSocket serves the typed
+  clock/ring application views. Physical Bluetooth `Set Connectable`/pairing, real-peer A2DP,
+  Wi-Fi RF association, captive-portal detection, stock Wi-Fi drivers, targeted AP teardown, real
+  hardware input, acoustics and a power cycle are not verified. A captive-portal browser proof or
+  a Linux command/D-Bus fixture is not proof of RF or stock-driver behavior.
+- **Script runtimes are implemented and now running on the unit.** `make
+  interpreter` builds real quickjs-ng v0.18.0 and MicroPython 1.29 hosts from pinned sources and
+  stages `capsula-quickjs`/`capsula-micropython` beside `libcapsula`. The hosts load the public C
+  ABI, open the AppBus, and expose unary/proto calls, events, routed calls and stream cancellation.
+  `ListRuntimes` reports the installed engines, and non-native packages are admitted only when the
+  matching host and ABI are present. `interpreter/smoke/run.sh` passes READY, invocation, unary,
+  routed unary, routed stream/cancel, stop/crash cleanup and a daemon-crash phase where both hosts
+  receive the bounded terminal disconnect event and exit on their own; `capsula_host_test.c` pins
+  the single-job queue behavior. Both hosts are installed in `/data/capsdemo/lib` on the Capsula
+  Mini: `ListRuntimes` reports `quickjs-ng 0.18.0` and `micropython 1.29.0-preview` from the
+  device, and a temporary QuickJS package ran `APP_READY` under `mountns`, read the public device
+  API, accepted an invocation and stopped without an orphan host. The same host+library pair has
+  not yet been exercised under MicroPython on the device, and script sandbox strength is still the
+  documented mount-only kernel limit.
 - **Rockchip vendor LED ABI is recovered, measured and partly validated.** The device tree
   describes a 36-channel WS2812B chain (`/dev/topleds`, 12 RGB ring pixels) and an IS31FL3236
   (`/dev/led_multi_ctrl`, 30 monochrome display cells); `GET_COUNT` returns exactly 36 and 30 on a
@@ -158,7 +478,9 @@ the implementation is honest about what is verified on real hardware and what is
 - **The Web UI certificate is self-signed.** Browsers show a trust warning until the operator
   verifies and trusts the fingerprint. Password recovery is a local-console CLI operation.
 - **Personal wakeword models require setup and evaluation.** Native incremental speech-embedding
-  inference runs on Rockchip, but legacy mel models must be retrained. There is no bundled,
+  inference runs on Rockchip, but legacy mel models must be retrained. The installed model was
+  trained on raw audio and now runs on the processed tap, so its calibrated threshold is unverified;
+  it stays installed and selected with an explicit warning. There is no bundled,
   speaker-independent Russian keyword head. See [wakeword setup and evidence](docs/WAKEWORD.md).
 - **Sandbox strength is probed, never assumed.** Linux user+mount namespace isolation, read-only
   mounts and a seccomp deny list are implemented, but the RK3308 stock kernel (4.4.167) offers only
@@ -187,6 +509,86 @@ and Rust binding use Cargo's release profile, and the Go binding is built into i
 to `build/bin`, `build/lib` and `build/include`; the Rust binding uses its own Cargo target
 directory. Builds are local artifacts and nothing here deploys them to a device.
 
+`make interpreter` is opt-in because it builds third-party engines from pinned sources
+(quickjs-ng v0.18.0 and MicroPython 1c6321181…, both sha256-pinned in
+`interpreter/build.sh`). It stages `capsula-quickjs` and `capsula-micropython` into `build/lib`
+beside `libcapsula`; `make interpreter-quickjs` / `make interpreter-micropython` build one engine.
+Offline builds may set `QUICKJS_SRC` / `MICROPYTHON_SRC` to already extracted matching trees.
+The runnable samples are `interpreter/samples/`; the end-to-end proof is
+`sh interpreter/smoke/run.sh`.
+
+The Web UI is a separate Vue 3 + Vite project in `web/` with Tailwind CSS 3.4.17 and daisyUI
+4.12.23. Its built output is checked in under `internal/webui/dist` and embedded by `capsulad`, so a
+normal `make`/`go build` needs no Node toolchain. After changing frontend sources, rebuild it and
+then the daemon:
+
+```sh
+make web          # npm ci && npm run build into internal/webui/dist
+make capsulad     # re-embed the new assets
+```
+
+For frontend work, run the SPA against a live simulator daemon instead of re-embedding assets on
+every edit. The daemon keeps its real HTTPS/session surface; Vite only serves the sources:
+
+```sh
+mkdir -p build/dev-web
+./build/bin/capsula -data-dir build/dev-web auth init -hostname localhost -ip 127.0.0.1 \
+  -password devpass123
+./build/bin/capsulad -platform simulator -data-dir build/dev-web \
+  -dev-admin build/dev-web/run/dev.sock -web-addr 127.0.0.1:8443
+cd web && npm run dev            # https://localhost:5173, HMR
+```
+
+`vite` proxies `/api`, `/healthz` and the binary `/ws` socket to the daemon
+(`CAPSULA_WEB_TARGET`, default `https://127.0.0.1:8443`) with `changeOrigin` off, so the daemon's
+Origin/Host check still matches. The dev server reuses the daemon's certificate
+(`build/dev-web/security`, or `CAPSULA_DEV_SECURITY_DIR`) and serves HTTPS, because the session and
+CSRF cookies are `Secure; SameSite=Strict` and Safari drops them on plain `http://localhost`;
+accept the self-signed certificate once, or set `CAPSULA_DEV_HTTPS=0` for browsers that accept
+Secure cookies from localhost. `capsula -data-dir build/dev-web dev <state|wakeword|gesture|key|raw>`
+and the `-dev-admin` Unix socket drive input, wakeword and rendered frames
+(`curl --unix-socket build/dev-web/run/dev.sock http://localhost/state`).
+
+The Overview media bar needs a provider. `sh tools/dev-media.sh build/dev-web` builds the real
+media-contract fixture (`internal/daemon/testdata/mediafixture`) for the host, installs it as the app
+`dev.media` and leaves it stopped; restart the daemon and Play starts it through the same routed
+contract the panel keys use, so transport and now-playing render exactly as they would for an
+installed provider. The fixture is a development package, not a product app.
+
+The checked-in dist is generated from the current `web/src` with the pinned Vue 3.5.13 / Vite 4.5.5 /
+PostCSS 8.4.49 / autoprefixer 10.4.20 toolchain (the offline flow symlinks the staged package tree
+into `web/node_modules` and runs `vite build`; do not hand-edit minified output). The fresh daisyUI
+console replaced the previous hand-styled UI and loads only local assets, with no CDN or external
+font. Observed local verification (not a device deployment): the frontend's 11/11 node tests passed;
+the final Vite production build, the embedded host daemon build and the Linux arm64 crossbuild
+passed (after all patches); `go test -race ./internal/webui` passed (22.672 s); the wakeword
+real-origin last-20 history focused `-race` test passed; the daemon
+install/cancellation/install-and-train focused `-race` tests passed (2.045 s with a matching host
+native runtime); and the targeted `TestTraining` `-race` run (4.581 s) confirms that neither a local
+nor a generic cancel claims the installed model is unchanged — only an explicit daemon precommit
+status does. A native Tern browser session through a throwaway loopback HTTP→TLS/WebSocket proxy
+exercised the 390 px and 849 px surfaces: login with live startup and no reload, live microphone
+changes plus an independent-client push that preserved an unsaved name, timezone city search with
+explicit Apply, the Clock app's `allow-scripts` settings document reaching ready with a blink patch
+persisted through the public CLI, API-key create/clear/revoke, password change with reconnect, an
+authenticated certificate PEM 200 attachment, Settings filter no-results, wakeword room-take start
+and cancel with simulator routing restored to its default baseline and no captures, diagnostics
+pause with 10 new/resumed 27 logs and filtering, and a final main-toolbar Bluetooth/media/volume/microphone pass before the apps
+without overflow at 849 px. Limits: the managed WebKit build crashed in EGL and Chromium failed its
+Mach-port launch; a direct Tern load of the self-signed TLS endpoint with `insecure:true` was still
+refused ("Unacceptable TLS certificate") and certificate validation was not weakened, so the proxy
+run remains the browser proof; Tern ignored resize emulation, so the viewport was dictated by the
+pane rather than a full 1440 px desktop or physical phone; no real Wi-Fi/Bluetooth peer, physical
+temperature, acoustics or full training-quality run, and no deployment. All temporary smoke services
+were stopped and the proxy script deleted. Historical evidence retained as such: an
+earlier WebKit build through a temporary plain-HTTP TLS-forwarding proxy showed two live sessions
+receiving a cross-session Access change without refresh, with the resync client handling exercised
+independently.
+
+The browser schema lives in `proto/capsula/web/v1/web.proto`. Regenerate the Go bindings with
+`protoc` and the browser module with `go run ./web/protogen` whenever that schema changes. The
+WebSocket is HTTPS-only and speaks binary protobuf; there is no JSON-over-bytes fallback.
+
 The clock face and LED-ring behaviour are built-in **system apps** compiled into `capsulad`.
 They are not installable packages and need no `app install`, but they are otherwise normal apps:
 `capsula app list` and the Web UI list them, `capsula app start capsula.clock` starts a stopped
@@ -197,22 +599,38 @@ can select another installed provider or none, and there is no hidden fallback.
 
 ```sh
 capsula -data-dir build/demo settings app capsula.clock blink=true timezone=Europe/Moscow
-capsula -data-dir build/demo settings app capsula.ring effect=breathe palette=aurora
+capsula -data-dir build/demo settings app capsula.clock alarms='0 7 * * 1-5, 30 9 * * 6,7'
+capsula -data-dir build/demo settings app capsula.ring effect=static palette='#FF7828'
+capsula -data-dir build/demo settings app capsula.ring effect=breathe \
+  palette='linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)'
 capsula -data-dir build/demo app runs capsula.ring
 capsula -data-dir build/demo app stop <run-id>
 capsula -data-dir build/demo app start capsula.ring
 ```
 
 `capsula.clock` settings cover `blink` (boolean), `timezone` (IANA name; empty follows the device),
-`display_mode`, the timer duration, the stopwatch reset gesture (`hold` or `double_tap`) and one
-alarm (label, hour, minute, weekday mask, timezone, enabled). `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle`),
-`palette`, `speed`, `brightness` and an optional wall-clock active window
+`display_mode`, the timer duration, the stopwatch reset gesture (`hold` or `double_tap`) and
+`alarms`, a string of five-field dcron entries separated by a comma after the fifth field and any
+suffixes. Entries may carry `@IANA-zone`, `!once` and `!disabled`; the stable ID is
+`expr [@zone] [!once]`. `alarm_labels` is a JSON map from that stable ID to a display label
+(schedules stay solely in `alarms`); `Alarm.label`/`AddAlarm.label` expose it, and legacy
+`alarm_label` migrates into the map. Older flat `app-settings/capsula.clock.json` /
+`capsula.ring.json` files are converted once atomically; the canonical directory form wins and the
+flat source is retained. Recurring alarms deduplicate by local wall-clock minute, so a DST fall-back
+does not ring twice. Comma lists inside a field stay in that field (`0,30 7 * * 1-5`), so the
+list is parsed five whitespace-separated fields (plus optional suffixes) at a time rather than split
+on every comma; the Web UI edits friendly times and repeat days with timezone, one-shot and
+enabled/disabled controls, and preserves untouched entries byte-for-byte on save. `capsula.ring` settings are `effect` (`breathe|spinner|rainbow|pulse|comet|sparkle|static`),
+`palette` (canonical `linear-gradient(...)` or solid `#RRGGBB`), `speed`, `brightness` and an optional
+wall-clock active window
 (`schedule_enabled`, `schedule_start`/`schedule_end` as 24-hour `HH:MM` in the device timezone; the
 window may cross midnight and equal bounds mean all day). Outside the window the app presents an
 explicit blank frame on its normal baseline presentation, so the ring is dark but still yields to
 volume, mute, alert and application captures, and the selected effect returns at the boundary. The
-legacy `mode` key is accepted only so an existing settings
-file still validates; it is migrated to `effect` and no longer offered. Legacy defaults `org.capsula.clock`,
+`static` effect shows one solid palette colour and does not animate, while `rainbow`
+rotates/interpolates the palette's actual samples at 0, 1/3 and 2/3 without inventing unrelated hues. Legacy named palettes migrate to
+equivalent gradients with their colours preserved; the legacy `mode` key is migrated to `effect`
+and no longer offered. Legacy defaults `org.capsula.clock`,
 `org.example.ring-controller` and `org.capsula.assistant` migrate to these IDs at boot, and the old
 clock settings are copied to `capsula.clock` once. The Web UI default-provider dropdowns list
 installed packages and system apps; an empty selection means no default provider.
@@ -342,7 +760,8 @@ capsula -data-dir build/demo auth key revoke automation
 capsula -data-dir build/demo cert status
 capsula -data-dir build/demo settings show
 capsula -data-dir build/demo settings app capsula.clock blink=false
-capsula -data-dir build/demo settings app capsula.ring effect=spinner
+capsula -data-dir build/demo settings app capsula.ring effect=spinner \
+  palette='linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)'
 ```
 
 The rest of the CLI uses the framework Unix socket as before:
@@ -493,7 +912,9 @@ library at startup.
 - `bus_open` starts the managed `AppBusService/Connect` session, sends `AppHello{run_id}` followed
   by `AppReady`, and delivers `on_ready`, `on_disconnected` and `on_event` callbacks. Event kinds
   cover invocations, settings changes, actions, assistant activations and input release; payloads
-  are canonical protobuf JSON except raw-PCM audio.
+  are canonical protobuf JSON except raw-PCM audio. A touch activation carries `hold_to_talk`, so
+  the assistant knows whether a release ends input without reading administrator-only device
+  settings.
 - `bus_ready` waits until the two frames are flushed and `on_ready` has returned. Inbound custom
   calls arrive on `on_call` on a bounded pool (4 workers, 32 queued calls, 64 live calls; overflow
   ends the call with `RESOURCE_EXHAUSTED`). The library owns the callback reference; retain the call
@@ -635,7 +1056,9 @@ set when framework protos change:
 protoc -I proto --include_imports \
   --descriptor_set_out=sdk/native/descriptors/capsula-framework.protoset \
   proto/capsula/framework/v1/framework.proto \
-  proto/capsula/contracts/media/v1/media.proto
+  proto/capsula/contracts/media/v1/media.proto \
+  proto/capsula/contracts/clock/v1/clock.proto \
+  proto/capsula/contracts/ring/v1/ring.proto
 ```
 
 ### Compatibility policy
@@ -664,16 +1087,18 @@ behavior starts a new major. Compatibility failures are explicit (`UNSUPPORTED_A
 | `internal/sandbox` | Linux read-only namespace launcher + seccomp |
 | `internal/websecurity` | self-signed TLS, Argon2id password, API keys, sessions |
 | `internal/provenance` | Sigstore/GitHub attestation verification |
-| `internal/webui` | password/API-key HTML interface |
+| `internal/webui` | HTTPS Web UI server, session auth, SPA assets, protobuf WebSocket |
+| `web` | independently built Vue 3 SPA, browser protobuf bindings and their generator |
 | `internal/sounds` | embedded framework UI cue audio and its CC BY-SA `COPYING` |
 | `sdk/native` | Rust shared engine behind the stable C ABI (`libcapsula.so.1` / `.dylib`), header and C example |
 | `sdk/go` | nested Go module `capsula/sdk`; thin binding over the shared native library |
 | `sdk/rust` | Rust binding that dynamically loads the shared native library, with real-daemon smoke examples |
 | `sdk/cpp` | C++ `dlopen` example and CMake target for the C ABI |
+| `interpreter` | pinned QuickJS/MicroPython embed hosts, script SDKs, samples and the end-to-end `smoke/run.sh` |
 | `apps/dumbassistant` | optional first-party nested Go module; built only on request |
 | `deploy/rockchip-stock` | single removable boot hook and bring-up scripts for the RK3308 stock image |
-| `proto/` | draft v0.5 framework and media contract schemas; the ring contract now ships as the compiled-in `capsula.ring` system app interface |
-| `docs/` | hardware findings, implementation status, security notes |
+| `proto/` | draft v0.5 framework and standard app-contract schemas (media, clock, ring); built-in system apps publish contracts from here |
+| `docs/` | glossary, current app API, speaker behavior, implementation status, hardware and wakeword evidence |
 
 ## Verification
 
@@ -692,13 +1117,43 @@ c++ -std=c++17 -pthread -I build/include sdk/cpp/example.cpp \
     -o build/bin/capsula-cpp-example -ldl
 ```
 
-Tests cover routing/capture semantics, preset validation, touch delivery/system suppression and
-cancellation, settings CAS and secret redaction, self-signed TLS, password sessions, API-key
-accept/revoke and CSRF, genuine Sigstore fixture verification, bounded log rotation, and an
-end-to-end simulator run (supervision, singleton invocation, routed unary/streaming calls,
-Bluetooth player and admin gating, touch partial/full capture, crash cleanup, wakeword
-capture/release, mic watchdog and masked settings). The Web UI is additionally tested through
-login/session, CSRF and static API-key flows.
+Tests cover routing/capture semantics, preset validation, touch mapping/gesture inference/system
+suppression and cancellation, settings CAS and secret redaction, self-signed TLS, password sessions,
+API-key accept/revoke and CSRF, genuine Sigstore fixture verification, bounded log rotation, and an
+end-to-end simulator run (supervision, selected-provider recovery and deselection, singleton
+invocation, routed unary/streaming calls, standard-provider and Bluetooth-fallback media control,
+touch partial/full capture, crash cleanup, wakeword capture/release, mic watchdog and masked
+settings). The 2026-11-13 focused integrated run (macOS arm64, `-ldflags '-linkmode=external'`,
+real Mach-O native runtime from `build/lib` via `CAPSULA_NATIVE_LIB_DIR`) passed race-enabled suites
+for input/backend/wakeword/settings/discovery/audio, focused supervisor and daemon lifecycle
+recovery, Bluetooth registration/ordering, Web UI hostname and Restart wording, the final
+standard-provider/Bluetooth-fallback media tests, and all eleven assistant scenarios; fresh host
+CLI/daemon smoke covered health/status, simulated circle press, empty media list, shutdown and
+persisted-hostname startup with simulator mDNS correctly unsupported. Two lifecycle policy edges
+found after the first pass were then repaired: a READY-to-crash loop keeps backoff until 30 s of
+continuous READY, and selected-origin/forced recovery re-checks selection regardless of
+`restart_on_failure`; controlled-clock regressions and the full `-race` supervisor suite pass, and
+the integrated daemon lifecycle recovery set passes 7/7 against the real native runtime. The Web UI
+is additionally tested through login/session, CSRF and static API-key flows. A Chrome-headless browser session
+against a real HTTPS simulator daemon observed the host-name default, normalized save and restart
+persistence, invalid-label rejection at the HTML and server layers, the simulator's unsupported
+mDNS warning with no false advertisement claim, and the **Restart** labels on Clock, Ring and
+Diagnostics. A second browser run drove the corrected apply through the production Web
+UI/auth/TLS/settings path against a successful responder fixture: startup, two GETs and a
+same-name save made zero `SetHostName` calls with a clean advertised status; a changed label made
+one call; a collision remained visible with no advertised claim; restoring the label recovered.
+Real Bluetooth peer recovery and the acoustic/VAD room gate remain hardware gates, not simulator
+or browser results; device `.local` resolution and a warning-free mDNS startup were observed after
+the 2026-11-13 deployment. Final host checks used a fresh HEAD-built
+Mach-O runtime with matching metadata and the exact embedded descriptor in a temporary directory
+(the pre-existing `build/lib` candidate did not match): under `-race` with the external linker, the
+audio drop/frame/lifecycle subset passed (2.238 s), the nested assistant module passed (6.222 s),
+and the actual daemon passed all 14 assistant scenarios (128.684 s), including zero pre-capture /
+active / post-close noise baseline and typed-level/no-playback assertions. The BlueZ
+`MediaControl1` private-bus wire fixture and the barrier-driven Avahi fixture plus Web UI browser
+run are separate local evidence. The follow-up daemon and assistant were deployed on 2026-11-13
+after a full host backup, the canonical health gate and a normal restart; the dated entry in
+[STATUS.md](docs/STATUS.md) records the installed hashes, preserved choices and remaining limits.
 
 ## Status
 

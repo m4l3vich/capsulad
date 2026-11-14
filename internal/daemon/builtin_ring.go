@@ -11,14 +11,15 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presets"
+	"capsulad/internal/ringpalette"
 	"capsulad/internal/settings"
+	"capsulad/internal/uichanges"
 )
 
 type builtinRing struct {
@@ -35,6 +36,7 @@ type builtinRing struct {
 
 	effect     string
 	palette    string
+	gradient   ringpalette.Gradient
 	brightness float64
 	speed      float64
 
@@ -52,25 +54,69 @@ type builtinRing struct {
 	wake            chan struct{}
 
 	applied string
+
+	// settingsRevision mirrors the app-settings store revision. Watchers use
+	// it for compare-and-swap and convergence; an older queued snapshot must
+	// never overwrite a newer synchronous update.
+	settingsMu       sync.Mutex
+	settingsLoaded   bool
+	settingsRevision uint64
+	// runGen invalidates watcher callbacks from a previous start/stop.
+	runGen uint64
+	// frameMu serializes baseline frame compute+send and applied bookkeeping.
+	frameMu sync.Mutex
+	// failOnce bounds one stream-failure recovery per run generation.
+	failOnce sync.Once
+	// pixelCount is derived from the advertised ring capability at start.
+	pixelCount  uint32
+	watchers    map[int]chan *ringv1.RingState
+	nextWatch   int
+	settingSubs map[int]chan *ringv1.RingSettingsSnapshot
+	nextSetting int
 }
 
 func newBuiltinRing(d *Daemon, ringID string) *builtinRing {
-	return &builtinRing{
+	r := &builtinRing{
 		d: d, ringID: ringID,
-		effect: "breathe", palette: "aurora", brightness: 1, speed: 1,
+		effect: "breathe", brightness: 1, speed: 1,
 		now: time.Now, active: true, loc: time.Local,
 		activeFrom: 22 * 60, activeUntil: 7 * 60,
 		wake: make(chan struct{}, 1),
 	}
+	r.palette, r.gradient = defaultRingPalette()
+	if info := d.resources[ringID]; info != nil && info.GetRing() != nil {
+		r.pixelCount = info.GetRing().GetPixelCount()
+	}
+	r.watchers = map[int]chan *ringv1.RingState{}
+	r.settingSubs = map[int]chan *ringv1.RingSettingsSnapshot{}
+	return r
+}
+
+// defaultRingPalette is the canonical aurora gradient. Preset names are a UI
+// convenience; the persisted setting is always this canonical form.
+func defaultRingPalette() (string, ringpalette.Gradient) {
+	const text = "linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)"
+	g, err := ringpalette.Parse(text)
+	if err != nil {
+		panic(err)
+	}
+	return text, g
 }
 
 func (r *builtinRing) start() {
+	r.settingsMu.Lock()
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
+		r.settingsMu.Unlock()
 		return
 	}
 	r.running = true
+	r.runGen++
+	gen := r.runGen
+	r.settingsLoaded = false
+	r.settingsRevision = 0
+	r.failOnce = sync.Once{}
 	r.runID = r.d.SystemAppRunID(ringAppID)
 	ctx, cancel := context.WithCancel(r.d.ctx)
 	r.cancel = cancel
@@ -78,6 +124,8 @@ func (r *builtinRing) start() {
 	client := newBuiltinAppClient(r.d, ringAppID)
 	r.client = client
 	r.mu.Unlock()
+	r.settingsMu.Unlock()
+	client.SetFailureHandler(func(err error) { r.failRun(gen, err) })
 
 	// Opening the stream talks to the daemon's own gRPC endpoint. Doing that
 	// outside the lock keeps the output loop, which reasserts the baseline on
@@ -95,25 +143,54 @@ func (r *builtinRing) start() {
 		client.Close()
 		return
 	}
-	if err != nil {
-		r.d.logs.Errorf(ringAppID, "", "open baseline presentation: %v", err)
-	} else {
+	if err == nil {
 		r.pres = pres
 	}
 	r.mu.Unlock()
-
-	r.loadSettings(ctx)
+	if err != nil {
+		r.d.logs.Errorf(ringAppID, "", "open baseline presentation: %v", err)
+		r.failRun(gen, err)
+		return
+	}
+	r.d.markSystemHealthy(ringAppID)
+	r.loadSettings(ctx, gen)
 	r.refreshSchedule()
 	go r.scheduleLoop(ctx)
 }
 
+// failRun recovers an internal stream failure by failing this run; the daemon
+// schedules a bounded restart. Stale generations and normal stops are ignored.
+func (r *builtinRing) failRun(gen uint64, err error) {
+	r.settingsMu.Lock()
+	current := r.runGen
+	r.settingsMu.Unlock()
+	if current != gen {
+		return
+	}
+	r.mu.Lock()
+	running := r.running
+	r.mu.Unlock()
+	if !running {
+		return
+	}
+	r.failOnce.Do(func() {
+		r.d.logs.Errorf(ringAppID, "", "internal stream failed: %v; recovering run", err)
+		r.d.recoverSystemApp(ringAppID)
+	})
+}
+
 func (r *builtinRing) stop() {
+	r.settingsMu.Lock()
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
+		r.settingsMu.Unlock()
 		return
 	}
 	r.running = false
+	r.runGen++
+	r.settingsLoaded = false
+	r.settingsRevision = 0
 	cancel := r.cancel
 	r.cancel = nil
 	pres := r.pres
@@ -121,7 +198,16 @@ func (r *builtinRing) stop() {
 	r.pres = nil
 	r.client = nil
 	r.applied = ""
+	for id, ch := range r.watchers {
+		delete(r.watchers, id)
+		close(ch)
+	}
+	for id, ch := range r.settingSubs {
+		delete(r.settingSubs, id)
+		close(ch)
+	}
 	r.mu.Unlock()
+	r.settingsMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -133,13 +219,13 @@ func (r *builtinRing) stop() {
 	}
 }
 
-func (r *builtinRing) loadSettings(ctx context.Context) {
+func (r *builtinRing) loadSettings(ctx context.Context, gen uint64) {
 	snap, ch, cancel, err := r.d.appCfg.WatchApp(ringAppID)
 	if err != nil {
 		r.d.logs.Warnf(ringAppID, "", "settings unavailable: %v", err)
 		return
 	}
-	r.applySettings(snap.Values)
+	r.applySettingsGen(gen, snap.Revision, snap.Values)
 	go func() {
 		defer cancel()
 		for {
@@ -150,13 +236,40 @@ func (r *builtinRing) loadSettings(ctx context.Context) {
 				if !ok {
 					return
 				}
-				r.applySettings(next.Values)
+				r.applySettingsGen(gen, next.Revision, next.Values)
 			}
 		}
 	}()
 }
 
-func (r *builtinRing) applySettings(values []settings.AppSettingView) {
+// applySettings applies settings for the current run. Mutating callers use it
+// so their committed snapshot is visible synchronously.
+func (r *builtinRing) applySettings(revision uint64, values []settings.AppSettingView) {
+	r.settingsMu.Lock()
+	gen := r.runGen
+	r.settingsMu.Unlock()
+	r.applySettingsGen(gen, revision, values)
+}
+
+// applySettingsGen drops callbacks from a previous run and enforces monotonic
+// store revisions for this run. revision 0 is an unversioned local apply.
+func (r *builtinRing) applySettingsGen(gen, revision uint64, values []settings.AppSettingView) {
+	r.settingsMu.Lock()
+	if gen != r.runGen {
+		r.settingsMu.Unlock()
+		return
+	}
+	if revision != 0 {
+		r.mu.Lock()
+		if r.settingsLoaded && revision <= r.settingsRevision {
+			r.mu.Unlock()
+			r.settingsMu.Unlock()
+			return
+		}
+		r.settingsLoaded = true
+		r.settingsRevision = revision
+		r.mu.Unlock()
+	}
 	r.mu.Lock()
 	effect, palette := r.effect, r.palette
 	brightness, speed := r.brightness, r.speed
@@ -169,7 +282,7 @@ func (r *builtinRing) applySettings(values []settings.AppSettingView) {
 		effect = nextEffect
 	}
 	if decodeSetting(values, "palette", &nextPalette) {
-		palette = nextPalette
+		palette = strings.TrimSpace(nextPalette)
 	}
 	var level, rate float64
 	if decodeSetting(values, "brightness", &level) {
@@ -193,25 +306,41 @@ func (r *builtinRing) applySettings(values []settings.AppSettingView) {
 			activeUntil = minute
 		}
 	}
-	switch effect {
-	case "breathe", "spinner", "rainbow", "pulse", "comet", "sparkle":
-	default:
+	if !validRingEffect(effect) {
 		effect = "breathe"
 	}
-	switch palette {
-	case "aurora", "ocean", "sunset", "ember", "mono", "spectrum":
-	default:
-		palette = "aurora"
+	parsed, err := ringpalette.Parse(palette)
+	if err != nil {
+		r.d.logs.Warnf(ringAppID, "", "invalid palette %q (%v); keeping the previous gradient", palette, err)
+		r.mu.Lock()
+		palette, parsed = r.palette, r.gradient
+		r.mu.Unlock()
+	} else {
+		// Persist the canonical text only for values already in canonical
+		// form; the setting is the user's source of truth and the validator
+		// enforces the grammar, so no rewrite is needed here.
 	}
 
 	r.mu.Lock()
 	r.effect, r.palette = effect, palette
+	r.gradient = parsed
 	r.brightness, r.speed = brightness, speed
 	r.scheduleEnabled = scheduleEnabled
 	r.activeFrom, r.activeUntil = activeFrom, activeUntil
 	r.mu.Unlock()
+	r.settingsMu.Unlock()
 	r.refreshSchedule()
 	r.signalSchedule()
+	r.notifySettings()
+	r.notifyState()
+}
+
+func validRingEffect(effect string) bool {
+	switch effect {
+	case "breathe", "spinner", "rainbow", "pulse", "comet", "sparkle", "static":
+		return true
+	}
+	return false
 }
 
 // refreshSchedule re-evaluates the active window against the current wall
@@ -245,6 +374,12 @@ func (r *builtinRing) setDeviceTimezone(name string) {
 }
 
 func (r *builtinRing) reassert() {
+	// Compute and send under one frame lock so concurrent settings/output
+	// callbacks cannot deliver an older frame after a newer one. applied is
+	// updated only after a successful write; a failed stream keeps the old
+	// signature so the next tick retries.
+	r.frameMu.Lock()
+	defer r.frameMu.Unlock()
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
@@ -263,11 +398,17 @@ func (r *builtinRing) reassert() {
 		r.mu.Unlock()
 		return
 	}
+	r.mu.Unlock()
+	if err := pres.UpdateFrame(frame); err != nil {
+		if r.d.ctx.Err() == nil {
+			r.d.logs.Debugf(ringAppID, "", "baseline: %v", err)
+		}
+		return
+	}
+	r.mu.Lock()
 	r.applied = sig
 	r.mu.Unlock()
-	if err := pres.UpdateFrame(frame); err != nil && r.d.ctx.Err() == nil {
-		r.d.logs.Debugf(ringAppID, "", "baseline: %v", err)
-	}
+	r.notifyState()
 }
 
 // frameLocked builds the baseline frame for the current state. A closed active
@@ -283,7 +424,8 @@ func (r *builtinRing) frameLocked() (*frameworkv1.PresentationFrame, string) {
 }
 
 func (r *builtinRing) contentLocked() (string, presets.Params, string) {
-	primary, secondary, saturation := paletteColors(r.palette)
+	primary := r.gradient.Sample(0)
+	secondary := r.gradient.Sample(1)
 	brightness := clampUnit(r.brightness)
 	speed := clampRange(r.speed, 0.1, 4)
 	var (
@@ -291,6 +433,11 @@ func (r *builtinRing) contentLocked() (string, presets.Params, string) {
 		params presets.Params
 	)
 	switch r.effect {
+	case "static":
+		id = "system.ring.static"
+		params = presets.Params{
+			"color": scaleColor(r.gradient.Solid(), brightness), "intensity": 1.0,
+		}
 	case "spinner":
 		id = "system.ring.spinner"
 		params = presets.Params{
@@ -300,7 +447,9 @@ func (r *builtinRing) contentLocked() (string, presets.Params, string) {
 	case "rainbow":
 		id = "system.ring.rainbow"
 		params = presets.Params{
-			"speed": 0.15 * speed, "saturation": saturation, "brightness": brightness,
+			"speed": 0.15 * speed,
+			"color": r.gradient.Sample(0), "color_b": r.gradient.Sample(1.0 / 3.0),
+			"color_c": r.gradient.Sample(2.0 / 3.0), "brightness": brightness,
 		}
 	case "pulse":
 		id = "system.ring.pulse"
@@ -329,7 +478,19 @@ func (r *builtinRing) contentLocked() (string, presets.Params, string) {
 		params = presets.Params{"period_s": period, "color": scaleColor(primary, brightness)}
 	}
 	return id, mustParams(id, params),
-		fmt.Sprintf("%s|%s|%.3f|%.3f", r.effect, r.palette, r.brightness, r.speed)
+		fmt.Sprintf("%s|%s|%.3f|%.3f|%s", r.effect, r.palette, r.brightness, r.speed,
+			gradientSignature(r.gradient))
+}
+
+// gradientSignature keeps the frame deduplication key sensitive to parsed
+// colour changes without formatting frames or re-parsing the string.
+func gradientSignature(g ringpalette.Gradient) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%g", g.Angle)
+	for _, s := range g.Stops {
+		fmt.Fprintf(&b, "/%.3f:%02x%02x%02x", s.Position, s.Color.R, s.Color.G, s.Color.B)
+	}
+	return b.String()
 }
 
 // --- active window ----------------------------------------------------------
@@ -481,49 +642,285 @@ func parseClockTime(s string) (int, bool) {
 	return hour*60 + minute, true
 }
 
-func (r *builtinRing) handleCall(ctx context.Context, service, rpc string, request []byte) ([][]byte, error) {
+func (r *builtinRing) handleCall(ctx context.Context, service, rpc string, request []byte, emit func([]byte) error) error {
 	if service != ringServiceName {
-		return nil, status.Errorf(codes.Unimplemented, "ring app does not implement %s", service)
-	}
-	if rpc != "GetState" {
-		return nil, status.Errorf(codes.Unimplemented, "unknown RingService method %s", rpc)
-	}
-	if len(request) > 0 {
-		msg := &ringv1.GetStateRequest{}
-		if err := protojson.Unmarshal(request, msg); err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
-		}
+		return status.Errorf(codes.Unimplemented, "ring app does not implement %s", service)
 	}
 	r.mu.Lock()
-	if !r.running {
-		r.mu.Unlock()
-		return nil, status.Error(codes.FailedPrecondition, "ring app is not running")
-	}
-	out := &ringv1.RingState{
-		Effect: r.effect, Palette: r.palette,
-		Brightness: float32(r.brightness), Speed: float32(r.speed),
-		PresentationId: r.presentationIDLocked(),
-		Active:         r.active,
-	}
+	running := r.running
 	r.mu.Unlock()
-	payload, err := encodeRingState(out)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+	if !running {
+		return status.Error(codes.FailedPrecondition, "ring app is not running")
 	}
-	return [][]byte{payload}, nil
+	switch rpc {
+	case "GetState":
+		if err := decodeRingRequest(request, &ringv1.GetStateRequest{}); err != nil {
+			return err
+		}
+		return emitProto(emit, r.stateSnapshot())
+	case "WatchState":
+		if err := decodeRingRequest(request, &ringv1.WatchStateRequest{}); err != nil {
+			return err
+		}
+		return r.watchState(ctx, emit)
+	case "GetSettings":
+		if err := decodeRingRequest(request, &ringv1.GetSettingsRequest{}); err != nil {
+			return err
+		}
+		return emitProto(emit, r.settingsSnapshot())
+	case "UpdateSettings":
+		req := &ringv1.UpdateSettingsRequest{}
+		if err := decodeRingRequest(request, req); err != nil {
+			return err
+		}
+		snap, err := r.updateSettings(req)
+		if err != nil {
+			return err
+		}
+		return emitProto(emit, snap)
+	case "WatchSettings":
+		if err := decodeRingRequest(request, &ringv1.WatchSettingsRequest{}); err != nil {
+			return err
+		}
+		return r.watchSettings(ctx, emit)
+	default:
+		return status.Errorf(codes.Unimplemented, "unknown RingService method %s", rpc)
+	}
 }
 
-// validateRingSettings rejects select values the generic form can submit but
-// the app cannot render.
+func decodeRingRequest(request []byte, msg proto.Message) error {
+	if err := proto.Unmarshal(request, msg); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	return nil
+}
+
+func emitProto(emit func([]byte) error, msg proto.Message) error {
+	payload, err := encodeRingState(msg)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	return emit(payload)
+}
+
+func (r *builtinRing) stateSnapshot() *ringv1.RingState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stateSnapshotLocked()
+}
+
+func (r *builtinRing) settingsSnapshot() *ringv1.RingSettingsSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.settingsSnapshotLocked()
+}
+
+// updateSettings writes only the declared setting paths named in the request,
+// through the same CAS store and validator as the generic configuration API.
+func (r *builtinRing) updateSettings(req *ringv1.UpdateSettingsRequest) (*ringv1.RingSettingsSnapshot, error) {
+	if len(req.GetUpdateFields()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "update_fields is required")
+	}
+	if req.GetValues() == nil {
+		return nil, status.Error(codes.InvalidArgument, "values is required")
+	}
+	values := req.GetValues()
+	changes := make([]settings.Change, 0, len(req.GetUpdateFields()))
+	for _, field := range req.GetUpdateFields() {
+		switch field {
+		case "effect":
+			changes = append(changes, settings.Change{Key: field, Value: values.GetEffect()})
+		case "palette":
+			changes = append(changes, settings.Change{Key: field, Value: values.GetPalette()})
+		case "brightness":
+			changes = append(changes, settings.Change{Key: field, Value: float64(values.GetBrightness())})
+		case "speed":
+			changes = append(changes, settings.Change{Key: field, Value: float64(values.GetSpeed())})
+		case "schedule_enabled":
+			changes = append(changes, settings.Change{Key: field, Value: values.GetScheduleEnabled()})
+		case "schedule_start":
+			changes = append(changes, settings.Change{Key: field, Value: values.GetScheduleStart()})
+		case "schedule_end":
+			changes = append(changes, settings.Change{Key: field, Value: values.GetScheduleEnd()})
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "setting %q is not declared by the ring app", field)
+		}
+	}
+	snap, rev, _, err := r.d.appCfg.Update(ringAppID, req.GetExpectedRevision(), changes)
+	if err != nil {
+		return nil, appSettingsStatus(err)
+	}
+	// Apply synchronously so the reply carries the committed values; the
+	// watcher will observe the same revision and is idempotent.
+	r.applySettings(rev, snap.Values)
+	r.d.publishUI(uichanges.AppSettings)
+	return r.settingsSnapshot(), nil
+}
+
+// watchState streams the current render state first, then every state change.
+func (r *builtinRing) watchState(ctx context.Context, emit func([]byte) error) error {
+	ch, cancel := r.subscribeState()
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case snap, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := emitProto(emit, snap); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *builtinRing) watchSettings(ctx context.Context, emit func([]byte) error) error {
+	ch, cancel := r.subscribeSettings()
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case snap, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := emitProto(emit, snap); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *builtinRing) subscribeState() (<-chan *ringv1.RingState, func()) {
+	ch := make(chan *ringv1.RingState, 1)
+	r.mu.Lock()
+	r.nextWatch++
+	id := r.nextWatch
+	r.watchers[id] = ch
+	ch <- r.stateSnapshotLocked()
+	r.mu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if cur, ok := r.watchers[id]; ok {
+				delete(r.watchers, id)
+				close(cur)
+			}
+			r.mu.Unlock()
+		})
+	}
+}
+
+func (r *builtinRing) subscribeSettings() (<-chan *ringv1.RingSettingsSnapshot, func()) {
+	ch := make(chan *ringv1.RingSettingsSnapshot, 1)
+	r.mu.Lock()
+	r.nextSetting++
+	id := r.nextSetting
+	r.settingSubs[id] = ch
+	ch <- r.settingsSnapshotLocked()
+	r.mu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if cur, ok := r.settingSubs[id]; ok {
+				delete(r.settingSubs, id)
+				close(cur)
+			}
+			r.mu.Unlock()
+		})
+	}
+}
+
+// stateSnapshotLocked builds a state snapshot. Callers hold r.mu.
+func (r *builtinRing) stateSnapshotLocked() *ringv1.RingState {
+	return &ringv1.RingState{
+		Effect: r.effect, Palette: r.palette,
+		Brightness: float32(r.brightness), Speed: float32(r.speed),
+		PresentationId:   r.presentationIDLocked(),
+		Active:           r.active,
+		SettingsRevision: r.settingsRevision,
+		ScheduleEnabled:  r.scheduleEnabled,
+		ScheduleStart:    formatClockTime(r.activeFrom),
+		ScheduleEnd:      formatClockTime(r.activeUntil),
+		PixelCount:       r.pixelCount,
+	}
+}
+
+func (r *builtinRing) settingsSnapshotLocked() *ringv1.RingSettingsSnapshot {
+	return &ringv1.RingSettingsSnapshot{
+		Revision: r.settingsRevision,
+		Values: &ringv1.RingSettings{
+			Effect: r.effect, Palette: r.palette,
+			Brightness: float32(r.brightness), Speed: float32(r.speed),
+			ScheduleEnabled: r.scheduleEnabled,
+			ScheduleStart:   formatClockTime(r.activeFrom),
+			ScheduleEnd:     formatClockTime(r.activeUntil),
+		},
+	}
+}
+
+func (r *builtinRing) notifyState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.watchers) == 0 {
+		return
+	}
+	snap := r.stateSnapshotLocked()
+	// Sends are non-blocking and happen under the same lock that closes
+	// subscription channels, so a cancel can never race into send-on-closed.
+	for _, ch := range r.watchers {
+		pushLatest(ch, snap)
+	}
+}
+
+func (r *builtinRing) notifySettings() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.settingSubs) == 0 {
+		return
+	}
+	snap := r.settingsSnapshotLocked()
+	for _, ch := range r.settingSubs {
+		pushLatest(ch, snap)
+	}
+}
+
+// pushLatest keeps only the newest snapshot in a one-slot subscriber channel.
+func pushLatest[T any](ch chan T, value T) {
+	select {
+	case ch <- value:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- value:
+	default:
+	}
+}
+
+func formatClockTime(minute int) string {
+	minute = ((minute % (24 * 60)) + 24*60) % (24 * 60)
+	return fmt.Sprintf("%02d:%02d", minute/60, minute%60)
+}
+
+// validateRingSettings rejects values the generic form can submit but the app
+// cannot render: unsupported effect names, malformed gradients or clock times.
 func validateRingSettings(values map[string]json.RawMessage) error {
 	var effect string
 	if raw, ok := values["effect"]; ok {
 		if json.Unmarshal(raw, &effect) != nil {
 			return fmt.Errorf("effect must be text")
 		}
-		switch effect {
-		case "breathe", "spinner", "rainbow", "pulse", "comet", "sparkle":
-		default:
+		if !validRingEffect(effect) {
 			return fmt.Errorf("effect %q is not supported", effect)
 		}
 	}
@@ -532,10 +929,8 @@ func validateRingSettings(values map[string]json.RawMessage) error {
 		if json.Unmarshal(raw, &palette) != nil {
 			return fmt.Errorf("palette must be text")
 		}
-		switch palette {
-		case "aurora", "ocean", "sunset", "ember", "mono", "spectrum":
-		default:
-			return fmt.Errorf("palette %q is not supported", palette)
+		if _, err := ringpalette.Parse(palette); err != nil {
+			return fmt.Errorf("palette: %w", err)
 		}
 	}
 	if raw, ok := values["brightness"]; ok {
@@ -579,16 +974,12 @@ func (r *builtinRing) presentationIDLocked() string {
 	return r.pres.ID()
 }
 
-func encodeProtoResponse(msg proto.Message) ([]byte, error) {
-	return protojson.MarshalOptions{UseProtoNames: true}.Marshal(msg)
-}
-
-// encodeRingState emits default values so the built-in app always reports
-// active=false while its window is closed. Without that, proto3 would omit the
-// field and a reader could not tell "inactive" from "this provider does not
-// report activity".
+// encodeRingState emits the public binary protobuf response. The schema's
+// `active` flag is a proto3 bool with no explicit presence: an inactive
+// baseline arrives as false (its documented zero value), and the blank frame
+// plus empty presentation_id still make the state observable.
 func encodeRingState(msg proto.Message) ([]byte, error) {
-	return protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}.Marshal(msg)
+	return proto.Marshal(msg)
 }
 
 func mustParams(id string, params presets.Params) presets.Params {
@@ -601,23 +992,6 @@ func mustParams(id string, params presets.Params) presets.Params {
 		panic("built-in preset " + id + ": " + err.Error())
 	}
 	return out
-}
-
-func paletteColors(name string) (primary, secondary backend.RGB, saturation float64) {
-	switch name {
-	case "ocean":
-		return backend.RGB{R: 0, G: 180, B: 255}, backend.RGB{R: 0, G: 70, B: 210}, 1
-	case "sunset":
-		return backend.RGB{R: 255, G: 120, B: 40}, backend.RGB{R: 255, G: 60, B: 150}, 1
-	case "ember":
-		return backend.RGB{R: 255, G: 40, B: 20}, backend.RGB{R: 255, G: 170, B: 20}, 1
-	case "mono":
-		return backend.RGB{R: 255, G: 255, B: 255}, backend.RGB{R: 150, G: 150, B: 150}, 0
-	case "spectrum":
-		return backend.RGB{R: 255, G: 70, B: 210}, backend.RGB{R: 70, G: 200, B: 255}, 1
-	default:
-		return backend.RGB{R: 0, G: 220, B: 180}, backend.RGB{R: 80, G: 130, B: 255}, 1
-	}
 }
 
 func scaleColor(c backend.RGB, level float64) backend.RGB {

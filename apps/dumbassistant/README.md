@@ -19,25 +19,64 @@ library path in `CAPSULA_LIBRARY`, and the manifest declares the optional
 
 - Wakeword, talk-button and API activations are queued and handled one at a time.
 - A turn claims the ring presentation and capture, then opens the standard
-  microphone stream with `OpenMic`. The framework's activation pre-roll is used
-  for the initial level display but is never mistaken for speech from this turn.
+  microphone stream with `OpenMic`. Application microphone capture is the
+  framework's processed application tap (high-pass, conservative
+  stationary-noise suppression and a peak limiter). The internal wakeword feed is
+  a separate daemon path with its own documented tap; this app only ever sees the
+  application tap. The activation pre-roll is used for the initial level display
+  but is never mistaken for speech from this turn.
 - While listening, every ring pixel is teal (`#008080`). Brightness follows the
   real captured PCM level (RMS mapped over -60..0 dBFS), with fast attack and a
   slower release. There is no synthetic level generator.
-- Speech end comes from the captured PCM: sustained energy above a learned
-  room-noise floor starts an utterance, 700 ms of quiet near that floor ends it,
-  and a blip shorter than 140 ms is rejected as noise. The activation pre-roll
-  calibrates the floor before speech is classified, and it keeps adapting while
-  listening. The absolute thresholds remain the floor for a quiet room; a steady
-  fan or traffic raises the onset and release thresholds instead of holding the
-  turn open until the listen cap. A 3 s no-speech window cancels the turn without a
-  reply. Continuous speech that reaches the 10 s listen cap also cancels the
-  turn with a full cleanup instead of pretending the utterance ended, so a
-  reply delay can never start while the user is still speaking. These are
-  safety limits; the normal end-of-speech decision is not a fixed listen timer.
+- Speech end comes from the captured PCM in the speech band (300-3400 Hz), not
+  from full-band energy: a real room's fan, air conditioner or traffic is a loud
+  low-frequency roar that no full-band threshold can tell from a voice. Speech is
+  recognized by *modulation*: a voice moves the band level by tens of percent
+  within a few hundred milliseconds (syllables, consonants), while hums, hisses
+  and buffeted room noise hold their band level steadier. Onset needs 60 ms of
+  sample time with the band above a floor learned from the room and modulated.
+  An utterance ends when the band level has fallen clearly below the recent voice
+  level and stayed there for 700 ms, so the same room returning after speech ends
+  the turn while a sustained voiced vowel, which keeps its level, is preserved
+  until it actually stops. A reply needs 140 ms of voiced utterance time with at
+  least 40 ms of articulation, or 400 ms of steady voiced level well above the
+  room (a held vowel). A short unmodulated room event (a bump, a door) carries no
+  articulation and is rejected without a reply. Onset, end and noise rejection
+  all use the same band level and floor, so they cannot disagree. Only the oldest
+  part of the activation pre-roll (at least 400 ms before the activation)
+  calibrates the floor, using a low percentile, so the wakeword itself cannot
+  become the background. Without any pre-roll the cold floor stays at the
+  digital-silence value and a level-only onset is allowed once, so a turn that
+  opens on a voice already in progress is not swallowed by its own floor; a
+  capture gap keeps the learned floor and only discards stream state.
+  A 3 s no-speech window cancels the turn without a reply; only confirmed speech
+  keeps that window open, so a rejected noise hypothesis cannot extend a turn.
+  Continuous speech-like audio that reaches the 10 s listen cap also cancels the
+  turn with a full cleanup instead of pretending the utterance ended, so a reply
+  delay can never start while the user is still speaking. These are safety
+  limits; the normal end-of-speech decision is not a fixed listen timer and is
+  independent of transport chunk size. Thresholds are relative to the learned
+  band floor, so a change in the framework tap's suppression depth or high-pass
+  corner needs no retune.
+
+  Measured limits (fixtures matched to the authorized capture's level statistics,
+  plus backed-up word takes; not an acoustic-certification claim): a word whose
+  300-3400 Hz band level is at least about 3x the room's band level is answered;
+  at about 1.5-2x it is marginal, and below the room's band level it is
+  physically buried. A room that begins mid-turn and whose band level never
+  falls away from the speaker's is bounded by the no-speech window or the 10 s
+  cap (cancel, no reply) rather than ended early. The one authorized ambient
+  capture turned out to be music from external speakers, not a speech-free room;
+  music and vocals are legitimately speech-like, so an endpointer responding to
+  them is not a false-positive result, and this app adds no music cancellation.
+  A perfectly steady tone or hiss cannot be separated from a held vowel by this
+  tap and, if it holds and then stops, is answered like one — including when the
+  turn started without any pre-roll; that limitation is pinned by a test.
 - For hold-to-talk touch turns, the framework's `TouchRelease` event ends the
-  utterance. A late release also ends a turn that was already using speech-end
-  detection, so a mode change cannot wedge the capture.
+  utterance. The touch activation itself carries `hold_to_talk`, so the app
+  applies the per-turn mode without reading the administrator-only device
+  settings service. A late release also ends a turn that was already using
+  speech-end detection, so a mode change cannot wedge the capture.
 - When speech ends, the ring smoothly transitions to a blue chase. The chase
   runs through the delay and the reply. The delay starts only after speech ends.
   The transition is time-based and independent of the delay: an empty or short
@@ -139,11 +178,13 @@ and depend on a published `capsula/sdk` version instead.
 ### Verification
 
 ```sh
-# App unit tests: delay grammar, store containment/catalog and speech tracker.
+# App unit tests: delay grammar, store containment/catalog and the speech-band
+# detector against deterministic speech, colored-room and steady-noise fixtures.
 cd apps/dumbassistant && go test ./...
 
 # Root-level contract tests: real package, real daemon, simulator PCM capture.
-cd ../.. && go test ./internal/daemon -run 'TestDumbAssistant' -count=1 -v
+cd ../.. && go test -ldflags "-linkmode=external" ./internal/daemon \
+  -run 'TestDumbAssistant' -count=1 -v
 ```
 
 The daemon contract tests install the real package, select it as the assistant,
@@ -151,7 +192,16 @@ inject real 16 kHz PCM through the simulator microphone, and assert: no reply
 before speech, real teal level frames, speech-end detection before the delay,
 blue chase frames during the delay, the configured store asset, synchronous
 rejection of malformed/inverted/overflow delays and unsafe asset paths, and
-clean release on no-speech and mute.
+clean release on no-speech and mute. `TestDumbAssistantEndsAfterSpeechOverColoredRoom`
+feeds a synthetic colored, level-swinging room around a modulated speech fixture
+and requires the turn to end and reply once; `TestDumbAssistantColoredRoomNoiseProducesNoReply`
+requires the same room alone to reach a safety exit with no reply, and
+`TestDumbAssistantRoomSpliceDoesNotReply` forces a producer stall so the
+simulator's silent-read splice is exercised end to end. The injector is
+consumption-driven, not wall-clock paced: it keeps a bounded four-frame lead,
+refills on each frame the capture pipeline consumes, and blocks when the lead is
+full, so a loaded host cannot splice silence into the room by starving a timer
+(it can only stall the producer, which the splice test covers).
 
 ### Hardware target
 

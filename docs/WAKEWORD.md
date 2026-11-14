@@ -1,6 +1,6 @@
 # Wakeword engine and personal training
 
-**Updated:** 2026-11-12. The detector now uses pretrained speech embeddings and a small personal
+**Updated:** 2026-11-13. The detector now uses pretrained speech embeddings and a small personal
 keyword head, following the architecture of
 [station-wakeword](https://github.com/tangenx/station-wakeword), not its unlicensed source code or
 non-commercial dataset. The raw-mel classifier and browser numerical trainer have been removed.
@@ -56,6 +56,35 @@ streaming inference or shared-state mismatch.
 ## Current architecture
 
 - One framework-owned 16 kHz capture fan-out; no second physical microphone or cloud recognizer.
+- **Provenance:** wakeword inference, enrollment and training subscribe to the framework's
+  processed capture stream (`framework.dsp.v1`) — the same DSP chain as
+  `audio.input.microphone`: 80 Hz high-pass, energy-gated adaptive spectral suppression ≤12 dB,
+  unity gain and a −1 dBFS limiter. The installed model was trained on the raw vendor tap; it
+  remains installed, selected and byte-identical, detection stays enabled, and the daemon logs an
+  explicit unverified-threshold warning instead of rewriting weights, metadata or selection or
+  forcing a retrain. The untouched physical `speex` samples are available only at the explicit
+  `audio.input.microphone.raw` endpoint. The wakeword runner rejects any frame whose tap does not
+  match the declared processing policy, and the provenance parser/`InputPolicy` validation reject
+  unknown declarations. Every recording stores a processing-provenance sidecar; a take without one
+  is treated as a legacy raw recording and converted in memory through the same chain under that
+  declared policy, never silently relabeled. The processed and raw endpoints share the mute gate,
+  visible-indication watchdog and stream cleanup; frame subscribers are separately mute-gated and
+  bounded. Detection pauses while recording and while the assistant has audio: that
+  assistant-audio gate (with the runner's reset on the transition) clears pending audio,
+  embeddings and score streaks — there is no separate hidden half-duplex switch.
+- **Colored-noise suppression.** The noise estimator learns from aggregate frame energy relative to
+  a fast-down/slow-up floor and a very-slow-up average; spectral flatness no longer gates learning,
+  and per-bin power tracks symmetrically while a frame looks like the stationary floor. A general
+  cold-start guard keeps a voice or word at 0 dB relative to the learned reference out of the
+  estimate; the first-vowel gate is ≥0.85 of reference (worst measured 0.896), and room
+  re-engagement plus a second speech segment after a pause are preserved. On the one authorized
+  10 s background recording — mostly music played through a Mac's own or external speakers, not the
+  Capsula Bluetooth path, with no local playback reference to cancel the music — cleanup measured
+  2.9 dB overall and 2.7 dB in 80–300 Hz. Synthetic pink, brown/rumble and amplitude-modulated room
+  regressions measure 4.23, 8.33 and 3.42 dB. That recording is unannotated, consumed background
+  evidence: it does not validate fan/traffic noise, music immunity, the new location, or a zero
+  false-activation rate. Sustained amplitude-modulated room events are deliberately preserved to
+  avoid learning speech as noise.
 - Raw int16 magnitudes → Hann/FFT/mel frontend → pretrained Google/openWakeWord speech embeddings.
 - The incremental backbone reuses convolution/pooling state. ARM64 NEON kernels process complete
   temporal/frequency convolution positions; other architectures have a generic implementation.
@@ -86,7 +115,8 @@ streaming inference or shared-state mismatch.
 - Legacy `CNEG0001`, header `version: 1`, and missing or invalid warm-up metadata are rejected with
   an explicit regeneration instruction. Old embeddings are never relabelled as warm.
 - Runtime requires two consecutive scores at the threshold, then applies a 2.9-second cooldown.
-  Mute, capture gaps and half-duplex transitions clear pending audio, embeddings and score streaks.
+  Mute, capture gaps and the assistant-audio gate (with the runner's reset on that transition)
+  clear pending audio, embeddings and score streaks.
   A reset needs approximately two seconds of fresh audio before a full context is available.
 - Activations retain the existing selected-assistant, readiness, bounded pre-roll and microphone-mute
   semantics. Manual talk-button activation does not require a trained keyword model.
@@ -116,25 +146,32 @@ The former full-window scalar backbone took 425 ms per output and could not sust
 cadence. The new probe fits the cadence and startup queue budget. This is a frontend benchmark,
 not a sustained loaded-system certification or a detection-quality measurement.
 
-## Training through `/wakeword`
+## Training through Settings → Wakeword
 
-1. Choose the word, unmute and put Capsula in its normal position. The guided flow records three
-   independent 8-second room takes, four unrelated 4-second phrases and **six independent 2-second
-   word takes**. A cancellable three-second countdown precedes each recording, and the ring pulses
-   red for the whole take. Word and unrelated-phrase takes play a three-second tone countdown (two short tones
-   and one longer one); capture starts only after it drains, so the cue is never recorded.
-   Unrelated-phrase takes show a random everyday Russian phrase, so the negatives are not one
-   fixed utterance. The six word prompts ask for normal speech, louder speech, a clear whisper,
-   speaking from about two metres away, calling someone by name, and soft speech with the head
-   slightly turned. Say the complete word once, half a second after the final tone. Do not say it
-   in negative phrases.
-2. Review the selected take counts. Only IDs from this setup are submitted; saved recordings from
-   earlier setups are not silently mixed in. The selection survives a reload in this tab. Starting
-   a new setup clears the selection, not the saved WAV files.
-3. The browser starts `AssistantService.TrainWakewordClassifier` through authenticated, CSRF-checked
-   `POST /wakeword/train` and displays its streamed progress. Audio, embeddings, augmentation,
-   fitting and quality checks stay on the device. Closing/cancelling aborts the request; reload to
-   check installation if cancellation/disconnection occurred near the final commit.
+1. Open **Settings → Wakeword**, choose the wake word and language, unmute and put Capsula in its
+   normal position. The guided dialog records three independent 8-second room takes, four unrelated
+   4-second phrases and **six independent 2-second word takes**. A three-second device cue precedes
+   every take and the ring pulses red for the whole take; capture starts only after the cue drains,
+   so it is never recorded. The dialog shows the device cue and capture boundary, but the browser
+   never records or accesses the microphone. Unrelated-phrase takes show a random everyday phrase
+   in the selected language, so the negatives are not one fixed utterance. The six word prompts ask
+   for normal speech, louder speech, a clear whisper, speaking from about two metres away, calling
+   someone by name, and soft speech with the head slightly turned. Say the complete word once, half
+   a second after the final cue. Do not say it in negative phrases.
+2. Review the selected take counts. The dialog can re-record or remove individual selected takes.
+   Only IDs from this setup are submitted; saved recordings from earlier setups are not silently
+   mixed in. The selection survives a reload in this tab. Starting a new setup clears the selection,
+   not the saved WAV files.
+3. The browser starts training with the typed `train` command on the authenticated, same-origin
+   `capsula.web.v1` binary WebSocket and displays its streamed stage/fraction/log progress frames.
+   Audio, embeddings, augmentation, fitting and quality checks stay on the device. Dismissing or
+   cancelling during training sends `CancelTraining`; dismissing during a take aborts the in-flight
+   record command through `CancelOperation`, so the device-side take is cancelled rather than left
+   running. A lost session also cancels active recording and training on the device. The dialog
+   waits for the device's cancellation result when it can; after a disconnection, reload and check
+   the installed model instead of assuming the final commit did or did not happen. A cancellation
+   that arrives as the final atomic commit is being written may still install the new model, so a
+   generic cancel never promises the previously installed model is unchanged.
 4. Whole original recordings are assigned to train/tune/test by content, independently of optimizer
    seed and input order. Each held-out word partition gets 25% (at least two takes); the rest trains.
    Six word takes give two fitting, two tuning and two final-test recordings. Exact duplicates are
@@ -154,10 +191,26 @@ not a sustained loaded-system certification or a detection-quality measurement.
    The fixed model/threshold then faces the untouched final recordings and corpus partition once.
    Both gates require at least 80% independent-word recall and zero false activations. No model is
    installed after a failing gate. A consumed final test requires a fresh setup, not threshold
-   adjustment against the test results.
+   adjustment against the test results. The calibration grid and the pass/fail certificate use
+   **only** local held-out takes already processed by the daemon; external `CNEG` streams are
+   precomputed off-policy examples, are recorded under `metrics.auxiliary_offpolicy`, and never
+   decide the certificate. Provenance states this explicitly, so a raw CNEG result is not presented
+   as processed-audio quality evidence. A false activation on the broad `CNEG` corpus remains a
+   hard acceptance veto, so restoring this separation does not weaken the previous false-activation
+   guard. Provenance and `InputPolicy` validation are closed; no forced retrain, weight or selection
+   rewrite occurs.
 7. On success the daemon validates the typed version-3 artifact, constructs its engine, atomically
-   replaces `model.json`, stops the previous runner and starts the replacement. Select `word.personal`
-   and enable detection in Settings if it is not already selected.
+   replaces `model.json`, stops the previous runner and starts the replacement. The dialog does not
+   change your model selection or detection switch automatically: select `word.personal` and enable
+   detection in the same Wakeword section if it is not already active.
+
+The Wakeword section lists the single personal-model slot with its availability, the saved takes on
+the device, and recent hands-free detections reported by the daemon. Detections are newest first,
+capped at 20, and contain only engine-origin activations; manual talk-key activations are not
+included. Training a new model replaces `word.personal` atomically only after the checks pass; there
+is no separate delete-model action. Closing the dialog while idle changes nothing. Dismissing during
+a take or during training follows the cancellation path above, and a completed or failed final check
+requires a new setup with fresh takes.
 
 Training is serialized, cancellable and bounded to 30 minutes by the Web UI. A warm `CNEG0002`
 negative corpus must already exist at `<data-dir>/wakeword/negatives.bin` (or at the path passed to
@@ -200,6 +253,19 @@ against v3 or v4, and v3/v4 were used only for scoring after the model was froze
 final recordings have already been used for diagnosis and regression, so this repeat is not an
 independent positive certificate. Six word takes are also a small enrollment, and this is not a
 speaker-independent Russian model.
+
+### Usability on the processed tap (local source, not deployed)
+
+The installed raw-trained model is now fed the processed tap. On the settled current profile, a
+warm classifier replay of all six backed-up word takes used 2.32 s of its own same-session ambient
+audio plus the word and a 1 s tail, applied the DSP continuously once across prefix, body and tail,
+and replayed sequential 1280-sample windows with the real two-consecutive-score policy and 2.9 s
+cooldown: raw fired 6/6 and processed fired 6/6. That is legacy-model usability evidence only — it
+shows processing does not disable the installed detector, not calibration, accuracy or a daily
+false-alarm rate. It is a different algorithm and dataset from the dumb-assistant endpointer result
+and must not be merged with it. The model, its weights and its selection are unchanged, and the
+daemon logs an explicit unverified-threshold warning. This check is local evidence; the corrected
+binary is not deployed.
 
 A fourth negative set was prepared before the candidate was scored (manifest SHA-256
 `95406ffd0a04be2db102357818bc4c6969fe32258e26a526924653d40aa3ac7b`): 237 whole clips, 2,416.67

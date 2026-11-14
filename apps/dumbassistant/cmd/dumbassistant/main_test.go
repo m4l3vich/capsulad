@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -420,64 +421,9 @@ func TestApplySettings(t *testing.T) {
 	}
 }
 
-func TestSpeechTracker(t *testing.T) {
-	tr := &speechTracker{}
-	if started, ended := tr.feed(0.001, 10*time.Millisecond); started || ended || tr.active() {
-		t.Fatal("silence started speech")
-	}
-	if started, _ := tr.feed(speechOnRMS+0.01, 10*time.Millisecond); started {
-		t.Fatal("one loud chunk started speech")
-	}
-	if started, _ := tr.feed(speechOnRMS+0.01, 10*time.Millisecond); !started || !tr.active() {
-		t.Fatal("sustained energy did not start speech")
-	}
-	for range 20 {
-		tr.feed(speechOnRMS+0.01, 10*time.Millisecond)
-	}
-
-	ended := false
-	for range 80 {
-		var e bool
-		_, e = tr.feed(0.001, 10*time.Millisecond)
-		if e {
-			ended = true
-			break
-		}
-	}
-	if !ended {
-		t.Fatal("silence did not end speech")
-	}
-
-	blip := &speechTracker{}
-	blip.feed(speechOnRMS+0.01, 10*time.Millisecond)
-	blip.feed(speechOnRMS+0.01, 10*time.Millisecond)
-	for range 80 {
-		if _, e := blip.feed(0.001, 10*time.Millisecond); e {
-			break
-		}
-	}
-	if blip.active() {
-		t.Fatal("short blip left the tracker active")
-	}
-	if started, _ := blip.feed(speechOnRMS+0.01, 10*time.Millisecond); started {
-		t.Fatal("blip restarted speech on one chunk")
-	}
-	if started, _ := blip.feed(speechOnRMS+0.01, 10*time.Millisecond); !started {
-		t.Fatal("speech did not restart after a rejected blip")
-	}
-
-	long := &speechTracker{}
-	long.feed(speechOnRMS+0.01, 10*time.Millisecond)
-	long.feed(speechOnRMS+0.01, 10*time.Millisecond)
-	for range 1100 {
-		if _, ended := long.feed(speechOnRMS+0.01, 10*time.Millisecond); ended {
-			t.Fatal("continuous speech auto-ended; the caller's listen cap must cancel instead")
-		}
-	}
-	if !long.active() {
-		t.Fatal("continuous speech left the tracker inactive")
-	}
-}
+// The tracker's behaviour on real room audio is covered by the acoustic
+// fixtures below; the small helpers that used to be tested here directly
+// (thresholds, feed with ZCR) no longer exist.
 
 func TestPCMRMS(t *testing.T) {
 	if got := pcmRMS(nil); got != 0 {
@@ -617,49 +563,640 @@ func TestEmptyActivationIdentityIgnored(t *testing.T) {
 	}
 }
 
-// A steady room noise floor (a fan, a fridge, traffic) must not be mistaken for
-// speech, and speech above it must still start and end. The old fixed
-// thresholds either never ended the turn or let the background keep it open
-// until the listen cap cancelled it.
-func TestSpeechTrackerAdaptsToRoomNoise(t *testing.T) {
+// Acoustic-fixture coverage for the speech band lives at the end of this file.
+
+// The wakeword itself is in the pre-roll window. A low percentile must keep a
+// late phrase from raising the floor above the following speech.
+func TestSpeechTrackerCalibrationIgnoresLateWord(t *testing.T) {
 	tr := &speechTracker{}
 	for range 50 {
-		if started, _ := tr.feed(0.03, 20*time.Millisecond); started {
-			t.Fatal("room noise started speech")
+		tr.calibrate(0.002)
+	}
+	for range 30 {
+		tr.calibrate(0.2) // the word that triggered the activation
+	}
+	tr.finishCalibration()
+	if !tr.armed {
+		t.Fatal("calibration did not arm the tracker")
+	}
+	if gate := math.Max(speechBandFloorMin, tr.floor*speechBandOnset); gate > 0.02 {
+		t.Fatalf("late word raised the onset gate to %f", gate)
+	}
+}
+
+func TestEarlyPrerollExcludesActivationSpeech(t *testing.T) {
+	const second = uint64(time.Second)
+	item := reply{activationNS: 2 * second}
+	cases := []struct {
+		name string
+		item reply
+		ns   uint64
+		want bool
+	}{
+		{"unknown activation time", reply{}, second, true},
+		{"unknown chunk time", item, 0, true},
+		{"whole second old", item, second, true},
+		{"inside the guard", item, 2*second - uint64(300*time.Millisecond), false},
+		{"before the guard", item, 2*second - uint64(500*time.Millisecond), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := earlyPreroll(tc.item, &capsula.AudioChunk{MonotonicTimeNS: tc.ns})
+			if got != tc.want {
+				t.Fatalf("earlyPreroll(%d, %d) = %v, want %v", tc.item.activationNS, tc.ns, got, tc.want)
+			}
+		})
+	}
+}
+
+// The old detector classified background by zero-crossing rate, which only
+// recognizes broadband noise. A colored room (fan hum, air conditioner,
+// low-frequency rumble) reads as low-frequency, so the escape never fired and a
+// turn held the microphone until the listen cap. These fixtures reproduce that
+// room and the speech over it without recorded audio.
+
+const fixtureRate = 16000
+
+// pcmFromSamples normalizes samples to the requested full-scale RMS and encodes
+// 16-bit little-endian mono.
+func pcmFromSamples(samples []float64, level float64) []byte {
+	sum := 0.0
+	for _, s := range samples {
+		sum += s * s
+	}
+	scale := 1.0
+	if rms := math.Sqrt(sum / float64(len(samples))); rms > 0 {
+		scale = level / rms
+	}
+	pcm := make([]byte, len(samples)*2)
+	for i, s := range samples {
+		v := s * scale
+		if v > 1 {
+			v = 1
+		}
+		if v < -1 {
+			v = -1
+		}
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(v*32767)))
+	}
+	return pcm
+}
+
+// roomNoisePCM renders a colored, non-stationary room: a low-frequency harmonic
+// hum with slow wobble, shaped hiss and fan buffeting that moves the level by
+// several times. Deterministic; no recorded audio.
+func roomNoisePCM(seconds int, level float64) []byte {
+	frames := seconds * fixtureRate
+	samples := make([]float64, frames)
+	rng := rand.New(rand.NewPCG(0x9e3779b9, 0x85ebca6b))
+	var shaped [3]float64
+	for i := range samples {
+		t := float64(i) / fixtureRate
+		hum := 0.0
+		for k, tone := range [][2]float64{{95, 1}, {145, .7}, {205, .5}, {310, .35}, {430, .25}, {620, .15}} {
+			wobble := 1 + 0.02*math.Sin(2*math.Pi*0.11*t+float64(k)*1.7)
+			hum += tone[1] * math.Sin(2*math.Pi*tone[0]*wobble*t+float64(k)*1.3)
+		}
+		white := rng.Float64()*2 - 1
+		for k := range shaped {
+			shaped[k] += (white - shaped[k]) * 0.25
+		}
+		// A synthetic fan/AC room matched to the authorized capture's band
+		// statistics: band/full RMS 0.39, 160 ms band-level relative deviation
+		// 0.118 median / 0.180 at the 90th percentile. (That capture is external
+		// music, not a fan and not speech-free; only its level statistics are
+		// borrowed here, not a noise label.) Fan buffeting moves the low hum,
+		// in-band air movement wanders the hiss, and the room breathes slightly.
+		am := 1 + 0.28*math.Sin(2*math.Pi*0.17*t) + 0.18*math.Sin(2*math.Pi*3.7*t+1.1)
+		wander := 1 + 0.4*math.Sin(2*math.Pi*0.23*t+0.7) + 0.2*math.Sin(2*math.Pi*4.3*t+2.1)
+		glob := 1 + 0.25*math.Sin(2*math.Pi*0.31*t+1.9) + 0.15*math.Sin(2*math.Pi*6.7*t)
+		// The authorized capture's 99th-percentile deviation came from music
+		// from external speakers, not from the fan this fixture models; its
+		// p50/p90 (matched above) are the noise profile to preserve.
+		samples[i] = (hum*am + shaped[2]*wander) * glob
+	}
+	return pcmFromSamples(samples, level)
+}
+
+// whiteNoisePCM renders flat broadband noise from a seeded generator.
+func whiteNoisePCM(seconds int, level float64) []byte {
+	samples := make([]float64, seconds*fixtureRate)
+	rng := rand.New(rand.NewPCG(0x2545f491, 0x1b873593))
+	for i := range samples {
+		samples[i] = rng.Float64()*2 - 1
+	}
+	return pcmFromSamples(samples, level)
+}
+
+// speechPCM renders speech-like audio: a glottal harmonic stack with a moving
+// spectral tilt, a 4.5 Hz syllable envelope and periodic fricative bursts. It
+// matches the way real speech modulates the 300-3400 Hz band; a steady tone is
+// deliberately not used, because a tone is indistinguishable from a hiss.
+func speechPCM(seconds, level float64) []byte {
+	frames := int(seconds * fixtureRate)
+	samples := make([]float64, frames)
+	rng := rand.New(rand.NewPCG(0x51ed270b, 0xc2b2ae35))
+	var phase float64
+	for i := range samples {
+		t := float64(i) / fixtureRate
+		f0 := 118 + 10*math.Sin(2*math.Pi*0.9*t)
+		phase += 2 * math.Pi * f0 / fixtureRate
+		tilt := 0.85 + 0.45*math.Sin(2*math.Pi*1.3*t+0.8)
+		src := 0.0
+		for k := 1; k <= 40; k++ {
+			if 130*k > 7000 {
+				break
+			}
+			src += math.Sin(float64(k)*phase+float64(k)*0.7) / math.Pow(float64(k), tilt)
+		}
+		env := math.Max(0, math.Sin(2*math.Pi*4.5*t+0.2))
+		samples[i] = math.Pow(env, 0.5) * src
+	}
+	for start := int(0.06 * fixtureRate); start < frames; start += 4000 {
+		for j := 0; j < 800 && start+j < frames; j++ {
+			samples[start+j] += 0.6 * (rng.Float64()*2 - 1) * float64(800-j) / 800
 		}
 	}
-	started := false
-	for range 20 {
-		if s, _ := tr.feed(0.18, 20*time.Millisecond); s {
-			started = true
+	return pcmFromSamples(samples, level)
+}
+
+// mixPCM adds two PCM streams over their common length, clamping to full scale.
+func mixPCM(a, b []byte) []byte {
+	n := min(len(a), len(b))
+	out := make([]byte, n)
+	for i := 0; i+1 < n; i += 2 {
+		sum := int32(int16(binary.LittleEndian.Uint16(a[i:]))) +
+			int32(int16(binary.LittleEndian.Uint16(b[i:])))
+		if sum > math.MaxInt16 {
+			sum = math.MaxInt16
+		}
+		if sum < math.MinInt16 {
+			sum = math.MinInt16
+		}
+		binary.LittleEndian.PutUint16(out[i:], uint16(int16(sum)))
+	}
+	return out
+}
+
+type trackerEvents struct {
+	started, ended, rejected int // sample index, -1 when absent
+	confirmed                bool
+	active                   bool
+}
+
+// runTracker calibrates from preroll and then classifies pcm as live audio,
+// feeding both in chunks of chunkBytes.
+func runTracker(pcm, preroll []byte, chunkBytes int) trackerEvents {
+	res := trackerEvents{started: -1, ended: -1, rejected: -1}
+	tr := &speechTracker{}
+	feed := func(data []byte, mode speechFeed) {
+		for offset := 0; offset < len(data); offset += chunkBytes {
+			end := min(offset+chunkBytes, len(data))
+			if end%2 != 0 {
+				end--
+			}
+			if end <= offset {
+				break
+			}
+			ev := tr.observe(data[offset:end], fixtureRate, mode)
+			at := end / 2
+			if ev.Started && res.started < 0 {
+				res.started = at
+			}
+			if ev.Ended && res.ended < 0 {
+				res.ended = at
+				// An end is only produced for a confirmed utterance; capture
+				// that before the tracker clears the per-hypothesis state.
+				res.confirmed = true
+			}
+			if ev.Rejected && res.rejected < 0 {
+				res.rejected = at
+			}
 		}
 	}
-	if !started {
-		t.Fatal("speech above the room noise was not detected")
+	feed(preroll, speechFeedCalibrate)
+	feed(pcm, speechFeedLive)
+	res.active = tr.active()
+	return res
+}
+
+func sampleClock(frames int) time.Duration {
+	return time.Duration(frames) * time.Second / fixtureRate
+}
+
+// Intended contract: a voice in the 300-3400 Hz band whose level is modulated,
+// over a loud colored room that swings in level and returns afterwards, must
+// start a turn after 60 ms and end it 700 ms after the voice stops, producing
+// exactly one reply. Room noise alone must never become an utterance.
+func TestSpeechTrackerEndsAfterSpeechOverColoredRoom(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	speech := speechPCM(1.2, 0.2)
+	start := fixtureRate * 2
+	body := mixPCM(speech, noise[start:start+len(speech)])
+	pcm := append(body, noise[start+len(speech):]...)
+
+	res := runTracker(pcm, preroll, 640)
+	if res.started < 0 {
+		t.Fatalf("speech over the colored room was not detected: %+v", res)
 	}
-	ended := false
-	for range 100 {
-		if _, e := tr.feed(0.03, 20*time.Millisecond); e {
-			ended = true
-			break
+	if onset := sampleClock(res.started); onset > 300*time.Millisecond {
+		t.Fatalf("onset at %s, want within 300 ms", onset)
+	}
+	if res.rejected >= 0 || res.ended < 0 {
+		t.Fatalf("turn did not finish as speech: %+v", res)
+	}
+	speechEnd := sampleClock(len(speech) / 2)
+	if end := sampleClock(res.ended); end < speechEnd+400*time.Millisecond || end > speechEnd+1100*time.Millisecond {
+		t.Fatalf("end at %s, want about 700 ms after speech at %s", end, speechEnd)
+	}
+	if !res.confirmed {
+		t.Fatal("the reply decision was not confirmed")
+	}
+}
+
+// Colored room noise with variable amplitude must not produce a reply, however
+// long the turn listens. A rejected hypothesis is allowed; an utterance is not.
+func TestSpeechTrackerColoredRoomNoiseProducesNoReply(t *testing.T) {
+	noise := roomNoisePCM(8, 0.06)
+	res := runTracker(noise[fixtureRate*2:], noise[:fixtureRate*2], 640)
+	if res.confirmed || res.ended >= 0 {
+		t.Fatalf("colored room noise produced a reply: %+v", res)
+	}
+}
+
+// A steady hiss or tone that starts mid-turn is never an utterance: its level
+// never falls away from a voiced reference, so it cannot produce an end (and
+// therefore never a reply). The caller's no-speech window or listen cap bounds
+// the hypothesis instead; ending such a level on stationarity alone is what
+// would also end a sustained real vowel.
+func TestSpeechTrackerSteadyNoiseNeverReplies(t *testing.T) {
+	quiet := whiteNoisePCM(2, 0.0015)
+	loud := whiteNoisePCM(4, 0.1)
+	res := runTracker(loud, quiet, 640)
+	if res.ended >= 0 {
+		t.Fatalf("steady broadband noise became an utterance: %+v", res)
+	}
+}
+
+// resonatorSection is a two-pole band-pass used to synthesize formants.
+func resonatorSection(rate, freq, bandwidth float64) biquad {
+	w0 := 2 * math.Pi * freq / rate
+	q := freq / bandwidth
+	alpha := math.Sin(w0) / (2 * q)
+	cos := math.Cos(w0)
+	a0 := 1 + alpha
+	return biquad{
+		b0: alpha / a0, b1: 0, b2: -alpha / a0,
+		a1: -2 * cos / a0, a2: (1 - alpha) / a0,
+	}
+}
+
+// sustainedVowelPCM renders a continuously voiced vowel: a jittered, vibrato
+// glottal pulse train through three fixed formants, plus faint breath noise.
+// Unlike speechPCM it has no syllables or consonants, so it tests the case a
+// modulation-only endpoint would wrongly cut off.
+func sustainedVowelPCM(seconds, level float64) []byte {
+	frames := int(seconds * fixtureRate)
+	source := make([]float64, frames)
+	rng := rand.New(rand.NewPCG(0x2f6b1e3d, 0x9a4c7f11))
+	var phase float64
+	for i := range source {
+		t := float64(i) / fixtureRate
+		f0 := 120 * (1 + 0.02*math.Sin(2*math.Pi*5.2*t)) * (1 + 0.003*(rng.Float64()*2-1))
+		phase += 2 * math.Pi * f0 / fixtureRate
+		sum := 0.0
+		for k := 1; k <= 40; k++ {
+			if 120*k > 7000 {
+				break
+			}
+			sum += math.Sin(float64(k)*phase) / float64(k)
+		}
+		source[i] = sum
+	}
+	samples := make([]float64, frames)
+	for n, formant := range [][2]float64{{700, 90}, {1220, 120}, {2600, 180}} {
+		section := resonatorSection(fixtureRate, formant[0], formant[1])
+		for i, v := range source {
+			samples[i] += math.Pow(0.9, float64(n)) * section.process(v)
 		}
 	}
-	if !ended {
-		t.Fatal("speech tail against the same room noise did not end the turn")
+	attack := fixtureRate * 30 / 1000
+	for i := range samples {
+		samples[i] += 0.03 * (rng.Float64()*2 - 1)
+		if i < attack {
+			samples[i] *= float64(i) / float64(attack)
+		}
 	}
-	if tr.active() {
-		t.Fatal("tracker stayed active after the utterance")
+	return pcmFromSamples(samples, level)
+}
+
+// With no pre-roll at all, the first sound of the turn must not be swallowed by
+// the cold floor. A sustained vowel from the first sample is detected and
+// answered; the cold floor stays at the digital-silence value for exactly this
+// reason.
+func TestSpeechTrackerColdStartVoicedFromFirstSample(t *testing.T) {
+	vowel := sustainedVowelPCM(1.2, 0.2)
+	quiet := whiteNoisePCM(3, 0.0015)
+	res := runTracker(append(append([]byte{}, vowel...), quiet...), nil, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("a cold-start voice was swallowed by its own floor: %+v", res)
+	}
+}
+
+// A capture gap must not re-learn a floor from a voice already in progress: the
+// room estimate survives, and the stream state around it is discarded.
+func TestSpeechTrackerResetKeepsTheLearnedFloor(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	tr := &speechTracker{}
+	feed := func(pcm []byte, mode speechFeed) speechEvents {
+		var ev speechEvents
+		for offset := 0; offset < len(pcm); offset += 640 {
+			end := min(offset+640, len(pcm))
+			if end%2 != 0 {
+				end--
+			}
+			e := tr.observe(pcm[offset:end], fixtureRate, mode)
+			ev.Started = ev.Started || e.Started
+			ev.Ended = ev.Ended || e.Ended
+			ev.Rejected = ev.Rejected || e.Rejected
+		}
+		return ev
+	}
+	feed(noise[:fixtureRate*2], speechFeedCalibrate)
+	feed(noise[fixtureRate*2:fixtureRate*3], speechFeedLive)
+	floor := tr.floor
+	if floor <= 0 {
+		t.Fatal("no floor was learned")
+	}
+	tr.reset()
+	if tr.floor != floor || !tr.armed {
+		t.Fatalf("reset dropped the learned floor: got %f armed=%v, want %f", tr.floor, tr.armed, floor)
+	}
+	speech := speechPCM(1.0, 0.12)
+	mixed := mixPCM(speech, noise[fixtureRate*3:fixtureRate*3+len(speech)])
+	if ev := feed(mixed, speechFeedLive); !ev.Started {
+		t.Fatal("speech after a gap was not detected against the retained floor")
+	}
+}
+
+// Intended contract: a sustained voiced vowel is an utterance, not room. It must
+// stay listening while the voice holds its level and only finish 700 ms after
+// the level actually falls away to the room — no premature end, and a reply
+// once it does end.
+func TestSpeechTrackerKeepsSustainedVoicedSpeech(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	vowel := sustainedVowelPCM(1.6, 0.2)
+	start := fixtureRate * 2
+	body := mixPCM(vowel, noise[start:start+len(vowel)])
+	pcm := append(body, noise[start+len(vowel):]...)
+	res := runTracker(pcm, preroll, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("sustained vowel over the room was not answered: %+v", res)
+	}
+	vowelEnd := sampleClock(len(vowel) / 2)
+	if end := sampleClock(res.ended); end < vowelEnd+400*time.Millisecond {
+		t.Fatalf("sustained vowel ended at %s, before it finished at %s: %+v", end, vowelEnd, res)
 	}
 
-	// A quiet room keeps the absolute floors: a level that is well above the
-	// background but still quiet is not speech.
-	quiet := &speechTracker{}
-	for range 50 {
-		quiet.feed(0.001, 20*time.Millisecond)
+	// A vowel that ends into a quiet room is answered the same way.
+	quiet := whiteNoisePCM(4, 0.0015)
+	res = runTracker(append(append([]byte{}, vowel...), quiet...), quiet, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("sustained vowel followed by silence was not answered: %+v", res)
 	}
-	on, _ := quiet.thresholds()
-	if on != speechOnRMS {
-		t.Fatalf("quiet-room onset threshold = %f, want %f", on, speechOnRMS)
+
+	// A voice that gets louder without articulating is still the voice: it must
+	// start, confirm, and finish only when the room returns — never early.
+	soft := sustainedVowelPCM(0.8, 0.12)
+	loud := sustainedVowelPCM(0.8, 0.25)
+	pcm = append(append(append([]byte{}, soft...), loud...), noise[start:]...)
+	res = runTracker(pcm, preroll, 640)
+	voiceEnd := sampleClock(len(soft)/2 + len(loud)/2)
+	if res.started < 0 {
+		t.Fatalf("louder sustained voice was not detected: %+v", res)
+	}
+	if res.ended < 0 || !res.confirmed {
+		t.Fatalf("louder sustained voice did not confirm and complete: %+v", res)
+	}
+	if end := sampleClock(res.ended); end < voiceEnd+400*time.Millisecond {
+		t.Fatalf("louder sustained voice ended early at %s, voice ends at %s: %+v", end, voiceEnd, res)
+	}
+}
+
+// Documented limitation, pinned deliberately: a perfectly steady tone or hiss
+// carries no amplitude modulation and no formant movement, which this tap cannot
+// separate from a sustained voiced vowel. A tone that starts mid-turn (or a cold
+// turn with no pre-roll) and later stops is therefore answered once its level
+// falls, exactly like a held vowel. A fan/air-conditioner room (buffeted, see
+// TestSpeechTrackerMidTurnRoomNeverReplies) is never answered. This is a
+// limitation, not a claim of separation.
+func TestSpeechTrackerSteadyToneMidTurnIsALimitation(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	tone := make([]byte, fixtureRate*2) // 1 s at 430 Hz
+	for i := 0; i < fixtureRate; i++ {
+		v := int16(0.15 * 32767 * math.Sin(2*math.Pi*430*float64(i)/fixtureRate))
+		binary.LittleEndian.PutUint16(tone[i*2:], uint16(v))
+	}
+	body := mixPCM(tone, noise[fixtureRate*2:fixtureRate*2+len(tone)])
+	pcm := append(body, noise[fixtureRate*2+len(tone):]...)
+	res := runTracker(pcm, preroll, 640)
+	if !res.confirmed || res.ended < 0 {
+		t.Fatalf("steady-tone limitation changed: expected it to be answered, got %+v", res)
+	}
+}
+
+// composedWordPCM renders a short, low-SNR voiced word: a 60 ms articulated
+// onset, a steady voiced vowel, one 60 ms articulated burst, then a steady
+// vowel. Its total modulated time is ~120 ms (below the 140 ms articulation
+// budget used before the fix), while its voiced time is ~340 ms. It is the
+// public oracle for confirmation-on-voiced-time: modulation-only confirmation
+// rejects it, the settled logic answers it.
+func composedWordPCM() []byte {
+	var out []byte
+	out = append(out, speechPCM(0.06, 0.2)...)
+	out = append(out, sustainedVowelPCM(0.1, 0.15)...)
+	out = append(out, speechPCM(0.06, 0.2)...)
+	out = append(out, sustainedVowelPCM(0.12, 0.15)...)
+	return out
+}
+
+// A quiet compposed word over a synthetic fan room must be answered. The
+// synthetic room has the authorized capture's band/full ratio and 160 ms band
+// deviation (p50/p90); it is a fan model, not the external-music capture.
+func TestSpeechTrackerQuietComposedWordOverFanRoom(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	word := composedWordPCM()
+	body := mixPCM(word, noise[fixtureRate*2:fixtureRate*2+len(word)])
+	pcm := append(body, noise[fixtureRate*2+len(word):]...)
+	res := runTracker(pcm, preroll, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("a quiet composed word over the fan room was not answered: %+v", res)
+	}
+}
+
+// A quiet word over the synthetic fan room must still be answered at a level
+// well above the room; this is the level reference, not the discriminating
+// oracle (see TestSpeechTrackerQuietComposedWordOverFanRoom).
+func TestSpeechTrackerQuietWordOverColoredRoom(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	speech := speechPCM(1.0, 0.12)
+	body := mixPCM(speech, noise[fixtureRate*2:fixtureRate*2+len(speech)])
+	pcm := append(body, noise[fixtureRate*2+len(speech):]...)
+	res := runTracker(pcm, preroll, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("a quiet word over the room was not answered: %+v", res)
+	}
+}
+
+// A fan/AC room that starts after the turn is already listening must not
+// produce a reply. It has no sustained fall away from its own level, so it is
+// bounded by the caller's no-speech window or listen cap, never answered.
+func TestSpeechTrackerMidTurnRoomNeverReplies(t *testing.T) {
+	quiet := whiteNoisePCM(2, 0.0015)
+	room := roomNoisePCM(6, 0.06)
+	res := runTracker(room, quiet, 640)
+	if res.ended >= 0 {
+		t.Fatalf("room noise starting mid-turn produced a reply: %+v", res)
+	}
+}
+
+// A room stream with brief silent splices models the dropped/silent audio a
+// slow consumer receives. It must never be confirmed as an utterance: splicing
+// lowers the learned floor, so a loud room sits far above it.
+func TestSpeechTrackerSilenceSplicedRoomDoesNotReply(t *testing.T) {
+	room := roomNoisePCM(5, 0.06)
+	block := fixtureRate / 5 * 2 // 200 ms
+	silence := make([]byte, fixtureRate*60/1000*2)
+	var spliced []byte
+	for i := 0; i < len(room); i += block {
+		spliced = append(spliced, room[i:min(i+block, len(room))]...)
+		spliced = append(spliced, silence...)
+	}
+	res := runTracker(spliced, nil, 640)
+	if res.ended >= 0 {
+		t.Fatalf("silence-spliced room became an utterance: %+v", res)
+	}
+}
+
+// A short unmodulated loud event in the room (a bump, a door, a knock) must not
+// become an utterance, while a sustained voiced vowel must (covered above).
+func TestSpeechTrackerRoomBumpIsNotAnUtterance(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	for _, duration := range []float64{0.15, 0.25} {
+		bump := whiteNoisePCM(1, 0.3)[:int(duration*fixtureRate)*2]
+		start := fixtureRate * 2
+		body := mixPCM(bump, noise[start:start+len(bump)])
+		pcm := append(body, noise[start+len(bump):]...)
+		res := runTracker(pcm, preroll, 640)
+		if res.ended >= 0 {
+			t.Fatalf("a %.0f ms room bump became an utterance: %+v", duration*1000, res)
+		}
+		// The bump opens a hypothesis and the classifier rejects it: assert the
+		// rejection path itself, not only the absence of a reply.
+		if res.rejected < 0 {
+			t.Fatalf("a %.0f ms room bump was not rejected as noise: %+v", duration*1000, res)
+		}
+	}
+}
+
+// Quiet speech and a short word must still be answered; a sub-minSpeech blip
+// must not.
+func TestSpeechTrackerRetainsQuietAndShortSpeech(t *testing.T) {
+	quiet := whiteNoisePCM(4, 0.0015)
+	speech := speechPCM(0.3, 0.05)
+	pcm := append(mixPCM(speech, quiet[:len(speech)]), quiet...)
+	res := runTracker(pcm, quiet, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("quiet 300 ms speech was not answered: %+v", res)
+	}
+
+	blip := speechPCM(0.12, 0.12)
+	pcm = append(mixPCM(blip, quiet[:len(blip)]), quiet...)
+	res = runTracker(pcm, quiet, 640)
+	if res.ended >= 0 || res.confirmed {
+		t.Fatalf("a 120 ms blip became an utterance: %+v", res)
+	}
+}
+
+// Pre-activation audio establishes the room, but the first live chunk is
+// already speech: calibration must not absorb it.
+func TestSpeechTrackerKeepsSpeechFromTheFirstLiveChunk(t *testing.T) {
+	quiet := whiteNoisePCM(3, 0.0015)
+	speech := speechPCM(0.6, 0.12)
+	res := runTracker(append(append([]byte{}, speech...), quiet...), quiet, 640)
+	if res.started < 0 || res.ended < 0 || !res.confirmed {
+		t.Fatalf("initial speech was calibrated away: %+v", res)
+	}
+}
+
+// Without any pre-roll the cold floor stays at the digital-silence value and a
+// level-only onset is allowed once, so a voice already in progress is not
+// swallowed. A cold loud room may open a hypothesis and stay in it (bounded by
+// the caller's cap); it must never produce a reply, including through its
+// transients.
+func TestSpeechTrackerColdStartRoomDoesNotReply(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	res := runTracker(noise, nil, 640)
+	if res.ended >= 0 {
+		t.Fatalf("cold-start room noise produced a reply: %+v", res)
+	}
+
+	quiet := whiteNoisePCM(3, 0.0015)
+	speech := speechPCM(0.8, 0.15)
+	pcm := append(append([]byte{}, quiet[:fixtureRate]...), speech...)
+	pcm = append(pcm, quiet...)
+	res = runTracker(pcm, nil, 640)
+	if res.started < 0 || res.ended < 0 {
+		t.Fatalf("cold-start speech was not detected: %+v", res)
+	}
+}
+
+// The decision is integrated in sample time over fixed analysis frames, so the
+// transport's chunk size cannot move the onset or the end by more than one
+// chunk.
+func TestSpeechTrackerChunkSizeDoesNotChangeDecisions(t *testing.T) {
+	noise := roomNoisePCM(6, 0.06)
+	preroll := noise[:fixtureRate*2]
+	speech := speechPCM(1.2, 0.2)
+	body := mixPCM(speech, noise[fixtureRate*2:fixtureRate*2+len(speech)])
+	pcm := append(body, noise[fixtureRate*2+len(speech):]...)
+
+	ref := runTracker(pcm, preroll, 640)
+	for _, chunk := range []int{160, 320, 640, 1280, 2560} {
+		got := runTracker(pcm, preroll, chunk)
+		if (got.started >= 0) != (ref.started >= 0) || (got.ended >= 0) != (ref.ended >= 0) {
+			t.Fatalf("chunk %d changed the decision sequence: %+v vs %+v", chunk, got, ref)
+		}
+		// A decision is attributed to the chunk that completed its analysis
+		// frame, so the reported time may trail by up to one chunk.
+		tolerance := sampleClock(chunk / 2)
+		for _, pair := range [][2]int{{got.started, ref.started}, {got.ended, ref.ended}} {
+			if pair[0] < 0 {
+				continue
+			}
+			if diff := sampleClock(pair[0] - pair[1]); diff < -tolerance || diff > tolerance {
+				t.Fatalf("chunk %d moved a decision by %s: %+v vs %+v", chunk, diff, got, ref)
+			}
+		}
+	}
+}
+
+// Genuinely continuous speech has no 700 ms unmodulated tail, so the tracker
+// stays in the hypothesis and the caller's listen cap decides.
+func TestSpeechTrackerContinuousSpeechHoldsTheTurn(t *testing.T) {
+	quiet := whiteNoisePCM(2, 0.0015)
+	res := runTracker(speechPCM(11, 0.2), quiet, 640)
+	if res.ended >= 0 || res.rejected >= 0 {
+		t.Fatalf("continuous speech auto-ended: %+v", res)
+	}
+	if !res.active {
+		t.Fatal("continuous speech left the tracker inactive")
 	}
 }
 
@@ -687,41 +1224,4 @@ func TestDismissCancelsActiveTurnAndQueuedActivations(t *testing.T) {
 	// Dismissing with no active turn is a no-op, not a panic.
 	a.active = nil
 	a.dismiss()
-}
-
-// Pre-activation audio characterizes the room before any speech window is
-// classified, so a loud steady background is not mistaken for an utterance.
-func TestSpeechTrackerPreRollCalibratesLoudRoom(t *testing.T) {
-	tr := &speechTracker{}
-	for range 20 {
-		tr.calibrate(0.06)
-	}
-	on, off := tr.thresholds()
-	if on != noiseFloorMax*speechNoiseOn || off != noiseFloorMax*speechNoiseOff {
-		t.Fatalf("calibrated thresholds on=%f off=%f", on, off)
-	}
-	for range 50 {
-		if started, _ := tr.feed(0.06, 20*time.Millisecond); started {
-			t.Fatal("calibrated room noise started speech")
-		}
-	}
-	started := false
-	for range 20 {
-		if s, _ := tr.feed(0.2, 20*time.Millisecond); s {
-			started = true
-		}
-	}
-	if !started {
-		t.Fatal("speech above the calibrated room noise was not detected")
-	}
-	ended := false
-	for range 100 {
-		if _, e := tr.feed(0.06, 20*time.Millisecond); e {
-			ended = true
-			break
-		}
-	}
-	if !ended {
-		t.Fatal("speech did not end against the calibrated room noise")
-	}
 }

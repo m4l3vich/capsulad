@@ -64,14 +64,8 @@ func TestClockAlarmAlertPersistsUntilDismissed(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
-	base := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
-	if _, err := app.setAlarm(&clockv1.SetAlarmRequest{
-		AlarmId: "persist", Label: "Wake", Hour: uint32(base.Hour()), Minute: uint32(base.Minute() + 1),
-		Timezone: "UTC", Enabled: true,
-	}); err != nil {
-		t.Fatalf("set alarm: %v", err)
-	}
-	advance(2 * time.Minute)
+	setTestAlarms(t, app, "1 9 * * *")
+	advance(time.Minute)
 	app.tick()
 
 	state := app.state()
@@ -88,43 +82,30 @@ func TestClockAlarmAlertPersistsUntilDismissed(t *testing.T) {
 	}
 }
 
-func TestClockAlarmDisableAndDeleteStopRinging(t *testing.T) {
+func TestClockAlarmRemovalStopsRinging(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
-	base := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
-	setAt := func(id string, minute int) {
-		t.Helper()
-		if _, err := app.setAlarm(&clockv1.SetAlarmRequest{
-			AlarmId: id, Label: id, Hour: uint32(base.Hour()), Minute: uint32(minute),
-			Timezone: "UTC", Enabled: true,
-		}); err != nil {
-			t.Fatalf("set alarm %s: %v", id, err)
-		}
-	}
-
-	setAt("disable-me", 1)
+	setTestAlarms(t, app, "1 9 * * *")
 	advance(time.Minute)
 	app.tick()
 	if state := app.state(); len(state.ActiveAlerts) != 1 {
 		t.Fatalf("alarm did not ring: %+v", state.ActiveAlerts)
 	}
-	if _, err := app.setAlarmEnabled("disable-me", false); err != nil {
-		t.Fatal(err)
-	}
+	// Removing the schedule (the friendly editor disables an alarm by omitting
+	// it) dismisses its alert; unrelated settings keep other alarms intact.
+	setTestAlarms(t, app)
 	if state := app.state(); len(state.ActiveAlerts) != 0 {
-		t.Fatalf("disabling the alarm left an alert: %+v", state.ActiveAlerts)
+		t.Fatalf("removing the alarm left an alert: %+v", state.ActiveAlerts)
 	}
 
-	setAt("delete-me", 2)
+	setTestAlarms(t, app, "2 9 * * *")
 	advance(time.Minute)
 	app.tick()
 	if state := app.state(); len(state.ActiveAlerts) != 1 {
 		t.Fatalf("second alarm did not ring: %+v", state.ActiveAlerts)
 	}
-	if _, err := app.deleteAlarm("delete-me"); err != nil {
-		t.Fatal(err)
-	}
+	setTestAlarms(t, app)
 	if state := app.state(); len(state.ActiveAlerts) != 0 {
 		t.Fatalf("deleting the alarm left an alert: %+v", state.ActiveAlerts)
 	}
@@ -134,14 +115,8 @@ func TestClockRecurringAlarmDoesNotDuplicateActiveAlert(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	app, advance := testClockTimes(t, d)
 
-	base := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
-	if _, err := app.setAlarm(&clockv1.SetAlarmRequest{
-		AlarmId: "daily", Label: "Daily", Hour: uint32(base.Hour()), Minute: uint32(base.Minute() + 1),
-		DaysOfWeek: 127, Timezone: "UTC", Enabled: true,
-	}); err != nil {
-		t.Fatalf("set alarm: %v", err)
-	}
-	advance(2 * time.Minute)
+	setTestAlarms(t, app, "1 9 * * *")
+	advance(time.Minute)
 	app.tick()
 	state := app.state()
 	if len(state.ActiveAlerts) != 1 {
@@ -447,7 +422,7 @@ func TestClockStopwatchRingPulseAndPrimaryGestures(t *testing.T) {
 
 	waitStopwatch := func(want clockv1.StopwatchStatus, when string) {
 		t.Helper()
-		got := app.state().Stopwatch.State
+		got := app.state().Stopwatch.Status
 		if got != want {
 			t.Fatalf("%s: stopwatch state = %v, want %v", when, got, want)
 		}
@@ -507,7 +482,7 @@ func TestClockStopwatchRingPulseAndPrimaryGestures(t *testing.T) {
 
 	// Selecting double tap moves the reset gesture; a hold then has no effect
 	// but is still consumed by the framework, and two taps reset.
-	app.applySettings([]settings.AppSettingView{{
+	app.applySettings(0, []settings.AppSettingView{{
 		Key: "stopwatch_reset_gesture", Value: `"double_tap"`, HasValue: true,
 	}})
 	app.stopwatchCommand("StopwatchStart")

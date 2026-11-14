@@ -101,9 +101,28 @@ Frame writes and the ioctl calls themselves are also pending hardware validation
   `loopback`;
 - `S49stereo-softvol.sh` primes the stereo playback path; `S51volume_up` sets DAC line-out gain.
 
-The Rockchip backend uses the firmware's `pacat`/`parec` clients: playback to `master`, capture
-from `speex`, at 48 kHz stereo / 16 kHz mono S16LE. Latency, format negotiation and coexistence
+The Rockchip backend uses the firmware's `pacat`/`parec` clients: playback to `master` at 48 kHz
+stereo and capture from `speex` at 16 kHz mono S16LE. Latency, format negotiation and coexistence
 with vendor daemons require device testing; the subsystem is reported `PARTIAL`.
+
+Applications capture `audio.input.microphone` through a bounded framework DSP chain that runs only
+for the production S16LE mono 16 kHz `speex` format: 80 Hz high-pass, adaptive spectral suppression
+capped at 12 dB, unity gain (no AGC) and a −1 dBFS peak limiter, with a 256-sample frame / 128 hop
+(about 15.9 ms) STFT. The noise estimate follows aggregate frame energy against a fast-down/slow-up
+floor and a very-slow-up average, so colored steady room noise is learned; spectral flatness no
+longer gates learning. State and output length are fixed, chunk boundaries do not change output,
+and the chain resets on mute, source reopen or a capture gap. Wakeword inference, enrollment and
+training consume this same processed tap (`framework.dsp.v1`); the untouched physical `speex`
+samples are available only at the explicit `audio.input.microphone.raw` endpoint, and frames whose
+tap declaration does not match are rejected. A general cold-start guard keeps a voice or word at
+0 dB relative to the learned reference out of the estimate; the first-vowel gate is ≥0.85 of
+reference (worst 0.896), and room re-engagement plus a second speech segment are preserved. On the
+one authorized 10 s background recording — mostly music played through a Mac's own or external
+speakers, not the Capsula path — cleanup measured 2.9 dB overall (80–300 Hz: 2.7 dB). That
+recording is unannotated and has no local playback reference to cancel the music, so it is consumed
+background evidence, not fan/traffic, music-immunity, new-location or zero-FAR proof. Endpoint
+negotiation with a real `speex` source, subjective suppression benefit and transparency remain
+hardware/listening gates.
 
 ### Microphone gate and mute
 
@@ -124,16 +143,33 @@ The stock device tree declares five keys:
 | `volumeup-key` | `0x73` `KEY_VOLUMEUP` | `volume_up` |
 | `playpause-key` | `0xa4` `KEY_PLAYPAUSE` | `play_pause` |
 | `volumedown-key` | `0x72` `KEY_VOLUMEDOWN` | `volume_down` |
-| `voice-key` | `0x2c0` `BTN_TRIGGER_HAPPY1` in one DTB, `0x246` `KEY_VOICECOMMAND` in the other | `voice` |
+| `voice-key` | `0x2c0` `BTN_TRIGGER_HAPPY1` in one DTB, `0x246` `KEY_VOICECOMMAND` in the other | `center` |
 
-The two DTBs embedded in the boot partition disagree on the voice key code and label, so the
+The two DTBs embedded in the boot partition disagree on the voice-key code and label, so the
 backend derives the semantic name from each child's node name and label and merges those entries
-over a default map. `BTN_0`, `KEY_ENTER` and `KEY_OK` still map to `primary`. The framework's
-system input handler consumes volume and microphone keys, and `primary` drives touch gestures;
-`play_pause` and `voice` are emitted as key events and reach an application only while it holds a
-full input capture. Raw coordinate availability must be confirmed per unit; the resource advertises `coordinates_available` only when
-the evdev device exposes absolute axes. Full/raw capture fails explicitly when the backend cannot
-provide it.
+over a default map. `BTN_0`, `KEY_ENTER` and `KEY_OK` still map to `primary`. The `voice-key` name
+is a vendor label, not an assistant function: both codes are the same **unmarked neutral centre**
+in the physical five-key layout. The roles are microphone mute (north), volume up (east),
+circle/play-pause talk key (south), volume down (west) and neutral centre. The centre dismisses
+alerts/assistant turns and drives stopwatch gestures but never summons the assistant; the talk key
+is `play_pause`.
+
+There is no coordinate panel. `touch.panel.main` advertises `coordinates_available=false` and
+`full_raw_available=false`, but the backend advertises `full_panel_available=true`: all five keys
+and the gestures inferred from ordered presses are deliverable. Partial capture receives
+circle/centre key events and swipes/circles; full capture receives every key and gesture with all
+system effects suppressed. The user's map is authoritative — east is volume up and west is volume
+down — and direction is not inverted from a single passive trace. A full swipe is
+opposite → centre → direction, or the minimum two-contact opposite-edge pair without the centre
+(W→E right, E→W left), where the first contact must still be down when the second is pressed; a
+sequential opposite tap pair or circle-then-microphone remains deliberate key actions, and the
+vertical two-contact pair is full-capture only. A centre-first half swipe is accepted when
+unambiguous, and a closed perimeter traversal from any corner is `circle_cw`/`circle_ccw`. Gesture
+windows and the 700 ms hold use the kernel event timestamp converted to the daemon clock; only an
+invalid event older than 5 s falls back to receive time. A crossing that reports zero or
+one contact cannot be distinguished from a key press or no input and is not inferred as a gesture.
+A failed multi-contact sequence suppresses its prefix effects, while a standalone volume tap or
+held ramp still works; raw coordinates are never fabricated.
 
 ### Vendor daemons (superseded at startup)
 
@@ -186,9 +222,11 @@ bring-up; boot integration is now one removable hook:
   (`capsulad` sha256 `86d131ae…fe604`) made the old `S60capsulad` restart healthy, `capsulad
   -health` exit 0, watchdog 21 s; the shared native SDK (`libcapsula.so.1`, sha256
   `b8632b17…72b50d`, ABI 1.0, 35 capabilities) and the optional `org.capsula.dumbassistant`
-  (sha256 `993f58ae…45686`) were installed at that time. **The single-hook rewrite and the current
-  clock/ring system-app build have not been deployed to the unit**; no power-cycle, fallback or
-  physical effect verification exists for them yet.
+  (sha256 `993f58ae…45686`) were installed at that time. The single-hook rewrite and the
+  public-contract clock/ring build were subsequently deployed through that hook on 2026-11-14
+  (daemon `a847c805…`, then the clock/ring binary-wire correction as `fce5c506…`; details and
+  limits in [STATUS.md](STATUS.md)); normal service restarts and the health gate are verified,
+  while no power-cycle, vendor-fallback or physical-effect verification exists for them yet.
 - A factory reset wipes the overlay: the device then boots the stock assistant and the deployment
   must be repeated.
 
@@ -229,17 +267,35 @@ free, and the daemon log rotates at 512 KiB plus one backup.
 
 The framework no longer uses `hciconfig` for anything; it talks to BlueZ 5.65 over the system bus.
 The original `hciconfig hci0 piscan` failure (`Can't set scan mode on hci0: Network is down (100)`)
-was an adapter that nobody powered after the vendor stack was retired. The daemon now sets
-`Adapter1.Powered`, `Discoverable` and `Pairable` through D-Bus, powers the adapter at startup and
-reconciles it every 5 s after a BlueZ restart.
+was an adapter that nobody powered after the vendor stack was retired. The daemon sets
+`Adapter1.Powered`, `Discoverable` and `Pairable` through D-Bus, and the BlueZ manager repairs its
+A2DP registration and power state after a BlueZ restart; it does not poll adapter properties.
 
-The vendor `btctl` was also the component that registered A2DP endpoints. Without it the adapter
+The vendor `btctl` was the component that registered A2DP endpoints. Without it the adapter
 advertised only AVRCP (0x110C/0x110E) and no Audio Sink, so a source refused to connect with
-`br-connection-profile-unavailable`. The daemon now loads PulseAudio's standard
-`module-bluetooth-discover` at startup (the modules ship in `/usr/lib/pulse-16.1/modules`); the
-adapter then advertises Audio Sink (0x110B), Headset (0x1108) and Audio Source (0x110A), and the
-source's audio appears as `bluez_source.<ADDR>.a2dp_source`. On connect the daemon loads
-`module-loopback source=… sink=master latency_msec=60`; on disconnect it unloads it.
+`br-connection-profile-unavailable`. The current daemon registers its own SBC sink endpoint through
+the public `org.bluez.Media1.RegisterEndpoint` API and verifies that the registration is still armed
+for the current adapter generation **before** the adapter is made connectable, discoverable or
+pairable, and before an API request can enable those. A failed registration, a BlueZ restart or an
+adapter power cycle invalidates readiness; it is not reported ready and is repaired before the next
+connect.
+Discoverability and pairability are refused while the profile is missing, and
+`BluetoothStatus.Detail` says the audio profile is not advertised. If native registration is not
+possible, the daemon falls back to PulseAudio's standard `module-bluetooth-discover`, which makes
+the adapter advertise Audio Sink (0x110B), Headset (0x1108) and Audio Source (0x110A) and exposes
+`bluez_source.<ADDR>.a2dp_source`. PA's Bluetooth endpoints are removed only after the native sink
+is armed and never while a source is actively routed through them; that source keeps its PA route
+until disconnect, and the native owner takes over for the next connection.
+
+BlueZ may autopower the adapter before `capsulad` starts. In that pre-daemon window a paired source
+can open an ACL while the framework's sink is not yet advertised. The incoming-connect handler
+repairs/verifies the registration and requests A2DP/AVRCP over the already-connected device via
+`Device1.ConnectProfile` (no second ACL). Whether a peer that already abandoned A2DP during that
+window honors the request without reconnecting is device-dependent and remains a real-peer gate.
+
+The live verification below is retained as dated **PulseAudio-route** evidence from 2026-11-11, when
+PA discovery owned the sink. It is not a claim that the native endpoint has passed the same
+end-to-end listening/peer test.
 
 Live verification with the paired MacBook (2026-11-11):
 
@@ -256,7 +312,11 @@ Live verification with the paired MacBook (2026-11-11):
 - `Pairable` and `Discoverable` toggled from the Web UI showed up in BlueZ and survived a reboot
   (`bluetooth_pairable` is a typed setting); the paired MacBook is listed in the UI.
 
-### Bluetooth volume and A2DP jitter
+### Bluetooth volume and A2DP jitter (PulseAudio fallback path)
+
+These measurements describe the PulseAudio fallback owner and are retained as dated evidence. The
+native endpoint uses AVRCP transport volume plus the framework's stream trim instead of a PA
+loopback; its audible level has not been certified.
 
 The Mac's AVRCP volume and the Capsula master are kept equal in both directions through one
 `applyMasterVolume` path: a master change writes the transport, and a transport change from the
@@ -267,29 +327,31 @@ master at 5 % and the Mac output at its minimum, the transport volume read ~6/12
 stream was near full scale, and the speaker was ~90–100 % loud. The AVRCP slider had moved without
 attenuating the stream.
 
-The loopback therefore carries a local safety gain of master^1.5 (cube-root compensated, because
-PulseAudio sink-input volume is cubic), while the source is held at a fixed 90 % trim. A linear
-master was still too hot at 5–7 % on this amplifier. The local gain and source trim are applied on
-source/route changes and volume events, rather than by a periodic re-assert. The audible Bluetooth
-level is bounded by master^1.5 and is at most about 0.73 × it; the Mac's own attenuation, when it
-does apply, makes it quieter still. This is the only arrangement that is safe with a source that
-may ignore AVRCP.
+When PulseAudio is the fallback owner, the loopback carries a local safety gain of master^1.5
+(cube-root compensated, because PulseAudio sink-input volume is cubic), while the source is held
+at a fixed 90 % trim. A linear master was still too hot at 5–7 % on this amplifier. The local gain
+and source trim are applied on source/route changes and volume events, rather than by a periodic
+re-assert. The audible Bluetooth level is bounded by master^1.5 and is at most about 0.73 × it;
+the Mac's own attenuation, when it does apply, makes it quieter still. This is the only
+arrangement that is safe with a source that may ignore AVRCP.
 
-PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on every source
-connect, because PulseAudio recreates it with the default (1) on a profile reconnect. The default
-mirrored the transport onto the local source and applied a cubic second attenuation; at master 30
-/ Mac 50 the source mirrored 47 % (10.4 % cubic) and the audio collapsed to ~1.5 %, which sounded
-like a phone call. No periodic self-heal remains; the per-connect reload and source/route events
-cover recreation.
+In the fallback path, PulseAudio's `module-bluez5-device` is reloaded with
+`avrcp_absolute_volume=0` on every source connect, because PulseAudio recreates it with the
+default (1) on a profile reconnect. The default mirrored the transport onto the local source and
+applied a cubic second attenuation; at master 30 / Mac 50 the source mirrored 47 % (10.4 % cubic)
+and the audio collapsed to ~1.5 %, which sounded like a phone call. No periodic self-heal remains;
+the per-connect reload and source/route events cover recreation.
 
 Audio quality was compared directly with the stock stack: the vendor `voice-agent`/`btctl` chain
 sounded clearly better on the same source. The vendor registers its own A2DP endpoint and feeds
 decoded PCM to the device; the old capsulad path received the PulseAudio bluez5 SBC source,
 resampled it through `module-loopback` into the 48 kHz master sink and then ALSA.
 
-capsulad now owns the A2DP sink endpoint instead. It unloads PA's bluez5 modules, exports an
-`org.bluez.MediaEndpoint1` SBC endpoint, and registers it with `Media1.RegisterEndpoint`. On this
-BlueZ 5.65 the endpoint API is `SelectConfiguration(ay) -> ay` and
+capsulad prefers its own A2DP sink endpoint. It exports an `org.bluez.MediaEndpoint1` SBC endpoint
+and registers it with `Media1.RegisterEndpoint`, verifying that it is armed for the current adapter
+generation before the adapter is made connectable or pairable; PA's bluez5 endpoints are removed
+only after that and never while a source is actively using them. On this BlueZ 5.65 the endpoint
+API is `SelectConfiguration(ay) -> ay` and
 `SetConfiguration(o transport, a{sv} properties)`; the transport object has no `Endpoint`
 property, so the transport path returned by `SetConfiguration` is used (UUID/Codec fallback).
 The transport fd is acquired with `MediaTransport1.Acquire` only while the transport is
@@ -312,9 +374,10 @@ the signal is attenuated twice. The synced pair is Mac ↔ Capsula; the PA sourc
 
 The volume cue peaks at 0.22 of full scale, about five times quieter than the original 0.95.
 
-A2DP jitter was tuned separately: the original 60 ms loopback target let the source buffer swing by
-hundreds of milliseconds and the resampler move between 44.03 and 44.4 kHz. With 250 ms the source
-settles at 57–111 ms against its 68 ms target at ~44.1 kHz. The Bluetooth UART IRQ is moved to CPU3
+A2DP jitter was tuned on the PulseAudio fallback path: the original 60 ms loopback target let the
+source buffer swing by hundreds of milliseconds and the resampler move between 44.03 and 44.4 kHz.
+With 250 ms the source settles at 57–111 ms against its 68 ms target at ~44.1 kHz. The native
+endpoint bypasses that loopback and its resampler. The Bluetooth UART IRQ is moved to CPU3
 by the boot hook, because `hci_uart` logged `Unexpected start frame` errors while the IRQ shared
 CPU0 with the daemon and wakeword inference.
 
@@ -329,6 +392,39 @@ Once superseded, capture is unaffected (a 2 s take recorded after takeover has r
 against 2196 before it). `voice-agent` was also the process that kept `/dev/watchdog` alive, so
 killing it by hand without giving the timer a new owner resets the board after the 21 s timeout
 (`dw_wdt: keepalive missed, machine will reset`); always let capsulad perform the handover.
+
+### mDNS and Avahi
+
+The stock image runs `avahi-daemon`, which owns multicast DNS and the 5353 socket. `capsulad` does
+not start a second responder or bind 5353: it applies the host name through the public
+`org.freedesktop.Avahi.Server` calls on the system bus. The value is the persisted single-label
+`Hostname` setting (default `capsula`), normalized to lower case and validated as one DNS label;
+the `.local` suffix is added by Avahi. Saves use the normal settings CAS revision. Apply reads
+`GetState`/`GetHostName` and makes **no** `SetHostName` write when the responder is RUNNING and
+already owns the requested label, confirming the advertisement through `GetHostNameFqdn`. After a
+write it waits a bounded interval for the responder to report the requested label; a redundant
+reply or a concurrent writer winning the race is accepted only from that authoritative read.
+Write-time collisions, invalid names and a missing responder remain visible errors with the
+observed FQDN, and a successful write whose FQDN cannot be read is reported as
+applied-but-unconfirmed rather than a fabricated advertisement. The daemon applies the latest
+requested label/generation at startup and when Avahi transitions to `AVAHI_SERVER_RUNNING`; the
+monitor subscribes to `StateChanged` before taking its initial snapshot and a coalesced worker
+drains changes during an apply, replaying the latest RUNNING edge instead of dropping it. `Close`
+cancels without publishing a warning. `GET /settings` is read-only: it renders the stored status
+and never applies a name or saves configuration. The simulator and unsupported platforms report
+mDNS as unavailable, cannot rename the host, and retain the saved label.
+
+This is a runtime setting in Avahi; durability comes from the settings store being re-applied on
+daemon start. A read-only snapshot of the unit observed Avahi `RUNNING`, `GetHostName=capsula` and
+`GetHostNameFqdn=capsula.local`, which is why the old unconditional `SetHostName` produced a
+redundant-operation warning. The portable fake-responder tests, a barrier-driven private-bus Linux
+adapter fixture (`-tags avahifixture`) and a real Web UI/auth/TLS/settings browser run against a
+successful responder fixture cover the ordering. In that run startup, two GETs and a same-name save
+made zero `SetHostName` calls with a clean “Advertised as capsula.local”; a changed label made one
+call; a genuine collision stayed visible with no advertised claim and no writes from the GET;
+restoring the label recovered. That is fixture-backed browser evidence, not a device or transport
+proof. Real `.local` resolution and real collision/rename behavior after an Avahi restart remain
+device gates. The fixture is not the simulator's unsupported status.
 
 ### Sensors
 
@@ -410,17 +506,17 @@ installed clock or ring apps.
 
 ### Operating the unit without a service manager
 
-The deployed unit still has the historical two-file init integration (`S60capsulad` plus an
-`exec` wrapper). The repository target is the single self-contained `/etc/init.d/S99btctl.sh`
-hook; deploy it before relying on `disable`/`enable` there. Once deployed, normal starts,
-restarts and upgrades go through the boot service; the manual sequence below remains the
+The deployed unit runs the single self-contained `/etc/init.d/S99btctl.sh` hook (installed since
+2026-11-13; the historical two-file `S60capsulad` + `exec` wrapper integration is retired). Normal
+starts, restarts and upgrades go through that boot service; the manual sequence below remains the
 maintenance fallback when the overlay or boot hook is missing. Two facts make that less trivial
 than it looks:
 
-- **`/data` holds only 78.5 MB.** The current stripped `capsulad` is 23,003,288 bytes;
+- **`/data` holds only 78.5 MB.** The current stripped `capsulad` is about 27 MB (27,132,164 bytes
+  as of the 2026-11-14 web-rewrite deployment);
   operator-installed app
   packages, recordings and logs grow from there. A deploy that keeps the old binary next to the new
-  one needs the new binary's size free (23,003,288 bytes, or the same again for a retained
+  one needs the new binary's size free (about 27 MB, or the same again for a retained
   `.prev`); free space first (`df -h /data`), deploy to `*.new` and `mv` into place,
   and keep the log small. Upgrading the daemon quarantines old installed sample bundles but keeps
   their files; a manual `ls` may still show them even though they are not active. Removing those
@@ -511,8 +607,17 @@ zones.
    terminates the stream 5 s after the last qualifying indication (polls every 1 s, so 5–6 s after
    the indication disappears). Remaining: latency/underrun measurement under sustained load, and
    pre-roll timing.
-3. evdev capabilities: coordinates, pressure and gesture keys cannot be checked on this unit — it
-   has no touch panel, so only the five `gpio-keys` exist.
+3. evdev capabilities: there is no touch/coordinate panel, so only the five `gpio-keys` exist.
+   `coordinates_available`/`full_raw_available` stay false, but `full_panel_available` is true and
+   the key/gesture contract is testable on the unit; raw coordinate semantics need a different
+   panel. Verify a single-key tap resolves once after the 250 ms recognition window, a held circle
+   still summons at 700 ms, an overlapping edge-to-edge crossing is recognized without stepping
+   volume, sequential opposite taps and circle-then-microphone remain deliberate key actions, the
+   vertical pair is full-capture only, a 0/1-contact glide is not treated as a gesture, full
+   swipes/circles emit the documented gesture, and an unfinished multi-key sequence produces no
+   mute/volume/summon effect. Confirm the 250 ms/700 ms windows follow the kernel event timestamp
+   even when the read loop is delayed. The user's map is authoritative; a passive trace cannot
+   establish contact order and must not be used to invert direction.
 4. ~~Namespace/seccomp support~~ measured: mount namespace only, no user/net/PID namespaces and no
    seccomp filter. ~~App runtime dependencies inside the mount namespace~~ verified 2026-11-12: a
    native app mapped `libcapsula.so.1` (ABI 1.0) from `/capsula/lib` and reported `APP_READY`;
@@ -534,3 +639,25 @@ zones.
    and unpair a throwaway device through the Web UI (unpair was deliberately not run against the
    user's MacBook), exercise a source that publishes AVRCP track metadata, and decide the boundary
    for the vendor helpers that still run (`okcall`, `stereoctl`, `telemetryd`, `snapclient`).
+7. Native A2DP ordering/readiness with a real source: confirm the sink is advertised before the
+   adapter is connectable after a cold boot and after a BlueZ restart/power cycle, that a failed
+   registration keeps pairable/discoverable off with the documented `Detail`, and that a source
+   connected during the pre-daemon/autopower window either recovers A2DP on the same link or
+   requires a reconnect. PA-module removal timing around an active source is a real-device gate.
+8. mDNS host name: save a label in the Web UI, confirm `.local` resolution with `avahi-resolve`,
+   restart Avahi through the device init system and confirm the same label is re-adopted, and
+   check a colliding/invalid name keeps the prior name and reports the collision. With the label
+   already active, a Settings GET and a daemon restart must produce zero `SetHostName` calls
+   (`dbus-monitor --system "interface=org.freedesktop.Avahi.Server,member=SetHostName"`) and no
+   redundant-operation warning. The simulator, fake responder,
+   barrier-driven private-bus fixture and fixture-backed browser run cannot prove device/network
+   resolution.
+9. Application capture DSP: confirm the live `speex` source is S16LE mono 16 kHz so the chain is
+   active, that `audio.input.microphone` and the wakeword/inference feed report
+   `framework.dsp.v1` while only the explicit `.raw` endpoint stays unprocessed, that
+   muting/reopening produces a clean discontinuity, and that output length is invariant across
+   capture chunk sizes. The colored-noise estimator and the installed raw-trained model on the
+   processed tap have local finite-clip evidence only: 2.9 dB cleanup on the consumed mostly-Mac-
+   music recording; settled warm classifier replay 6/6 raw and 6/6 processed (legacy-model
+   usability, threshold unverified). Real fan/traffic/music behaviour, quiet speech, subjective
+   suppression benefit and acoustic transparency remain listening/acoustic gates.

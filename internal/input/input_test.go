@@ -74,6 +74,7 @@ func TestSystemControlsInPartialAndFullCapture(t *testing.T) {
 	defer sub.Close()
 
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if volumes.Load() != 1 {
 		t.Fatal("partial capture did not route volume to the framework")
 	}
@@ -85,6 +86,7 @@ func TestSystemControlsInPartialAndFullCapture(t *testing.T) {
 
 	mode.Store(int32(routing.TouchFull))
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if volumes.Load() != 1 {
 		t.Fatal("full capture still interpreted the system volume control")
 	}
@@ -129,11 +131,13 @@ func TestDiscreteKeysActOnPressOnly(t *testing.T) {
 	// toggles straight back and volume jumps two steps.
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "mic_toggle", Pressed: true}})
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "mic_toggle", Pressed: false}})
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if got := mic.Load(); got != 1 {
 		t.Fatalf("mic toggled %d times for one tap, want 1", got)
 	}
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: false}})
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if got := up.Load(); got != 1 {
 		t.Fatalf("volume stepped %d times for one tap, want 1", got)
 	}
@@ -203,7 +207,7 @@ func TestHeldVolumeKeyRepeats(t *testing.T) {
 		Handlers{VolumeUp: func() bool { steps.Add(1); return true }})
 	defer m.Close()
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
-	time.Sleep(2*volumeRepeatStart + 80*time.Millisecond)
+	time.Sleep(2*volumeRepeatStart + 500*time.Millisecond)
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: false}})
 	got := steps.Load()
 	if got < 3 {
@@ -252,6 +256,9 @@ type controlCounters struct {
 	doubleTaps       atomic.Int32
 	primaryActive    atomic.Bool
 	dismissAssistant atomic.Bool
+	mediaToggles     atomic.Int32
+	mediaPrevious    atomic.Int32
+	mediaNext        atomic.Int32
 }
 
 // newControlManager builds a framework-owned panel whose DismissAlert result
@@ -295,6 +302,9 @@ func newControlManager(t *testing.T, active *atomic.Bool, talk *atomic.Bool) (*M
 				}
 				return true
 			},
+			MediaToggle:   func() { c.mediaToggles.Add(1) },
+			MediaPrevious: func() { c.mediaPrevious.Add(1) },
+			MediaNext:     func() { c.mediaNext.Add(1) },
 		})
 	t.Cleanup(m.Close)
 	return m, c
@@ -390,8 +400,10 @@ func TestVolumeAndMicStayActiveDuringAlert(t *testing.T) {
 
 	pressKey(m, "volume_up", true)
 	pressKey(m, "volume_up", false)
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	pressKey(m, "mic_toggle", true)
 	pressKey(m, "mic_toggle", false)
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 
 	if got := c.volumes.Load(); got != 1 {
 		t.Fatalf("volume stepped %d times, want 1", got)
@@ -486,33 +498,51 @@ func TestFullCaptureForwardsControlsWithoutDismissal(t *testing.T) {
 	}
 }
 
-// Releasing one volume key must not stop the ramp the other key started.
-func TestVolumeReleaseKeepsOtherKeyRamp(t *testing.T) {
+// When a crossing reports both opposite volume edges without the centre, the
+// ordered pair is the left/right swipe, not a volume chord. The swipe must
+// produce previous/next and no volume ramp, and neither contact's release may
+// leak a step. A crossing that reports only one contact remains a volume press
+// and is not inferred as a swipe.
+func TestOppositeVolumeContactsFormASwipe(t *testing.T) {
 	clock := ids.NewClock()
 	logs, err := logbus.New(clock, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var up, down atomic.Int32
+	var up, down, previous, next atomic.Int32
 	m := NewManager(context.Background(), clock, logs, backend.TouchCaps{},
 		func() (string, string, routing.TouchMode) { return "", "", routing.TouchNone },
 		Handlers{
-			VolumeUp:   func() bool { up.Add(1); return true },
-			VolumeDown: func() bool { down.Add(1); return true },
+			VolumeUp:      func() bool { up.Add(1); return true },
+			VolumeDown:    func() bool { down.Add(1); return true },
+			MediaPrevious: func() { previous.Add(1) },
+			MediaNext:     func() { next.Add(1) },
 		})
 	defer m.Close()
 
-	pressKey(m, "volume_up", true)
-	pressKey(m, "volume_down", true)
-	pressKey(m, "volume_up", false)
-	time.Sleep(2*volumeRepeatStart + 120*time.Millisecond)
-	pressKey(m, "volume_down", false)
-
-	if got := up.Load(); got != 1 {
-		t.Fatalf("replaced volume ramp stepped %d times, want 1", got)
+	// East then west is a leftward crossing. The east contact is still down
+	// when the west edge is pressed, as an overlapping crossing can report.
+	panelKeyAt(m, "volume_up", true, 1_000_000)
+	panelKeyAt(m, "volume_down", true, 1_090_000)
+	panelKeyAt(m, "volume_up", false, 1_150_000)
+	panelKeyAt(m, "volume_down", false, 1_160_000)
+	if got := previous.Load(); got != 1 {
+		t.Fatalf("leftward crossing delivered %d previous, want 1", got)
 	}
-	if got := down.Load(); got < 3 {
-		t.Fatalf("volume_down ramp stopped when volume_up was released: %d steps", got)
+	if up.Load() != 0 || down.Load() != 0 {
+		t.Fatalf("swipe leaked volume steps up=%d down=%d", up.Load(), down.Load())
+	}
+
+	// West then east is a rightward crossing.
+	panelKeyAt(m, "volume_down", true, 2_000_000)
+	panelKeyAt(m, "volume_up", true, 2_090_000)
+	panelKeyAt(m, "volume_down", false, 2_150_000)
+	panelKeyAt(m, "volume_up", false, 2_160_000)
+	if got := next.Load(); got != 1 {
+		t.Fatalf("rightward crossing delivered %d next, want 1", got)
+	}
+	if up.Load() != 0 || down.Load() != 0 {
+		t.Fatalf("swipe leaked volume steps up=%d down=%d", up.Load(), down.Load())
 	}
 }
 
@@ -532,6 +562,7 @@ func TestDuplicateVolumePressDoesNotStepTwice(t *testing.T) {
 	pressKey(m, "volume_up", true)
 	pressKey(m, "volume_up", true)
 	pressKey(m, "volume_up", false)
+	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if got := steps.Load(); got != 1 {
 		t.Fatalf("duplicate press stepped %d times, want 1", got)
 	}
@@ -611,7 +642,7 @@ func TestTalkKeyTapDrivesFrameworkGesture(t *testing.T) {
 	pressKey(m, "play_pause", true)
 	time.Sleep(60 * time.Millisecond)
 	pressKey(m, "play_pause", false)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(panelInterContact + 120*time.Millisecond)
 
 	if got := c.taps.Load(); got != 1 {
 		t.Fatalf("framework taps = %d, want 1", got)
@@ -663,7 +694,7 @@ func TestTalkKeyDoubleTapDrivesFrameworkGesture(t *testing.T) {
 	pressKey(m, "play_pause", true)
 	time.Sleep(40 * time.Millisecond)
 	pressKey(m, "play_pause", false)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(2*panelInterContact + 150*time.Millisecond)
 
 	if got := c.doubleTaps.Load(); got != 1 {
 		t.Fatalf("framework double taps = %d, want 1", got)
