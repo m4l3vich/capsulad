@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 
+	"capsulad/internal/audio"
 	"capsulad/internal/wakeword"
 )
 
@@ -58,20 +59,22 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	en, err := loadEnrollment(*samplesDir, *ambientDir, *speechDir, *falseDir)
+	en, inputs, err := loadEnrollment(*samplesDir, *ambientDir, *speechDir, *falseDir)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "waketrain: %d word, %d room, %d speech, %d false-activation recordings\n",
-		len(en.Takes), len(en.Ambient), len(en.Speech), len(en.False))
+	fmt.Fprintf(os.Stderr, "waketrain: %d word, %d room, %d speech, %d false-activation recordings; input tap=%q, converted %d legacy raw takes\n",
+		len(en.Takes), len(en.Ambient), len(en.Speech), len(en.False), inputs.Tap, inputs.RawConverted)
 
 	last := make(map[string]int)
 	clf, err := wakeword.Train(ctx, en, wakeword.TrainOptions{
-		ID:            *name,
-		Display:       *display,
-		Language:      *language,
-		Seed:          *seed,
-		NegativesPath: *negPath,
+		ID:                *name,
+		Display:           *display,
+		Language:          *language,
+		Seed:              *seed,
+		NegativesPath:     *negPath,
+		InputProcessing:   inputs.Tap,
+		RawTakesConverted: inputs.RawConverted,
 		Progress: func(stage string, fraction float64) {
 			bucket := int(fraction*100 + 0.5)
 			if bucket > 100 {
@@ -106,11 +109,21 @@ func run() error {
 	}
 	fmt.Printf("wrote %s: model=%s threshold=%.3f\n", *outPath, clf.ID, clf.Threshold)
 	if metrics, ok := clf.Trained["metrics"].(map[string]any); ok {
+		printMetrics := func(label string, m map[string]any) {
+			fmt.Printf("%s: detected %v/%v (%s), false activations %v\n", label,
+				m["detected"], m["word_recordings"],
+				percentText(m["recall"]), m["false_activations"])
+		}
 		for _, part := range []string{"tune", "final_test"} {
 			if m, ok := metrics[part].(map[string]any); ok {
-				fmt.Printf("%s: detected %v/%v (%s), false activations %v\n", part,
-					m["detected"], m["word_recordings"],
-					percentText(m["recall"]), m["false_activations"])
+				printMetrics(part, m)
+			}
+		}
+		if aux, ok := metrics["auxiliary_offpolicy"].(map[string]any); ok {
+			for _, part := range []string{"tune", "final_test"} {
+				if m, ok := aux[part].(map[string]any); ok {
+					printMetrics("auxiliary off-policy "+part, m)
+				}
 			}
 		}
 	}
@@ -124,47 +137,90 @@ func percentText(v any) string {
 	return "?"
 }
 
+// enrollmentInputs records the preprocessing the loaded takes carry.
+type enrollmentInputs struct {
+	Tap          string
+	RawConverted int
+}
+
 // loadEnrollment reads the takes the capture flow writes. Background takes are
 // room recordings; -ambient, -speech and -false add recordings of those kinds
 // explicitly instead of guessing from a filename inside an arbitrary directory.
-func loadEnrollment(samplesDir, ambientDir, speechDir, falseDir string) (wakeword.Enrollment, error) {
+// Takes recorded with the sidecar declaring framework.dsp.v1 are used as-is;
+// legacy raw takes (no sidecar) are converted with the production DSP so the
+// offline trainer matches runtime inference instead of silently training on a
+// different tap.
+func loadEnrollment(samplesDir, ambientDir, speechDir, falseDir string) (wakeword.Enrollment, enrollmentInputs, error) {
 	var en wakeword.Enrollment
+	var in enrollmentInputs
+	read := func(path string) ([]int16, error) {
+		pcm, err := readWAV(path)
+		if err != nil {
+			return nil, err
+		}
+		prov, found, err := audio.ReadCaptureProvenance(path)
+		if err != nil {
+			return nil, err
+		}
+		if found && prov.ProcessingTap != "" {
+			if prov.ProcessingTap != audio.CaptureProcessingTap {
+				return nil, fmt.Errorf("%s: declared capture tap %q is not supported (want %q); do not reinterpret this take",
+					path, prov.ProcessingTap, audio.CaptureProcessingTap)
+			}
+			if in.Tap != "" && in.Tap != prov.ProcessingTap {
+				return nil, fmt.Errorf("%s: mixed input processing %q and %q", path, in.Tap, prov.ProcessingTap)
+			}
+			in.Tap = prov.ProcessingTap
+			return pcm, nil
+		}
+		out, tap := audio.ProcessCaptureS16(pcm, audio.CaptureDSPOptions{})
+		if tap != audio.CaptureProcessingTap {
+			return nil, fmt.Errorf("%s: legacy raw take needs conversion to %q, but the DSP profile is unavailable",
+				path, audio.CaptureProcessingTap)
+		}
+		if in.Tap != "" && in.Tap != tap {
+			return nil, fmt.Errorf("%s: mixed input processing %q and %q", path, in.Tap, tap)
+		}
+		in.Tap = tap
+		in.RawConverted++
+		return out, nil
+	}
 	entries, err := listWAVs(samplesDir)
 	if err != nil {
-		return en, err
+		return en, in, err
 	}
 	for _, path := range entries {
 		switch {
 		case strings.HasSuffix(path, "_word.wav"):
-			pcm, err := readWAV(path)
+			pcm, err := read(path)
 			if err != nil {
-				return en, err
+				return en, in, err
 			}
 			en.Takes = append(en.Takes, pcm)
 		case strings.HasSuffix(path, "_background.wav"):
-			pcm, err := readWAV(path)
+			pcm, err := read(path)
 			if err != nil {
-				return en, err
+				return en, in, err
 			}
 			en.Ambient = append(en.Ambient, pcm)
 		}
 	}
 	if len(en.Takes) == 0 {
-		return en, fmt.Errorf("%s: no *_word.wav recordings found", samplesDir)
+		return en, in, fmt.Errorf("%s: no *_word.wav recordings found", samplesDir)
 	}
 
 	if ambientDir != "" {
 		paths, err := listWAVs(ambientDir)
 		if err != nil {
-			return en, err
+			return en, in, err
 		}
 		if len(paths) == 0 {
-			return en, fmt.Errorf("%s: no *.wav recordings found", ambientDir)
+			return en, in, fmt.Errorf("%s: no *.wav recordings found", ambientDir)
 		}
 		for _, path := range paths {
-			pcm, err := readWAV(path)
+			pcm, err := read(path)
 			if err != nil {
-				return en, err
+				return en, in, err
 			}
 			en.Ambient = append(en.Ambient, pcm)
 		}
@@ -172,15 +228,15 @@ func loadEnrollment(samplesDir, ambientDir, speechDir, falseDir string) (wakewor
 	if speechDir != "" {
 		paths, err := listWAVs(speechDir)
 		if err != nil {
-			return en, err
+			return en, in, err
 		}
 		if len(paths) == 0 {
-			return en, fmt.Errorf("%s: no *.wav recordings found", speechDir)
+			return en, in, fmt.Errorf("%s: no *.wav recordings found", speechDir)
 		}
 		for _, path := range paths {
-			pcm, err := readWAV(path)
+			pcm, err := read(path)
 			if err != nil {
-				return en, err
+				return en, in, err
 			}
 			en.Speech = append(en.Speech, pcm)
 		}
@@ -188,20 +244,20 @@ func loadEnrollment(samplesDir, ambientDir, speechDir, falseDir string) (wakewor
 	if falseDir != "" {
 		paths, err := listWAVs(falseDir)
 		if err != nil {
-			return en, err
+			return en, in, err
 		}
 		if len(paths) == 0 {
-			return en, fmt.Errorf("%s: no *.wav recordings found", falseDir)
+			return en, in, fmt.Errorf("%s: no *.wav recordings found", falseDir)
 		}
 		for _, path := range paths {
-			pcm, err := readWAV(path)
+			pcm, err := read(path)
 			if err != nil {
-				return en, err
+				return en, in, err
 			}
 			en.False = append(en.False, pcm)
 		}
 	}
-	return en, nil
+	return en, in, nil
 }
 
 func listWAVs(dir string) ([]string, error) {

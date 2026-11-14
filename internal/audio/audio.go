@@ -5,6 +5,12 @@
 // queues; slow consumers receive discontinuity information instead of stalling
 // hardware capture. Playback streams are independent and mixed at 48 kHz
 // stereo S16LE.
+//
+// Application capture additionally passes through a bounded 16 kHz mono DSP
+// chain (rumble high-pass, conservative spectral noise suppression, peak
+// limiter). The same declared processed tap feeds framework wakeword
+// enrollment and inference, so training and detection share one policy; an
+// explicit raw app capture remains available separately. See dsp.go.
 package audio
 
 import (
@@ -21,11 +27,16 @@ import (
 )
 
 const (
-	outRate         = 48000
-	outChannels     = 2
-	mixFrameMS      = 10
-	playbackQueue   = 32
-	captureQueue    = 16
+	outRate       = 48000
+	outChannels   = 2
+	mixFrameMS    = 10
+	playbackQueue = 32
+	// The capture event channel must hold the one-second pre-roll, which is
+	// emitted synchronously before the RPC reader starts: captureLoop produces
+	// 20 ms chunks, so the window is at most 50 chunks plus the Started event.
+	// A smaller queue would silently truncate the pre-roll; live overflow is
+	// still bounded and reported as CLIENT_TOO_SLOW.
+	captureQueue    = 64
 	progressPeriod  = 250 * time.Millisecond
 	prerollMS       = 1000
 	maxPlaybackItem = 1 << 20
@@ -35,16 +46,30 @@ type Options struct {
 	// IndicationActive reports whether an app currently shows a qualifying
 	// visible ring/segment indication.
 	IndicationActive func(appID string) bool
-	WatchdogGraceMS  int
-	WatchdogPollMS   int
-	DuckGain         float64
-	DuckFadeMS       int
+	// IndicationCue delivers the audible half of the microphone indication. It
+	// is called once when a supervised application opens a capture and must
+	// return only after the mixer has consumed and drained the cue to the
+	// output sink. It returns an error when an audible cue cannot be
+	// guaranteed (no output, zero master volume, mute, or a failed stream). A
+	// nil hook denies app captures: silence is never an implicit microphone
+	// indication.
+	IndicationCue   func(appID string) error
+	WatchdogGraceMS int
+	WatchdogPollMS  int
+	DuckGain        float64
+	DuckFadeMS      int
+	// CaptureDSP applies the bounded framework capture cleanup to application
+	// capture, wakeword inference and enrollment. The zero value is
+	// deliberately conservative because the Rockchip capture source (`speex`)
+	// is already processed by the vendor firmware.
+	CaptureDSP CaptureDSPOptions
 }
 
 type Started struct {
-	StreamID   string
-	Format     backend.AudioFormat
-	WatchdogMS uint32
+	StreamID      string
+	Format        backend.AudioFormat
+	WatchdogMS    uint32
+	ProcessingTap string // empty for the physical/raw tap
 }
 
 type Chunk struct {
@@ -55,6 +80,9 @@ type Chunk struct {
 	PCM           []byte
 	Discontinuity bool
 	DroppedFrames uint64
+	// ProcessingTap identifies the producer of PCM. Empty means the physical
+	// (vendor-processed `speex`) capture is passed through unchanged.
+	ProcessingTap string
 }
 
 type Notice struct{ Code, Detail string }
@@ -92,12 +120,30 @@ type Manager struct {
 	playbacks     map[string]*Playback
 	captures      map[string]*capture
 	conversations map[string]conversation
-	preroll       []Chunk
+	preroll       []prerollEntry
 	sink          backend.Sink
 	source        backend.Source
 	lastProgress  uint64
 	frameSinks    map[int]chan Frame
 	nextFrameSink int
+	dspEnabled    bool
+	resetDSP      bool
+	// cueID is the playback stream that owns the microphone indication. While
+	// it is set, only that stream is mixed; application playbacks cannot mask
+	// or delay the audible indication with concurrent audio.
+	cueID string
+	// Retained terminal drop snapshot: enough for a caller that samples after
+	// EndCapture without an unbounded per-app history map.
+	closedDropApp   string
+	closedDropTotal uint64
+}
+
+// prerollEntry keeps the bounded pre-activation history in both provenances:
+// app captures request the processed tap, while an explicit raw capture and
+// compatibility diagnostics can still see the physical stream.
+type prerollEntry struct {
+	raw       Chunk
+	processed *Chunk
 }
 
 type conversation struct {
@@ -123,22 +169,31 @@ func NewManager(parent context.Context, clock *ids.Clock, logs *logbus.Bus, dev 
 		ctx: ctx, cancel: cancel, clock: clock, logs: logs, dev: dev, opts: opts,
 		volume: 0.6, playbacks: map[string]*Playback{}, captures: map[string]*capture{},
 		conversations: map[string]conversation{},
+		dspEnabled:    !opts.CaptureDSP.Disabled && captureDSPSupported(dev.CaptureFormat()),
 	}
 }
 
-// Frame is one chunk of the processed capture stream. It is shared with
-// framework consumers (the wakeword detector) so they observe exactly what an
-// application capture receives without opening a second microphone.
+// Frame is one chunk of the declared capture stream shared with framework
+// consumers (the wakeword detector and enrollment recorder), so they observe
+// exactly the samples detection runs on without opening a second microphone.
+// When the framework cleanup is active the PCM is its output and ProcessingTap
+// is CaptureProcessingTap; when the profile is disabled or the backend format
+// is unsupported the PCM is the physical vendor `speex` tap and the tap is
+// empty. Consumers must validate ProcessingTap rather than assume either.
 type Frame struct {
 	PCM           []byte
 	RateHz        int
 	Sequence      uint64 // capture chunk ID; a gap means the subscriber lost audio
 	Discontinuity bool   // capture resumed after a source read error
+	ProcessingTap string // CaptureProcessingTap, or empty for the physical raw tap
 }
 
-// SubscribeFrames registers a framework consumer on the capture stream. Frames
-// are delivered with a bounded queue and dropped when the consumer falls
-// behind: the audio path must never block on analysis.
+// SubscribeFrames registers a framework consumer on the declared capture
+// stream. Frames carry the same processed samples application capture and
+// wakeword inference use, with their provenance in ProcessingTap. They are
+// delivered with a bounded queue and dropped when the consumer falls behind:
+// the audio path must never block on analysis. The explicit raw endpoint stays
+// available to application capture through RawCaptureEndpoint.
 func (m *Manager) SubscribeFrames(buffer int) (<-chan Frame, func()) {
 	if buffer <= 0 {
 		buffer = 8
@@ -180,6 +235,7 @@ func (m *Manager) Start() error {
 		return err
 	}
 	m.sink, m.source, m.started = sink, source, true
+	m.resetDSP = true
 	muted := m.muted
 	m.mu.Unlock()
 
@@ -234,6 +290,28 @@ func (m *Manager) SetMasterVolume(v float64) {
 	_ = m.dev.SetMasterVolume(1)
 }
 
+// BeginIndicationCue makes playback id the exclusive mixer source for the
+// microphone indication. Other playbacks are muted, not stopped, so the cue
+// cannot be masked by an application flooding the mixer.
+func (m *Manager) BeginIndicationCue(id string) {
+	if id == "" {
+		return
+	}
+	m.mu.Lock()
+	m.cueID = id
+	m.mu.Unlock()
+}
+
+// EndIndicationCue releases exclusivity only if id still owns it, so a stale
+// completion cannot unmute a newer cue.
+func (m *Manager) EndIndicationCue(id string) {
+	m.mu.Lock()
+	if m.cueID == id {
+		m.cueID = ""
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) MasterVolume() float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -258,6 +336,10 @@ func (m *Manager) SetMuted(muted bool) {
 	m.mu.Lock()
 	m.muted = muted
 	m.hardwareMute = hw
+	// Mute boundaries are discontinuities: never hand pre-mute audio or DSP
+	// state to a capture opened after unmute.
+	m.resetDSP = true
+	m.preroll = m.preroll[:0]
 	captures := make([]*capture, 0, len(m.captures))
 	if muted {
 		for _, c := range m.captures {
@@ -457,6 +539,7 @@ func (m *Manager) mixLoop() {
 			playbacks = append(playbacks, p)
 		}
 		volume := m.volume
+		cueID := m.cueID
 		anyConversation := len(m.conversations) > 0
 		convs := make(map[string]struct{}, len(m.conversations))
 		for id := range m.conversations {
@@ -467,6 +550,13 @@ func (m *Manager) mixLoop() {
 
 		for _, p := range playbacks {
 			p.drainControl()
+			isCue := cueID != "" && p.id == cueID
+			if cueID != "" && !isCue {
+				// The microphone indication owns the mixer. Freeze application
+				// playbacks instead of mixing them under the cue; they resume
+				// when the cue ends, so a flood cannot mask it.
+				continue
+			}
 			p.feed()
 			p.mu.Lock()
 			if p.closed {
@@ -480,7 +570,7 @@ func (m *Manager) mixLoop() {
 			p.mu.Unlock()
 
 			target := 1.0
-			if anyConversation && (p.conversationID == "" || !isActiveConv) {
+			if !isCue && anyConversation && (p.conversationID == "" || !isActiveConv) {
 				target = m.opts.DuckGain
 			}
 			p.mu.Lock()
@@ -598,13 +688,15 @@ func (p *Playback) feed() {
 type capture struct {
 	id, appID, runID, endpoint, activationID, conversationID string
 	format                                                   backend.AudioFormat
+	processed                                                bool
 	mgr                                                      *Manager
 	events                                                   chan CaptureEvent
 	done                                                     chan struct{}
 
 	mu             sync.Mutex
 	closed         bool
-	droppedFrames  uint64
+	droppedFrames  uint64 // pending count, reset when the next chunk is delivered
+	dropTotal      uint64 // cumulative for diagnostics/tests, never reset
 	pendingDiscont bool
 	lastQualifying uint64
 }
@@ -643,7 +735,13 @@ func (c *capture) close(n Notice) {
 }
 
 func (m *Manager) StartCapture(appID, runID, endpointID string, _ backend.AudioFormat, _ uint32, activationID, conversationID string) (*capture, error) {
-	if endpointID != "" && endpointID != "audio.input.microphone" {
+	endpoint := CaptureEndpoint
+	processed := true
+	switch endpointID {
+	case "", CaptureEndpoint:
+	case RawCaptureEndpoint:
+		endpoint, processed = RawCaptureEndpoint, false
+	default:
 		return nil, fmt.Errorf("unknown capture endpoint %q", endpointID)
 	}
 	m.mu.Lock()
@@ -651,42 +749,103 @@ func (m *Manager) StartCapture(appID, runID, endpointID string, _ backend.AudioF
 		m.mu.Unlock()
 		return nil, fmt.Errorf("microphone is globally muted")
 	}
+	if processed && !m.dspEnabled {
+		processed = false
+	}
 	m.mu.Unlock()
+	// A supervised application may only receive microphone audio while a
+	// selected, visible, non-blank presentation and an audible framework cue
+	// both prove the microphone is live. Checks run without the manager lock:
+	// the visible hook reads routing state and the cue hook opens a playback
+	// stream through this same manager.
+	if appID != "" {
+		if m.opts.IndicationActive == nil || m.opts.IndicationCue == nil {
+			return nil, fmt.Errorf("microphone capture requires visible and audible indication")
+		}
+		if !m.opts.IndicationActive(appID) {
+			return nil, fmt.Errorf("microphone capture requires a selected visible ring or segment indication")
+		}
+		if err := m.opts.IndicationCue(appID); err != nil {
+			return nil, fmt.Errorf("microphone indication is not audible: %w", err)
+		}
+		// The cue takes time to drain; the presentation must still be visible
+		// when capture actually starts.
+		if !m.opts.IndicationActive(appID) {
+			return nil, fmt.Errorf("microphone capture requires a selected visible ring or segment indication")
+		}
+	}
 	format := m.dev.CaptureFormat()
+	tap := CaptureProcessingTap
+	if !processed {
+		tap = ""
+	}
 	c := &capture{
-		id: ids.New("mic"), appID: appID, runID: runID, endpoint: "audio.input.microphone",
+		id: ids.New("mic"), appID: appID, runID: runID, endpoint: endpoint,
+		processed:    processed,
 		activationID: activationID, conversationID: conversationID, format: format,
 		mgr: m, events: make(chan CaptureEvent, captureQueue), done: make(chan struct{}),
 		// The initial grace period runs from the start, so a capture that never
-		// shows an indication is still terminated on time.
+		// shows an indication is still terminated on time. Frames are withheld
+		// whenever an indication is absent, so the grace cannot leak audio.
 		lastQualifying: m.clock.NowNS(),
 	}
-	c.emit(CaptureEvent{Started: &Started{StreamID: c.id, Format: format, WatchdogMS: uint32(m.opts.WatchdogGraceMS)}})
+	c.emit(CaptureEvent{Started: &Started{StreamID: c.id, Format: format,
+		WatchdogMS: uint32(m.opts.WatchdogGraceMS), ProcessingTap: tap}})
 	if activationID != "" {
 		m.mu.Lock()
-		pre := make([]Chunk, len(m.preroll))
+		pre := make([]prerollEntry, len(m.preroll))
 		copy(pre, m.preroll)
 		m.mu.Unlock()
-		for _, ch := range pre {
+		frameBytes := format.BytesPerFrame()
+		var lost uint64
+		for _, entry := range pre {
+			ch := entry.raw
+			if c.processed && entry.processed != nil {
+				ch = *entry.processed
+			}
 			cp := ch
-			c.emit(CaptureEvent{Chunk: &cp})
+			if !c.emit(CaptureEvent{Chunk: &cp}) {
+				if frameBytes > 0 {
+					lost += uint64(len(ch.PCM) / frameBytes)
+				}
+				continue
+			}
 		}
-		m.logs.Infof("audio", appID, "capture stream=%s attached %d pre-roll chunks for activation=%s",
-			c.id, len(pre), activationID)
+		if lost > 0 {
+			// Pre-roll never blocks the caller, so a saturated queue is
+			// disclosed on the next live chunk instead of pretending the full
+			// history was attached.
+			c.mu.Lock()
+			c.droppedFrames += lost
+			c.dropTotal += lost
+			c.pendingDiscont = true
+			c.mu.Unlock()
+			m.logs.Warnf("audio", appID, "capture stream=%s pre-roll truncated: %d frames not queued", c.id, lost)
+		}
+		m.logs.Infof("audio", appID, "capture stream=%s attached %d pre-roll chunks for activation=%s tap=%s",
+			c.id, len(pre), activationID, tapName(tap))
 	}
 	m.mu.Lock()
 	m.captures[c.id] = c
 	m.mu.Unlock()
-	m.logs.Infof("audio", appID, "capture stream=%s opened endpoint=%s conversation=%s",
-		c.id, c.endpoint, conversationID)
+	m.logs.Infof("audio", appID, "capture stream=%s opened endpoint=%s tap=%s conversation=%s",
+		c.id, c.endpoint, tapName(tap), conversationID)
 	go m.watchdog(c)
 	return c, nil
+}
+
+func tapName(tap string) string {
+	if tap == "" {
+		return "raw"
+	}
+	return tap
 }
 
 func (m *Manager) StopCapture(streamID string) bool {
 	m.mu.Lock()
 	c := m.captures[streamID]
 	delete(m.captures, streamID)
+	m.retireCaptureLocked(c)
 	m.mu.Unlock()
 	if c == nil {
 		return false
@@ -737,6 +896,7 @@ func (m *Manager) watchdog(c *capture) {
 				c.id, since, dropped)
 			m.mu.Lock()
 			delete(m.captures, c.id)
+			m.retireCaptureLocked(c)
 			m.mu.Unlock()
 			c.close(Notice{Code: "WATCHDOG_EXPIRED",
 				Detail: "no qualifying visible ring/segment indication; capture terminated"})
@@ -752,6 +912,7 @@ func (m *Manager) captureLoop() {
 		frames = 320
 	}
 	buf := make([]byte, frames*format.BytesPerFrame())
+	proc := newCaptureProcessor(format, m.opts.CaptureDSP)
 	seq := uint64(0)
 	firstFrame := uint64(0)
 	discontinuity := false
@@ -761,9 +922,18 @@ func (m *Manager) captureLoop() {
 			return
 		default:
 		}
+		if m.consumeDSPReset() && proc != nil {
+			proc.reset()
+		}
 		n, err := m.source.ReadPCM(buf)
 		if err != nil {
 			discontinuity = true
+			if proc != nil {
+				proc.reset()
+			}
+			m.mu.Lock()
+			m.preroll = m.preroll[:0]
+			m.mu.Unlock()
 			m.logs.Warnf("audio", "", "capture read failed: %v", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -777,39 +947,86 @@ func (m *Manager) captureLoop() {
 		chunk := Chunk{Sequence: seq, FirstFrame: firstFrame,
 			MonotonicNS: now, Frames: frameCount, PCM: append([]byte(nil), buf[:n]...),
 			Discontinuity: discontinuity}
+		// The processed tap is a separate bounded copy: the raw chunk remains
+		// available to an explicit raw application capture, while framework
+		// frame subscribers receive the processed frame below.
+		var processed *Chunk
+		if proc != nil {
+			pcm := make([]byte, n)
+			proc.process(pcm, buf[:n])
+			p := chunk
+			p.PCM = pcm
+			p.ProcessingTap = CaptureProcessingTap
+			processed = &p
+		}
 		firstFrame += uint64(frameCount)
 		discontinuity = false
 		// Dispatch under the same lock as cancellation, so a subscriber cannot
-		// close its channel between a snapshot and the nonblocking send.
+		// close its channel between a snapshot and the nonblocking send. A
+		// subscriber observes the same processed samples as application
+		// capture and wakeword inference; the raw chunk is not offered here.
+		var frame Frame
+		if processed != nil {
+			frame = Frame{PCM: processed.PCM, RateHz: format.RateHz, Sequence: seq,
+				Discontinuity: processed.Discontinuity, ProcessingTap: CaptureProcessingTap}
+		} else {
+			frame = Frame{PCM: chunk.PCM, RateHz: format.RateHz, Sequence: seq,
+				Discontinuity: chunk.Discontinuity}
+		}
 		m.mu.Lock()
-		frame := Frame{PCM: chunk.PCM, RateHz: format.RateHz, Sequence: seq,
-			Discontinuity: chunk.Discontinuity}
 		for _, ch := range m.frameSinks {
 			select {
 			case ch <- frame:
 			default: // consumer is behind; sequence gap exposes the dropped audio
 			}
 		}
-		m.addPrerollLocked(chunk)
+		m.addPrerollLocked(chunk, processed)
+		volume := m.volume
+		muted := m.muted
 		subs := make([]*capture, 0, len(m.captures))
 		for _, c := range m.captures {
 			subs = append(subs, c)
 		}
 		m.mu.Unlock()
 		for _, c := range subs {
+			deliver := true
+			if c.appID != "" {
+				// Both halves are re-evaluated for every chunk: zero volume or
+				// a lost visible indication withholds audio immediately rather
+				// than waiting for the termination watchdog.
+				deliver = !muted && volume > 0 && m.opts.IndicationActive != nil && m.opts.IndicationActive(c.appID)
+			}
 			c.mu.Lock()
+			delivering := deliver
+			if !delivering && !c.closed {
+				// Count the withheld audio as dropped so the app sees a
+				// discontinuity instead of a silent gap, and so the watchdog's
+				// evidence matches what was actually delivered.
+				c.droppedFrames += uint64(frameCount)
+				c.dropTotal += uint64(frameCount)
+				c.pendingDiscont = true
+			}
 			discon := c.pendingDiscont
 			dropped := c.droppedFrames
-			c.pendingDiscont = false
-			c.droppedFrames = 0
+			if delivering {
+				c.pendingDiscont = false
+				c.droppedFrames = 0
+			}
 			c.mu.Unlock()
+			if !delivering {
+				continue
+			}
 			out := chunk
+			if c.processed && processed != nil {
+				out = *processed
+			}
 			out.Discontinuity = out.Discontinuity || discon
 			out.DroppedFrames = dropped
 			if !c.emit(CaptureEvent{Chunk: &out}) {
 				c.mu.Lock()
 				if !c.closed {
 					c.droppedFrames += uint64(frameCount)
+					c.dropTotal += uint64(frameCount)
 					c.pendingDiscont = true
 				}
 				c.mu.Unlock()
@@ -819,15 +1036,23 @@ func (m *Manager) captureLoop() {
 	}
 }
 
-func (m *Manager) addPrerollLocked(c Chunk) {
-	m.preroll = append(m.preroll, c)
+func (m *Manager) consumeDSPReset() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	reset := m.resetDSP
+	m.resetDSP = false
+	return reset
+}
+
+func (m *Manager) addPrerollLocked(c Chunk, processed *Chunk) {
+	m.preroll = append(m.preroll, prerollEntry{raw: c, processed: processed})
 	limit := prerollMS * m.dev.CaptureFormat().RateHz / 1000 * m.dev.CaptureFormat().BytesPerFrame()
 	total := 0
 	for _, item := range m.preroll {
-		total += len(item.PCM)
+		total += len(item.raw.PCM)
 	}
 	for total > limit && len(m.preroll) > 1 {
-		total -= len(m.preroll[0].PCM)
+		total -= len(m.preroll[0].raw.PCM)
 		m.preroll = m.preroll[1:]
 	}
 }
@@ -863,6 +1088,7 @@ func (m *Manager) RemoveRun(runID string) {
 		if c.runID == runID {
 			caps = append(caps, c)
 			delete(m.captures, id)
+			m.retireCaptureLocked(c)
 		}
 	}
 	for id, conv := range m.conversations {
@@ -900,8 +1126,82 @@ func (m *Manager) ActiveStreams() []StreamInfo {
 	return out
 }
 
+// retireCaptureLocked records the last removed capture's cumulative drop count
+// so a caller sampling after EndCapture/removal does not see zero. m.mu must be
+// held. The snapshot is manager-global and bounded to one entry: it holds the
+// most recently removed capture, whatever its app. An intervening removal can
+// overwrite it; it is not a per-app history.
+func (m *Manager) retireCaptureLocked(c *capture) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	total := c.dropTotal
+	c.mu.Unlock()
+	m.closedDropApp, m.closedDropTotal = c.appID, total
+}
+
+// CaptureDroppedFrames reports cumulative frames dropped by appID's active
+// capture(s) because the consumer did not drain its queue. If no matching
+// capture is active, it reports the retained snapshot of the most recently
+// removed capture, and only when that capture belonged to appID. The snapshot
+// is manager-global and one entry, so an intervening other-app removal can
+// overwrite it. It is a read-only diagnostic/test accessor, not a wire surface.
+// It is not the pending count that resets when a later chunk is delivered, and
+// it does not become zero merely because EndCapture removed the stream.
+func (m *Manager) CaptureDroppedFrames(appID string) uint64 {
+	m.mu.Lock()
+	caps := make([]*capture, 0, len(m.captures))
+	for _, c := range m.captures {
+		if c.appID == appID {
+			caps = append(caps, c)
+		}
+	}
+	closedApp, closedTotal := m.closedDropApp, m.closedDropTotal
+	m.mu.Unlock()
+	if len(caps) > 0 {
+		var total uint64
+		for _, c := range caps {
+			c.mu.Lock()
+			total += c.dropTotal
+			c.mu.Unlock()
+		}
+		return total
+	}
+	if closedApp == appID {
+		return closedTotal
+	}
+	return 0
+}
+
 func (m *Manager) CaptureFormat() backend.AudioFormat  { return m.dev.CaptureFormat() }
 func (m *Manager) PlaybackFormat() backend.AudioFormat { return m.dev.PlaybackFormat() }
+
+// CaptureProcessingTap reports the processing tap an application capture
+// actually receives on CaptureEndpoint. An empty result means the physical
+// vendor stream: DSP is disabled or the backend format is not the tuned
+// 16 kHz mono S16LE profile. Endpoint advertisement must use this value
+// instead of assuming processing is active.
+func (m *Manager) CaptureProcessingTap() string {
+	if m.dspEnabled {
+		return CaptureProcessingTap
+	}
+	return ""
+}
+
+// FrameProcessingTap reports the provenance SubscribeFrames delivers. It is
+// the same chain as CaptureProcessingTap because wakeword inference, enrollment
+// and application capture must share one declared preprocessing policy.
+func (m *Manager) FrameProcessingTap() string { return m.CaptureProcessingTap() }
+
+// ProcessCaptureS16 applies this manager's configured capture cleanup to a
+// complete recording, starting from reset state. Enrollment uses it to convert
+// legacy raw vendor-tap takes onto the declared runtime profile without
+// rewriting the file. The returned tap is empty when the configured profile is
+// disabled or unsupported and the input was copied unchanged.
+func (m *Manager) ProcessCaptureS16(samples []int16) ([]int16, string) {
+	return ProcessCaptureS16(samples, m.opts.CaptureDSP)
+}
 
 func clamp01(v float64) float64 {
 	if v < 0 {

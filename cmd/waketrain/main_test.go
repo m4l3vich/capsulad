@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"capsulad/internal/audio"
 )
 
 func buildWAV(channels uint16, rate uint32, bits uint16, pcm []int16) []byte {
@@ -117,12 +119,15 @@ func TestLoadEnrollment(t *testing.T) {
 	writeFile(t, filepath.Join(speech, "phrase2.wav"), wav)
 	writeFile(t, filepath.Join(falseDir, "other.wav"), wav)
 
-	en, err := loadEnrollment(samples, ambient, speech, falseDir)
+	en, inputs, err := loadEnrollment(samples, ambient, speech, falseDir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if len(en.Takes) != 1 || len(en.Ambient) != 2 || len(en.Speech) != 2 || len(en.False) != 1 {
 		t.Fatalf("counts = %d/%d/%d/%d, want 1/2/2/1", len(en.Takes), len(en.Ambient), len(en.Speech), len(en.False))
+	}
+	if inputs.Tap != audio.CaptureProcessingTap || inputs.RawConverted != 6 {
+		t.Fatalf("inputs = %+v, want tap %q with 6 converted legacy raw takes", inputs, audio.CaptureProcessingTap)
 	}
 }
 
@@ -132,10 +137,10 @@ func TestLoadEnrollmentRejectsEmpty(t *testing.T) {
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if _, err := loadEnrollment(empty, "", "", ""); err == nil {
+	if _, _, err := loadEnrollment(empty, "", "", ""); err == nil {
 		t.Fatal("directory without word takes accepted")
 	}
-	if _, err := loadEnrollment(filepath.Join(root, "missing"), "", "", ""); err == nil {
+	if _, _, err := loadEnrollment(filepath.Join(root, "missing"), "", "", ""); err == nil {
 		t.Fatal("missing directory accepted")
 	}
 
@@ -144,7 +149,7 @@ func TestLoadEnrollmentRejectsEmpty(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	writeFile(t, filepath.Join(samples, "wk_1_word.wav"), buildWAV(1, 16000, 16, []int16{1, 2}))
-	if _, err := loadEnrollment(samples, empty, "", ""); err == nil {
+	if _, _, err := loadEnrollment(samples, empty, "", ""); err == nil {
 		t.Fatal("empty explicit ambient directory accepted")
 	}
 }

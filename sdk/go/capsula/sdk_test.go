@@ -87,6 +87,26 @@ func TestUnmarshalProtoJSONEnumNameAndNumber(t *testing.T) {
 	}
 }
 
+// The framework carries the per-turn hold rule on the activation so an
+// assistant does not need the administrator-only settings surface. Proto3
+// omits a false field, so both the true and absent forms must decode.
+func TestUnmarshalProtoJSONActivationHoldToTalk(t *testing.T) {
+	var held Activation
+	if err := unmarshalProtoJSON([]byte(`{"activationId":"act_1","origin":"ACTIVATION_TOUCH","holdToTalk":true}`), &held); err != nil {
+		t.Fatalf("unmarshal hold-to-talk activation: %v", err)
+	}
+	if !held.HoldToTalk || held.Origin != ActivationOriginTouch || held.ID != "act_1" {
+		t.Fatalf("hold-to-talk activation = %+v", held)
+	}
+	var summon Activation
+	if err := unmarshalProtoJSON([]byte(`{"activationId":"act_2","origin":"ACTIVATION_TOUCH"}`), &summon); err != nil {
+		t.Fatalf("unmarshal summon activation: %v", err)
+	}
+	if summon.HoldToTalk {
+		t.Fatalf("absent holdToTalk decoded as true: %+v", summon)
+	}
+}
+
 func TestUnmarshalProtoJSONBase64AndRGB(t *testing.T) {
 	var value struct {
 		PCM   []byte `json:"pcm"`

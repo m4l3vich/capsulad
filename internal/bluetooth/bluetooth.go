@@ -1,10 +1,12 @@
 // Package bluetooth is the framework's Bluetooth facade.
 //
-// On the device it drives BlueZ over the system D-Bus: adapter power,
-// discoverability and pairability, paired-device management, and the AVRCP
-// state of a connected audio source (playback commands, track metadata and
-// absolute volume). The framework never drives the HCI device directly; BlueZ
-// owns profiles and pairing.
+// On the device it drives BlueZ over the system D-Bus: adapter power, the
+// incoming-connection and discoverability policy, paired-device management,
+// and the AVRCP state of a connected audio source (playback commands, track
+// metadata and absolute volume). The framework never drives the HCI device
+// directly; BlueZ owns profiles and pairing. BR/EDR connectability, which BlueZ
+// 5.65 does not expose as an Adapter1 property, is controlled through the
+// public Linux Bluetooth management API's Set Connectable command.
 //
 // The manager is an interface so the simulator and tests use the in-memory
 // implementation while the stock image uses BlueZ.
@@ -29,6 +31,14 @@ var (
 	// ErrNoTransport means the A2DP endpoint is registered but no transport is
 	// configured yet; callers should retry while the profile comes up.
 	ErrNoTransport = errors.New("no A2DP transport is configured")
+	// ErrIncomingDisabled means the user disabled incoming Bluetooth
+	// connections. The adapter stays powered for BLE work, but no inbound link
+	// is accepted, including from already-paired devices.
+	ErrIncomingDisabled = errors.New("Bluetooth incoming connections are disabled")
+	// ErrPairingDisabled means a new remote device tried to bond while the
+	// adapter was not discoverable. An existing bond does not depend on this
+	// window.
+	ErrPairingDisabled = errors.New("Bluetooth discoverability is disabled")
 )
 
 // A2DPTransport is an acquired A2DP media transport. The caller owns File and
@@ -51,7 +61,10 @@ type TrustSetter interface {
 // callers that only need control state do not have to implement it.
 type A2DPSink interface {
 	// RegisterA2DPSink exports and registers the local A2DP SBC endpoint with
-	// BlueZ. It is idempotent.
+	// BlueZ and returns the real registration outcome. It is idempotent and
+	// must not report success for an endpoint that is not armed. Implementations
+	// register before enabling page scan so a first incoming source cannot
+	// connect without an audio profile.
 	RegisterA2DPSink(ctx context.Context) error
 	// AcquireA2DP acquires the configured transport. It returns ErrNoTransport
 	// until BlueZ has created one.
@@ -62,20 +75,32 @@ type A2DPSink interface {
 }
 
 // A2DPRegistrar is optionally implemented by a manager that can report whether
-// its sink endpoint is currently advertised. The daemon uses it to decide when
-// profile advertisement still has to be prepared before pairing is enabled.
+// its sink endpoint is currently advertised. Registration is generation-scoped:
+// after a BlueZ restart or adapter power cycle it reports false until the
+// endpoint is armed against the new adapter state. The daemon uses it to decide
+// when profile advertisement still has to be prepared before incoming
+// connections or discoverability are enabled, and never treats a stale
+// registration as ready.
 type A2DPRegistrar interface {
 	SinkRegistered() bool
 }
 
 // Status is the adapter state a UI can show.
 type Status struct {
-	Present      bool
-	Powered      bool
+	Present bool
+	Powered bool
+	// Discoverable is the observed BlueZ Adapter1.Discoverable property.
+	// Discovering and connecting a new device requires this.
 	Discoverable bool
-	Pairable     bool
-	Adapter      string
-	Detail       string
+	// IncomingConnections is the observed BR/EDR connectability setting from
+	// the Linux Bluetooth management API. It is not fabricated from the power
+	// state: the adapter stays Powered when incoming connections are denied.
+	IncomingConnections bool
+	Adapter             string
+	// Name is the advertised adapter name (BlueZ Adapter1.Alias, falling back
+	// to Adapter1.Name and then the adapter id).
+	Name   string
+	Detail string
 }
 
 // Device is one paired remote device.
@@ -153,10 +178,16 @@ const (
 	// the missing transition happened; the queue keeps emitting a fresh marker
 	// for as long as it stays full.
 	EventResync
+	// EventAdapter reports an observed adapter policy change (power,
+	// discoverability, connectability or advertised name). It carries no media
+	// state; consumers refresh the status they display.
+	EventAdapter
 )
 
 // Event carries the state after a change. Media is set for EventMedia and on
-// connect/disconnect when a state is available.
+// connect/disconnect when a state is available. DeviceAddress/DeviceName
+// identify the source for connect, disconnect and volume events; a volume event
+// always belongs to the displayed source, never a background phone.
 type Event struct {
 	Kind          EventKind
 	DeviceAddress string
@@ -229,7 +260,10 @@ func deliverEvent(ch chan Event, event Event) {
 type Manager interface {
 	Status(ctx context.Context) (Status, error)
 	SetDiscoverable(ctx context.Context, on bool) error
-	SetPairable(ctx context.Context, on bool) error
+	// SetIncomingConnections controls BR/EDR connectability without powering
+	// the radio off. Enabling discoverability also enables incoming
+	// connections; disabling incoming connections disables discoverability.
+	SetIncomingConnections(ctx context.Context, on bool) error
 	EnsurePowered(ctx context.Context) error
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
@@ -262,13 +296,23 @@ type Memory struct {
 	subs      map[int]chan Event
 	nextID    int
 	closed    bool
+
+	// Simulator-only playlist. It is empty unless a test installs one, so
+	// Next/Previous keep their historical no-op behavior by default.
+	playlist []string
+	track    int
 }
 
-// NewMemory returns a powered simulator adapter with no devices.
+// NewMemory returns a powered simulator adapter with no devices. Incoming
+// connections are enabled and the adapter is hidden, matching the persisted
+// defaults.
 func NewMemory() *Memory {
 	return &Memory{
-		status: Status{Present: true, Powered: true, Adapter: "sim-hci0", Detail: "simulated adapter"},
-		subs:   map[int]chan Event{},
+		status: Status{
+			Present: true, Powered: true, IncomingConnections: true,
+			Adapter: "sim-hci0", Name: "Capsula", Detail: "simulated adapter",
+		},
+		subs: map[int]chan Event{},
 	}
 }
 
@@ -284,17 +328,27 @@ func (m *Memory) SetDiscoverable(_ context.Context, on bool) error {
 	if !m.status.Powered {
 		return fmt.Errorf("bluetooth adapter is powered off")
 	}
+	if on {
+		// Discoverability is the pairing window: a new device cannot connect
+		// to an adapter that accepts no incoming links.
+		m.status.IncomingConnections = true
+	}
 	m.status.Discoverable = on
 	return nil
 }
 
-func (m *Memory) SetPairable(_ context.Context, on bool) error {
+func (m *Memory) SetIncomingConnections(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.status.Powered {
 		return fmt.Errorf("bluetooth adapter is powered off")
 	}
-	m.status.Pairable = on
+	m.status.IncomingConnections = on
+	if !on {
+		// The two controls are dependent: hidden is the only coherent state
+		// when no inbound link is accepted.
+		m.status.Discoverable = false
+	}
 	return nil
 }
 
@@ -404,8 +458,10 @@ func (m *Memory) Command(_ context.Context, cmd Command) error {
 		m.media.Playing = false
 	case CommandToggle:
 		m.media.Playing = !m.media.Playing
-	case CommandNext, CommandPrevious:
-		// Track changes are injected by tests through SetMedia.
+	case CommandNext:
+		m.advanceTrackLocked(1)
+	case CommandPrevious:
+		m.advanceTrackLocked(-1)
 	default:
 		m.mu.Unlock()
 		return ErrUnsupported
@@ -464,7 +520,36 @@ func (m *Memory) Close() error {
 	return nil
 }
 
+// SimulateIncomingConnection models the kernel/agent decision for an inbound
+// link and, when allowed, connects the device. Incoming off denies every
+// device, paired or not, while the adapter stays powered. A new (unpaired)
+// device additionally requires discoverability, the pairing window.
+func (m *Memory) SimulateIncomingConnection(dev Device, media MediaState) error {
+	m.mu.Lock()
+	if !m.status.Present {
+		m.mu.Unlock()
+		return ErrUnavailable
+	}
+	if !m.status.Powered {
+		m.mu.Unlock()
+		return fmt.Errorf("bluetooth adapter is powered off")
+	}
+	if !m.status.IncomingConnections {
+		m.mu.Unlock()
+		return ErrIncomingDisabled
+	}
+	if !dev.Paired && !m.status.Discoverable {
+		m.mu.Unlock()
+		return ErrPairingDisabled
+	}
+	m.mu.Unlock()
+	m.SimulateConnect(dev, media)
+	return nil
+}
+
 // SimulateConnect marks a device connected and publishes the given media state.
+// It bypasses the incoming-connection gate; tests of that policy use
+// SimulateIncomingConnection instead.
 func (m *Memory) SimulateConnect(dev Device, media MediaState) {
 	m.mu.Lock()
 	dev.Paired = true
@@ -485,6 +570,8 @@ func (m *Memory) SimulateConnect(dev Device, media MediaState) {
 	m.revision++
 	media.Revision = m.revision
 	m.media = media
+	m.playlist = nil
+	m.track = 0
 	m.hasVolume = true
 	m.volume = 100
 	event := Event{Kind: EventConnected, DeviceAddress: dev.Address, DeviceName: dev.Name, Media: media}
@@ -514,6 +601,8 @@ func (m *Memory) SimulateDisconnect(address string) {
 	}
 	if m.media.DeviceAddress == address {
 		m.media = MediaState{}
+		m.playlist = nil
+		m.track = 0
 	}
 	m.hasVolume = false
 	m.volume = 0
@@ -524,9 +613,39 @@ func (m *Memory) SimulateDisconnect(address string) {
 	m.broadcast(event)
 }
 
+// SetPlaylist installs a deterministic simulator playlist. Next/Previous move
+// through it and publish the new Title through the ordinary MediaState, giving
+// integration tests an observable command oracle without a production-only
+// echo field. An empty playlist restores the historical no-op transport.
+func (m *Memory) SetPlaylist(titles []string) {
+	m.mu.Lock()
+	m.playlist = append([]string(nil), titles...)
+	m.track = 0
+	if len(m.playlist) > 0 {
+		m.media.Title = m.playlist[0]
+		m.media.PositionMS = 0
+	}
+	m.revision++
+	m.media.Revision = m.revision
+	event := Event{Kind: EventMedia, Media: m.media}
+	m.mu.Unlock()
+	m.broadcast(event)
+}
+
+func (m *Memory) advanceTrackLocked(delta int) {
+	if len(m.playlist) == 0 {
+		return
+	}
+	m.track = (m.track + delta + len(m.playlist)) % len(m.playlist)
+	m.media.Title = m.playlist[m.track]
+	m.media.PositionMS = 0
+}
+
 // SetMedia replaces the media state, e.g. after a track change.
 func (m *Memory) SetMedia(media MediaState) {
 	m.mu.Lock()
+	m.playlist = nil
+	m.track = 0
 	m.revision++
 	media.Revision = m.revision
 	m.media = media
@@ -537,12 +656,11 @@ func (m *Memory) SetMedia(media MediaState) {
 
 func (m *Memory) broadcast(event Event) {
 	m.mu.Lock()
-	subs := make([]chan Event, 0, len(m.subs))
+	defer m.mu.Unlock()
+	// Deliver under the same mutex that closes subscriptions. deliverEvent is
+	// non-blocking, so this cannot stall a publisher, and a watcher cancelled
+	// concurrently cannot turn the send into a panic on a closed channel.
 	for _, ch := range m.subs {
-		subs = append(subs, ch)
-	}
-	m.mu.Unlock()
-	for _, ch := range subs {
 		deliverEvent(ch, event)
 	}
 }

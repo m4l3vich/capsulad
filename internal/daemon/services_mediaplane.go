@@ -14,12 +14,14 @@ import (
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
 	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
+	"capsulad/internal/uichanges"
 )
 
 // callerIdentity resolves an app connection to a supervised run.
@@ -28,11 +30,22 @@ import (
 // credentials are available, the PID must match the supervisor's run. This is
 // identity bookkeeping, not a per-app permission model.
 func (d *Daemon) callerIdentity(ctx context.Context) (appID, runID string, ok bool) {
+	if d.sup == nil {
+		return "", "", false
+	}
 	if md, found := metadata.FromIncomingContext(ctx); found {
 		if vals := md.Get("capsula-run-id"); len(vals) > 0 {
 			runID = vals[0]
 			run, found := d.sup.Get(runID)
 			if !found {
+				return "", "", false
+			}
+			if run.Virtual && !d.isInternalPeer(ctx) {
+				// Built-in run IDs are stable by design. Without the per-boot
+				// daemon token, a local client could claim to be the clock or
+				// ring; the daemon's in-process clients are the only legitimate
+				// users of a virtual run identity.
+				d.logs.Warnf("daemon", run.AppID, "rejected virtual run %s from a non-daemon connection", runID)
 				return "", "", false
 			}
 			if creds := grpcpeer.FromContext(ctx); creds.OK && creds.PID != run.PID {
@@ -394,8 +407,8 @@ func (s *routingService) Capture(req *frameworkv1.CaptureRequest, stream framewo
 	}
 	if info.Kind == frameworkv1.ResourceKind_RESOURCE_TOUCH {
 		caps := touchCaps(s.d.dev.Touch())
-		if mode == routing.TouchFull && !caps.FullRaw {
-			return status.Error(codes.FailedPrecondition, "this touch backend cannot provide raw readings; full capture is unavailable")
+		if mode == routing.TouchFull && !caps.FullPanel {
+			return status.Error(codes.FailedPrecondition, "this touch backend cannot provide a full-panel stream; full capture is unavailable")
 		}
 		if mode == routing.TouchPartial && !caps.PartialGestures {
 			return status.Error(codes.FailedPrecondition, "this touch backend provides no semantic gestures")
@@ -443,12 +456,18 @@ func (s *routingService) Capture(req *frameworkv1.CaptureRequest, stream framewo
 func (s *routingService) ReleaseCapture(ctx context.Context, req *frameworkv1.ReleaseCaptureRequest) (*frameworkv1.ReleaseCaptureResponse, error) {
 	appID, runID, err := s.d.requireCaller(ctx)
 	if err != nil {
-		return &frameworkv1.ReleaseCaptureResponse{Released: s.d.router.ForceRelease(req.CaptureId)}, nil
+		return nil, err
 	}
-	return &frameworkv1.ReleaseCaptureResponse{Released: s.d.router.Release(req.CaptureId, appID, runID)}, nil
+	return &frameworkv1.ReleaseCaptureResponse{Released: s.d.releaseAppCapture(appID, runID, req.CaptureId)}, nil
 }
 
 func (s *routingService) ForceRelease(ctx context.Context, req *frameworkv1.ForceReleaseRequest) (*frameworkv1.ForceReleaseResponse, error) {
+	// ForceRelease removes another owner's capture, so it is reserved for the
+	// local administrator/diagnostics surface. Applications release only their
+	// own capture through ReleaseCapture and their run lifecycle.
+	if err := s.d.requireAdministrativeCaller(ctx, "force release is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	return &frameworkv1.ForceReleaseResponse{Released: s.d.router.ForceRelease(req.CaptureId)}, nil
 }
 
@@ -532,7 +551,10 @@ func (s *audioService) ListEndpoints(ctx context.Context, _ *frameworkv1.ListAud
 	in := s.d.audio.CaptureFormat()
 	out := s.d.audio.PlaybackFormat()
 	return &frameworkv1.ListAudioEndpointsResponse{Endpoints: []*frameworkv1.AudioEndpointInfo{
-		{EndpointId: "audio.input.microphone", Direction: frameworkv1.AudioDirection_AUDIO_CAPTURE,
+		{EndpointId: audio.CaptureEndpoint, Direction: frameworkv1.AudioDirection_AUDIO_CAPTURE,
+			SupportedFormats: []*frameworkv1.AudioFormat{formatProto(in)},
+			ProcessingTap:    s.d.audio.CaptureProcessingTap()},
+		{EndpointId: audio.RawCaptureEndpoint, Direction: frameworkv1.AudioDirection_AUDIO_CAPTURE,
 			SupportedFormats: []*frameworkv1.AudioFormat{formatProto(in)}},
 		{EndpointId: "audio.output.speaker", Direction: frameworkv1.AudioDirection_AUDIO_PLAYBACK,
 			SupportedFormats: []*frameworkv1.AudioFormat{formatProto(out)}},
@@ -563,9 +585,21 @@ func (s *audioService) Capture(req *frameworkv1.CaptureAudioRequest, stream fram
 	if err != nil {
 		return err
 	}
-	cap, err := s.d.audio.StartCapture(appID, runID, req.EndpointId, formatFromProto(req.PreferredFormat), req.PacketMs, req.ActivationId, req.ConversationId)
+	activationID := req.ActivationId
+	if activationID != "" && !s.d.activationGrantAllowed(appID, activationID) {
+		// Pre-roll reaches back before this capture. An arbitrary caller-chosen
+		// ID would replay audio around someone else's turn; drop the request but
+		// let the live, indicated capture proceed.
+		s.d.logs.Warnf("audio", appID, "ignored activation %q for microphone pre-roll: not issued to this app", activationID)
+		activationID = ""
+	}
+	cap, err := s.d.audio.StartCapture(appID, runID, req.EndpointId, formatFromProto(req.PreferredFormat), req.PacketMs, activationID, req.ConversationId)
 	if err != nil {
+		s.d.logs.Warnf("audio", appID, "capture denied endpoint=%s: %v", req.EndpointId, err)
 		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if activationID != "" {
+		s.d.consumeActivationGrant(appID, activationID)
 	}
 	defer s.d.audio.StopCapture(cap.ID())
 	for {
@@ -700,6 +734,9 @@ func (s *audioService) GetAudioState(ctx context.Context, _ *frameworkv1.GetAudi
 }
 
 func (s *audioService) SetMasterVolume(ctx context.Context, req *frameworkv1.SetMasterVolumeRequest) (*frameworkv1.AudioState, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "master volume is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	if req.Volume < 0 || req.Volume > 1 {
 		return nil, status.Error(codes.InvalidArgument, "volume must be in [0,1]")
 	}
@@ -710,6 +747,9 @@ func (s *audioService) SetMasterVolume(ctx context.Context, req *frameworkv1.Set
 }
 
 func (s *audioService) SetMicrophoneMuted(ctx context.Context, req *frameworkv1.SetMicrophoneMutedRequest) (*frameworkv1.AudioState, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "microphone mute is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	if err := s.d.applyMicrophoneMute(req.Muted); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -730,14 +770,21 @@ func (s *assistantService) ListWakewordModels(ctx context.Context, _ *frameworkv
 }
 
 func (s *assistantService) RecordWakewordSample(ctx context.Context, req *frameworkv1.RecordWakewordSampleRequest) (*frameworkv1.RecordWakewordSampleResponse, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "wakeword recording is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	sam, err := s.d.RecordSample(ctx, req.Label, req.DurationMs)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
+	s.d.publishUI(uichanges.Wakeword)
 	return &frameworkv1.RecordWakewordSampleResponse{Sample: sampleProto(sam)}, nil
 }
 
 func (s *assistantService) ListWakewordSamples(ctx context.Context, _ *frameworkv1.ListWakewordSamplesRequest) (*frameworkv1.ListWakewordSamplesResponse, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "wakeword samples are a local administrator operation"); err != nil {
+		return nil, err
+	}
 	samples, err := s.d.listSamples()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -750,13 +797,20 @@ func (s *assistantService) ListWakewordSamples(ctx context.Context, _ *framework
 }
 
 func (s *assistantService) DeleteWakewordSample(ctx context.Context, req *frameworkv1.DeleteWakewordSampleRequest) (*frameworkv1.DeleteWakewordSampleResponse, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "wakeword samples are a local administrator operation"); err != nil {
+		return nil, err
+	}
 	if err := s.d.deleteSample(req.SampleId); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	s.d.publishUI(uichanges.Wakeword)
 	return &frameworkv1.DeleteWakewordSampleResponse{}, nil
 }
 
 func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewordClassifierRequest, stream frameworkv1.AssistantService_TrainWakewordClassifierServer) error {
+	if err := s.d.requireAdministrativeCaller(stream.Context(), "wakeword training is a local administrator operation"); err != nil {
+		return err
+	}
 	sel := trainSelection{
 		Display:  req.DisplayName,
 		Language: req.Language,
@@ -794,6 +848,7 @@ func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewor
 	if err != nil {
 		return trainRPCStatus(err)
 	}
+	s.d.publishUI(uichanges.Wakeword)
 	return send(&frameworkv1.TrainWakewordEvent{
 		Stage: "installed", Fraction: 1,
 		Log: fmt.Sprintf("installed %s (threshold %.2f); select it in Settings and enable wakeword detection", clf.ID, clf.Threshold),

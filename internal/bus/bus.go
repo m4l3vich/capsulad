@@ -35,11 +35,12 @@ const (
 type ResolveFunc func(runID string) (appID string, pid int, ok bool)
 
 // InternalHandler answers a routed app-bus call on behalf of a compiled-in
-// system app. request and each response are the same protobuf JSON frames the
-// SDK sends over AppBusService.Call, so an external app cannot tell a system
-// app from a supervised one. An empty responses slice means an empty successful
-// reply; returning a gRPC status preserves its code and message.
-type InternalHandler func(ctx context.Context, service, rpc string, request []byte) ([][]byte, error)
+// system app. request and each emitted response are the same protobuf JSON
+// frames the SDK sends over AppBusService.Call, so an external app cannot tell
+// a system app from a supervised one. A unary method emits one frame; a
+// server-streaming method may emit many until ctx is cancelled or emit fails.
+// Returning a gRPC status preserves its code and message.
+type InternalHandler func(ctx context.Context, service, rpc string, request []byte, emit func([]byte) error) error
 
 type internalTarget struct {
 	runID   string
@@ -59,6 +60,11 @@ type Bus struct {
 	resolve ResolveFunc
 	hooks   Hooks
 
+	// authorizeInternal gates routed calls to compiled-in system-app targets.
+	// The daemon installs it at startup; without it, internal targets are
+	// unreachable so a missing policy can never grant access by default.
+	authorizeInternal func(ctx context.Context, targetAppID, service string) error
+
 	mu       sync.Mutex
 	conns    map[string]*conn
 	byApp    map[string]*conn
@@ -73,6 +79,15 @@ func New(logs *logbus.Bus, resolve ResolveFunc, hooks Hooks) *Bus {
 		conns: map[string]*conn{}, byApp: map[string]*conn{},
 		internal: map[string]*internalTarget{}, calls: map[string]*call{},
 	}
+}
+
+// SetInternalAuthorizer installs the policy for routed calls that target a
+// compiled-in system app. It must be installed before the bus serves calls;
+// a nil authorizer denies every internal target.
+func (b *Bus) SetInternalAuthorizer(authorize func(ctx context.Context, targetAppID, service string) error) {
+	b.mu.Lock()
+	b.authorizeInternal = authorize
+	b.mu.Unlock()
 }
 
 type conn struct {
@@ -120,6 +135,16 @@ func (b *Bus) Connect(stream frameworkv1.AppBusService_ConnectServer) error {
 	if creds.OK && creds.PID != pid {
 		b.logs.Errorf("bus", appID, "peer credential mismatch: hello claims pid %d, socket peer is %d", pid, creds.PID)
 		return status.Error(codes.PermissionDenied, "run_id does not match connecting process")
+	}
+	// A compiled-in app is answered in-process. Accepting a supervised
+	// connection for its stable run ID would let that client receive activations
+	// and routed traffic meant for the system app, so it is never allowed.
+	b.mu.Lock()
+	_, internal := b.internal[appID]
+	b.mu.Unlock()
+	if internal {
+		b.logs.Warnf("bus", appID, "rejected Connect for an in-process system app run=%s", hello.GetRunId())
+		return status.Error(codes.PermissionDenied, "run belongs to an in-process system application")
 	}
 
 	c := &conn{
@@ -314,6 +339,15 @@ func (b *Bus) Call(stream frameworkv1.AppBusService_CallServer) error {
 		return status.Error(codes.InvalidArgument, "first RoutedCall message must be RoutedCallStart with target, service and rpc")
 	}
 	if target, ok := b.internalTarget(start.GetTargetAppId()); ok {
+		b.mu.Lock()
+		authorize := b.authorizeInternal
+		b.mu.Unlock()
+		if authorize == nil {
+			return status.Error(codes.PermissionDenied, "internal app-bus targets are not reachable")
+		}
+		if err := authorize(stream.Context(), start.GetTargetAppId(), start.GetGrpcService()); err != nil {
+			return err
+		}
 		return b.callInternal(stream, start, target)
 	}
 	target, ok := b.readyConn(start.GetTargetAppId())
@@ -324,17 +358,23 @@ func (b *Bus) Call(stream frameworkv1.AppBusService_CallServer) error {
 		return nil
 	}
 	callerRunID := ""
+	creds := grpcpeer.FromContext(stream.Context())
 	if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
 		if vals := md.Get("capsula-run-id"); len(vals) > 0 {
-			if _, _, ok := b.resolve(vals[0]); ok {
+			appID, pid, found := b.resolve(vals[0])
+			switch {
+			case !found:
+				// An unknown run ID is bookkeeping noise, not identity.
+			case creds.OK && creds.PID != pid:
+				b.logs.Warnf("bus", appID, "routed call claimed run %s but the socket peer is pid %d", vals[0], creds.PID)
+				return status.Error(codes.PermissionDenied, "run_id does not match the connecting process")
+			default:
 				callerRunID = vals[0]
 			}
 		}
 	}
-	if callerRunID == "" {
-		if creds := grpcpeer.FromContext(stream.Context()); creds.OK {
-			callerRunID = fmt.Sprintf("pid:%d", creds.PID)
-		}
+	if callerRunID == "" && creds.OK {
+		callerRunID = fmt.Sprintf("pid:%d", creds.PID)
 	}
 	cl := &call{
 		id: ids.New("call"), targetRunID: target.runID, callerRunID: callerRunID,
@@ -457,8 +497,17 @@ func (b *Bus) callInternal(stream frameworkv1.AppBusService_CallServer, start *f
 		}
 	}
 invoke:
-	responses, err := target.handler(ctx, start.GetGrpcService(), start.GetRpcName(), request)
+	emit := func(payload []byte) error {
+		return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+			ResponseMessage: payload,
+		}})
+	}
+	err := target.handler(ctx, start.GetGrpcService(), start.GetRpcName(), request, emit)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller closed the stream while a watch was running.
+			return nil
+		}
 		code := codes.Internal
 		detail := err.Error()
 		if st, ok := status.FromError(err); ok {
@@ -469,13 +518,6 @@ invoke:
 			End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(code), Detail: detail},
 		}})
 		return nil
-	}
-	for _, resp := range responses {
-		if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
-			ResponseMessage: resp,
-		}}); err != nil {
-			return err
-		}
 	}
 	return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
 		End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(codes.OK)},

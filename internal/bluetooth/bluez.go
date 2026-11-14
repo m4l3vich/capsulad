@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +41,13 @@ type BlueZ struct {
 	nextID    int
 	closed    bool
 
+	// policyMu serializes the two dependent user controls and the automatic
+	// re-application after power/restart. incomingConfigured is false until the
+	// daemon applies persisted settings, so startup never guesses connectable.
+	policyMu           sync.Mutex
+	incomingEnabled    bool
+	incomingConfigured bool
+
 	cancel   context.CancelFunc
 	powering atomic.Bool
 
@@ -51,13 +57,33 @@ type BlueZ struct {
 	volume       uint16
 	volumeSet    bool
 	volumeWrote  bool
+	volumeDevice string
 	transportKey string
 
-	endpointMu   sync.Mutex
-	endpointPath dbus.ObjectPath
-	endpoint     *sbcEndpoint
-	armed        bool
-	transport    dbus.ObjectPath
+	registrationMu sync.Mutex
+	endpointMu     sync.Mutex
+	endpointPath   dbus.ObjectPath
+	endpoint       *sbcEndpoint
+	armed          bool
+	// armedGen is the endpoint generation the current registration belongs
+	// to. endpointGen advances whenever BlueZ or the adapter can have dropped
+	// the registration, so a stale armed flag can never report readiness.
+	armedGen    uint64
+	endpointGen uint64
+	transport   dbus.ObjectPath
+
+	// audioStreamProbe is read-only evidence from the sink owner that the
+	// acquired transport is receiving audio right now. It is needed because an
+	// acquired MediaTransport1 disappears from the object tree and a source may
+	// expose no MediaPlayer1.Status, leaving BlueZ unable to resolve a toggle
+	// direction. It is consulted for a toggle only; it never becomes published
+	// playback state.
+	probeMu          sync.RWMutex
+	audioStreamProbe func(address string) bool
+
+	// registerEndpoint is the org.bluez.Media1.RegisterEndpoint call. Tests
+	// replace it; production always reaches BlueZ.
+	registerEndpoint func(ctx context.Context, adapter, path dbus.ObjectPath) error
 }
 
 // Open attaches to the system bus and requires a BlueZ adapter. It returns
@@ -78,7 +104,8 @@ func Open(ctx context.Context) (*BlueZ, error) {
 	}
 	// A registered agent is required for a remote device to bond. Best effort
 	// here so a transient BlueZ state cannot disable adapter control; enabling
-	// pairing retries and reports the error instead of claiming success.
+	// discoverability retries and reports the error instead of claiming
+	// success.
 	_ = b.registerAgent(ctx)
 	runCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
@@ -110,53 +137,227 @@ func (b *BlueZ) Status(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.status, nil
+	status := b.status
+	b.mu.Unlock()
+	// BlueZ 5.65 has no Adapter1.Connectable. Read the kernel management
+	// setting so the UI never infers connectability from power or discoverable.
+	if status.Present && status.Powered {
+		if on, ok, err := adapterReadConnectable(ctx, status.Adapter); ok {
+			status.IncomingConnections = on
+			b.mu.Lock()
+			b.status.IncomingConnections = on
+			b.mu.Unlock()
+		} else if err != nil {
+			if status.Detail != "" {
+				status.Detail += "; "
+			}
+			status.Detail += "connectable state unavailable: " + err.Error()
+		}
+	}
+	return status, nil
 }
 
 func (b *BlueZ) SetDiscoverable(ctx context.Context, on bool) error {
-	if err := b.EnsurePowered(ctx); err != nil {
-		return err
-	}
-	if err := b.setAdapterProperty(ctx, "Discoverable", on); err != nil {
-		return err
+	b.policyMu.Lock()
+	defer b.policyMu.Unlock()
+	if on {
+		// Discoverability is the window in which a new device both finds the
+		// speaker and bonds. Require incoming connections and the pairing agent
+		// before advertising pairability we cannot honor.
+		if err := b.enableIncomingLocked(ctx); err != nil {
+			return err
+		}
+		if err := b.setAdapterProperty(ctx, "Pairable", true); err != nil {
+			return err
+		}
+		if err := b.setAdapterProperty(ctx, "Discoverable", true); err != nil {
+			return err
+		}
+	} else {
+		if err := b.refresh(ctx); err != nil {
+			return err
+		}
+		b.mu.Lock()
+		powered := b.status.Powered
+		b.mu.Unlock()
+		if !powered {
+			// An unpowered adapter cannot be discoverable; the management
+			// setting already denies inbound links and survives until power-on.
+			return nil
+		}
+		if err := b.setAdapterProperty(ctx, "Discoverable", false); err != nil {
+			return err
+		}
+		if err := b.setAdapterProperty(ctx, "Pairable", false); err != nil {
+			return err
+		}
+		// BlueZ 5.65 may clear page scan when discoverability is turned off.
+		// Keep paired reconnects available only when incoming is enabled.
+		if err := b.applyConnectablePolicyLocked(ctx); err != nil {
+			return err
+		}
 	}
 	if err := b.refresh(ctx); err != nil {
 		return err
 	}
-	// Pairing visibility is separate from connectability on this stack.
-	b.ensurePageScan()
 	return nil
 }
 
-func (b *BlueZ) SetPairable(ctx context.Context, on bool) error {
-	if err := b.EnsurePowered(ctx); err != nil {
-		return err
-	}
+// SetIncomingConnections controls BR/EDR page scan and LE connectable
+// advertising through the public Linux management API. Turning it off denies
+// every inbound link, including paired devices, while the adapter stays
+// powered for BLE work; existing connected links are not torn down. Turning it
+// off also clears discoverability.
+func (b *BlueZ) SetIncomingConnections(ctx context.Context, on bool) error {
+	b.policyMu.Lock()
+	defer b.policyMu.Unlock()
 	if on {
-		// Without a registered agent BlueZ cannot complete a new bond, so do
-		// not advertise pairability we cannot honor.
-		if err := b.registerAgent(ctx); err != nil {
+		if err := b.enableIncomingLocked(ctx); err != nil {
 			return err
 		}
+		if err := b.refresh(ctx); err != nil {
+			return err
+		}
+		b.publishAdapterEvent()
+		return nil
 	}
-	if err := b.setAdapterProperty(ctx, "Pairable", on); err != nil {
-		return err
-	}
-	return b.refresh(ctx)
-}
-
-// EnsurePowered turns the adapter on. BlueZ reports "Network is down" from the
-// legacy HCI ioctls when the adapter is off, so every operation that depends on
-// the adapter being usable starts here.
-func (b *BlueZ) EnsurePowered(ctx context.Context) error {
 	if err := b.refresh(ctx); err != nil {
 		return err
 	}
 	b.mu.Lock()
+	prevEnabled, prevConfigured := b.incomingEnabled, b.incomingConfigured
+	b.incomingEnabled, b.incomingConfigured = false, true
+	b.mu.Unlock()
+	if err := b.applyConnectablePolicyLocked(ctx); err != nil {
+		b.mu.Lock()
+		b.incomingEnabled, b.incomingConfigured = prevEnabled, prevConfigured
+		b.mu.Unlock()
+		return err
+	}
+	// Keep BlueZ's own view coherent with the kernel: connectable off also
+	// switches discoverability off. An unpowered adapter has no discoverable
+	// state to clear, and BlueZ rejects those property writes while off.
+	b.mu.Lock()
 	powered := b.status.Powered
 	b.mu.Unlock()
+	if powered {
+		if err := b.setAdapterProperty(ctx, "Discoverable", false); err != nil {
+			return err
+		}
+		if err := b.setAdapterProperty(ctx, "Pairable", false); err != nil {
+			return err
+		}
+	}
+	if err := b.refresh(ctx); err != nil {
+		return err
+	}
+	b.publishAdapterEvent()
+	return nil
+}
+
+// enableIncomingLocked powers the adapter, arms the pairing agent and enables
+// connectability. policyMu must be held.
+func (b *BlueZ) enableIncomingLocked(ctx context.Context) error {
+	if err := b.ensurePowered(ctx); err != nil {
+		return err
+	}
+	// A registered agent is required for a remote device to bond; enabling
+	// connectability is a user action, so report a failure instead of claiming
+	// success.
+	if err := b.registerAgent(ctx); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	prevEnabled, prevConfigured := b.incomingEnabled, b.incomingConfigured
+	b.incomingEnabled, b.incomingConfigured = true, true
+	b.mu.Unlock()
+	if err := b.applyConnectablePolicyLocked(ctx); err != nil {
+		b.mu.Lock()
+		b.incomingEnabled, b.incomingConfigured = prevEnabled, prevConfigured
+		b.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// applyConnectablePolicyLocked applies the stored intent. Before the daemon
+// applies persisted settings there is no intent, so it does nothing rather than
+// making the adapter connectable by guess. policyMu must be held.
+func (b *BlueZ) applyConnectablePolicyLocked(ctx context.Context) error {
+	b.mu.Lock()
+	configured, enabled, adapter := b.incomingConfigured, b.incomingEnabled, b.adapter
+	b.mu.Unlock()
+	if !configured {
+		return nil
+	}
+	if adapter == "" {
+		return ErrUnavailable
+	}
+	if err := adapterSetConnectable(ctx, adapterName(adapter), enabled); err != nil {
+		return err
+	}
+	if !enabled {
+		// BlueZ adds known/paired devices to the kernel action list, and the
+		// kernel keeps page scan alive for those entries even with the global
+		// connectable setting off. Clear the list so "incoming off" really
+		// denies paired devices instead of letting them bypass the setting.
+		if err := adapterClearAcceptList(ctx, adapterName(adapter)); err != nil {
+			return err
+		}
+	}
+	b.mu.Lock()
+	b.status.IncomingConnections = enabled
+	b.mu.Unlock()
+	return nil
+}
+
+// applyConnectablePolicy is the automatic path used after a power cycle or
+// restart. The sink must already be armed when enabling, so callers order this
+// after rearmA2DP.
+func (b *BlueZ) applyConnectablePolicy(ctx context.Context) error {
+	b.policyMu.Lock()
+	defer b.policyMu.Unlock()
+	return b.applyConnectablePolicyLocked(ctx)
+}
+
+// incomingPolicyState reports the stored intent. It is used by restart paths
+// to deny immediately even when the A2DP re-arm failed, while never enabling
+// page scan before the sink is ready.
+func (b *BlueZ) incomingPolicyState() (configured, enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.incomingConfigured, b.incomingEnabled
+}
+
+// EnsurePowered turns the adapter on so BLE work remains possible even while
+// incoming connections are disabled. It never enables page scan by itself:
+// connectability belongs to the explicit incoming policy, and registration
+// must arm the Audio Sink SEP before page scan makes the adapter connectable.
+func (b *BlueZ) EnsurePowered(ctx context.Context) error {
+	b.policyMu.Lock()
+	defer b.policyMu.Unlock()
+	return b.ensurePowered(ctx)
+}
+
+func (b *BlueZ) ensurePowered(ctx context.Context) error {
+	if err := b.refresh(ctx); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	powered, configured, enabled, adapter := b.status.Powered, b.incomingConfigured, b.incomingEnabled, b.adapter
+	b.mu.Unlock()
 	if !powered {
+		// A powered controller may come up connectable. Deny first when the
+		// persisted policy says so; enabling is applied only after the sink is
+		// armed so a paired source cannot connect without an audio profile.
+		// The public management API documents these commands as usable while
+		// unpowered, but an unsupported implementation must not prevent the
+		// radio from powering: the authoritative deny runs again below, after
+		// power, and surfaces a real failure without leaving the radio off.
+		if configured && !enabled && adapter != "" {
+			_ = adapterSetConnectable(ctx, adapterName(adapter), false)
+			_ = adapterClearAcceptList(ctx, adapterName(adapter))
+		}
 		if err := b.setAdapterProperty(ctx, "Powered", true); err != nil {
 			return err
 		}
@@ -164,21 +365,17 @@ func (b *BlueZ) EnsurePowered(ctx context.Context) error {
 			return err
 		}
 	}
-	b.ensurePageScan()
-	return nil
-}
-
-// ensurePageScan keeps the adapter connectable while hidden. BlueZ 5.65 on
-// this kernel clears page scan when the adapter is made non-discoverable, so a
-// paired device cannot reconnect. The legacy ioctl restores it and persists
-// until the next adapter state change; non-Linux platforms simply ignore the
-// missing tool.
-func (b *BlueZ) ensurePageScan() {
-	name := adapterName(b.adapterPath())
-	if name == "" {
-		return
+	// BlueZ programs connectability as part of power-on. Re-assert a denied
+	// policy after the fact; an enabled policy waits for the caller's arm step.
+	if configured && !enabled && adapter != "" {
+		if err := adapterSetConnectable(ctx, adapterName(adapter), false); err != nil {
+			return err
+		}
+		if err := adapterClearAcceptList(ctx, adapterName(adapter)); err != nil {
+			return err
+		}
 	}
-	_ = exec.Command("hciconfig", name, "pscan").Run()
+	return nil
 }
 
 func (b *BlueZ) PairedDevices(ctx context.Context) ([]Device, error) {
@@ -324,9 +521,9 @@ func (b *BlueZ) SetTrusted(ctx context.Context, address string, trusted bool) er
 	return b.refresh(ctx)
 }
 
-// SetTransportVolume writes the AVRCP absolute volume of the active transport.
-// With avrcp_absolute_volume=0 in PulseAudio this changes only the remote
-// volume, not the local source gain.
+// SetTransportVolume writes the AVRCP absolute volume of the displayed
+// source's transport. With avrcp_absolute_volume=0 in PulseAudio this changes
+// only the remote volume, not the local source gain.
 func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	if level < 0 {
 		level = 0
@@ -338,7 +535,8 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	if err != nil {
 		return err
 	}
-	path, props := findVolumeTransport(objs)
+	media := mediaFrom(objs)
+	path, props := findVolumeTransport(objs, media.DeviceAddress)
 	if path == "" {
 		return ErrUnsupported
 	}
@@ -353,20 +551,23 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	}
 	// Record the level we just wrote so the PropertiesChanged echo of our own
 	// write is not republished as a source-side change, even when no snapshot
-	// of the source's level existed before the write.
+	// of the source's level existed before the write. The device identity keeps
+	// a source switch from treating the old level as this source's echo.
 	b.mu.Lock()
 	b.volume, b.volumeSet, b.volumeWrote = value, true, true
+	b.volumeDevice = media.DeviceAddress
 	b.mu.Unlock()
 	return nil
 }
 
-// TransportVolume reads the active AVRCP transport volume.
+// TransportVolume reads the displayed source's AVRCP transport volume.
 func (b *BlueZ) TransportVolume(ctx context.Context) (uint16, error) {
 	objs, err := b.objects(ctx)
 	if err != nil {
 		return 0, err
 	}
-	path, props := findVolumeTransport(objs)
+	media := mediaFrom(objs)
+	path, props := findVolumeTransport(objs, media.DeviceAddress)
 	if path == "" {
 		return 0, ErrUnsupported
 	}
@@ -392,12 +593,29 @@ func (b *BlueZ) Media(ctx context.Context) (MediaState, error) {
 	return b.media, nil
 }
 
+// SetAudioStreamProbe installs the sink owner's read-only evidence that the
+// acquired transport is receiving audio for a device. It is used only to pick
+// a direction for an ambiguous toggle; a command never writes it and a failed
+// command leaves it untouched.
+func (b *BlueZ) SetAudioStreamProbe(probe func(address string) bool) {
+	b.probeMu.Lock()
+	b.audioStreamProbe = probe
+	b.probeMu.Unlock()
+}
+
+func (b *BlueZ) audioStreaming(address string) bool {
+	b.probeMu.RLock()
+	probe := b.audioStreamProbe
+	b.probeMu.RUnlock()
+	return probe != nil && probe(address)
+}
+
 func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	if err := b.refresh(ctx); err != nil {
 		return err
 	}
 	b.mu.Lock()
-	present, playing, device := b.media.Present, b.media.Playing, b.media.DeviceAddress
+	present, device := b.media.Present, b.media.DeviceAddress
 	b.mu.Unlock()
 	if !present {
 		return ErrNoSource
@@ -406,29 +624,102 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	if err != nil {
 		return err
 	}
-	if path := findPlayerPath(objs, device); path != "" {
-		method := playerMethod(cmd, playing)
-		if method == "" {
-			return ErrUnsupported
-		}
-		if err := b.conn.Object(bluezService, path).CallWithContext(ctx, "org.bluez.MediaPlayer1."+method, 0).Err; err != nil {
-			return fmt.Errorf("media player %s: %w", method, err)
-		}
-	} else if path := findControlPath(objs); path != "" {
-		method := controlMethod(cmd, playing)
-		if method == "" {
-			return ErrUnsupported
-		}
-		if err := b.conn.Object(bluezService, path).CallWithContext(ctx, "org.bluez.MediaControl1."+method, 0).Err; err != nil {
-			return fmt.Errorf("media control %s: %w", method, err)
-		}
-	} else {
+	target, ok := b.mediaTarget(objs, device, cmd)
+	if !ok {
 		return ErrUnsupported
+	}
+	if err := b.conn.Object(bluezService, target.path).CallWithContext(ctx, target.iface+"."+target.method, 0).Err; err != nil {
+		return fmt.Errorf("%s %s: %w", target.iface, target.method, err)
 	}
 	// AVRCP applies commands asynchronously; the signal watcher publishes the
 	// resulting state. Refresh once so the immediate reply is as fresh as BlueZ
 	// allows.
 	return b.refresh(ctx)
+}
+
+// mediaTarget is the public BlueZ object and method one transport command uses.
+type mediaTarget struct {
+	path   dbus.ObjectPath
+	iface  string
+	method string
+}
+
+// mediaTarget resolves a command without crossing devices: when the framework
+// is showing a source, only that source's MediaPlayer1 or MediaControl1 may
+// receive the command, so a second connected device that happens to be playing
+// cannot capture the user's toggle or skip. A source that exposes MediaControl1
+// but no MediaPlayer1 is controlled through that public interface.
+func (b *BlueZ) mediaTarget(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string, cmd Command) (mediaTarget, bool) {
+	// Only a toggle needs a direction; Play/Pause/Next/Previous are explicit.
+	var playing bool
+	if cmd == CommandToggle {
+		playing = b.playingFor(objs, nil, device)
+	}
+	if path := findPlayerPath(objs, device); path != "" {
+		props := objs[path]["org.bluez.MediaPlayer1"]
+		if cmd == CommandToggle {
+			playing = b.playingFor(objs, props, device)
+		}
+		method := playerMethod(cmd, playing)
+		if method == "" {
+			return mediaTarget{}, false
+		}
+		return mediaTarget{path: path, iface: "org.bluez.MediaPlayer1", method: method}, true
+	}
+	if path, _ := findControlPath(objs, device); path != "" {
+		// MediaControl1 publishes no playback status; direction comes from the
+		// transport or the sink receipt evidence for the same device.
+		method := controlMethod(cmd, playing)
+		if method == "" {
+			return mediaTarget{}, false
+		}
+		return mediaTarget{path: path, iface: "org.bluez.MediaControl1", method: method}, true
+	}
+	return mediaTarget{}, false
+}
+
+// playingFor resolves playback direction from the strongest public evidence:
+// a MediaPlayer1.Status when the source publishes one, then the source's own
+// A2DP transport state, then the sink's packet-receipt probe (an acquired
+// transport is absent from the object tree). Unknown resolves to false, which
+// sends Play; it never invents a paused state after a failed command.
+func (b *BlueZ) playingFor(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, playerProps map[string]dbus.Variant, device string) bool {
+	if playerProps != nil {
+		if status := strProp(playerProps, "Status"); status != "" {
+			return status == "playing"
+		}
+	}
+	if device == "" {
+		if path, props := findPlayer(objs); path != "" {
+			if status := strProp(props, "Status"); status != "" {
+				return status == "playing"
+			}
+			device = playerDeviceAddress(objs, props)
+		}
+	}
+	if transportPlaying(objs, device) {
+		return true
+	}
+	return b.audioStreaming(device)
+}
+
+// transportPlaying reports whether BlueZ currently shows the same device's
+// A2DP transport as actively streaming. An idle transport means the source is
+// paused even though its connection stays open.
+func transportPlaying(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) bool {
+	for _, ifaces := range objs {
+		props, ok := ifaces["org.bluez.MediaTransport1"]
+		if !ok || strProp(props, "State") != "active" {
+			continue
+		}
+		if device == "" {
+			return true
+		}
+		if strings.EqualFold(deviceAddressAt(objs, objectPathProp(props, "Device")), device) {
+			return true
+		}
+	}
+	return false
 }
 
 // Watch subscribes to connect/disconnect and media changes.
@@ -506,10 +797,16 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 		b.mu.Lock()
 		b.status = Status{Detail: err.Error()}
 		b.mu.Unlock()
+		// The adapter could not be inspected; a registration from an earlier
+		// read is no longer verifiable, so do not report it as ready.
+		b.markA2DPUnarmed()
 		return unavailable
 	}
 
 	adapterPath, adapterProps := findAdapter(objs)
+	b.mu.Lock()
+	prevAdapter, prevStatus := b.adapter, b.status
+	b.mu.Unlock()
 	status := Status{
 		Present: adapterPath != "",
 		Adapter: adapterName(adapterPath),
@@ -518,9 +815,15 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 	if status.Present {
 		status.Powered = boolProp(adapterProps, "Powered")
 		status.Discoverable = boolProp(adapterProps, "Discoverable")
-		status.Pairable = boolProp(adapterProps, "Pairable")
+		status.Name = adapterDisplayName(adapterProps, status.Adapter)
 		if !status.Powered {
 			status.Detail = "BlueZ adapter is powered off"
+		}
+		// Connectability is observed through the kernel management API, not
+		// Adapter1. Carry the last observation only for the same powered
+		// adapter; a replacement or power cycle invalidates it.
+		if adapterPath == prevAdapter && status.Powered {
+			status.IncomingConnections = prevStatus.IncomingConnections
 		}
 	} else {
 		status.Detail = "no BlueZ adapter"
@@ -551,6 +854,12 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 	}
 	b.connected = nextConnected
 
+	if prevStatus.Present != status.Present || prevStatus.Powered != status.Powered ||
+		prevStatus.Discoverable != status.Discoverable || prevStatus.Name != status.Name ||
+		prevStatus.Adapter != status.Adapter {
+		events = append(events, Event{Kind: EventAdapter, Media: media})
+	}
+
 	if mediaChanged(b.media, media) {
 		b.revision++
 		media.Revision = b.revision
@@ -559,18 +868,23 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 		media.Revision = b.media.Revision
 	}
 
-	// AVRCP absolute volume. A first observation is still published: a source
-	// change that happens before any snapshot (including between connect and
-	// the first refresh) must not be dropped. Only the exact level this manager
-	// wrote before a snapshot is suppressed, because that read is our echo.
-	if volume, ok := transportVolume(objs); ok {
+	// AVRCP absolute volume, scoped to the same connected source the framework
+	// displays. A background phone's transport must not move the master.
+	if media.DeviceAddress != b.volumeDevice {
+		b.volume, b.volumeSet, b.volumeWrote = 0, false, false
+		b.volumeDevice = media.DeviceAddress
+	}
+	if volume, ok := transportVolume(objs, media.DeviceAddress); ok {
 		publish, echo := volumeObservation(b.volume, b.volumeSet, b.volumeWrote, volume)
 		switch {
 		case echo:
 			b.volumeSet = true
 		case publish:
 			b.volume, b.volumeSet = volume, true
-			events = append(events, Event{Kind: EventVolume, Volume: volume, Media: media})
+			events = append(events, Event{
+				Kind: EventVolume, Volume: volume, Media: media,
+				DeviceAddress: media.DeviceAddress, DeviceName: media.DeviceName,
+			})
 		}
 		b.volumeWrote = false
 	} else {
@@ -592,18 +906,38 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 	}
 
 	b.media = media
-	subs := make([]chan Event, 0, len(b.subs))
-	for _, ch := range b.subs {
-		subs = append(subs, ch)
-	}
 	b.mu.Unlock()
 
-	for _, event := range events {
-		for _, ch := range subs {
-			deliverEvent(ch, event)
+	if endpointRegistrationInvalidated(prevAdapter, adapterPath, prevStatus, status) {
+		// BlueZ drops endpoint registrations when the adapter is power-cycled
+		// or replaced. The watcher re-arms on the next signal; until that
+		// succeeds SinkRegistered reports not ready.
+		b.markA2DPUnarmed()
+	}
+
+	if len(events) > 0 {
+		// Deliver under the same mutex that closes subscriptions. deliverEvent
+		// is non-blocking, so a concurrent Watch cancellation cannot panic on
+		// a closed channel and this cannot stall the refresh.
+		b.mu.Lock()
+		for _, event := range events {
+			for _, ch := range b.subs {
+				deliverEvent(ch, event)
+			}
 		}
+		b.mu.Unlock()
 	}
 	return nil
+}
+
+// publishAdapterEvent invalidates observers after a user-visible adapter policy
+// change that has no D-Bus property signal (connectability).
+func (b *BlueZ) publishAdapterEvent() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, ch := range b.subs {
+		deliverEvent(ch, Event{Kind: EventAdapter})
+	}
 }
 
 func (b *BlueZ) run(ctx context.Context) {
@@ -621,8 +955,9 @@ func (b *BlueZ) run(ctx context.Context) {
 }
 
 // reconcilePower turns the adapter back on after a BlueZ restart or a manual
-// power-off. The framework wants Bluetooth available; the user-facing switch is
-// pairability, not adapter power.
+// power-off. The framework wants the radio available for BLE even while
+// incoming connections are disabled; the user-facing switches are incoming
+// connections and discoverability, not adapter power.
 func (b *BlueZ) reconcilePower(ctx context.Context) {
 	if !b.powering.CompareAndSwap(false, true) {
 		return
@@ -640,10 +975,15 @@ func (b *BlueZ) reconcilePower(ctx context.Context) {
 		return
 	}
 	_ = b.refresh(callCtx)
-	b.ensurePageScan()
 	// Powering the adapter discards the endpoints registered with it, so the
-	// sink profile must be advertised again before a source can connect.
-	b.rearmA2DP(callCtx)
+	// sink profile must be advertised again before page scan makes the adapter
+	// connectable again; a source that connects in between finds no profile.
+	if err := b.rearmA2DP(callCtx); err != nil {
+		if configured, enabled := b.incomingPolicyState(); configured && enabled {
+			return
+		}
+	}
+	_ = b.applyConnectablePolicy(callCtx)
 }
 
 // watchOnce installs the match rules and refreshes on any relevant signal.
@@ -699,7 +1039,13 @@ func (b *BlueZ) watchOnce(ctx context.Context) error {
 				b.markA2DPUnarmed()
 				_ = b.refresh(ctx)
 				b.reconcilePower(ctx)
-				b.rearmA2DP(ctx)
+				if err := b.rearmA2DP(ctx); err != nil {
+					if configured, enabled := b.incomingPolicyState(); configured && enabled {
+						_ = b.registerAgent(ctx)
+						continue
+					}
+				}
+				_ = b.applyConnectablePolicy(ctx)
 				_ = b.registerAgent(ctx)
 				continue
 			}
@@ -713,8 +1059,35 @@ func (b *BlueZ) watchOnce(ctx context.Context) error {
 		case <-debounce.C:
 			_ = b.refresh(ctx)
 			b.reconcilePower(ctx)
+			configured, enabled := b.incomingPolicyState()
+			if configured && !enabled {
+				// A manual power cycle or another BlueZ client can re-enable
+				// connectability and repopulate the known-device list. Reassert
+				// the user's deny decision on the resulting signal.
+				_ = b.applyConnectablePolicy(ctx)
+				continue
+			}
+			if configured {
+				b.mu.Lock()
+				hidden, adapter := !b.status.Discoverable, b.adapter
+				b.mu.Unlock()
+				// BlueZ 5.65 can clear page scan when discoverability is
+				// turned off. While hidden, incoming must stay enabled for
+				// paired reconnects; reassert only when the kernel reports it
+				// was cleared instead of writing on every signal.
+				if hidden && adapter != "" {
+					if on, ok, err := adapterReadConnectable(ctx, adapterName(adapter)); ok && !on && err == nil {
+						_ = b.applyConnectablePolicy(ctx)
+					}
+				}
+			}
 			if !b.SinkRegistered() {
-				b.rearmA2DP(ctx)
+				if err := b.rearmA2DP(ctx); err != nil {
+					if configured, enabled := b.incomingPolicyState(); configured && enabled {
+						continue
+					}
+				}
+				_ = b.applyConnectablePolicy(ctx)
 			}
 		}
 	}
@@ -734,6 +1107,19 @@ func findAdapter(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (d
 func adapterName(path dbus.ObjectPath) string {
 	name := strings.TrimPrefix(string(path), bluezNamespace+"/")
 	return name
+}
+
+// adapterDisplayName returns the name the adapter actually advertises. Alias is
+// the user-visible BlueZ name; Name is the system fallback. The Wi-Fi AP uses
+// this value as its SSID so the speaker is recognisable on both radios.
+func adapterDisplayName(props map[string]dbus.Variant, fallback string) string {
+	if name := strings.TrimSpace(strProp(props, "Alias")); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(strProp(props, "Name")); name != "" {
+		return name
+	}
+	return fallback
 }
 
 func devicesFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) []Device {
@@ -776,7 +1162,9 @@ func mediaFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) Medi
 			}
 		}
 		if dev := objectPathProp(playerProps, "Device"); dev != "" {
-			state.DeviceAddress, state.DeviceName = deviceIdentity(objs, dev)
+			if _, ok := objs[dev]; ok {
+				state.DeviceAddress, state.DeviceName = deviceIdentity(objs, dev)
+			}
 		}
 		if state.Title == "" && state.Artist == "" && state.Album == "" {
 			state.Detail = "the source reports playback state without track metadata"
@@ -784,13 +1172,16 @@ func mediaFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) Medi
 		return state
 	}
 
-	for _, ifaces := range objs {
-		props, ok := ifaces["org.bluez.MediaControl1"]
+	// MediaControl1 is exported on the device object itself, so the identity
+	// comes from that object. Using any connected device here would show (and
+	// later command) the wrong source with two devices connected.
+	for _, path := range devicePaths(objs) {
+		props, ok := objs[path]["org.bluez.MediaControl1"]
 		if !ok || !boolProp(props, "Connected") {
 			continue
 		}
 		state := MediaState{Present: true, Detail: "source exposes AVRCP controls but no track metadata"}
-		state.DeviceAddress, state.DeviceName = deviceIdentity(objs, dbus.ObjectPath(""))
+		state.DeviceAddress, state.DeviceName = deviceIdentity(objs, path)
 		return state
 	}
 
@@ -803,7 +1194,9 @@ func mediaFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) Medi
 		case "active", "pending":
 			state := MediaState{Present: true, Detail: "audio transport is active; the source exposes no AVRCP player"}
 			if dev := objectPathProp(props, "Device"); dev != "" {
-				state.DeviceAddress, state.DeviceName = deviceIdentity(objs, dev)
+				if _, ok := objs[dev]; ok {
+					state.DeviceAddress, state.DeviceName = deviceIdentity(objs, dev)
+				}
 			}
 			return state
 		}
@@ -881,30 +1274,44 @@ func findPlayer(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (db
 	return best, bestProps
 }
 
-// findPlayerPath picks the player a transport command targets: the one already
-// playing, else one belonging to the source the framework is showing (so a
-// play command after a source switch reaches the source the user sees), else
-// the deterministic first player.
+// findPlayerPath picks the player a transport command targets. When the
+// framework is showing a source, only that source's players are eligible (the
+// one already playing first, then deterministic path order): a player
+// belonging to another connected device must never capture the command, which
+// is how a second connected phone could otherwise receive the user's skip.
+// Without a displayed source the playing player, then the deterministic first,
+// is used.
 func findPlayerPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, preferredAddress string) dbus.ObjectPath {
-	best, props := findPlayer(objs)
-	if best != "" && strProp(props, "Status") == "playing" {
+	if preferredAddress == "" {
+		best, _ := findPlayer(objs)
 		return best
 	}
-	if preferredAddress != "" {
-		paths := make([]dbus.ObjectPath, 0, len(objs))
-		for path, ifaces := range objs {
-			if _, ok := ifaces["org.bluez.MediaPlayer1"]; ok {
-				paths = append(paths, path)
-			}
+	var fallback dbus.ObjectPath
+	for _, path := range playerPaths(objs) {
+		props := objs[path]["org.bluez.MediaPlayer1"]
+		if !strings.EqualFold(playerDeviceAddress(objs, props), preferredAddress) {
+			continue
 		}
-		sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
-		for _, path := range paths {
-			if strings.EqualFold(playerDeviceAddress(objs, objs[path]["org.bluez.MediaPlayer1"]), preferredAddress) {
-				return path
-			}
+		if strProp(props, "Status") == "playing" {
+			return path
+		}
+		if fallback == "" {
+			fallback = path
 		}
 	}
-	return best
+	return fallback
+}
+
+// playerPaths returns every MediaPlayer1 object path in deterministic order.
+func playerPaths(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) []dbus.ObjectPath {
+	paths := make([]dbus.ObjectPath, 0, len(objs))
+	for path, ifaces := range objs {
+		if _, ok := ifaces["org.bluez.MediaPlayer1"]; ok {
+			paths = append(paths, path)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+	return paths
 }
 
 // playerDeviceAddress resolves a MediaPlayer1 object's Device property to the
@@ -921,26 +1328,75 @@ func playerDeviceAddress(objs map[dbus.ObjectPath]map[string]map[string]dbus.Var
 	return strProp(ifaces["org.bluez.Device1"], "Address")
 }
 
-func findControlPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) dbus.ObjectPath {
-	for path, ifaces := range objs {
-		props, ok := ifaces["org.bluez.MediaControl1"]
-		if ok && boolProp(props, "Connected") {
-			return path
+// findControlPath picks the deprecated org.bluez.MediaControl1 object for a
+// command. That interface is exported on the device object itself and publishes
+// no status, only Connected, so a connected control for a *different* source is
+// never used: with a displayed source, a missing control means the command is
+// unsupported rather than silently sent to the wrong device.
+func findControlPath(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, preferredAddress string) (dbus.ObjectPath, map[string]dbus.Variant) {
+	var first dbus.ObjectPath
+	var firstProps map[string]dbus.Variant
+	for _, path := range devicePaths(objs) {
+		props, ok := objs[path]["org.bluez.MediaControl1"]
+		if !ok || !boolProp(props, "Connected") {
+			continue
+		}
+		if first == "" {
+			first, firstProps = path, props
+		}
+		if preferredAddress != "" {
+			if strings.EqualFold(deviceAddressAt(objs, path), preferredAddress) {
+				return path, props
+			}
 		}
 	}
-	return ""
+	if preferredAddress != "" {
+		return "", nil
+	}
+	return first, firstProps
+}
+
+// deviceAddressAt resolves the address of exactly the given device object and
+// never falls back to another connected device.
+func deviceAddressAt(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, path dbus.ObjectPath) string {
+	if path == "" {
+		return ""
+	}
+	return strProp(objs[path]["org.bluez.Device1"], "Address")
+}
+
+// devicePaths returns every org.bluez.Device1 object path in deterministic
+// order so a media fallback cannot depend on map iteration.
+func devicePaths(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) []dbus.ObjectPath {
+	paths := make([]dbus.ObjectPath, 0, len(objs))
+	for path, ifaces := range objs {
+		if _, ok := ifaces["org.bluez.Device1"]; ok {
+			paths = append(paths, path)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+	return paths
 }
 
 // findVolumeTransport prefers an active transport, then pending, then any
-// transport that exposes Volume. AVRCP absolute volume is available before the
-// audio stream becomes active (the property exists while State=idle), and the
-// framework volume must reach the source at that point too.
-func findVolumeTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (dbus.ObjectPath, map[string]dbus.Variant) {
+// transport that exposes Volume, but only for the connected source the
+// framework displays. AVRCP absolute volume is available before the audio
+// stream becomes active (the property exists while State=idle), and the
+// framework volume must reach the displayed source at that point too. A
+// background source's transport must never receive the framework write or
+// report its own level as the framework's source change.
+func findVolumeTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) (dbus.ObjectPath, map[string]dbus.Variant) {
+	if device == "" {
+		return "", nil
+	}
 	var idlePath, pendingPath dbus.ObjectPath
 	var idleProps, pendingProps map[string]dbus.Variant
 	for path, ifaces := range objs {
 		props, ok := ifaces["org.bluez.MediaTransport1"]
 		if !ok {
+			continue
+		}
+		if !strings.EqualFold(deviceAddressAt(objs, objectPathProp(props, "Device")), device) {
 			continue
 		}
 		if _, hasVolume := props["Volume"]; !hasVolume {
@@ -963,11 +1419,11 @@ func findVolumeTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Var
 	return idlePath, idleProps
 }
 
-// transportVolume reads the AVRCP absolute volume of the transport the volume
-// path targets. ok is false when no transport exposes the property, i.e. the
+// transportVolume reads the AVRCP absolute volume of the display source's
+// transport. ok is false when no transport exposes the property, i.e. the
 // source does not support absolute volume.
-func transportVolume(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (uint16, bool) {
-	path, props := findVolumeTransport(objs)
+func transportVolume(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) (uint16, bool) {
+	path, props := findVolumeTransport(objs, device)
 	if path == "" {
 		return 0, false
 	}

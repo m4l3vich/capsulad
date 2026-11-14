@@ -191,6 +191,26 @@ func randomUniform(rng *rand.Rand, n int, limit float64) []float32 {
 	return out
 }
 
+// InputProcessingTap reports the capture preprocessing the trainer declared
+// for this model. declared=false means the artifact predates input provenance
+// (or was hand-built): it was trained on the raw physical tap if it came from
+// an earlier build. Callers must not reinterpret that as framework-processed.
+func (m *Classifier) InputProcessingTap() (tap string, declared bool) {
+	if m == nil || m.Trained == nil {
+		return "", false
+	}
+	raw, ok := m.Trained["input_audio"]
+	if !ok {
+		return "", false
+	}
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	tap, _ = entry["processing_tap"].(string)
+	return tap, true
+}
+
 // LoadClassifier reads and validates a model file. Legacy files fail with a
 // retrain message rather than being reinterpreted.
 func LoadClassifier(path string) (*Classifier, error) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -32,6 +33,26 @@ type builtinAppClient struct {
 	presentations frameworkv1.PresentationServiceClient
 	routing       frameworkv1.RoutingServiceClient
 	audio         frameworkv1.AudioServiceClient
+
+	failMu    sync.Mutex
+	onFailure func(error)
+}
+
+// SetFailureHandler registers a callback for an unexpected internal stream
+// failure. Normal presentation/capture Close calls never invoke it.
+func (c *builtinAppClient) SetFailureHandler(fn func(error)) {
+	c.failMu.Lock()
+	c.onFailure = fn
+	c.failMu.Unlock()
+}
+
+func (c *builtinAppClient) streamFailed(err error) {
+	c.failMu.Lock()
+	fn := c.onFailure
+	c.failMu.Unlock()
+	if fn != nil {
+		fn(err)
+	}
 }
 
 func newBuiltinAppClient(d *Daemon, appID string) *builtinAppClient {
@@ -62,11 +83,13 @@ type appPresentation struct {
 	done   chan struct{}
 	ready  chan struct{}
 
-	sendMu sync.Mutex
-	mu     sync.Mutex
-	id     string
-	err    error
-	once   sync.Once
+	sendMu  sync.Mutex
+	mu      sync.Mutex
+	id      string
+	err     error
+	once    sync.Once
+	client  *builtinAppClient
+	closing atomic.Bool
 }
 
 func (c *builtinAppClient) OpenPresentation(parent context.Context, resourceID string) (*appPresentation, error) {
@@ -83,7 +106,7 @@ func (c *builtinAppClient) OpenPresentation(parent context.Context, resourceID s
 		return nil, err
 	}
 	p := &appPresentation{
-		cancel: cancel, stream: stream,
+		cancel: cancel, stream: stream, client: c,
 		done: make(chan struct{}), ready: make(chan struct{}),
 	}
 	go p.recvLoop()
@@ -105,6 +128,9 @@ func (p *appPresentation) recvLoop() {
 	for {
 		ev, err := p.stream.Recv()
 		if err != nil {
+			if !p.closing.Load() && p.client != nil {
+				p.client.streamFailed(err)
+			}
 			p.mu.Lock()
 			p.err = err
 			p.mu.Unlock()
@@ -144,6 +170,7 @@ func (p *appPresentation) UpdateFrame(frame *frameworkv1.PresentationFrame) erro
 }
 
 func (p *appPresentation) Close() {
+	p.closing.Store(true)
 	p.cancel()
 	select {
 	case <-p.done:
@@ -165,6 +192,7 @@ type appCapture struct {
 	err     error
 	release sync.Once
 	once    sync.Once
+	closing atomic.Bool
 }
 
 func (c *builtinAppClient) Capture(parent context.Context, resourceID, presentationID string) (*appCapture, error) {
@@ -199,6 +227,9 @@ func (c *appCapture) recvLoop() {
 	for {
 		ev, err := c.stream.Recv()
 		if err != nil {
+			if !c.closing.Load() && c.client != nil {
+				c.client.streamFailed(err)
+			}
 			c.mu.Lock()
 			c.err = err
 			c.mu.Unlock()
@@ -229,6 +260,7 @@ func (c *appCapture) result() error {
 }
 
 func (c *appCapture) Release() {
+	c.closing.Store(true)
 	c.release.Do(func() {
 		if id := c.ID(); id != "" {
 			ctx, cancel := context.WithTimeout(c.client.context(context.Background()), time.Second)
@@ -247,7 +279,9 @@ func (c *appCapture) Release() {
 
 // PlaybackFormat reads the speaker format through AudioService.ListEndpoints.
 func (c *builtinAppClient) PlaybackFormat(parent context.Context) (backend.AudioFormat, error) {
-	resp, err := c.audio.ListEndpoints(c.context(parent), &frameworkv1.ListAudioEndpointsRequest{})
+	ctx, cancel := context.WithTimeout(parent, appStreamTimeout)
+	defer cancel()
+	resp, err := c.audio.ListEndpoints(c.context(ctx), &frameworkv1.ListAudioEndpointsRequest{})
 	if err != nil {
 		return backend.AudioFormat{}, err
 	}

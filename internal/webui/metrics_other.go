@@ -1,0 +1,17 @@
+//go:build !linux
+
+package webui
+
+// The appliance is a Linux device. A macOS or other host runs the daemon for
+// development, but it must not present process stats as host CPU/RAM/disk/SoC
+// telemetry, so this build reports the capability as absent.
+func platformMetricsSupported() bool { return false }
+
+func readCPUCounters() (cpuCounters, bool) { return cpuCounters{}, false }
+
+func readSystemMetrics(cpuCounters, bool) (SystemMetrics, cpuCounters, bool) {
+	return SystemMetrics{
+		Available: false,
+		Detail:    "System health readings are not available on this host",
+	}, cpuCounters{}, false
+}

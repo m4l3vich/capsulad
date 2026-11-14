@@ -3,9 +3,13 @@ package settings
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"capsulad/internal/discovery"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 )
@@ -137,6 +141,51 @@ func TestAppSettingsMaskedRedactionAndClear(t *testing.T) {
 	}
 }
 
+func TestAppWatchSnapshotIsAtomicAndConvergesOnNewest(t *testing.T) {
+	lookup := func(appID string) (*ManifestSchema, bool) {
+		if appID != "test.watch" {
+			return nil, false
+		}
+		return &ManifestSchema{AppID: appID, Settings: []SchemaSetting{
+			{Key: "value", Type: "text", DefaultJSON: `"0"`},
+		}}, true
+	}
+	store, err := OpenApps(filepath.Join(t.TempDir(), "apps"), testLogs(t), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, ch, cancel, err := store.WatchApp("test.watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if initial.Revision != 1 || len(initial.Values) != 1 || initial.Values[0].Value != `"0"` {
+		t.Fatalf("initial snapshot = %+v", initial)
+	}
+	// More updates than the watcher buffer without reading: the subscription
+	// must converge on the newest revision instead of dropping it.
+	for i := 1; i <= 8; i++ {
+		if _, _, _, err := store.Update("test.watch", 0, []Change{{
+			Key: "value", Value: fmt.Sprintf("%d", i),
+		}}); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+	}
+	var last AppSnapshot
+	for {
+		select {
+		case snap := <-ch:
+			last = snap
+			continue
+		default:
+		}
+		break
+	}
+	if last.Revision != 9 || last.Values[0].Value != `"8"` {
+		t.Fatalf("coalesced last snapshot = %+v, want revision 9 value 8", last)
+	}
+}
+
 func TestUserSettingsTimezoneValidation(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenUser(filepath.Join(dir, "settings.json"), testLogs(t), nil)
@@ -161,6 +210,167 @@ func TestUserSettingsTimezoneValidation(t *testing.T) {
 	patch.Timezone = ""
 	if _, err := store.Update(next.Revision, patch, []string{"timezone"}); err != nil {
 		t.Fatalf("empty timezone rejected: %v", err)
+	}
+}
+
+// A host name must be one valid DNS label. Rejected values must not replace
+// the stored name, and a successful value must survive a daemon restart.
+func TestUserSettingsHostnameValidationAndPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	store, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := store.Get()
+	if snap.Values.Hostname != DefaultHostname {
+		t.Fatalf("default hostname = %q", snap.Values.Hostname)
+	}
+	patch := snap.Values
+	patch.Hostname = "  Living-Room  "
+	next, err := store.Update(snap.Revision, patch, []string{"hostname"})
+	if err != nil {
+		t.Fatalf("valid hostname rejected: %v", err)
+	}
+	if next.Values.Hostname != "living-room" {
+		t.Fatalf("hostname not canonicalized: %q", next.Values.Hostname)
+	}
+	// A stale revision must not replace the host name.
+	patch.Hostname = "stale"
+	if _, err := store.Update(snap.Revision, patch, []string{"hostname"}); err == nil {
+		t.Fatal("stale hostname update was accepted")
+	}
+	if got := store.Get(); got.Values.Hostname != "living-room" {
+		t.Fatalf("stale update changed hostname: %q", got.Values.Hostname)
+	}
+
+	invalid := []string{"", "capsula.local", "-capsula", "capsula-", "capsula_2", "two words", strings.Repeat("a", 64)}
+	for _, bad := range invalid {
+		patch.Hostname = bad
+		if _, err := store.Update(next.Revision, patch, []string{"hostname"}); err == nil {
+			t.Fatalf("invalid hostname %q was accepted", bad)
+		}
+		got := store.Get()
+		if got.Values.Hostname != "living-room" || got.Revision != next.Revision {
+			t.Fatalf("rejected hostname %q changed stored state: %+v", bad, got)
+		}
+	}
+
+	reopened, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Get(); got.Values.Hostname != "living-room" || got.Revision != next.Revision {
+		t.Fatalf("hostname persistence failed: %+v", got)
+	}
+}
+
+func TestLegacyStoreGetsDefaultHostname(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"revision":7,"values":{"master_volume":0.5}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := store.Get()
+	if snap.Revision != 7 || snap.Values.MasterVolume != 0.5 {
+		t.Fatalf("legacy values changed: %+v", snap)
+	}
+	if snap.Values.Hostname != DefaultHostname {
+		t.Fatalf("legacy store hostname = %q, want %q", snap.Values.Hostname, DefaultHostname)
+	}
+}
+
+func TestLegacyBluetoothPairableMigrates(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		legacy         string
+		wantIncoming   bool
+		wantDiscoveral bool
+	}{
+		{"pairable true keeps the pairing window", `true`, true, true},
+		{"pairable false keeps paired reconnects", `false`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			doc := `{"revision":3,"values":{"master_volume":0.4,"bluetooth_pairable":` + tc.legacy + `}}`
+			if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := OpenUser(path, testLogs(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap := store.Get()
+			if snap.Revision != 3 || snap.Values.MasterVolume != 0.4 {
+				t.Fatalf("unrelated values changed: %+v", snap)
+			}
+			if snap.Values.BluetoothIncomingConnections != tc.wantIncoming ||
+				snap.Values.BluetoothDiscoverable != tc.wantDiscoveral {
+				t.Fatalf("migrated Bluetooth = incoming:%v discoverable:%v, want incoming:%v discoverable:%v",
+					snap.Values.BluetoothIncomingConnections, snap.Values.BluetoothDiscoverable,
+					tc.wantIncoming, tc.wantDiscoveral)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "bluetooth_pairable") {
+				t.Fatalf("obsolete key survived migration: %s", data)
+			}
+			if !strings.Contains(string(data), "bluetooth_incoming_connections") ||
+				!strings.Contains(string(data), "bluetooth_discoverable") {
+				t.Fatalf("migrated keys missing: %s", data)
+			}
+		})
+	}
+}
+
+func TestBluetoothDependentSettingsStayCoherent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	store, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := store.Get()
+	if !snap.Values.BluetoothIncomingConnections || snap.Values.BluetoothDiscoverable {
+		t.Fatalf("new-store Bluetooth defaults = %+v", snap.Values)
+	}
+
+	snap, err = store.Update(snap.Revision, snap.Values, []string{"bluetooth_discoverable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Values.BluetoothDiscoverable = true
+	snap, err = store.Update(snap.Revision, snap.Values, []string{"bluetooth_discoverable"})
+	if err != nil {
+		t.Fatalf("enable discoverability: %v", err)
+	}
+	if !snap.Values.BluetoothIncomingConnections || !snap.Values.BluetoothDiscoverable {
+		t.Fatalf("discoverability did not imply incoming: %+v", snap.Values)
+	}
+
+	snap.Values.BluetoothIncomingConnections = false
+	snap, err = store.Update(snap.Revision, snap.Values, []string{"bluetooth_incoming_connections"})
+	if err != nil {
+		t.Fatalf("disable incoming: %v", err)
+	}
+	if snap.Values.BluetoothIncomingConnections || snap.Values.BluetoothDiscoverable {
+		t.Fatalf("incoming off left discoverability on: %+v", snap.Values)
+	}
+	reopened, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Get().Values; got.BluetoothIncomingConnections || got.BluetoothDiscoverable {
+		t.Fatalf("dependent state did not persist: %+v", got)
+	}
+}
+
+func TestDefaultHostnameIsValid(t *testing.T) {
+	if err := discovery.ValidateHostname(DefaultHostname); err != nil {
+		t.Fatalf("default hostname invalid: %v", err)
 	}
 }
 

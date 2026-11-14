@@ -19,19 +19,37 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RingService_GetState_FullMethodName = "/capsula.contracts.ring.v1.RingService/GetState"
+	RingService_GetState_FullMethodName       = "/capsula.contracts.ring.v1.RingService/GetState"
+	RingService_WatchState_FullMethodName     = "/capsula.contracts.ring.v1.RingService/WatchState"
+	RingService_GetSettings_FullMethodName    = "/capsula.contracts.ring.v1.RingService/GetSettings"
+	RingService_UpdateSettings_FullMethodName = "/capsula.contracts.ring.v1.RingService/UpdateSettings"
+	RingService_WatchSettings_FullMethodName  = "/capsula.contracts.ring.v1.RingService/WatchSettings"
 )
 
 // RingServiceClient is the client API for RingService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Standard interface exposed by the built-in Ring system app.
-// Discovery uses capsula.framework.v1.AppInterfaceService; calls use
-// AppBusService.Call targeting app_id "capsula.ring". The ring app renders its
-// baseline presentation through normal presentation/capture routing.
+// Standard LED-ring contract exposed by the built-in Ring application.
+//
+// The service is discoverable through capsula.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsula.ring". The
+// ring still renders its baseline presentation through the normal
+// presentation/capture routing; these RPCs only read or change its declared
+// settings.
+//
+// Every declared setting is readable, writable with compare-and-swap, and
+// watchable. Updates run the same validation as the generic application
+// configuration surface and never reset the app's baseline presentation
+// ownership. WatchSettings streams an initial snapshot first and then
+// converges on the newest accepted revision; intermediate revisions may be
+// coalesced for a slow consumer.
 type RingServiceClient interface {
 	GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*RingState, error)
+	WatchState(ctx context.Context, in *WatchStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RingState], error)
+	GetSettings(ctx context.Context, in *GetSettingsRequest, opts ...grpc.CallOption) (*RingSettingsSnapshot, error)
+	UpdateSettings(ctx context.Context, in *UpdateSettingsRequest, opts ...grpc.CallOption) (*RingSettingsSnapshot, error)
+	WatchSettings(ctx context.Context, in *WatchSettingsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RingSettingsSnapshot], error)
 }
 
 type ringServiceClient struct {
@@ -52,16 +70,88 @@ func (c *ringServiceClient) GetState(ctx context.Context, in *GetStateRequest, o
 	return out, nil
 }
 
+func (c *ringServiceClient) WatchState(ctx context.Context, in *WatchStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RingState], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RingService_ServiceDesc.Streams[0], RingService_WatchState_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchStateRequest, RingState]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RingService_WatchStateClient = grpc.ServerStreamingClient[RingState]
+
+func (c *ringServiceClient) GetSettings(ctx context.Context, in *GetSettingsRequest, opts ...grpc.CallOption) (*RingSettingsSnapshot, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RingSettingsSnapshot)
+	err := c.cc.Invoke(ctx, RingService_GetSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ringServiceClient) UpdateSettings(ctx context.Context, in *UpdateSettingsRequest, opts ...grpc.CallOption) (*RingSettingsSnapshot, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RingSettingsSnapshot)
+	err := c.cc.Invoke(ctx, RingService_UpdateSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ringServiceClient) WatchSettings(ctx context.Context, in *WatchSettingsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RingSettingsSnapshot], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RingService_ServiceDesc.Streams[1], RingService_WatchSettings_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchSettingsRequest, RingSettingsSnapshot]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RingService_WatchSettingsClient = grpc.ServerStreamingClient[RingSettingsSnapshot]
+
 // RingServiceServer is the server API for RingService service.
 // All implementations must embed UnimplementedRingServiceServer
 // for forward compatibility.
 //
-// Standard interface exposed by the built-in Ring system app.
-// Discovery uses capsula.framework.v1.AppInterfaceService; calls use
-// AppBusService.Call targeting app_id "capsula.ring". The ring app renders its
-// baseline presentation through normal presentation/capture routing.
+// Standard LED-ring contract exposed by the built-in Ring application.
+//
+// The service is discoverable through capsula.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsula.ring". The
+// ring still renders its baseline presentation through the normal
+// presentation/capture routing; these RPCs only read or change its declared
+// settings.
+//
+// Every declared setting is readable, writable with compare-and-swap, and
+// watchable. Updates run the same validation as the generic application
+// configuration surface and never reset the app's baseline presentation
+// ownership. WatchSettings streams an initial snapshot first and then
+// converges on the newest accepted revision; intermediate revisions may be
+// coalesced for a slow consumer.
 type RingServiceServer interface {
 	GetState(context.Context, *GetStateRequest) (*RingState, error)
+	WatchState(*WatchStateRequest, grpc.ServerStreamingServer[RingState]) error
+	GetSettings(context.Context, *GetSettingsRequest) (*RingSettingsSnapshot, error)
+	UpdateSettings(context.Context, *UpdateSettingsRequest) (*RingSettingsSnapshot, error)
+	WatchSettings(*WatchSettingsRequest, grpc.ServerStreamingServer[RingSettingsSnapshot]) error
 	mustEmbedUnimplementedRingServiceServer()
 }
 
@@ -74,6 +164,18 @@ type UnimplementedRingServiceServer struct{}
 
 func (UnimplementedRingServiceServer) GetState(context.Context, *GetStateRequest) (*RingState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetState not implemented")
+}
+func (UnimplementedRingServiceServer) WatchState(*WatchStateRequest, grpc.ServerStreamingServer[RingState]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchState not implemented")
+}
+func (UnimplementedRingServiceServer) GetSettings(context.Context, *GetSettingsRequest) (*RingSettingsSnapshot, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSettings not implemented")
+}
+func (UnimplementedRingServiceServer) UpdateSettings(context.Context, *UpdateSettingsRequest) (*RingSettingsSnapshot, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateSettings not implemented")
+}
+func (UnimplementedRingServiceServer) WatchSettings(*WatchSettingsRequest, grpc.ServerStreamingServer[RingSettingsSnapshot]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchSettings not implemented")
 }
 func (UnimplementedRingServiceServer) mustEmbedUnimplementedRingServiceServer() {}
 func (UnimplementedRingServiceServer) testEmbeddedByValue()                     {}
@@ -114,6 +216,64 @@ func _RingService_GetState_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RingService_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchStateRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RingServiceServer).WatchState(m, &grpc.GenericServerStream[WatchStateRequest, RingState]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RingService_WatchStateServer = grpc.ServerStreamingServer[RingState]
+
+func _RingService_GetSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RingServiceServer).GetSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RingService_GetSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RingServiceServer).GetSettings(ctx, req.(*GetSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RingService_UpdateSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RingServiceServer).UpdateSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RingService_UpdateSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RingServiceServer).UpdateSettings(ctx, req.(*UpdateSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RingService_WatchSettings_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchSettingsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RingServiceServer).WatchSettings(m, &grpc.GenericServerStream[WatchSettingsRequest, RingSettingsSnapshot]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RingService_WatchSettingsServer = grpc.ServerStreamingServer[RingSettingsSnapshot]
+
 // RingService_ServiceDesc is the grpc.ServiceDesc for RingService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -125,7 +285,26 @@ var RingService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetState",
 			Handler:    _RingService_GetState_Handler,
 		},
+		{
+			MethodName: "GetSettings",
+			Handler:    _RingService_GetSettings_Handler,
+		},
+		{
+			MethodName: "UpdateSettings",
+			Handler:    _RingService_UpdateSettings_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchState",
+			Handler:       _RingService_WatchState_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchSettings",
+			Handler:       _RingService_WatchSettings_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "capsula/contracts/ring/v1/ring.proto",
 }

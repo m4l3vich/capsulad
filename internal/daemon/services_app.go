@@ -15,6 +15,7 @@ import (
 	"capsulad/internal/provenance"
 	"capsulad/internal/registry"
 	"capsulad/internal/settings"
+	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
 )
 
@@ -35,25 +36,25 @@ func (s *applicationService) ListApplications(ctx context.Context, _ *frameworkv
 }
 
 func (s *applicationService) ListRuntimes(ctx context.Context, _ *frameworkv1.ListRuntimesRequest) (*frameworkv1.ListRuntimesResponse, error) {
-	native := &frameworkv1.RuntimeAvailability{
-		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_NATIVE, Available: true,
-		ImplementationVersion: "capsulad/" + version.Version,
-		Detail:                "Go/Rust SDK connects to the Unix-socket app bus; sandbox mode: " + s.d.launcher.Mode(),
+	out := &frameworkv1.ListRuntimesResponse{}
+	for _, status := range s.d.launcher.RuntimeStatuses() {
+		entry := &frameworkv1.RuntimeAvailability{
+			Runtime:               runtimeProto(status.Runtime),
+			Available:             status.Available,
+			ImplementationVersion: status.ImplementationVersion,
+			Detail:                status.Detail,
+		}
+		switch status.Runtime {
+		case manifest.RuntimeNative:
+			entry.ImplementationVersion = "capsulad/" + version.Version
+			entry.Detail = "Go/Rust SDK connects to the Unix-socket app bus; sandbox mode: " + s.d.launcher.Mode()
+		case manifest.RuntimeBuiltin:
+			entry.ImplementationVersion = "capsulad/" + version.Version
+			entry.Detail = "compiled-in system applications: normal app identity, settings, run lifecycle and app-bus endpoints; no package, process or install/uninstall"
+		}
+		out.Runtimes = append(out.Runtimes, entry)
 	}
-	quick := &frameworkv1.RuntimeAvailability{
-		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_QUICKJS, Available: false,
-		Detail: "no QuickJS host runner is built for this target; script packages are rejected rather than executed without bindings",
-	}
-	micropython := &frameworkv1.RuntimeAvailability{
-		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_MICROPYTHON, Available: false,
-		Detail: "no MicroPython host runner is built for this target; script packages are rejected rather than executed without bindings",
-	}
-	builtin := &frameworkv1.RuntimeAvailability{
-		Runtime: frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN, Available: true,
-		ImplementationVersion: "capsulad/" + version.Version,
-		Detail:                "compiled-in system applications: normal app identity, settings, run lifecycle and app-bus endpoints; no package, process or install/uninstall",
-	}
-	return &frameworkv1.ListRuntimesResponse{Runtimes: []*frameworkv1.RuntimeAvailability{native, quick, micropython, builtin}}, nil
+	return out, nil
 }
 
 func (s *applicationService) GetBinaryProvenance(ctx context.Context, req *frameworkv1.GetBinaryProvenanceRequest) (*frameworkv1.BinaryProvenanceResult, error) {
@@ -80,6 +81,9 @@ func (s *applicationService) GetBinaryProvenance(ctx context.Context, req *frame
 }
 
 func (s *applicationService) Launch(ctx context.Context, req *frameworkv1.LaunchRequest) (*frameworkv1.LaunchResult, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "launching an application is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	args := map[string]string{}
 	for _, a := range req.Arguments {
 		args[a.Name] = a.Value
@@ -95,21 +99,40 @@ func (s *applicationService) Launch(ctx context.Context, req *frameworkv1.Launch
 }
 
 func (s *applicationService) Stop(ctx context.Context, req *frameworkv1.StopRequest) (*frameworkv1.StopResponse, error) {
-	return &frameworkv1.StopResponse{Requested: s.d.sup.Stop(req.RunId)}, nil
+	if err := s.d.requireAdministrativeCaller(ctx, "stopping an application is a local administrator operation"); err != nil {
+		return nil, err
+	}
+	return &frameworkv1.StopResponse{Requested: s.d.Stop(req.RunId)}, nil
 }
 
 func (s *applicationService) ListRuns(ctx context.Context, req *frameworkv1.ListRunsRequest) (*frameworkv1.ListRunsResponse, error) {
+	filter := req.AppId
+	if callerApp, _, isApp := s.d.callerIdentity(ctx); isApp {
+		if req.AppId != "" && req.AppId != callerApp {
+			s.d.logs.Warnf("daemon", callerApp, "denied run listing for %q", req.AppId)
+			return nil, status.Error(codes.PermissionDenied, "applications may only list their own runs")
+		}
+		filter = callerApp
+	}
 	out := &frameworkv1.ListRunsResponse{}
-	for _, run := range s.d.sup.List(req.AppId) {
+	for _, run := range s.d.sup.List(filter) {
 		out.Runs = append(out.Runs, runProto(run))
 	}
 	return out, nil
 }
 
 func (s *applicationService) WatchRuns(req *frameworkv1.WatchRunsRequest, stream frameworkv1.ApplicationService_WatchRunsServer) error {
+	filter := req.AppId
+	if callerApp, _, isApp := s.d.callerIdentity(stream.Context()); isApp {
+		if req.AppId != "" && req.AppId != callerApp {
+			s.d.logs.Warnf("daemon", callerApp, "denied run watch for %q", req.AppId)
+			return status.Error(codes.PermissionDenied, "applications may only watch their own runs")
+		}
+		filter = callerApp
+	}
 	ch, cancel := s.d.subscribeRuns()
 	defer cancel()
-	for _, run := range s.d.sup.List(req.AppId) {
+	for _, run := range s.d.sup.List(filter) {
 		if err := stream.Send(&frameworkv1.AppRunEvent{Run: runProto(run)}); err != nil {
 			return err
 		}
@@ -122,7 +145,7 @@ func (s *applicationService) WatchRuns(req *frameworkv1.WatchRunsRequest, stream
 			if !ok {
 				return nil
 			}
-			if req.AppId != "" && run.AppID != req.AppId {
+			if filter != "" && run.AppID != filter {
 				continue
 			}
 			if err := stream.Send(&frameworkv1.AppRunEvent{Run: runProto(run)}); err != nil {
@@ -177,6 +200,9 @@ func (s *appConfigService) Describe(ctx context.Context, req *frameworkv1.Descri
 }
 
 func (s *appConfigService) Get(ctx context.Context, req *frameworkv1.GetAppConfigurationRequest) (*frameworkv1.AppConfigurationSnapshot, error) {
+	if err := s.d.requireAppScope(ctx, req.AppId); err != nil {
+		return nil, err
+	}
 	snap, err := s.d.appCfg.Snapshot(req.AppId)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
@@ -189,6 +215,9 @@ func (s *appConfigService) Get(ctx context.Context, req *frameworkv1.GetAppConfi
 }
 
 func (s *appConfigService) Update(ctx context.Context, req *frameworkv1.UpdateAppConfigurationRequest) (*frameworkv1.AppConfigurationSnapshot, error) {
+	if err := s.d.requireAppScope(ctx, req.AppId); err != nil {
+		return nil, err
+	}
 	var changes []settings.Change
 	for _, c := range req.Changes {
 		if c.Clear {
@@ -214,6 +243,9 @@ func (s *appConfigService) Update(ctx context.Context, req *frameworkv1.UpdateAp
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	s.d.pushAppSettings(req.AppId, rev, private)
+	if s.d.uiChanges != nil {
+		s.d.uiChanges.Publish(uichanges.AppSettings)
+	}
 	out := &frameworkv1.AppConfigurationSnapshot{AppId: snap.AppID, Revision: snap.Revision}
 	for _, v := range snap.Values {
 		out.Values = append(out.Values, &frameworkv1.AppSettingState{Key: v.Key, ValueJson: v.Value, HasValue: v.HasValue})
@@ -222,6 +254,9 @@ func (s *appConfigService) Update(ctx context.Context, req *frameworkv1.UpdateAp
 }
 
 func (s *appConfigService) TriggerAction(ctx context.Context, req *frameworkv1.TriggerAppActionRequest) (*frameworkv1.TriggerAppActionResult, error) {
+	if err := s.d.requireAppScope(ctx, req.AppId); err != nil {
+		return nil, err
+	}
 	id, err := s.d.TriggerAction(req.AppId, req.ActionId)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())

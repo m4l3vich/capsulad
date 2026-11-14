@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clock settings</title>
+<style>
+  .alarm-editor { display: flex; flex-direction: column; gap: 10px; }
+  .alarm-item { justify-content: space-between; }
+  .alarm-item .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .alarm-item .raw { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .time-editor { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 4px 0; }
+</style>
+</head>
+<body>
+<main class="capsula-ui" id="app">
+  <div class="spread">
+    <div>
+      <h2>Alarms</h2>
+      <small>Schedules are stored in the clock app’s <code>alarms</code> setting as five-field dcron expressions; an entry may name its own IANA timezone and carry one-shot/disabled markers. Entries without a timezone follow the device timezone.</small>
+    </div>
+    <span class="pill" id="connection">waiting for host…</span>
+  </div>
+
+  <div id="notice" class="notice err" hidden></div>
+
+  <section class="card" style="margin-top: 12px">
+    <div class="alarm-list" id="alarm-list"></div>
+    <p class="empty" id="alarm-empty">No alarms yet. Add a schedule below.</p>
+
+    <div class="time-editor" style="margin-top: 12px">
+      <div class="field">
+        <label for="new-time">Time</label>
+        <input id="new-time" type="time" step="60" value="07:00">
+      </div>
+      <div class="field">
+        <label>Repeat</label>
+        <div class="days" id="new-days" role="group" aria-label="Weekdays for the new alarm"></div>
+      </div>
+      <div class="field">
+        <label for="new-zone">Timezone (optional)</label>
+        <input id="new-zone" type="text" placeholder="device timezone">
+      </div>
+      <label class="check"><input id="new-once" type="checkbox"> <span>One-shot</span></label>
+      <button type="button" id="add-alarm">Add alarm</button>
+    </div>
+    <small id="repeat-hint">Every day. Clear all days to choose specific days.</small>
+
+    <div class="actions" style="margin-top: 14px">
+      <button type="button" id="save-alarms" disabled>Save alarms</button>
+      <span class="pill" id="alarm-count">0 schedules</span>
+    </div>
+  </section>
+
+  <h2 style="margin-top: 18px">Display</h2>
+  <section class="card">
+    <div class="stack">
+      <label class="check"><input id="blink" type="checkbox" data-immediate="blink"> <span>Blink the colon</span></label>
+
+      <div class="row">
+        <div class="field">
+          <label for="display-mode">Shown when idle</label>
+          <select id="display-mode" data-immediate="display_mode">
+            <option value="clock">Clock</option>
+            <option value="stopwatch">Stopwatch</option>
+            <option value="timer">Timer</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="reset-gesture">Stopwatch reset</label>
+          <select id="reset-gesture" data-immediate="stopwatch_reset_gesture">
+            <option value="hold">Hold the button</option>
+            <option value="double_tap">Double tap the button</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="timer-seconds">Timer duration (seconds)</label>
+          <input id="timer-seconds" type="number" min="1" max="86400" step="1">
+        </div>
+        <div class="field grow">
+          <label for="clock-timezone">Clock timezone</label>
+          <input id="clock-timezone" type="text" maxlength="64" placeholder="empty follows the device timezone">
+        </div>
+        <button type="button" id="save-display">Save display fields</button>
+      </div>
+      <small>Timer duration and timezone are drafts until you save them. Selects and the blink checkbox apply immediately.</small>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const api = window.CapsulaUI;
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const values = new Map();
+  let current = '';
+  let items = [];
+  let newDays = [];
+  let dirty = { alarms: false, timer: false, timezone: false };
+
+  const $ = (id) => document.getElementById(id);
+  const notice = $('notice');
+  const connection = $('connection');
+  const list = $('alarm-list');
+  const empty = $('alarm-empty');
+  const saveAlarms = $('save-alarms');
+  const alarmCount = $('alarm-count');
+
+  function showNotice(text, kind) {
+    notice.hidden = !text;
+    notice.textContent = text || '';
+    notice.className = 'notice ' + (kind || 'err');
+  }
+
+  function schemaDef(key) {
+    const settings = api.schema && Array.isArray(api.schema.settings) ? api.schema.settings : [];
+    return settings.find((s) => s.key === key);
+  }
+
+  function jsonValue(key) {
+    const raw = values.get(key);
+    if (!raw || !raw.hasValue || typeof raw.valueJson !== 'string') {
+      const def = schemaDef(key);
+      if (def && typeof def.defaultValueJson === 'string') {
+        try { return JSON.parse(def.defaultValueJson); } catch (_) { return undefined; }
+      }
+      return undefined;
+    }
+    try { return JSON.parse(raw.valueJson); } catch (_) { return undefined; }
+  }
+
+  function adopt(state) {
+    if (state && Array.isArray(state.values)) {
+      values.clear();
+      for (const v of state.values) values.set(v.key, v);
+    }
+    if (state && typeof state.revision === 'number') current = state.revision;
+    if (state && state.schema && Array.isArray(state.schema.settings)) api.schema = state.schema;
+    applyState();
+  }
+
+  function applyState() {
+    connection.textContent = 'connected';
+    connection.className = 'pill ok';
+    $('blink').checked = jsonValue('blink') !== false;
+    setSelect('display-mode', jsonValue('display_mode') || 'clock');
+    setSelect('reset-gesture', jsonValue('stopwatch_reset_gesture') || 'hold');
+    if (!dirty.timer) $('timer-seconds').value = String(jsonValue('timer_seconds') ?? 300);
+    if (!dirty.timezone) $('clock-timezone').value = String(jsonValue('timezone') ?? '');
+    if (!dirty.alarms) {
+      const raw = String(jsonValue('alarms') ?? '');
+      try {
+        items = parseEntries(raw).map(classify);
+        renderAlarms();
+        showNotice('');
+      } catch (err) {
+        items = [{ kind: 'raw', raw: raw, dirty: false }];
+        renderAlarms();
+        showNotice('Stored alarm schedules could not be parsed into friendly rows: ' + err.message);
+      }
+    }
+  }
+
+  function setSelect(id, value) {
+    const el = $(id);
+    if (!el) return;
+    if (![...el.options].some((o) => o.value === value)) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      el.appendChild(option);
+    }
+    el.value = value;
+  }
+
+  const pendingDone = new Map();
+
+  function patch(changes, done) {
+    const id = api.patch(changes);
+    if (done && id) pendingDone.set(id, done);
+  }
+
+  api.onState(adopt);
+  api.onResult((result) => {
+    const done = pendingDone.get(result.requestId);
+    pendingDone.delete(result.requestId);
+    if (done) done(result);
+    if (!result.ok) {
+      showNotice(result.error || 'The settings update was rejected.');
+      return;
+    }
+    if (typeof result.revision === 'number') current = result.revision;
+    showNotice(result.message || 'Saved.', 'ok');
+  });
+
+  // --- dcron grammar --------------------------------------------------------
+
+  const FIELD_RE = /^(\*|\d+|\d+-\d+)(\/\d+)?((,)(\*|\d+|\d+|\d+-\d+)(\/\d+)?)*$/;
+
+  function validateField(text, min, max, label) {
+    for (const part of text.split(',')) {
+      const m = part.match(/^(\*|\d+|\d+-\d+)(?:\/(\d+))?$/);
+      if (!m) throw new Error(label + ' field "' + part + '" is not numeric dcron');
+      const step = m[2] ? Number(m[2]) : 1;
+      if (step < 1) throw new Error(label + ' step must be positive');
+      if (m[1] === '*') continue;
+      if (m[1].includes('-')) {
+        const [a, b] = m[1].split('-').map(Number);
+        if (a > b || a < min || b > max) throw new Error(label + ' range ' + m[1] + ' is outside ' + min + '-' + max);
+      } else {
+        const n = Number(m[1]);
+        if (n < min || n > max) throw new Error(label + ' value ' + n + ' is outside ' + min + '-' + max);
+      }
+    }
+  }
+
+  const ZONE_RE = /^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)*$/;
+
+  function parseEntries(value) {
+    const s = String(value || '');
+    if (!s.trim()) return [];
+    const out = [];
+    let i = 0;
+    const n = s.length;
+    const space = (ch) => ch === ' ' || ch === '\t';
+    const skip = () => { while (i < n && space(s[i])) i++; };
+    while (i < n) {
+      skip();
+      if (i >= n) break;
+      const fields = [];
+      let boundary = false;
+      for (let f = 0; f < 5; f++) {
+        skip();
+        const start = i;
+        let token = '';
+        while (i < n && !space(s[i])) {
+          if (s[i] === ',') {
+            const next = i + 1;
+            if (next >= n || space(s[next])) {
+              if (f !== 4) throw new Error('entry separator appears inside an expression');
+              boundary = true;
+              i += 1;
+              break;
+            }
+          }
+          token += s[i];
+          i += 1;
+        }
+        if (!token) throw new Error('empty cron field near position ' + start);
+        fields.push(token);
+        if (boundary) break;
+      }
+      if (fields.length !== 5) throw new Error('each alarm needs exactly five fields');
+      validateField(fields[0], 0, 59, 'minute');
+      validateField(fields[1], 0, 23, 'hour');
+      validateField(fields[2], 1, 31, 'day-of-month');
+      validateField(fields[3], 1, 12, 'month');
+      validateField(fields[4], 0, 7, 'day-of-week');
+
+      let timezone = '';
+      let once = false;
+      let disabled = false;
+      if (!boundary) {
+        while (true) {
+          skip();
+          if (i >= n) break;
+          if (s[i] === ',') {
+            i += 1;
+            boundary = true;
+            break;
+          }
+          const start = i;
+          while (i < n && !space(s[i]) && s[i] !== ',') i += 1;
+          const modifier = s.slice(start, i);
+          if (modifier.startsWith('@')) {
+            if (timezone) throw new Error('duplicate alarm timezone modifier');
+            const zone = modifier.slice(1);
+            if (!ZONE_RE.test(zone)) throw new Error('alarm timezone must be an IANA zone such as Europe/Berlin');
+            timezone = zone;
+          } else if (modifier === '!once') {
+            if (once) throw new Error('duplicate !once modifier');
+            once = true;
+          } else if (modifier === '!disabled') {
+            if (disabled) throw new Error('duplicate !disabled modifier');
+            disabled = true;
+          } else {
+            throw new Error('unknown alarm modifier "' + modifier + '": use @IANA-zone, !once or !disabled');
+          }
+        }
+      }
+      let raw = fields.join(' ');
+      if (timezone) raw += ' @' + timezone;
+      if (once) raw += ' !once';
+      if (disabled) raw += ' !disabled';
+      out.push({ raw: raw, fields: fields, timezone: timezone, once: once, disabled: disabled });
+      if (boundary) {
+        skip();
+        if (i >= n) throw new Error('trailing alarm separator');
+      }
+    }
+    return out;
+  }
+
+  function dowSet(text) {
+    if (text === '*') return [0, 1, 2, 3, 4, 5, 6];
+    const set = new Set();
+    for (const part of text.split(',')) {
+      if (part.includes('/')) return null;
+      if (part.includes('-')) {
+        const [a, b] = part.split('-').map(Number);
+        if (a > b || a < 0 || b > 7) return null;
+        for (let d = a; d <= b; d += 1) set.add(d % 7);
+      } else {
+        const d = Number(part);
+        if (!Number.isInteger(d) || d < 0 || d > 7) return null;
+        set.add(d % 7);
+      }
+    }
+    return [...set].sort((a, b) => a - b);
+  }
+
+  function classify(entry) {
+    const [minute, hour, dom, month, dow] = entry.fields;
+    const days = dowSet(dow);
+    if (dom !== '*' || month !== '*' || !days || !/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour)) {
+      return { kind: 'raw', raw: entry.raw, dirty: false };
+    }
+    return {
+      kind: 'friendly', raw: entry.raw, minute: Number(minute), hour: Number(hour), days: days,
+      timezone: entry.timezone, once: entry.once, disabled: entry.disabled, dirty: false
+    };
+  }
+
+  function dowText(days) {
+    if (days.length === 7) return '*';
+    return days.map((d) => String(d)).join(',');
+  }
+
+  function suffixText(item) {
+    let out = '';
+    if (item.timezone) out += ' @' + item.timezone;
+    if (item.once) out += ' !once';
+    if (item.disabled) out += ' !disabled';
+    return out;
+  }
+
+  function serializeItems() {
+    return items.map((item) => {
+      if (item.kind === 'raw') return (item.raw || '').trim();
+      if (!item.dirty && item.raw) return item.raw;
+      return String(item.minute) + ' ' + String(item.hour) + ' * * ' + dowText(item.days) + suffixText(item);
+    }).join(', ');
+  }
+
+  // --- rendering ------------------------------------------------------------
+
+  function renderAlarms() {
+    list.textContent = '';
+    items.forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = 'alarm-item';
+      if (item.kind === 'friendly') {
+        const summary = document.createElement('div');
+        summary.className = 'summary';
+        const time = document.createElement('span');
+        time.className = 'time';
+        time.textContent = String(item.hour).padStart(2, '0') + ':' + String(item.minute).padStart(2, '0');
+        const days = document.createElement('div');
+        days.className = 'days';
+        DAY_NAMES.forEach((name, day) => {
+          const label = document.createElement('label');
+          label.textContent = name[0];
+          label.title = name;
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.checked = item.days.includes(day);
+          box.addEventListener('change', () => {
+            if (box.checked && !item.days.includes(day)) item.days.push(day);
+            if (!box.checked) item.days = item.days.filter((d) => d !== day);
+            item.days.sort((a, b) => a - b);
+            item.dirty = true;
+            dirty.alarms = true;
+            saveAlarms.disabled = false;
+            updateRepeatHint();
+          });
+          label.appendChild(box);
+          days.appendChild(label);
+        });
+        summary.append(time, days);
+        if (item.timezone) {
+          const zone = document.createElement('span');
+          zone.className = 'pill mono';
+          zone.textContent = '@' + item.timezone;
+          summary.appendChild(zone);
+        }
+        const repeat = document.createElement('span');
+        repeat.className = 'pill';
+        repeat.textContent = item.once ? 'one-shot' : 'repeating';
+        summary.appendChild(repeat);
+        if (item.disabled) {
+          const disabled = document.createElement('span');
+          disabled.className = 'pill err';
+          disabled.textContent = 'disabled';
+          summary.appendChild(disabled);
+        }
+        row.appendChild(summary);
+
+        const once = document.createElement('button');
+        once.type = 'button';
+        once.className = 'ghost';
+        once.textContent = item.once ? 'Make repeating' : 'Make one-shot';
+        once.addEventListener('click', () => {
+          item.once = !item.once;
+          item.dirty = true;
+          dirty.alarms = true;
+          saveAlarms.disabled = false;
+          renderAlarms();
+        });
+        const enabled = document.createElement('button');
+        enabled.type = 'button';
+        enabled.className = item.disabled ? 'secondary' : 'ghost';
+        enabled.textContent = item.disabled ? 'Enable' : 'Disable';
+        enabled.addEventListener('click', () => {
+          item.disabled = !item.disabled;
+          item.dirty = true;
+          dirty.alarms = true;
+          saveAlarms.disabled = false;
+          renderAlarms();
+        });
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'secondary';
+        edit.textContent = 'Edit';
+        edit.addEventListener('click', () => editTime(index));
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'danger';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', () => {
+          items.splice(index, 1);
+          dirty.alarms = true;
+          saveAlarms.disabled = false;
+          renderAlarms();
+        });
+        row.append(once, enabled, edit, remove);
+      } else {
+        const wrap = document.createElement('div');
+        wrap.className = 'grow';
+        const text = document.createElement('input');
+        text.type = 'text';
+        text.value = item.raw;
+        text.className = 'mono';
+        text.setAttribute('aria-label', 'Advanced dcron expression');
+        text.addEventListener('input', () => {
+          item.raw = text.value;
+          item.dirty = true;
+          dirty.alarms = true;
+          saveAlarms.disabled = false;
+        });
+        wrap.appendChild(text);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'danger';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', () => {
+          items.splice(index, 1);
+          dirty.alarms = true;
+          saveAlarms.disabled = false;
+          renderAlarms();
+        });
+        row.append(wrap, remove);
+      }
+      list.appendChild(row);
+    });
+    empty.hidden = items.length > 0;
+    alarmCount.textContent = items.length + (items.length === 1 ? ' schedule' : ' schedules');
+  }
+
+  function editTime(index) {
+    const item = items[index];
+    const row = document.createElement('div');
+    row.className = 'alarm-item';
+    const time = document.createElement('input');
+    time.type = 'time';
+    time.step = '60';
+    time.value = String(item.hour).padStart(2, '0') + ':' + String(item.minute).padStart(2, '0');
+    const zone = document.createElement('input');
+    zone.type = 'text';
+    zone.placeholder = 'device timezone';
+    zone.value = item.timezone || '';
+    zone.setAttribute('aria-label', 'Alarm timezone');
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.textContent = 'Apply';
+    apply.addEventListener('click', () => {
+      const [h, m] = time.value.split(':').map(Number);
+      if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+        showNotice('Choose a valid time (00:00–23:59).');
+        return;
+      }
+      const nextZone = zone.value.trim();
+      if (nextZone && !ZONE_RE.test(nextZone)) {
+        showNotice('Timezone must be an IANA name such as Europe/Berlin, or empty.');
+        return;
+      }
+      item.hour = h;
+      item.minute = m;
+      item.timezone = nextZone;
+      item.dirty = true;
+      dirty.alarms = true;
+      saveAlarms.disabled = false;
+      renderAlarms();
+    });
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'ghost';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', renderAlarms);
+    row.append(time, zone, apply, cancel);
+    list.replaceChild(row, list.children[index]);
+  }
+
+  function updateRepeatHint() {
+    const all = newDays.length === 7;
+    $('repeat-hint').textContent = all ? 'Every day.' : (newDays.length === 0 ? 'No days selected: choose at least one.' : 'Repeats on ' + newDays.slice().sort((a, b) => a - b).map((d) => DAY_NAMES[d]).join(', ') + '.');
+  }
+
+  const newDayBoxes = $('new-days');
+  DAY_NAMES.forEach((name, day) => {
+    const label = document.createElement('label');
+    label.textContent = name[0];
+    label.title = name;
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = true;
+    box.addEventListener('change', () => {
+      if (box.checked) newDays.push(day);
+      else newDays = newDays.filter((d) => d !== day);
+      newDays = [...new Set(newDays)].sort((a, b) => a - b);
+      updateRepeatHint();
+    });
+    label.appendChild(box);
+    newDayBoxes.appendChild(label);
+  });
+  newDays = [0, 1, 2, 3, 4, 5, 6];
+  updateRepeatHint();
+
+  $('add-alarm').addEventListener('click', () => {
+    const value = $('new-time').value || '07:00';
+    const [hour, minute] = value.split(':').map(Number);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
+      showNotice('Choose a valid alarm time.');
+      return;
+    }
+    if (newDays.length === 0) {
+      showNotice('Choose at least one weekday, or all days.');
+      return;
+    }
+    const timezone = $('new-zone').value.trim();
+    if (timezone && !ZONE_RE.test(timezone)) {
+      showNotice('Timezone must be an IANA name such as Europe/Berlin, or empty.');
+      return;
+    }
+    items.push({
+      kind: 'friendly', raw: '', minute: minute, hour: hour, days: newDays.slice().sort((a, b) => a - b),
+      timezone: timezone, once: $('new-once').checked, disabled: false, dirty: true
+    });
+    $('new-zone').value = '';
+    $('new-once').checked = false;
+    dirty.alarms = true;
+    saveAlarms.disabled = false;
+    showNotice('');
+    renderAlarms();
+  });
+
+  saveAlarms.addEventListener('click', () => {
+    let raw;
+    try {
+      raw = serializeItems();
+      parseEntries(raw);
+    } catch (err) {
+      showNotice(err.message);
+      return;
+    }
+    saveAlarms.disabled = true;
+    patch([{ key: 'alarms', valueJson: JSON.stringify(raw) }], (result) => {
+      if (!result.ok) {
+        saveAlarms.disabled = false;
+        return;
+      }
+      dirty.alarms = false;
+      items = parseEntries(raw).map(classify);
+      renderAlarms();
+    });
+  });
+
+  // --- immediate + draft controls -------------------------------------------
+
+  document.querySelectorAll('[data-immediate]').forEach((el) => {
+    el.addEventListener('change', () => {
+      const key = el.dataset.immediate;
+      const value = el.type === 'checkbox' ? !!el.checked : String(el.value);
+      patch([{ key: key, valueJson: JSON.stringify(value) }], (result) => {
+        if (!result.ok) applyState();
+      });
+    });
+  });
+
+  $('timer-seconds').addEventListener('input', () => {
+    dirty.timer = true;
+    $('save-display').disabled = false;
+  });
+  $('clock-timezone').addEventListener('input', () => {
+    dirty.timezone = true;
+    $('save-display').disabled = false;
+  });
+
+  $('save-display').addEventListener('click', () => {
+    const timer = Number($('timer-seconds').value);
+    if (!Number.isInteger(timer) || timer < 1 || timer > 86400) {
+      showNotice('Timer duration must be a whole number of seconds from 1 to 86400.');
+      return;
+    }
+    const timezone = $('clock-timezone').value.trim();
+    if (timezone && !/^[A-Za-z0-9_+\-]+(\/[A-Za-z0-9_+\-]+)*$/.test(timezone)) {
+      showNotice('Timezone must be an IANA name such as Europe/Berlin, or empty.');
+      return;
+    }
+    const changes = [];
+    if (dirty.timer) changes.push({ key: 'timer_seconds', valueJson: JSON.stringify(timer) });
+    if (dirty.timezone) changes.push({ key: 'timezone', valueJson: JSON.stringify(timezone) });
+    if (!changes.length) return;
+    patch(changes, (result) => {
+      if (!result.ok) return;
+      dirty.timer = false;
+      dirty.timezone = false;
+      $('save-display').disabled = true;
+    });
+  });
+
+  applyState();
+})();
+</script>
+</body>
+</html>

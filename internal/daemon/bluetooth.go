@@ -17,48 +17,134 @@ import (
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
+	"capsulad/internal/uichanges"
 )
 
-// applyBluetoothSettings powers the adapter and applies the persisted pairable
-// switch. The A2DP sink profile is advertised before pairing is enabled: a
-// source that connects first finds no audio-source profile and drops the link.
-// It runs at startup and on every settings change; only a real change reaches
-// D-Bus. Failures are logged, never claimed as success.
+// applyBluetoothSettings applies the persisted incoming-connections and
+// discoverability policy. The A2DP sink profile is made ready before any
+// inbound path is opened: a source that connects first finds no audio-source
+// profile and drops the link, and it does not retry just because the endpoint
+// appears later. Incoming off still powers the adapter, because the radio is
+// shared with BLE work; it only denies inbound links.
+//
+// It runs at startup and on every settings change. Only a real change reaches
+// D-Bus, and applications are serialized so a burst of settings updates
+// converges on the latest persisted values. Failures are logged and leave the
+// affected switch off, never claimed as success.
 func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	if d.bt == nil {
 		return
 	}
 	d.btMu.Lock()
 	initial := !d.btInit
-	changed := d.btPairable != v.BluetoothPairable
+	changed := d.btIncoming != v.BluetoothIncomingConnections ||
+		d.btDiscoverable != v.BluetoothDiscoverable
 	d.btInit = true
-	d.btMu.Unlock()
 	if !initial && !changed {
+		d.btMu.Unlock()
 		return
 	}
+	d.btApplyGen++
+	gen := d.btApplyGen
+	d.btMu.Unlock()
 	go func() {
+		// Serialize the asynchronous applies. A newer settings edit bumps the
+		// generation; an older queued apply must not overwrite it with stale
+		// values, so it exits when it finally takes the lock.
+		d.btApplyMu.Lock()
+		defer d.btApplyMu.Unlock()
+		d.btMu.Lock()
+		stale := d.btApplyGen != gen
+		d.btMu.Unlock()
+		if stale {
+			return
+		}
 		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 		defer cancel()
-		if v.BluetoothPairable {
-			// Refuse to accept a source before the profile it needs exists.
-			if err := d.ensureBluetoothAdvertisement(); err != nil {
-				d.logs.Warnf("bluetooth", "", "audio profile advertisement: %v; pairing stays off", err)
+		wantIncoming := v.BluetoothIncomingConnections
+		wantDiscoverable := v.BluetoothDiscoverable
+		if wantDiscoverable {
+			wantIncoming = true
+		}
+		if !wantIncoming {
+			wantDiscoverable = false
+		}
+
+		record := func(incoming, discoverable bool) {
+			d.btMu.Lock()
+			d.btIncoming, d.btDiscoverable = incoming, discoverable
+			d.btMu.Unlock()
+		}
+
+		// Incoming connections need the A2DP sink profile; discoverability is
+		// only meaningful when it does too. The initial settings pass follows
+		// initBluetoothAudio's single registration attempt and reports that
+		// readiness; a later user action may repair a lost registration.
+		advertised := true
+		if wantIncoming {
+			if initial {
+				advertised = d.bluetoothAudioReady()
+			} else {
+				advertised = d.ensureBluetoothAdvertisement() == nil
+			}
+			if !advertised {
+				if initial {
+					d.logs.Warnf("bluetooth", "", "audio profile is not advertised at startup; incoming connections stay off")
+				} else {
+					d.logs.Warnf("bluetooth", "", "audio profile advertisement failed; incoming connections stay off")
+				}
+				// Do not accept an inbound link that has no audio profile. The
+				// deny is applied before power so an autopowered controller
+				// cannot accept one, and the radio stays on for BLE.
+				denyOK, discoveryOK := true, true
+				if err := d.bt.SetIncomingConnections(ctx, false); err != nil {
+					denyOK = false
+					d.logs.Warnf("bluetooth", "", "incoming=false after a failed audio profile: %v", err)
+				}
+				if err := d.bt.EnsurePowered(ctx); err != nil {
+					d.logs.Warnf("bluetooth", "", "power/connectability after a failed audio profile: %v", err)
+				}
+				if err := d.bt.SetIncomingConnections(ctx, false); err != nil {
+					denyOK = false
+					d.logs.Warnf("bluetooth", "", "incoming=false after a failed audio profile: %v", err)
+				}
+				if err := d.bt.SetDiscoverable(ctx, false); err != nil {
+					discoveryOK = false
+					d.logs.Warnf("bluetooth", "", "discoverable=false after a failed audio profile: %v", err)
+				}
+				if denyOK && discoveryOK {
+					record(false, false)
+				}
 				return
 			}
 		}
+
+		// Power the radio even when no inbound link is accepted: BLE work for
+		// applications must remain possible. When incoming is denied, apply it
+		// once before power so a controller that autopowers connectable cannot
+		// accept a link during startup; the explicit call below is
+		// authoritative. Failures here are retried after power.
+		if !wantIncoming {
+			_ = d.bt.SetIncomingConnections(ctx, false)
+		}
 		if err := d.bt.EnsurePowered(ctx); err != nil {
-			d.logs.Warnf("bluetooth", "", "power on: %v", err)
+			d.logs.Warnf("bluetooth", "", "power/connectability: %v", err)
 			return
 		}
-		if err := d.bt.SetPairable(ctx, v.BluetoothPairable); err != nil {
+		if err := d.bt.SetIncomingConnections(ctx, wantIncoming); err != nil {
 			// Leave the recorded state unchanged so the next settings change
 			// retries instead of claiming the switch was applied.
-			d.logs.Warnf("bluetooth", "", "pairable=%v: %v", v.BluetoothPairable, err)
+			d.logs.Warnf("bluetooth", "", "incoming=%v: %v", wantIncoming, err)
 			return
 		}
-		d.btMu.Lock()
-		d.btPairable = v.BluetoothPairable
-		d.btMu.Unlock()
+		if err := d.bt.SetDiscoverable(ctx, wantDiscoverable); err != nil {
+			d.logs.Warnf("bluetooth", "", "discoverable=%v: %v", wantDiscoverable, err)
+			// Incoming may already be applied; reflect only that truth so a
+			// later settings update retries the discovery window.
+			record(wantIncoming, false)
+			return
+		}
+		record(wantIncoming, wantDiscoverable)
 	}()
 }
 
@@ -77,7 +163,7 @@ func (d *Daemon) applyBluetoothVolume(level float64) {
 	d.btVolume = level
 	d.btVolSet = true
 	d.btMu.Unlock()
-	if d.btNative {
+	if d.bluetoothNative() {
 		d.setBluetoothStreamTrim(level)
 	} else {
 		d.setBluetoothPlaybackGain(level)
@@ -138,6 +224,7 @@ func (d *Daemon) watchBluetooth() {
 	// A source may already be connected when the daemon starts; the manager
 	// seeds its state without emitting a connect event.
 	d.ensureConnectedBluetoothRoutes()
+	d.publishUI(uichanges.Bluetooth)
 	ring := &bluetoothNotice{}
 	display := &bluetoothNotice{}
 	defer func() {
@@ -163,6 +250,10 @@ func (d *Daemon) watchBluetooth() {
 			if !ok {
 				return
 			}
+			// Adapter state has no D-Bus property stream for connectability;
+			// this invalidation makes the Web UI re-read observed status after
+			// every manager event instead of polling.
+			d.publishUI(uichanges.Bluetooth)
 			if ev.Kind == bluetooth.EventResync {
 				// Collapse a backlog of markers: only the newest snapshot is
 				// worth one reconciliation. A real event that follows is
@@ -207,6 +298,18 @@ func (d *Daemon) watchBluetooth() {
 				d.showBluetoothPulse(ring, 1)
 				d.stopBluetoothStreamFor(ev.DeviceAddress)
 				d.removeBluetoothAudioRoute(ev.DeviceAddress)
+				// A native switch deferred at startup (PulseAudio owned the
+				// audio of a source that was already connected) is completed
+				// now that the source is gone. Registering with no active
+				// stream cannot disturb a listening session, and the next
+				// incoming connection finds the sink profile ready.
+				if !d.bluetoothNative() {
+					go func() {
+						if err := d.prepareBluetoothAudio(); err != nil {
+							d.logs.Debugf("bluetooth", "", "switch to the native A2DP sink: %v", err)
+						}
+					}()
+				}
 			case bluetooth.EventVolume:
 				d.applyBluetoothSourceVolume(ev.Volume)
 			case bluetooth.EventTransport:
@@ -215,14 +318,14 @@ func (d *Daemon) watchBluetooth() {
 				// volume at this point, so the framework level can reach the
 				// source before the first media packet. PulseAudio owns the
 				// transport in fallback mode, so only the native sink acquires.
-				if !d.btNative {
+				if !d.bluetoothNative() {
 					continue
 				}
 				d.forceBluetoothVolume()
 				d.startBluetoothStream(ev.DeviceAddress)
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
-					if !d.btNative {
+					if !d.bluetoothNative() {
 						d.ensureBluetoothAudioRoute(ev.Media.DeviceAddress)
 					} else if ev.Media.Playing {
 						// A source can connect while paused; the transport is
@@ -241,62 +344,81 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 	if d.bt == nil || strings.TrimSpace(address) == "" {
 		return
 	}
-	if d.btNative {
-		go func() {
-			start := time.Now()
-			ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-			defer cancel()
-			// The sink endpoint is registered at startup. If BlueZ restarted or
-			// power-cycled the adapter since then it forgot the registration,
-			// and the source would connect without an audio profile. Re-arm it
-			// now; PulseAudio's discovery modules are unloaded only in this
-			// repair path, never on a healthy connect, because unloading them
-			// while a source is connected can tear the card down.
-			if registrar, ok := d.bt.(bluetooth.A2DPRegistrar); ok && !registrar.SinkRegistered() {
-				d.unloadPulseBluetoothModules()
-				if sink, ok := d.bt.(bluetooth.A2DPSink); ok {
-					if err := sink.RegisterA2DPSink(ctx); err != nil {
-						d.logs.Warnf("bluetooth", "", "re-register A2DP sink before connecting %s: %v", address, err)
-					} else {
-						d.logs.Infof("bluetooth", "", "A2DP sink re-registered before connecting %s", address)
-					}
-				}
-			}
-			if trust, ok := d.bt.(bluetooth.TrustSetter); ok {
-				if err := trust.SetTrusted(ctx, address, true); err != nil {
-					d.logs.Debugf("bluetooth", "", "trust %s: %v", address, err)
-				}
-			}
-			if err := d.bt.ConnectAudio(ctx, address); err != nil {
-				d.logs.Warnf("bluetooth", "", "audio profiles for %s failed after %s: %v",
-					address, time.Since(start).Round(time.Millisecond), err)
-			} else {
-				d.logs.Infof("bluetooth", "", "A2DP source profile connected for %s in %s",
-					address, time.Since(start).Round(time.Millisecond))
-			}
-			d.forceBluetoothVolume()
-			d.startBluetoothStream(address)
-		}()
+	if d.bluetoothNative() {
+		go d.connectBluetoothAudioNative(address)
 		return
 	}
 	go func() {
-		// Reloading the PulseAudio device module recreates the source/card,
-		// so drop the route before it and let the loader wait for the new
-		// source.
-		d.removeBluetoothAudioRoute(address)
-		d.ensureDecoupledBluetoothModule(address)
-		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-		defer cancel()
-		if err := d.bt.ConnectAudio(ctx, address); err != nil {
-			d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
-		} else {
-			d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+		// If no audio owner became ready at startup (BlueZ was still coming up,
+		// or its registration was lost), resolve it before asking the source
+		// for a profile. A healthy PulseAudio owner reports ready and is left
+		// untouched; this is a one-shot check, not a retry loop. It runs off the
+		// watcher goroutine so notice timers and other sources keep flowing.
+		if !d.bluetoothAudioReady() {
+			if err := d.prepareBluetoothAudio(); err != nil {
+				d.logs.Warnf("bluetooth", "", "audio owner before connecting %s: %v", address, err)
+			}
 		}
-		// The Mac's AVRCP volume is the single Bluetooth gain and mirrors the
-		// framework master.
-		d.forceBluetoothVolume()
-		d.ensureBluetoothAudioRoute(address)
+		if d.bluetoothNative() {
+			d.connectBluetoothAudioNative(address)
+			return
+		}
+		d.connectBluetoothAudioPulse(address)
 	}()
+}
+
+// connectBluetoothAudioNative registers/verifies the native sink and then asks
+// the source for its audio profiles. The sink must be armed first: a source
+// that is asked for A2DP before the endpoint exists answers "profile
+// unavailable". The request uses Device1.ConnectProfile on the already-connected
+// device, so it does not open a second connection; live MacBook evidence shows
+// that request brings up A2DP/AVRCP on an ACL-only link. Whether a source that
+// already abandoned A2DP during the pre-registration window honors the request
+// without reconnecting is device-dependent and remains a hardware gate.
+func (d *Daemon) connectBluetoothAudioNative(address string) {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+	defer cancel()
+	// A healthy registration is never touched; only a lost or failed one is
+	// repaired.
+	if err := d.ensureBluetoothSinkRegistered(ctx); err != nil {
+		d.logs.Warnf("bluetooth", "", "A2DP sink is not ready before connecting %s: %v", address, err)
+	}
+	if trust, ok := d.bt.(bluetooth.TrustSetter); ok {
+		if err := trust.SetTrusted(ctx, address, true); err != nil {
+			d.logs.Debugf("bluetooth", "", "trust %s: %v", address, err)
+		}
+	}
+	if err := d.bt.ConnectAudio(ctx, address); err != nil {
+		d.logs.Warnf("bluetooth", "", "audio profiles for %s failed after %s: %v",
+			address, time.Since(start).Round(time.Millisecond), err)
+	} else {
+		d.logs.Infof("bluetooth", "", "A2DP source profile connected for %s in %s",
+			address, time.Since(start).Round(time.Millisecond))
+	}
+	d.forceBluetoothVolume()
+	d.startBluetoothStream(address)
+}
+
+// connectBluetoothAudioPulse is the PulseAudio fallback route. It is blocking
+// and is always called from a goroutine.
+func (d *Daemon) connectBluetoothAudioPulse(address string) {
+	// Reloading the PulseAudio device module recreates the source/card,
+	// so drop the route before it and let the loader wait for the new
+	// source.
+	d.removeBluetoothAudioRoute(address)
+	d.ensureDecoupledBluetoothModule(address)
+	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+	defer cancel()
+	if err := d.bt.ConnectAudio(ctx, address); err != nil {
+		d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
+	} else {
+		d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+	}
+	// The Mac's AVRCP volume is the single Bluetooth gain and mirrors the
+	// framework master.
+	d.forceBluetoothVolume()
+	d.ensureBluetoothAudioRoute(address)
 }
 
 // --- connect/disconnect notifications --------------------------------------
@@ -502,7 +624,7 @@ func (d *Daemon) reconcileBluetoothSession(media bluetooth.MediaState) {
 	// connect/transport event to the queue. Both acquisition paths are already
 	// guarded against a second start, so a burst of markers starts audio once.
 	if media.Present {
-		if d.btNative {
+		if d.bluetoothNative() {
 			if media.Playing {
 				d.startBluetoothStream(media.DeviceAddress)
 			}
@@ -516,12 +638,34 @@ func (d *Daemon) reconcileBluetoothSession(media bluetooth.MediaState) {
 // The Web UI and the local CLI run outside the app sandbox; apps identify
 // themselves through the bus run ID and their assigned UID.
 func (d *Daemon) requireLocalAdmin(ctx context.Context) error {
-	const detail = "paired-device management is a local administrator operation"
+	return d.requireAdministrativeCaller(ctx, "paired-device management is a local administrator operation")
+}
+
+// publishUI invalidates one Web UI topic after its authoritative store changed.
+// The in-process hub carries no data; the browser watcher rebuilds the view.
+func (d *Daemon) publishUI(topic uichanges.Topic) {
+	if d.uiChanges != nil {
+		d.uiChanges.Publish(topic)
+	}
+}
+
+// requireAdministrativeCaller is the single local-administrator gate. A
+// supervised application cannot qualify by omitting its run-id metadata:
+// on Linux its sandbox UID or its supervised PID still identifies it. The
+// daemon's own connections may omit a run ID (they carry the internal token
+// for private app-bus targets); a compiled-in system app always sends its run
+// ID and is therefore rejected like any other app.
+func (d *Daemon) requireAdministrativeCaller(ctx context.Context, detail string) error {
 	if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get("capsula-run-id")) > 0 {
 		return status.Error(codes.PermissionDenied, detail)
 	}
-	if creds := grpcpeer.FromContext(ctx); creds.OK && creds.UID >= d.cfg.SandboxUIDBase {
-		return status.Error(codes.PermissionDenied, detail)
+	if creds := grpcpeer.FromContext(ctx); creds.OK {
+		if creds.UID >= d.cfg.SandboxUIDBase {
+			return status.Error(codes.PermissionDenied, detail)
+		}
+		if d.isSupervisedPID(creds.PID) {
+			return status.Error(codes.PermissionDenied, detail)
+		}
 	}
 	return nil
 }

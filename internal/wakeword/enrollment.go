@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"capsulad/internal/audio"
 	"capsulad/internal/wakeword/oww"
 )
 
@@ -87,8 +88,19 @@ type TrainOptions struct {
 	Language string
 	Seed     uint64
 	// NegativesPath is a CNEG0002 corpus. It is required: the device does not
-	// embed a bundled negative set and training must not fall back to one.
+	// embed a bundled negative set and training must not fall back to one. Its
+	// precomputed embeddings are external, off-policy training examples; the
+	// tune/final-test certificate uses the local processed held-out takes.
 	NegativesPath string
+	// InputProcessing declares the capture preprocessing already applied to the
+	// enrollment takes before they reach Train. It must name the same profile
+	// runtime inference declares (for example audio.CaptureProcessingTap); an
+	// empty value means the raw physical tap.
+	InputProcessing string
+	// RawTakesConverted reports how many selected takes were declarations or
+	// legacy files of the raw physical tap, converted offline onto
+	// InputProcessing. It is provenance, not a setting.
+	RawTakesConverted int
 	// Progress reports monotonic 0..1 fractions within each stage. It may be
 	// called concurrently from embedding workers and is serialized here.
 	Progress func(stage string, fraction float64)
@@ -459,43 +471,47 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		return nil, fmt.Errorf("wakeword training: fit: %w", fitErr)
 	}
 
-	// Stage: calibrate. The threshold is chosen on the tune split only.
+	// Stage: calibrate. The threshold is chosen on the tune split only. The
+	// policy certificate uses the local processed takes; CNEG streams are
+	// precomputed from external audio and stay auxiliary/off-policy.
 	progress("calibrate", 0)
 	tuneWordEvals, err := evalFromEmbedded(ctx, clf, embedded[tuneWordStart:tuneWordStart+tuneWordCount], false)
 	if err != nil {
 		return nil, err
 	}
-	tuneNegEvals, err := evalNegativeSignals(ctx, clf, neg, "tune", embedded[tuneNegStart:tuneNegStart+tuneNegCount])
+	tuneNegEvals, tuneAuxEvals, err := evalNegativeSignals(ctx, clf, neg, "tune", embedded[tuneNegStart:tuneNegStart+tuneNegCount])
 	if err != nil {
 		return nil, err
 	}
 	if countScoreWindows(tuneNegEvals) == 0 {
-		return nil, enrollmentErrorf("held-out tune negatives are too short for a %d-embedding window; rebuild the corpus with longer tune recordings", ContextFrames)
+		return nil, enrollmentErrorf("held-out tune room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames)
 	}
 	threshold, tuneMetrics, err := calibrateThreshold(tuneWordEvals, tuneNegEvals)
 	if err != nil {
 		return nil, err
 	}
+	auxTuneMetrics := measurePolicy(nil, tuneAuxEvals, threshold)
 	progress("calibrate", 1)
 
 	// Stage: final test. Evaluated once with the calibrated threshold; it never
-	// chooses the threshold or changes the model.
+	// chooses the threshold or changes the model. Only processed local takes
+	// decide the pass/fail certificate; the CNEG result is reported separately.
 	progress("finaltest", 0)
 	testWordEvals, err := evalFromEmbedded(ctx, clf, embedded[testWordStart:testWordStart+testWordCount], false)
 	if err != nil {
 		return nil, err
 	}
-	testNegEvals, err := evalNegativeSignals(ctx, clf, neg, "test", embedded[testNegStart:testNegStart+testNegCount])
+	testNegEvals, testAuxEvals, err := evalNegativeSignals(ctx, clf, neg, "test", embedded[testNegStart:testNegStart+testNegCount])
 	if err != nil {
 		return nil, err
 	}
 	if countScoreWindows(testNegEvals) == 0 {
-		return nil, enrollmentErrorf("held-out final-test negatives are too short for a %d-embedding window; rebuild the corpus with longer test recordings", ContextFrames)
+		return nil, enrollmentErrorf("held-out final-test room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames)
 	}
 	testMetrics := measurePolicy(testWordEvals, testNegEvals, threshold)
-	if !testMetrics.passes() {
-		return nil, enrollmentErrorf("final test failed at threshold %.3f: detected %s with %d false activations; need at least 80%% of independent word recordings and zero false activations — add more independent recordings and retrain",
-			threshold, testMetrics.wordSummary(), testMetrics.FalseActivations)
+	auxTestMetrics := measurePolicy(nil, testAuxEvals, threshold)
+	if err := finalGateError(testMetrics, auxTuneMetrics, auxTestMetrics, threshold); err != nil {
+		return nil, err
 	}
 	progress("finaltest", 1)
 
@@ -524,6 +540,8 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		fitLosses:       fitLosses,
 		tuneMetrics:     tuneMetrics,
 		finalMetrics:    testMetrics,
+		auxTuneMetrics:  auxTuneMetrics,
+		auxTestMetrics:  auxTestMetrics,
 		threshold:       threshold,
 	})
 	if err := clf.Validate(); err != nil {
@@ -565,6 +583,12 @@ func (o TrainOptions) check() error {
 	}
 	if strings.TrimSpace(o.NegativesPath) == "" {
 		return enrollmentErrorf("negatives corpus path is required (build CNEG0002 with tools/build_wakeword_negatives.py); inference and training do not embed a bundled negative set")
+	}
+	if strings.TrimSpace(o.InputProcessing) == "" {
+		return enrollmentErrorf("input processing policy is required; declare the capture tap already applied to the takes (for example %q)", audio.CaptureProcessingTap)
+	}
+	if o.InputProcessing != audio.CaptureProcessingTap {
+		return enrollmentErrorf("unsupported input processing %q; this build trains and runs only %q — convert legacy raw takes before training", o.InputProcessing, audio.CaptureProcessingTap)
 	}
 	return nil
 }
@@ -958,22 +982,27 @@ func evalFromEmbedded(ctx context.Context, clf *Classifier, sigs []embeddedSigna
 	return out, nil
 }
 
-func evalNegativeSignals(ctx context.Context, clf *Classifier, neg *Negatives, split string, audio []embeddedSignal) ([]evalSignal, error) {
-	out := make([]evalSignal, 0, len(audio)+len(neg.StreamsForSplit(split)))
+// evalNegativeSignals separates the policy-matching held-out negatives (the
+// local room, speech and false-activation takes, already processed by the
+// daemon) from the external CNEG streams. Only the former decide calibration
+// and the final certificate; CNEG stays an auxiliary off-policy measurement.
+func evalNegativeSignals(ctx context.Context, clf *Classifier, neg *Negatives, split string, audio []embeddedSignal) (policy, offPolicy []evalSignal, err error) {
+	offPolicy = make([]evalSignal, 0, len(neg.StreamsForSplit(split)))
 	for _, st := range neg.StreamsForSplit(split) {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("wakeword training cancelled: %w", err)
+			return nil, nil, fmt.Errorf("wakeword training cancelled: %w", err)
 		}
 		sig := embeddedSignal{flat: st.Embeddings, count: st.Frames, wordStart: -1, wordEnd: -1}
 		scores, err := scoreStream(clf, &sig)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out = append(out, evalSignal{scores: scores, wordStart: -1, wordEnd: -1})
+		offPolicy = append(offPolicy, evalSignal{scores: scores, wordStart: -1, wordEnd: -1})
 	}
+	policy = make([]evalSignal, 0, len(audio))
 	for i := range audio {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("wakeword training cancelled: %w", err)
+			return nil, nil, fmt.Errorf("wakeword training cancelled: %w", err)
 		}
 		sig := &audio[i]
 		if sig.count < ContextFrames {
@@ -981,11 +1010,11 @@ func evalNegativeSignals(ctx context.Context, clf *Classifier, neg *Negatives, s
 		}
 		scores, err := scoreStream(clf, sig)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out = append(out, evalSignal{scores: scores, wordStart: -1, wordEnd: -1})
+		policy = append(policy, evalSignal{scores: scores, wordStart: -1, wordEnd: -1})
 	}
-	return out, nil
+	return policy, offPolicy, nil
 }
 
 type policyOutcome struct {
@@ -1071,6 +1100,27 @@ func measurePolicy(words, negatives []evalSignal, threshold float64) gateMetrics
 	return m
 }
 
+// finalGateError applies the installation gate. The processed-policy
+// certificate is the local held-out result; the external CNEG tune and
+// final-test results are auxiliary off-policy guards that can still block
+// installation if they false fire. Neither is relabelled as the other, and
+// neither auxiliary split participates in choosing the threshold.
+func finalGateError(test, auxTune, auxTest gateMetrics, threshold float64) error {
+	if auxTune.FalseActivations > 0 {
+		return enrollmentErrorf("auxiliary off-policy corpus guard failed: %d false activations on CNEG tune streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
+			auxTune.FalseActivations)
+	}
+	if auxTest.FalseActivations > 0 {
+		return enrollmentErrorf("auxiliary off-policy corpus guard failed: %d false activations on CNEG final-test streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
+			auxTest.FalseActivations)
+	}
+	if !test.passes() {
+		return enrollmentErrorf("final test failed at threshold %.3f: detected %s with %d false activations on held-out processed takes; need at least 80%% of independent word recordings and zero false activations — add more independent recordings and retrain",
+			threshold, test.wordSummary(), test.FalseActivations)
+	}
+	return nil
+}
+
 // calibrateThreshold searches the tune split for a feasible operating point.
 // The feasible interval's midpoint is used so the choice keeps margin from
 // both the recall floor and false activations. The final test never takes part.
@@ -1131,6 +1181,8 @@ type trainingProvenance struct {
 	fitLosses       []float64
 	tuneMetrics     gateMetrics
 	finalMetrics    gateMetrics
+	auxTuneMetrics  gateMetrics
+	auxTestMetrics  gateMetrics
 	threshold       float64
 }
 
@@ -1160,6 +1212,18 @@ func provenance(p trainingProvenance) map[string]any {
 		"word":     p.opts.ID,
 		"language": p.opts.Language,
 		"seed":     p.opts.Seed,
+		// Input provenance is explicit: a model trained on the raw vendor tap
+		// is not interchangeable with one trained on framework.dsp.v1. Legacy
+		// raw takes are converted before embedding and counted here; the CNEG
+		// corpus is precomputed from its own source audio and is never
+		// relabelled as framework-processed.
+		"input_audio": map[string]any{
+			"processing_tap":             p.opts.InputProcessing,
+			"sample_rate":                enrollmentSampleRate,
+			"channels":                   1,
+			"raw_takes_converted":        p.opts.RawTakesConverted,
+			"negative_corpus_processing": "external precomputed embeddings; auxiliary off-policy, not reinterpreted and not a processed-policy certificate",
+		},
 		"takes": map[string]any{
 			"word": map[string]int{
 				"total": len(p.words), "train": len(p.wordSplit.Train),
@@ -1196,6 +1260,7 @@ func provenance(p trainingProvenance) map[string]any {
 			"preroll_samples":         p.neg.PrerollSamples,
 			"sources":                 sources,
 			"streams":                 len(p.neg.Streams),
+			"policy":                  "auxiliary off-policy: precomputed from external corpus audio, not framework-processed; never used as the processed-policy certificate, but its tune/final-test false-activation guards can block installation",
 		},
 		"negative_sampling": map[string]any{
 			"corpus_windows":          p.corpusWindows,
@@ -1218,6 +1283,11 @@ func provenance(p trainingProvenance) map[string]any {
 			"threshold":  p.threshold,
 			"tune":       metricsToMap(p.tuneMetrics),
 			"final_test": metricsToMap(p.finalMetrics),
+			// Separate, non-certifying measurements on the external corpus.
+			"auxiliary_offpolicy": map[string]any{
+				"tune":       metricsToMap(p.auxTuneMetrics),
+				"final_test": metricsToMap(p.auxTestMetrics),
+			},
 		},
 		"exposure_seconds": map[string]float64{
 			"word_recordings": audioSecondsWordTakes(p.words),
@@ -1235,7 +1305,7 @@ func provenance(p trainingProvenance) map[string]any {
 				negativeAudioSeconds(p.speechTakes, p.speechSplit.Test) +
 				negativeAudioSeconds(p.falseTakes, p.falseSplit.Test),
 		},
-		"certification": "not certified: small enrollment set; metrics are measured on original held-out recordings, never on augmented copies",
+		"certification": "not certified: small enrollment set; the tune/final-test certificate uses only held-out original processed takes, never augmented copies; CNEG results are auxiliary off-policy measurements and do not certify processed-audio quality, but their zero-false-activation tune/final-test guards block installation",
 	}
 }
 

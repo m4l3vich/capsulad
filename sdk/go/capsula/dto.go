@@ -40,6 +40,10 @@ type Activation struct {
 	MatchedModelID     string           `json:"matchedModelId,omitempty"`
 	MonotonicTimeNS    uint64           `json:"monotonicTimeNs,omitempty"`
 	ExpiresMonotonicNS uint64           `json:"expiresMonotonicNs,omitempty"`
+	// HoldToTalk is true for a touch activation when the device is in
+	// hold-to-talk mode; the framework then sends InputReleased to end input.
+	// It is false in summon mode, where the turn may outlive the hold.
+	HoldToTalk bool `json:"holdToTalk,omitempty"`
 }
 
 // InputReleased reports the release in hold-to-talk mode.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"capsulad/internal/ids"
 	"capsulad/internal/manifest"
 	"capsulad/internal/presentations"
+	"capsulad/internal/settings"
 	"capsulad/internal/supervisor"
 )
 
@@ -89,6 +91,13 @@ func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocation
 // spawning anything. The simulator accepts host builds for development.
 func (d *Daemon) compatible(m *manifest.Manifest) error {
 	if d.dev.Platform() == backend.PlatformSimulator {
+		return nil
+	}
+	if m.Entrypoint.Runtime == manifest.RuntimeQuickJS || m.Entrypoint.Runtime == manifest.RuntimeMicroPython {
+		status := d.launcher.RuntimeStatus(m.Entrypoint.Runtime)
+		if !status.Available {
+			return fmt.Errorf("runtime %s is unavailable: %s", m.Entrypoint.Runtime, status.Detail)
+		}
 		return nil
 	}
 	if m.Entrypoint.Runtime != manifest.RuntimeNative {
@@ -226,7 +235,7 @@ func (d *Daemon) sendAppSettings(appID string) {
 
 func (d *Daemon) onAppDisconnect(runID, appID string) {
 	d.logs.Warnf("daemon", appID, "bus disconnected for run=%s", runID)
-	d.cleanupRun(runID)
+	d.cleanupRun(runID, appID)
 	if run, ok := d.sup.Get(runID); ok && run.State != supervisor.Stopping {
 		// A lost framework connection is a failure, not a user stop: stop the
 		// orphaned process but keep restart_on_failure semantics. A provider
@@ -262,18 +271,42 @@ func (d *Daemon) onRunState(run supervisor.Run) {
 
 func (d *Daemon) onRunExit(run supervisor.Run) {
 	d.logs.Infof("daemon", run.AppID, "run=%s exited state=%s code=%d", run.RunID, run.State, run.ExitCode)
-	d.cleanupRun(run.RunID)
+	d.cleanupRun(run.RunID, run.AppID)
 }
 
-// cleanupRun releases everything owned by a terminated process.
-func (d *Daemon) cleanupRun(runID string) {
+// cleanupRun releases everything owned by a terminated process. The app
+// identity is passed in because the supervisor has already removed the run
+// record by the time the exit callback runs.
+func (d *Daemon) cleanupRun(runID, appID string) {
 	d.pres.RemoveRun(runID)
 	d.router.RemoveRun(runID)
 	d.audio.RemoveRun(runID)
 	d.dropPending(runID)
+	// A held talk-key activation belongs to the app that received the press.
+	// Once that run is gone, its release must not be delivered to a restarted
+	// run, which never saw the activation. If a replacement run is already
+	// ready, leave its freshly delivered activation alone: this cleanup may
+	// arrive after the bus disconnect callback of the previous run.
+	otherReady := d.hasOtherReadyRun(appID, runID)
+	d.touchActMu.Lock()
+	if d.touchAssistant == appID && !otherReady {
+		d.touchActivation, d.touchAssistant = "", ""
+	}
+	d.touchActMu.Unlock()
 	d.input.OnRoutingChanged()
 	d.updateSystemRing()
 	d.launcher.CleanupRun(runID)
+}
+
+// hasOtherReadyRun reports whether appID still has a ready run other than
+// runID, which means a restarted provider may already own a new activation.
+func (d *Daemon) hasOtherReadyRun(appID, runID string) bool {
+	for _, run := range d.sup.List(appID) {
+		if run.RunID != runID && run.State == supervisor.Ready {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) broadcastRun(snapshot supervisor.Run) {
@@ -304,8 +337,116 @@ func (d *Daemon) subscribeRuns() (<-chan supervisor.Run, func()) {
 	}
 }
 
+// Stop requests termination of one run.
+//
+// A run that is the operator-selected default provider (a display, ring or
+// assistant selection, or a boot application the operator chose) is recovered:
+// the selected function of the device must stay available, so killing it is a
+// recovery event, not an off switch. The supported ways to keep it stopped are
+// to deselect another provider, shut the daemon down, or uninstall it; those
+// paths never reach here for a run that is still selected, and a run of a
+// deselected app stops for good. Compiled-in providers are re-registered in
+// place because they have no child process to relaunch.
 func (d *Daemon) Stop(runID string) bool {
-	return d.sup.Stop(runID)
+	run, ok := d.sup.Get(runID)
+	if !ok {
+		return false
+	}
+	if d.shuttingDown() || !d.isSelectedDefault(run.AppID) {
+		return d.sup.Stop(runID)
+	}
+	if run.Virtual {
+		if !d.sup.Stop(runID) {
+			return false
+		}
+		// Re-check the selection now that the teardown has completed: a
+		// "choose none" update can land while the built-in stops, and it must
+		// not be overridden by the recovery relaunch. The teardown is
+		// synchronous, so this check happens immediately before the new run.
+		if !d.shuttingDown() && d.isSelectedDefault(run.AppID) {
+			d.ensureRunning(run.AppID)
+		}
+		return true
+	}
+	return d.sup.StopForRestart(runID)
+}
+
+// isSelectedDefault reports whether appID is still an installed provider that
+// the persisted settings choose for a resource or for the assistant role.
+func (d *Daemon) isSelectedDefault(appID string) bool {
+	if appID == "" || isRetiredApp(appID) {
+		return false
+	}
+	app, ok := d.reg.Get(appID)
+	if !ok {
+		return false
+	}
+	// An uninstalled package has no directory left even if this process still
+	// has its registry entry cached from boot; it is no longer a provider the
+	// framework can recover.
+	if app.Dir != "" {
+		if _, err := os.Stat(app.Dir); err != nil {
+			return false
+		}
+	}
+	values := d.user.Get().Values
+	if values.DefaultAssistantAppID == appID {
+		return true
+	}
+	for _, selected := range values.DefaultAppByResource {
+		if selected == appID {
+			return true
+		}
+	}
+	return false
+}
+
+// shuttingDown reports whether the framework has begun tearing itself down. A
+// stop that races shutdown must not start anything new.
+func (d *Daemon) shuttingDown() bool {
+	select {
+	case <-d.closing:
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcileProviderRuns stops the run of a provider the operator just
+// deselected. Only on-demand providers are stopped: a boot or background app
+// still has its own contract (clock timers and alarms, ring alerts), and a
+// compiled-in app has in-process state a deselection must not discard. A
+// deselected assistant is exactly the on-demand case: it must not keep a
+// microphone turn or a reply alive after it stopped being the selected role.
+func (d *Daemon) reconcileProviderRuns(prev *settings.UserSettings, next settings.UserSettings) {
+	if prev == nil {
+		return
+	}
+	now := make(map[string]bool, len(next.DefaultAppByResource)+1)
+	for _, appID := range next.DefaultAppByResource {
+		now[appID] = true
+	}
+	if next.DefaultAssistantAppID != "" {
+		now[next.DefaultAssistantAppID] = true
+	}
+	before := make(map[string]bool, len(prev.DefaultAppByResource)+1)
+	for _, appID := range prev.DefaultAppByResource {
+		before[appID] = true
+	}
+	if prev.DefaultAssistantAppID != "" {
+		before[prev.DefaultAssistantAppID] = true
+	}
+	for appID := range before {
+		if appID == "" || now[appID] {
+			continue
+		}
+		app, ok := d.reg.Get(appID)
+		if !ok || app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin ||
+			app.Manifest.StartOnBoot || app.Manifest.Background {
+			continue
+		}
+		d.sup.StopApp(appID)
+	}
 }
 
 func (d *Daemon) TriggerAction(appID, actionID string) (string, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -34,8 +35,10 @@ type SystemApp struct {
 	Stop func()
 	// HandleCall answers AppBusService.Call routed through this app's ID.
 	// Request and response frames are protobuf JSON, identical to supervised
-	// apps. Returning a gRPC status preserves its code and message.
-	HandleCall func(ctx context.Context, service, rpc string, request []byte) ([][]byte, error)
+	// apps. A unary method emits one frame; a server-streaming watch may emit
+	// many until the context is cancelled. Returning a gRPC status preserves
+	// its code and message.
+	HandleCall func(ctx context.Context, service, rpc string, request []byte, emit func([]byte) error) error
 	// Action runs a manifest-declared action button.
 	Action func(ctx context.Context, actionID string) error
 }
@@ -153,6 +156,65 @@ func (d *Daemon) stopSystemApp(appID string, app *SystemApp) {
 	if app.Stop != nil {
 		app.Stop()
 	}
+}
+
+// recoverSystemApp fails a built-in run whose internal output stream died and
+// schedules a bounded restart. The next start re-registers the bus endpoint,
+// reopens presentations/captures and publishes a fresh READY run.
+func (d *Daemon) recoverSystemApp(appID string) {
+	if !d.sup.FailBuiltin(d.SystemAppRunID(appID), "internal output stream failed") {
+		return
+	}
+	d.scheduleSystemRestart(appID)
+}
+
+func (d *Daemon) scheduleSystemRestart(appID string) {
+	d.systemFailMu.Lock()
+	if d.systemRestarting == nil {
+		d.systemRestarting = map[string]bool{}
+	}
+	if d.systemFailures == nil {
+		d.systemFailures = map[string]int{}
+	}
+	if d.systemRestarting[appID] {
+		d.systemFailMu.Unlock()
+		return
+	}
+	d.systemRestarting[appID] = true
+	failures := d.systemFailures[appID]
+	d.systemFailures[appID] = failures + 1
+	delay := time.Duration(0)
+	if failures > 0 {
+		exp := failures
+		if exp > 5 {
+			exp = 5
+		}
+		delay = time.Duration(1<<uint(exp-1)) * time.Second
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+	}
+	d.systemFailMu.Unlock()
+
+	time.AfterFunc(delay, func() {
+		d.systemFailMu.Lock()
+		delete(d.systemRestarting, appID)
+		d.systemFailMu.Unlock()
+		if d.ctx.Err() != nil {
+			return
+		}
+		if _, err := d.startSystemApp(appID); err != nil {
+			d.logs.Errorf(appID, "", "system app restart failed: %v", err)
+			d.scheduleSystemRestart(appID)
+		}
+	})
+}
+
+// markSystemHealthy clears the restart backoff after a successful attach.
+func (d *Daemon) markSystemHealthy(appID string) {
+	d.systemFailMu.Lock()
+	delete(d.systemFailures, appID)
+	d.systemFailMu.Unlock()
 }
 
 // TriggerSystemAction dispatches a manifest action to a compiled-in app.

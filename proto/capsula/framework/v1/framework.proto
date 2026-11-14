@@ -114,6 +114,9 @@ message TouchCapabilities {
   bool coordinates_available = 3;
   bool pressure_available = 4;
   repeated string semantic_gestures = 5;
+  // The panel can deliver a complete key/gesture stream even when raw
+  // coordinates are unavailable (for example the Mini's five gpio keys).
+  bool full_panel_available = 6;
 }
 
 message ResourceInfo {
@@ -175,12 +178,23 @@ message UserSettings {
   // Per display/ring resource: "const" uses display_brightness, "auto"
   // follows the ambient-light sensor. Missing means "const".
   map<string, string> brightness_mode = 11;
-  // Allow new Bluetooth devices to pair while the adapter is not
-  // discoverable. Already-paired devices may connect while powered.
-  bool bluetooth_pairable = 12;
+  // Allow inbound Bluetooth links. Off denies even already-paired devices
+  // while the adapter stays powered for BLE; it also disables discoverability.
+  bool bluetooth_incoming_connections = 15;
+  // Advertise the adapter and accept new devices for discovery, connection and
+  // pairing. True implies bluetooth_incoming_connections; disabling incoming
+  // connections clears this. Already-paired devices may reconnect whenever
+  // incoming connections are enabled, even while hidden.
+  bool bluetooth_discoverable = 16;
+  reserved 12;
+  reserved "bluetooth_pairable";
   // Replay the startup cue on every boot. Off by default; installation plays
   // the cue once regardless of this value.
   bool startup_sound_enabled = 13;
+  // Single DNS label for the mDNS advertisement, reachable as
+  // <hostname>.local. Persisted by internal/settings; applied by the
+  // discovery manager at startup and on change. Empty is invalid.
+  string hostname = 14;
 }
 // Only controls how long the microphone-MUTED visual indication remains.
 // It does not change the mute state or capture/watchdog indication policy.
@@ -650,7 +664,12 @@ message AssistantActivation {
   string matched_model_id = 3;
   uint64 monotonic_time_ns = 4;
   uint64 expires_monotonic_ns = 5;
-  // In hold-to-talk mode, the release arrives as a separate AppBus event.
+  // Set for touch activations when the device is in hold-to-talk mode: the
+  // release arrives as a separate AssistantInputReleased AppBus event and ends
+  // input. It is false in summon mode, where the turn may outlive the hold.
+  // Carried on the activation so an assistant does not need the
+  // administrator-only device settings surface to know this per-turn rule.
+  bool hold_to_talk = 6;
 }
 message AssistantInputReleased { string activation_id = 1; }
 message BeginConversationRequest { string activation_id = 1; }
@@ -1070,10 +1089,15 @@ service SystemService {
   // Bluetooth adapter state and discoverability. Present=false when the
   // backend cannot drive or observe an adapter.
   rpc GetBluetoothStatus(GetBluetoothStatusRequest) returns (BluetoothStatus);
+  // Discoverability advertises the adapter and permits new devices to find,
+  // connect and pair. It implies incoming connections; disabling incoming
+  // connections also disables discoverability.
   rpc SetBluetoothDiscoverable(SetBluetoothDiscoverableRequest) returns (BluetoothStatus);
-  // Pairable allows new devices to pair while the adapter is not
-  // discoverable. Already-paired devices may always connect while powered.
-  rpc SetBluetoothPairable(SetBluetoothPairableRequest) returns (BluetoothStatus);
+  // Incoming connections controls inbound links. Off denies even paired
+  // devices while the adapter remains powered for BLE. Turning it off also
+  // disables discoverability.
+  rpc SetBluetoothIncomingConnections(SetBluetoothIncomingConnectionsRequest)
+      returns (BluetoothStatus);
   // Paired-device management is a local administrator operation: the daemon
   // rejects it for supervised application callers.
   rpc ListPairedDevices(ListPairedDevicesRequest) returns (ListPairedDevicesResponse);
@@ -1088,14 +1112,21 @@ service SystemService {
 }
 message GetBluetoothStatusRequest {}
 message SetBluetoothDiscoverableRequest { bool discoverable = 1; }
-message SetBluetoothPairableRequest { bool pairable = 1; }
+message SetBluetoothIncomingConnectionsRequest { bool incoming_connections = 1; }
 message BluetoothStatus {
   bool present = 1;
   bool powered = 2;
   bool discoverable = 3;
   string adapter = 4;   // e.g. hci0
   string detail = 5;    // backend explanation, never a false success
-  bool pairable = 6;
+  reserved 6;
+  reserved "pairable";
+  // Observed BR/EDR connectability from the public Linux Bluetooth management
+  // API. False with powered=true is the truthful "radio on, inbound denied"
+  // state; it is never inferred from the discoverable property.
+  bool incoming_connections = 7;
+  // Advertised adapter name (BlueZ Adapter1.Alias fallback Name).
+  string name = 8;
 }
 message ListPairedDevicesRequest {}
 message PairedDevice {

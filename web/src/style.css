@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #app {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-base-200 text-base-content antialiased;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+  }
+
+  dialog::backdrop {
+    @apply bg-neutral/40;
+  }
+}
+
+@layer components {
+  /* The appliance reports ids, versions and addresses; tabular figures keep
+     them from jittering between snapshots. */
+  .data-value {
+    @apply font-mono text-sm tabular-nums break-all;
+  }
+}

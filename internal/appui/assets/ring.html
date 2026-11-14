@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ring settings</title>
+<style>
+  .palette-grid { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr); gap: 14px; }
+  @media (max-width: 620px) { .palette-grid { grid-template-columns: 1fr; } }
+  .stop-list { display: flex; flex-direction: column; gap: 6px; }
+  .stop-row input[type="number"] { width: 100%; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .presets button { font-weight: 500; }
+  .gradient-preview { min-height: 42px; }
+  .range-value { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main class="capsula-ui" id="app">
+  <div class="spread">
+    <div>
+      <h2>Ring appearance</h2>
+      <small>Effect, palette, brightness and speed are the ring app’s own settings; changes apply to its normal ring presentation.</small>
+    </div>
+    <span class="pill" id="connection">waiting for host…</span>
+  </div>
+
+  <div id="notice" class="notice err" hidden></div>
+
+  <section class="card" style="margin-top: 12px">
+    <div class="stack">
+      <div class="row">
+        <div class="field">
+          <label for="effect">Effect</label>
+          <select id="effect" data-immediate="effect"></select>
+        </div>
+        <div class="field grow">
+          <label for="brightness">Effect brightness <span class="range-value" id="brightness-value">100%</span></label>
+          <input id="brightness" type="range" min="0" max="100" step="1" data-immediate="brightness">
+        </div>
+        <div class="field grow">
+          <label for="speed">Speed <span class="range-value" id="speed-value">1.0×</span></label>
+          <input id="speed" type="range" min="0.1" max="4" step="0.1" data-immediate="speed">
+        </div>
+      </div>
+      <small id="effect-hint">A static effect shows one solid colour; other effects sample the palette while animating.</small>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="spread">
+      <div>
+        <h3>Palette</h3>
+        <small id="palette-mode">Canonical gradient or solid colour.</small>
+      </div>
+      <span class="pill mono wrap" id="palette-current"></span>
+    </div>
+
+    <div id="solid-editor" class="row" style="margin-top: 12px" hidden>
+      <div class="field">
+        <label for="solid-color">Solid colour</label>
+        <input id="solid-color" type="color" value="#FFFFFF">
+      </div>
+      <button type="button" id="save-solid">Save solid colour</button>
+      <small class="grow">Saving replaces the palette with this single colour; it stays valid if you switch back to an animated effect.</small>
+    </div>
+
+    <div id="gradient-editor" class="palette-grid" style="margin-top: 12px">
+      <div class="stack">
+        <div class="gradient-preview" id="gradient-preview" aria-hidden="true"></div>
+        <div class="field">
+          <label for="angle">Angle <span class="range-value" id="angle-value">90°</span></label>
+          <input id="angle" type="range" min="0" max="360" step="1">
+        </div>
+        <div class="stop-list" id="stops"></div>
+        <div class="actions">
+          <button type="button" class="secondary" id="add-stop">Add stop</button>
+          <button type="button" id="save-gradient">Save gradient</button>
+        </div>
+      </div>
+      <div class="stack">
+        <h3>Presets</h3>
+        <div class="presets" id="presets">
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)">Aurora</button>
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)">Ocean</button>
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF7828 0%, #FF3C96 100%)">Sunset</button>
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF2814 0%, #FFAA14 100%)">Ember</button>
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FFFFFF 0%, #969696 100%)">Mono</button>
+          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF46D2 0%, #46C8FF 100%)">Spectrum</button>
+        </div>
+        <small>Presets serialize to the same canonical gradient as a custom edit; they are not stored by name. A preset applies immediately.</small>
+        <div class="field">
+          <label for="palette-raw">Raw palette value</label>
+          <textarea id="palette-raw" spellcheck="false" aria-describedby="raw-hint"></textarea>
+          <small id="raw-hint">Advanced editing for a canonical value. Invalid values are rejected by the app.</small>
+          <button type="button" class="secondary" id="save-raw">Save raw palette</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="stack">
+      <label class="check"><input type="checkbox" id="schedule-enabled"> <span>Light the ring only during an active window</span></label>
+      <div class="row">
+        <div class="field">
+          <label for="schedule-start">Active from</label>
+          <input id="schedule-start" type="time" step="60">
+        </div>
+        <div class="field">
+          <label for="schedule-end">Active until</label>
+          <input id="schedule-end" type="time" step="60">
+        </div>
+        <button type="button" id="save-schedule">Save window</button>
+      </div>
+      <small>HH:MM in the device timezone. The window may cross midnight; equal start and end mean all day. Outside the window the app presents a blank frame; volume, mute and alert indications still use the ring.</small>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const api = window.CapsulaUI;
+  const values = new Map();
+  let scheduleDirty = { start: false, end: false };
+  let paletteDirty = false;
+  let paletteParsed = true;
+  let gradient = { angle: 90, stops: [{ color: '#00DCB4', pos: 0 }, { color: '#5082FF', pos: 100 }] };
+  let pendingDone = new Map();
+
+  const $ = (id) => document.getElementById(id);
+  const notice = $('notice');
+  const connection = $('connection');
+
+  function showNotice(text, kind) {
+    notice.hidden = !text;
+    notice.textContent = text || '';
+    notice.className = 'notice ' + (kind || 'err');
+  }
+
+  function schemaDef(key) {
+    const settings = api.schema && Array.isArray(api.schema.settings) ? api.schema.settings : [];
+    return settings.find((s) => s.key === key);
+  }
+
+  function jsonValue(key) {
+    const raw = values.get(key);
+    if (!raw || !raw.hasValue || typeof raw.valueJson !== 'string') {
+      const def = schemaDef(key);
+      if (def && typeof def.defaultValueJson === 'string') {
+        try { return JSON.parse(def.defaultValueJson); } catch (_) { return undefined; }
+      }
+      return undefined;
+    }
+    try { return JSON.parse(raw.valueJson); } catch (_) { return undefined; }
+  }
+
+  function patch(changes, done) {
+    const id = api.patch(changes);
+    if (done && id) pendingDone.set(id, done);
+  }
+
+  api.onState(adopt);
+  api.onResult((result) => {
+    const done = pendingDone.get(result.requestId);
+    pendingDone.delete(result.requestId);
+    if (done) done(result);
+    if (!result.ok) showNotice(result.error || 'The settings update was rejected.');
+    else if (result.message) showNotice(result.message, 'ok');
+  });
+
+  function adopt(state) {
+    if (state && Array.isArray(state.values)) {
+      values.clear();
+      for (const v of state.values) values.set(v.key, v);
+    }
+    if (state && state.schema && Array.isArray(state.schema.settings)) api.schema = state.schema;
+    connection.textContent = 'connected';
+    connection.className = 'pill ok';
+    applyState();
+  }
+
+  function applyState() {
+    populateEffects();
+    const effect = String(jsonValue('effect') || 'breathe');
+    ensureOption('effect', effect);
+    $('effect').value = effect;
+    const brightness = clamp(Number(jsonValue('brightness') ?? 1), 0, 1);
+    const speed = clamp(Number(jsonValue('speed') ?? 1), 0.1, 4);
+    $('brightness').value = String(Math.round(brightness * 100));
+    $('speed').value = String(speed);
+    updateRangeLabels();
+    if (!paletteDirty) {
+      const palette = String(jsonValue('palette') ?? '');
+      $('palette-raw').value = palette;
+      adoptPalette(palette);
+    }
+    $('schedule-enabled').checked = jsonValue('schedule_enabled') === true;
+    if (!scheduleDirty.start) $('schedule-start').value = String(jsonValue('schedule_start') || '22:00');
+    if (!scheduleDirty.end) $('schedule-end').value = String(jsonValue('schedule_end') || '07:00');
+    renderStaticMode();
+  }
+
+  function populateEffects() {
+    const select = $('effect');
+    if (select.options.length) return;
+    const def = schemaDef('effect');
+    const choices = def && Array.isArray(def.choices) && def.choices.length
+      ? def.choices
+      : ['breathe', 'spinner', 'rainbow', 'pulse', 'comet', 'sparkle', 'static'].map((value) => ({ value, label: value }));
+    for (const choice of choices) {
+      const option = document.createElement('option');
+      option.value = choice.value;
+      option.textContent = choice.label || choice.value;
+      select.appendChild(option);
+    }
+  }
+
+  function ensureOption(id, value) {
+    const el = $(id);
+    if (![...el.options].some((o) => o.value === value)) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      el.appendChild(option);
+    }
+  }
+
+  function clamp(n, lo, hi) { return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : lo)); }
+
+  function updateRangeLabels() {
+    $('brightness-value').textContent = $('brightness').value + '%';
+    $('speed-value').textContent = Number($('speed').value).toFixed(1) + '×';
+  }
+
+  // --- palette parsing ------------------------------------------------------
+
+  const SOLID_RE = /^#[0-9a-fA-F]{6}$/;
+  const GRADIENT_RE = /^linear-gradient\(\s*(?:(\d+(?:\.\d+)?)\s*deg\s*)?,\s*([\s\S]+)\)$/i;
+  const STOP_RE = /^(#[0-9a-fA-F]{6})(?:\s+(\d+(?:\.\d+)?)%)?$/;
+
+  function parsePalette(text) {
+    const raw = String(text || '').trim();
+    if (SOLID_RE.test(raw)) {
+      return { kind: 'solid', color: raw.toUpperCase(), raw: raw };
+    }
+    const m = raw.match(GRADIENT_RE);
+    if (!m) throw new Error('Palette must be #RRGGBB or linear-gradient(<angle>deg, #RRGGBB [n%], ...).');
+    const angle = m[1] === undefined ? 90 : Number(m[1]);
+    if (!(angle >= 0 && angle <= 360)) throw new Error('Gradient angle must be between 0 and 360.');
+    const parts = m[2].split(',');
+    if (parts.length < 2 || parts.length > 8) throw new Error('A gradient needs 2 to 8 colour stops.');
+    let last = -1;
+    const stops = parts.map((part) => {
+      const s = part.trim().match(STOP_RE);
+      if (!s) throw new Error('Unsupported gradient stop "' + part.trim() + '": use #RRGGBB with an optional %.');
+      const pos = s[2] === undefined ? null : Number(s[2]);
+      if (pos !== null) {
+        if (!(pos >= 0 && pos <= 100)) throw new Error('Gradient stop positions must be 0 to 100%.');
+        if (pos < last) throw new Error('Gradient stop positions must not decrease.');
+        last = pos;
+      }
+      return { color: s[1].toUpperCase(), pos: pos };
+    });
+    fillPositions(stops);
+    return { kind: 'gradient', angle: angle, stops: stops, raw: raw };
+  }
+
+  function fillPositions(stops) {
+    stops[0].pos ??= 0;
+    stops[stops.length - 1].pos ??= 100;
+    for (let i = 1; i < stops.length - 1; i++) {
+      if (stops[i].pos !== null) continue;
+      let prev = i - 1;
+      while (prev >= 0 && stops[prev].pos === null) prev -= 1;
+      let next = i + 1;
+      while (next < stops.length && stops[next].pos === null) next += 1;
+      const prevPos = prev >= 0 ? stops[prev].pos : 0;
+      const nextPos = next < stops.length ? stops[next].pos : 100;
+      const span = next - prev;
+      stops[i].pos = span > 0 ? Math.round(prevPos + ((nextPos - prevPos) * (i - prev)) / span) : prevPos;
+    }
+    for (const stop of stops) stop.pos = clamp(stop.pos, 0, 100);
+  }
+
+  function gradientText(model) {
+    return 'linear-gradient(' + Math.round(model.angle) + 'deg, ' +
+      model.stops.map((s) => s.color + ' ' + Math.round(s.pos) + '%').join(', ') + ')';
+  }
+
+  function adoptPalette(text) {
+    $('palette-current').textContent = text || '—';
+    try {
+      const model = parsePalette(text);
+      if (model.kind === 'solid') {
+        $('solid-color').value = model.color;
+        gradient = { angle: 90, stops: [{ color: model.color, pos: 0 }, { color: model.color, pos: 100 }] };
+      } else {
+        gradient = { angle: model.angle, stops: model.stops.map((s) => ({ color: s.color, pos: s.pos })) };
+        $('solid-color').value = model.stops[0].color;
+      }
+      $('palette-raw').value = text;
+      $('palette-raw').setCustomValidity('');
+      paletteParsed = true;
+    } catch (err) {
+      $('palette-raw').setCustomValidity(err.message);
+      paletteParsed = false;
+    }
+    renderGradient();
+  }
+
+  function renderGradient() {
+    $('angle').value = String(Math.round(gradient.angle));
+    $('angle-value').textContent = Math.round(gradient.angle) + '°';
+    const preview = gradientText(gradient);
+    $('gradient-preview').style.background = preview;
+    const list = $('stops');
+    list.textContent = '';
+    gradient.stops.forEach((stop, index) => {
+      const row = document.createElement('div');
+      row.className = 'stop-row';
+      const color = document.createElement('input');
+      color.type = 'color';
+      color.value = stop.color;
+      color.setAttribute('aria-label', 'Stop ' + (index + 1) + ' colour');
+      color.addEventListener('input', () => {
+        stop.color = color.value.toUpperCase();
+        paletteDirty = true;
+        renderGradientPreviewOnly();
+      });
+      const pos = document.createElement('input');
+      pos.type = 'number';
+      pos.min = '0';
+      pos.max = '100';
+      pos.step = '1';
+      pos.value = String(Math.round(stop.pos));
+      pos.setAttribute('aria-label', 'Stop ' + (index + 1) + ' position percent');
+      pos.addEventListener('input', () => {
+        stop.pos = clamp(Number(pos.value), 0, 100);
+        paletteDirty = true;
+        renderGradientPreviewOnly();
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'danger';
+      remove.textContent = 'Remove';
+      remove.disabled = gradient.stops.length <= 2;
+      remove.addEventListener('click', () => {
+        if (gradient.stops.length <= 2) return;
+        gradient.stops.splice(index, 1);
+        paletteDirty = true;
+        renderGradient();
+      });
+      row.append(color, pos, remove);
+      list.appendChild(row);
+    });
+  }
+
+  function renderGradientPreviewOnly() {
+    const ok = gradient.stops.every((s, i, all) => i === 0 || s.pos >= all[i - 1].pos);
+    if (!ok) {
+      showNotice('Gradient stop positions must not decrease.');
+      return;
+    }
+    showNotice('');
+    const preview = gradientText(gradient);
+    $('gradient-preview').style.background = preview;
+    $('palette-current').textContent = preview;
+  }
+
+  $('angle').addEventListener('input', () => {
+    gradient.angle = clamp(Number($('angle').value), 0, 360);
+    paletteDirty = true;
+    renderGradientPreviewOnly();
+  });
+  $('add-stop').addEventListener('click', () => {
+    if (gradient.stops.length >= 8) {
+      showNotice('A gradient can have at most 8 stops.');
+      return;
+    }
+    const last = gradient.stops[gradient.stops.length - 1];
+    gradient.stops.push({ color: last.color, pos: Math.min(100, Math.round(last.pos)) });
+    paletteDirty = true;
+    renderGradient();
+  });
+
+  $('save-gradient').addEventListener('click', () => {
+    if (!paletteParsed) {
+      showNotice('The stored raw palette cannot be represented here; edit and save the raw value instead.');
+      return;
+    }
+    const ok = gradient.stops.every((s, i, all) => i === 0 || s.pos >= all[i - 1].pos);
+    if (!ok) {
+      showNotice('Gradient stop positions must not decrease.');
+      return;
+    }
+    savePalette(gradientText(gradient));
+  });
+
+  $('save-solid').addEventListener('click', () => savePalette($('solid-color').value.toUpperCase()));
+
+  $('save-raw').addEventListener('click', () => {
+    const raw = $('palette-raw').value.trim();
+    try { parsePalette(raw); } catch (err) { showNotice(err.message); return; }
+    savePalette(raw);
+  });
+
+  function savePalette(value) {
+    patch([{ key: 'palette', valueJson: JSON.stringify(value) }], (result) => {
+      if (!result.ok) return;
+      paletteDirty = false;
+      adoptPalette(value);
+    });
+  }
+
+  document.querySelectorAll('[data-preset]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const value = button.dataset.preset;
+      paletteDirty = false;
+      adoptPalette(value);
+      savePalette(value);
+    });
+  });
+
+  // --- immediate controls ---------------------------------------------------
+
+  let sliderTimers = {};
+  document.querySelectorAll('[data-immediate]').forEach((el) => {
+    const key = el.dataset.immediate;
+    if (el.type === 'range') {
+      el.addEventListener('input', () => {
+        updateRangeLabels();
+        clearTimeout(sliderTimers[key]);
+        sliderTimers[key] = setTimeout(() => {
+          let value;
+          if (key === 'brightness') value = clamp(Number(el.value) / 100, 0, 1);
+          else value = clamp(Number(el.value), 0.1, 4);
+          patch([{ key: key, valueJson: JSON.stringify(value) }], (result) => {
+            if (!result.ok) applyState();
+          });
+        }, 120);
+      });
+    } else {
+      el.addEventListener('change', () => {
+        const value = el.type === 'checkbox' ? !!el.checked : String(el.value);
+        patch([{ key: key, valueJson: JSON.stringify(value) }], (result) => {
+          if (!result.ok) applyState();
+          if (key === 'effect') renderStaticMode();
+        });
+      });
+    }
+  });
+
+  $('schedule-enabled').addEventListener('change', () => {
+    patch([{ key: 'schedule_enabled', valueJson: JSON.stringify(!!$('schedule-enabled').checked) }], (result) => {
+      if (!result.ok) applyState();
+    });
+  });
+
+  $('schedule-start').addEventListener('input', () => { scheduleDirty.start = true; });
+  $('schedule-end').addEventListener('input', () => { scheduleDirty.end = true; });
+
+  $('save-schedule').addEventListener('click', () => {
+    const start = $('schedule-start').value;
+    const end = $('schedule-end').value;
+    const changes = [];
+    if (scheduleDirty.start) {
+      if (!/^\d{2}:\d{2}$/.test(start)) {
+        showNotice('Active-from must be HH:MM.');
+        return;
+      }
+      changes.push({ key: 'schedule_start', valueJson: JSON.stringify(start) });
+    }
+    if (scheduleDirty.end) {
+      if (!/^\d{2}:\d{2}$/.test(end)) {
+        showNotice('Active-until must be HH:MM.');
+        return;
+      }
+      changes.push({ key: 'schedule_end', valueJson: JSON.stringify(end) });
+    }
+    if (!changes.length) return;
+    patch(changes, (result) => {
+      if (!result.ok) return;
+      for (const change of changes) {
+        if (change.key === 'schedule_start') scheduleDirty.start = false;
+        if (change.key === 'schedule_end') scheduleDirty.end = false;
+      }
+    });
+  });
+
+  function renderStaticMode() {
+    const isStatic = $('effect').value === 'static';
+    $('solid-editor').hidden = !isStatic;
+    $('gradient-editor').hidden = isStatic;
+    $('effect-hint').textContent = isStatic
+      ? 'Static shows one solid colour. A solid palette value is ideal; a gradient palette is sampled at its first stop.'
+      : 'Animated effects sample the palette. Brightness and speed apply immediately.';
+    $('palette-mode').textContent = isStatic
+      ? 'Static effect: choose one solid colour.'
+      : 'Canonical gradient with 2–8 stops.';
+  }
+
+  applyState();
+})();
+</script>
+</body>
+</html>

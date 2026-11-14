@@ -4,6 +4,9 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,7 +19,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/assets"
@@ -25,6 +31,7 @@ import (
 	"capsulad/internal/backend/rockchip"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/bus"
+	"capsulad/internal/discovery"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
 	"capsulad/internal/input"
@@ -38,10 +45,12 @@ import (
 	"capsulad/internal/sandbox"
 	"capsulad/internal/settings"
 	"capsulad/internal/supervisor"
+	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
 	"capsulad/internal/wakeword"
 	"capsulad/internal/websecurity"
 	"capsulad/internal/webui"
+	"capsulad/internal/wifi"
 )
 
 type Config struct {
@@ -121,6 +130,7 @@ type Daemon struct {
 	pidPath string
 	dev     backend.Backend
 	bt      bluetooth.Manager
+	wifiMgr wifi.Manager
 
 	resources map[string]*frameworkv1.ResourceInfo
 	resOrder  []string
@@ -132,6 +142,9 @@ type Daemon struct {
 	systemMu       sync.Mutex
 	systemApps     map[string]*SystemApp
 	systemRunMu    sync.Mutex
+	systemFailMu   sync.Mutex
+	systemFailures map[string]int
+	systemRestarting map[string]bool
 	appValidatorMu sync.RWMutex
 	appValidators  map[string]func(values map[string]json.RawMessage) error
 
@@ -143,8 +156,10 @@ type Daemon struct {
 	sup        *supervisor.Supervisor
 	launcher   *sandbox.Launcher
 	bus        *bus.Bus
+	discovery  discovery.Manager
 	audio      *audio.Manager
 	input      *input.Manager
+	sysMedia   *systemMediaController
 	wake       *wakeword.Manager
 	wd         *watchdogSupervisor
 	wakeCancel func()
@@ -159,11 +174,25 @@ type Daemon struct {
 	grpcSrv *grpc.Server
 	grpcLis net.Listener
 	web     *webui.Server
+	// uiChanges invalidates Web UI topics that have no framework watch stream.
+	uiChanges *uichanges.Hub
+
+	// internalToken proves a caller is a connection the daemon itself opened
+	// (Web UI backend and compiled-in system apps). It is minted per boot and
+	// never leaves this process, so supervised apps cannot reach private
+	// system-app services over the app bus.
+	internalToken string
 
 	invMu       sync.Mutex
 	invocations map[string]*invocationRecord
 	pending     map[string][]*invocationRecord
 	lastSel     map[string]string
+
+	// activations records framework-issued assistant activations so microphone
+	// pre-roll is attached only to a real activation delivered to that app, not
+	// to an arbitrary ID supplied by any caller.
+	actMu       sync.Mutex
+	activations map[string]activationGrant
 
 	runMu   sync.Mutex
 	runSubs map[int]chan supervisor.Run
@@ -188,18 +217,21 @@ type Daemon struct {
 	lastMuted    bool
 	lastApplied  *settings.UserSettings
 
-	btMu          sync.Mutex
-	btInit        bool
-	btPairable    bool
-	btVolume      float64
-	btVolSet      bool
-	btRouteMu     sync.Mutex
-	btRoutes      map[string]string
-	btNative      bool
-	btStreamMu    sync.Mutex
-	btStream      *a2dpStream
-	btStreamGen   uint64
-	btStreamStart bool
+	btMu           sync.Mutex
+	btInit         bool
+	btIncoming     bool
+	btDiscoverable bool
+	btApplyGen     uint64
+	btApplyMu      sync.Mutex
+	btVolume       float64
+	btVolSet       bool
+	btRouteMu      sync.Mutex
+	btRoutes       map[string]string
+	btNative       bool
+	btStreamMu     sync.Mutex
+	btStream       *a2dpStream
+	btStreamGen    uint64
+	btStreamStart  bool
 
 	touchActivation string
 	touchAssistant  string
@@ -286,13 +318,22 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		cancel()
 		return nil, err
 	}
+	internalToken, err := newInternalToken()
+	if err != nil {
+		_ = logs.Close()
+		cancel()
+		return nil, err
+	}
 	d := &Daemon{
 		cfg: cfg, ctx: ctx, cancel: cancel, clock: clock, logs: logs, bootID: ids.New("boot"),
-		prov:        map[string]provenance.Result{},
-		invocations: map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
-		lastSel: map[string]string{},
-		runSubs: map[int]chan supervisor.Run{},
-		closing: make(chan struct{}),
+		internalToken: internalToken,
+		prov:          map[string]provenance.Result{},
+		invocations:   map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
+		activations: map[string]activationGrant{},
+		lastSel:     map[string]string{},
+		runSubs:     map[int]chan supervisor.Run{},
+		closing:     make(chan struct{}),
+		uiChanges:   uichanges.New(),
 	}
 
 	switch cfg.Platform {
@@ -346,6 +387,17 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Platform == "simulator" {
+		d.wifiMgr = wifi.NewSimulator(wifi.SimulatorOptions{Detail: "the simulator has no Wi-Fi radio"})
+	} else if manager, err := wifi.Open(wifi.Config{
+		DataDir: cfg.DataDir, RunDir: cfg.RunDir, Logs: logs, APName: d.wifiAPName,
+		OnChange: func() { d.uiChanges.Publish(uichanges.Wifi) },
+	}); err != nil {
+		logs.Warnf("wifi", "", "unavailable: %v", err)
+		d.wifiMgr = wifi.NewSimulator(wifi.SimulatorOptions{Detail: err.Error()})
+	} else {
+		d.wifiMgr = manager
+	}
 	d.appCfg, err = settings.OpenApps(filepath.Join(cfg.DataDir, "app-settings"), logs, d.manifestSchema)
 	if err != nil {
 		return nil, err
@@ -358,6 +410,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if err := d.websec.Load(); err != nil {
 		return nil, err
 	}
+	d.watchWebCredentials()
 	d.pres = presentations.NewManager(clock, logs, func(resourceID string) {
 		d.router.Recompute(resourceID, "presentation changed")
 	})
@@ -396,7 +449,9 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		OnInvocationResult: d.onInvocationResult,
 		OnActionResult:     d.onActionResult,
 	})
+	d.bus.SetInternalAuthorizer(d.authorizeInternalBusCall)
 	d.sup.SetCallbacks(d.onRunState, d.onRunExit)
+	d.sup.SetRestartPolicy(d.isSelectedDefault)
 	// System apps share the registry, supervisor and app-bus routing table with
 	// supervised packages. They are constructed here, after those exist, and
 	// started by Run before external boot applications.
@@ -409,9 +464,13 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 
 	d.audio = audio.NewManager(ctx, clock, logs, d.dev.Audio(), audio.Options{
 		IndicationActive: d.indicationActive,
+		IndicationCue:    d.audibleMicIndication,
 		WatchdogGraceMS:  5000,
-		WatchdogPollMS:   1000,
+		// Delivery is also checked per chunk; the 250 ms poll bounds how long a
+		// lost indication can keep a capture alive before termination.
+		WatchdogPollMS: 250,
 	})
+	d.sysMedia = newSystemMediaController(d)
 	d.input = input.NewManager(ctx, clock, logs, touchCaps(d.dev.Touch()), d.touchState, input.Handlers{
 		VolumeUp:         func() bool { return d.adjustVolume(5) },
 		VolumeDown:       func() bool { return d.adjustVolume(-5) },
@@ -423,7 +482,11 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		DismissAssistant: func() bool { return d.dismissAssistantTurn() },
 		PrimaryActive:    d.clockPrimaryActive,
 		PrimaryGesture:   d.clockPrimaryGesture,
+		MediaToggle:      d.sysMedia.Toggle,
+		MediaPrevious:    d.sysMedia.Previous,
+		MediaNext:        d.sysMedia.Next,
 	})
+	go d.sysMedia.Run(ctx)
 	d.wake = wakeword.NewManager(ctx, clock, logs, d.wakeModels())
 	d.wake.SetOnFire(d.deliverActivation)
 	d.startWakewordEngine()
@@ -566,16 +629,27 @@ func (d *Daemon) Run() error {
 			}
 		}()
 	}
+	// Register the A2DP sink endpoint before the API or Web UI can expose a
+	// connectable adapter. Pairing settings are applied later, after this
+	// registration, so no source observes a half-initialized adapter.
+	d.initBluetoothAudio()
 	if err := d.startGRPC(); err != nil {
 		return err
+	}
+	d.discovery = discovery.Open(d.logs, string(d.dev.Platform()))
+	if err := d.discovery.Start(d.ctx); err != nil {
+		d.logs.Warnf("mdns", "", "start responder monitor: %v", err)
 	}
 	if d.cfg.WebUIAddr != "" && d.websec.Ready() {
 		tlsCfg, err := d.websec.TLSConfig()
 		if err != nil {
 			d.logs.Errorf("webui", "", "TLS configuration failed: %v", err)
-		} else if web, err := webui.New(d.cfg.WebUIAddr, tlsCfg, d.localClientConn(), d.logs, string(d.dev.Platform()), d.websec); err != nil {
+		} else if web, err := webui.New(d.cfg.WebUIAddr, tlsCfg, d.localClientConn(), d.logs, string(d.dev.Platform()), d.websec, d.discovery, d.uiChanges); err != nil {
 			d.logs.Errorf("webui", "", "init failed: %v", err)
 		} else {
+			web.Apps = d.reg
+			web.Wifi = d.wifiMgr
+			web.Wakeword = d.wake
 			d.web = web
 			go func() {
 				if err := web.Run(d.ctx); err != nil {
@@ -591,14 +665,11 @@ func (d *Daemon) Run() error {
 	}
 
 	d.seedDefaults()
-	// Register the A2DP sink endpoint and start Bluetooth audio before applying
-	// pairable/volume settings, so no source can observe a half-initialized
-	// adapter and the settings pass never races endpoint registration.
-	d.initBluetoothAudio()
 	d.applySettings(d.user.Get())
 	d.maybePlayStartupCue()
 	d.startSystemApps()
 	d.startBootApps()
+	go d.runWifi()
 	go d.watchBluetooth()
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
@@ -651,6 +722,7 @@ func (d *Daemon) startGRPC() error {
 func (d *Daemon) localClientConn() *grpc.ClientConn {
 	conn, err := grpc.NewClient("passthrough:///capsulad",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(internalTokenAuth{token: d.internalToken}),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "unix", d.cfg.SocketPath)
@@ -660,6 +732,83 @@ func (d *Daemon) localClientConn() *grpc.ClientConn {
 		panic(err)
 	}
 	return conn
+}
+
+// internalTokenKey carries the daemon's per-boot internal-caller proof. Only
+// conns created by localClientConn attach it; it is not a user credential and
+// is never written to disk or logs.
+const internalTokenKey = "capsula-internal-token"
+
+type internalTokenAuth struct{ token string }
+
+func (a internalTokenAuth) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{internalTokenKey: a.token}, nil
+}
+
+// RequireTransportSecurity is false because the framework socket is a local
+// Unix socket with filesystem permissions, not a network transport.
+func (internalTokenAuth) RequireTransportSecurity() bool { return false }
+
+func newInternalToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate internal caller token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// isInternalPeer reports whether ctx carries the current per-boot token. The
+// comparison is constant time; a stale token from a previous daemon process is
+// rejected even if the caller somehow learned it.
+func (d *Daemon) isInternalPeer(ctx context.Context) bool {
+	if d.internalToken == "" {
+		return false
+	}
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return false
+	}
+	want := []byte(d.internalToken)
+	for _, v := range md.Get(internalTokenKey) {
+		if subtle.ConstantTimeCompare([]byte(v), want) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// authorizeInternalBusCall gates routed calls to compiled-in system-app
+// targets. A service the target app publicly declares through its manifest
+// equivalent (registry interfaces) is reachable exactly like an installed
+// app's declared interface; anyone can discover it through
+// AppInterfaceService. Undeclared services remain denied, and caller identity
+// is still resolved by the bus from the run ID and socket peer credentials.
+func (d *Daemon) authorizeInternalBusCall(ctx context.Context, targetAppID, service string) error {
+	if d.isInternalPeer(ctx) {
+		return nil
+	}
+	if app, ok := d.reg.Get(targetAppID); ok {
+		if _, declared := app.InterfacesFor(service); declared {
+			return nil
+		}
+	}
+	d.logs.Warnf("bus", "", "denied undeclared app-bus target %s/%s from an application connection", targetAppID, service)
+	return status.Error(codes.PermissionDenied, "this app-bus service is not exposed to application callers")
+}
+
+// isSupervisedPID reports whether pid belongs to an external supervised run.
+// Compiled-in runs share the daemon's PID and are therefore never matched;
+// their callers prove identity with the internal token instead.
+func (d *Daemon) isSupervisedPID(pid int) bool {
+	if pid <= 0 || pid == os.Getpid() || d.sup == nil {
+		return false
+	}
+	for _, run := range d.sup.List("") {
+		if !run.Virtual && run.PID == pid {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) shutdown() {
@@ -683,7 +832,14 @@ func (d *Daemon) shutdown() {
 		d.audio.Close()
 		d.wake.Close()
 		d.input.Close()
+		d.sysMedia.Close()
+		if d.discovery != nil {
+			_ = d.discovery.Close()
+		}
 		d.bus.Close()
+		if d.wifiMgr != nil {
+			_ = d.wifiMgr.Close()
+		}
 		d.stopBluetoothStream()
 		d.resetBluetoothRoutes()
 		if d.bt != nil {
@@ -741,9 +897,12 @@ func (d *Daemon) buildResources() {
 			Routing:   frameworkv1.ResourceRouting_ROUTING_DEFAULT_WITH_CAPTURE,
 			Available: true, BackendName: "backend.touch",
 			Details: &frameworkv1.ResourceInfo_Touch{Touch: &frameworkv1.TouchCapabilities{
-				PartialGesturesAvailable: caps.PartialGestures, FullRawAvailable: caps.FullRaw,
-				CoordinatesAvailable: caps.Coordinates, PressureAvailable: caps.Pressure,
-				SemanticGestures: append([]string(nil), caps.SemanticGestures...),
+				PartialGesturesAvailable: caps.PartialGestures,
+				FullRawAvailable:         caps.FullRaw,
+				FullPanelAvailable:       caps.FullPanel,
+				CoordinatesAvailable:     caps.Coordinates,
+				PressureAvailable:        caps.Pressure,
+				SemanticGestures:         append([]string(nil), caps.SemanticGestures...),
 			}},
 		})
 	}

@@ -1,10 +1,15 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
+	"capsulad/internal/grpcpeer"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"
 )
@@ -18,6 +23,42 @@ import (
 // privileged shortcut that bypasses those checks. This is deliberately not a
 // wrapper around private output writes: the single physical writer remains
 // outputLoop.
+
+// applicationCaller reports whether the caller is an application, even when its
+// run record has already disappeared (a crashed or disconnected process that
+// keeps the socket open). A live run supplies its app ID; otherwise the
+// sandbox UID or supervised PID still identifies the connection as an app.
+func (d *Daemon) applicationCaller(ctx context.Context) (appID string, isApp bool) {
+	if appID, _, ok := d.callerIdentity(ctx); ok {
+		return appID, true
+	}
+	if creds := grpcpeer.FromContext(ctx); creds.OK {
+		if creds.UID >= d.cfg.SandboxUIDBase || d.isSupervisedPID(creds.PID) {
+			return "", true
+		}
+	}
+	return "", false
+}
+
+// requireAppScope scopes application-owned state: a local administrator may
+// address any installed app, while a supervised app may address only itself.
+// A connection that is recognizably an app but whose run is gone cannot fall
+// back to administrator access.
+func (d *Daemon) requireAppScope(ctx context.Context, targetAppID string) error {
+	callerApp, isApp := d.applicationCaller(ctx)
+	if !isApp {
+		return d.requireAdministrativeCaller(ctx, "applications may only access their own state")
+	}
+	if callerApp == "" {
+		d.logs.Warnf("daemon", "", "denied foreign app state for a connection whose run is not live")
+		return status.Error(codes.PermissionDenied, "application run is not live")
+	}
+	if callerApp != targetAppID {
+		d.logs.Warnf("daemon", callerApp, "denied cross-application access to %s", targetAppID)
+		return status.Error(codes.PermissionDenied, "applications may only access their own state")
+	}
+	return nil
+}
 
 // appRunOwns reports whether appID/runID identify a live supervised or
 // compiled-in run.
@@ -38,6 +79,12 @@ func (d *Daemon) openAppPresentation(appID, runID, resourceID string) (*presenta
 		return nil, fmt.Errorf("resource %s does not accept presentations", resourceID)
 	}
 	if appID == routing.SystemAppID {
+		// Framework-owned presentations carry no run. A supervised package
+		// that squats the reserved app ID always has a run ID and must not
+		// inherit the framework's bypass.
+		if runID != "" {
+			return nil, fmt.Errorf("run %s cannot use the framework identity", runID)
+		}
 		return d.pres.Open(resourceID, appID, "system", kind), nil
 	}
 	if !d.appRunOwns(appID, runID) {
@@ -52,6 +99,9 @@ func (d *Daemon) openAppPresentation(appID, runID, resourceID string) (*presenta
 func (d *Daemon) acquireAppCapture(appID, runID, resourceID, presentationID string, mode routing.TouchMode) (*routing.Capture, error) {
 	if appID != routing.SystemAppID && !d.appRunOwns(appID, runID) {
 		return nil, fmt.Errorf("run %s does not belong to application %s", runID, appID)
+	}
+	if appID == routing.SystemAppID && runID != "" {
+		return nil, fmt.Errorf("run %s cannot use the framework identity", runID)
 	}
 	if _, ok := d.resources[resourceID]; !ok {
 		return nil, fmt.Errorf("unknown resource %s", resourceID)
@@ -73,6 +123,9 @@ func (d *Daemon) acquireAppCapture(appID, runID, resourceID, presentationID stri
 func (d *Daemon) openAppPlayback(appID, runID, endpointID string, format backend.AudioFormat, conversationID string) (*audio.Playback, error) {
 	if appID != routing.SystemAppID && !d.appRunOwns(appID, runID) {
 		return nil, fmt.Errorf("run %s does not belong to application %s", runID, appID)
+	}
+	if appID == routing.SystemAppID && runID != "" {
+		return nil, fmt.Errorf("run %s cannot use the framework identity", runID)
 	}
 	if endpointID == "" {
 		return nil, fmt.Errorf("audio endpoint is required")

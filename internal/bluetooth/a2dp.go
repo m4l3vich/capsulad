@@ -100,91 +100,157 @@ func (e *sbcEndpoint) Config() []byte {
 }
 
 // RegisterA2DPSink exports and registers the endpoint with the adapter.
+//
+// Registration is ordered deliberately: the adapter is powered first (BlueZ
+// rejects RegisterEndpoint while it is off) but connectability is applied only
+// after the Audio Sink SEP exists, and only if the persisted incoming policy
+// enables it. Otherwise a paired source can make its first incoming connection
+// in the window where the adapter is connectable and has no audio profile, and
+// it does not retry just because the endpoint appears later. The call is
+// idempotent and returns the real registration outcome, so a failure is never
+// reported as an advertised sink.
 func (b *BlueZ) RegisterA2DPSink(ctx context.Context) error {
-	if err := b.EnsurePowered(ctx); err != nil {
+	b.registrationMu.Lock()
+	defer b.registrationMu.Unlock()
+	if err := b.ensurePowered(ctx); err != nil {
 		return err
 	}
-	b.endpointMu.Lock()
-	registered, armed := b.endpoint != nil, b.armed
-	b.endpointMu.Unlock()
-	if registered {
-		// The object is exported already; only BlueZ's registration may be
-		// missing after a service restart or adapter power cycle.
-		if !armed {
-			b.rearmA2DP(ctx)
-		}
-		return nil
+	if err := b.registerA2DPEndpoint(ctx); err != nil {
+		return err
 	}
+	// Re-apply the current incoming policy; this is the first point at which
+	// page scan is safe for a paired source.
+	if err := b.applyConnectablePolicy(ctx); err != nil {
+		return err
+	}
+	return nil
+}
 
-	ep := &sbcEndpoint{b: b}
-	if err := b.conn.Export(ep, a2dpEndpointID, "org.bluez.MediaEndpoint1"); err != nil {
-		return fmt.Errorf("export A2DP endpoint: %w", err)
-	}
+// registerA2DPEndpoint exports the endpoint object once and registers it
+// against the current adapter. BlueZ discards registrations on a service
+// restart or adapter power cycle while our exported object survives, so the
+// object is reused and only the D-Bus registration is repeated.
+func (b *BlueZ) registerA2DPEndpoint(ctx context.Context) error {
 	adapter := b.adapterPath()
 	if adapter == "" {
 		return ErrUnavailable
 	}
-	if err := b.conn.Object(bluezService, adapter).CallWithContext(ctx,
-		"org.bluez.Media1.RegisterEndpoint", 0, a2dpEndpointID, a2dpEndpointProps()).Err; err != nil && !isAlreadyExists(err) {
+	b.endpointMu.Lock()
+	ep := b.endpoint
+	path := b.endpointPath
+	b.endpointMu.Unlock()
+	if ep == nil {
+		ep = &sbcEndpoint{b: b}
+		if err := b.conn.Export(ep, a2dpEndpointID, "org.bluez.MediaEndpoint1"); err != nil {
+			return fmt.Errorf("export A2DP endpoint: %w", err)
+		}
+		path = a2dpEndpointID
+		b.endpointMu.Lock()
+		b.endpoint = ep
+		b.endpointPath = path
+		b.endpointMu.Unlock()
+	}
+	if path == "" {
+		return fmt.Errorf("export A2DP endpoint: empty object path")
+	}
+	// Capture the generation before the D-Bus round trip. A BlueZ restart or
+	// adapter power cycle that lands during the call advances it, and the
+	// reply must not arm an endpoint BlueZ has already discarded.
+	gen := b.endpointGeneration()
+	err := b.callRegisterEndpoint(ctx, adapter, path)
+	if err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("register A2DP endpoint: %w", err)
 	}
-	b.endpointMu.Lock()
-	b.endpoint = ep
-	b.endpointPath = a2dpEndpointID
-	b.armed = true
-	b.endpointMu.Unlock()
+	if !b.armA2DP(gen) {
+		return errors.New("A2DP endpoint changed generation during registration")
+	}
 	return nil
 }
 
+// callRegisterEndpoint is the single org.bluez.Media1.RegisterEndpoint call
+// site. Tests replace the hook; production goes straight to BlueZ.
+func (b *BlueZ) callRegisterEndpoint(ctx context.Context, adapter, path dbus.ObjectPath) error {
+	if b.registerEndpoint != nil {
+		return b.registerEndpoint(ctx, adapter, path)
+	}
+	return b.conn.Object(bluezService, adapter).CallWithContext(ctx,
+		"org.bluez.Media1.RegisterEndpoint", 0, path, a2dpEndpointProps()).Err
+}
+
 // SinkRegistered reports whether the sink endpoint is currently registered with
-// the adapter. It lets the daemon avoid tearing down a working audio owner when
-// the persisted pairing setting is applied.
+// the adapter. Readiness is generation-scoped: a registration is only valid
+// for the adapter power state it was armed under. After a BlueZ restart or an
+// adapter power cycle the flag reports false until a re-arm succeeds.
 func (b *BlueZ) SinkRegistered() bool {
 	b.endpointMu.Lock()
 	defer b.endpointMu.Unlock()
-	return b.endpoint != nil && b.armed
+	return b.endpoint != nil && b.armed && b.armedGen == b.endpointGen
 }
 
-// markA2DPUnarmed records that BlueZ no longer holds the registration, e.g.
-// after a service restart.
+// markA2DPUnarmed records that BlueZ may no longer hold the registration, e.g.
+// after a service restart or adapter power cycle. It advances the endpoint
+// generation unconditionally so a reply from any registration attempt that was
+// in flight when the invalidation happened cannot mark the endpoint ready.
 func (b *BlueZ) markA2DPUnarmed() {
 	b.endpointMu.Lock()
 	b.armed = false
+	b.armedGen = 0
+	b.endpointGen++
 	b.endpointMu.Unlock()
 }
 
 // rearmA2DP registers the exported endpoint again after BlueZ restarted or the
 // adapter was power-cycled; either event discards the registration while our
-// exported D-Bus object survives. AlreadyExists means it is advertised already.
-func (b *BlueZ) rearmA2DP(ctx context.Context) {
+// exported D-Bus object survives. It returns the real error: callers must not
+// assume readiness from a failed re-arm. An adapter that is not powered cannot
+// hold an endpoint, so it is left for reconcilePower to re-arm after powering.
+func (b *BlueZ) rearmA2DP(ctx context.Context) error {
+	b.registrationMu.Lock()
+	defer b.registrationMu.Unlock()
 	b.endpointMu.Lock()
 	registered := b.endpoint != nil
 	path := b.endpointPath
 	b.endpointMu.Unlock()
 	if !registered || path == "" {
-		return
+		return nil
 	}
-	adapter := b.adapterPath()
-	if adapter == "" {
-		return
+	b.mu.Lock()
+	ready := b.adapter != "" && b.status.Present && b.status.Powered
+	b.mu.Unlock()
+	if !ready {
+		return nil
 	}
-	err := b.conn.Object(bluezService, adapter).CallWithContext(ctx,
-		"org.bluez.Media1.RegisterEndpoint", 0, path, a2dpEndpointProps()).Err
-	if err == nil {
-		b.markA2DPArmed()
-		return
-	}
-	if isAlreadyExists(err) {
-		b.markA2DPArmed()
-		return
-	}
-	// The next BlueZ signal retries; a missing adapter is not an error here.
+	return b.registerA2DPEndpoint(ctx)
 }
 
-func (b *BlueZ) markA2DPArmed() {
+func (b *BlueZ) endpointGeneration() uint64 {
 	b.endpointMu.Lock()
+	defer b.endpointMu.Unlock()
+	return b.endpointGen
+}
+
+// armA2DP marks the endpoint registered only while the generation captured
+// before the D-Bus call is still current. A registration reply that raced a
+// BlueZ restart or adapter power cycle is not readiness.
+func (b *BlueZ) armA2DP(gen uint64) bool {
+	b.endpointMu.Lock()
+	defer b.endpointMu.Unlock()
+	if b.endpoint == nil || gen != b.endpointGen {
+		return false
+	}
 	b.armed = true
-	b.endpointMu.Unlock()
+	b.armedGen = gen
+	return true
+}
+
+// endpointRegistrationInvalidated reports whether a refresh observed an
+// adapter identity or power transition. BlueZ discards endpoint registrations
+// on any power change (off discards them; on requires a fresh registration),
+// so readiness must not survive it.
+func endpointRegistrationInvalidated(prevAdapter, adapter dbus.ObjectPath, prev, next Status) bool {
+	return prevAdapter != adapter ||
+		prev.Present != next.Present ||
+		prev.Powered != next.Powered
 }
 
 // a2dpEndpointProps is the local SBC sink capability advertised to BlueZ:
@@ -310,11 +376,15 @@ func byteValue(v dbus.Variant) byte {
 }
 
 func (b *BlueZ) unregisterA2DP() {
+	b.registrationMu.Lock()
+	defer b.registrationMu.Unlock()
 	b.endpointMu.Lock()
 	path := b.endpointPath
 	b.endpointPath = ""
 	b.endpoint = nil
 	b.armed = false
+	b.armedGen = 0
+	b.endpointGen++
 	b.transport = ""
 	b.endpointMu.Unlock()
 	if path == "" {

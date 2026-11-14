@@ -2518,15 +2518,15 @@ var SensorService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SystemService_GetStatus_FullMethodName                = "/capsula.framework.v1.SystemService/GetStatus"
-	SystemService_GetBluetoothStatus_FullMethodName       = "/capsula.framework.v1.SystemService/GetBluetoothStatus"
-	SystemService_SetBluetoothDiscoverable_FullMethodName = "/capsula.framework.v1.SystemService/SetBluetoothDiscoverable"
-	SystemService_SetBluetoothPairable_FullMethodName     = "/capsula.framework.v1.SystemService/SetBluetoothPairable"
-	SystemService_ListPairedDevices_FullMethodName        = "/capsula.framework.v1.SystemService/ListPairedDevices"
-	SystemService_UnpairDevice_FullMethodName             = "/capsula.framework.v1.SystemService/UnpairDevice"
-	SystemService_GetWebUiSecurity_FullMethodName         = "/capsula.framework.v1.SystemService/GetWebUiSecurity"
-	SystemService_ListUnits_FullMethodName                = "/capsula.framework.v1.SystemService/ListUnits"
-	SystemService_ControlUnit_FullMethodName              = "/capsula.framework.v1.SystemService/ControlUnit"
+	SystemService_GetStatus_FullMethodName                       = "/capsula.framework.v1.SystemService/GetStatus"
+	SystemService_GetBluetoothStatus_FullMethodName              = "/capsula.framework.v1.SystemService/GetBluetoothStatus"
+	SystemService_SetBluetoothDiscoverable_FullMethodName        = "/capsula.framework.v1.SystemService/SetBluetoothDiscoverable"
+	SystemService_SetBluetoothIncomingConnections_FullMethodName = "/capsula.framework.v1.SystemService/SetBluetoothIncomingConnections"
+	SystemService_ListPairedDevices_FullMethodName               = "/capsula.framework.v1.SystemService/ListPairedDevices"
+	SystemService_UnpairDevice_FullMethodName                    = "/capsula.framework.v1.SystemService/UnpairDevice"
+	SystemService_GetWebUiSecurity_FullMethodName                = "/capsula.framework.v1.SystemService/GetWebUiSecurity"
+	SystemService_ListUnits_FullMethodName                       = "/capsula.framework.v1.SystemService/ListUnits"
+	SystemService_ControlUnit_FullMethodName                     = "/capsula.framework.v1.SystemService/ControlUnit"
 )
 
 // SystemServiceClient is the client API for SystemService service.
@@ -2537,10 +2537,14 @@ type SystemServiceClient interface {
 	// Bluetooth adapter state and discoverability. Present=false when the
 	// backend cannot drive or observe an adapter.
 	GetBluetoothStatus(ctx context.Context, in *GetBluetoothStatusRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
+	// Discoverability advertises the adapter and permits new devices to find,
+	// connect and pair. It implies incoming connections; disabling incoming
+	// connections also disables discoverability.
 	SetBluetoothDiscoverable(ctx context.Context, in *SetBluetoothDiscoverableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
-	// Pairable allows new devices to pair while the adapter is not
-	// discoverable. Already-paired devices may always connect while powered.
-	SetBluetoothPairable(ctx context.Context, in *SetBluetoothPairableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
+	// Incoming connections controls inbound links. Off denies even paired
+	// devices while the adapter remains powered for BLE. Turning it off also
+	// disables discoverability.
+	SetBluetoothIncomingConnections(ctx context.Context, in *SetBluetoothIncomingConnectionsRequest, opts ...grpc.CallOption) (*BluetoothStatus, error)
 	// Paired-device management is a local administrator operation: the daemon
 	// rejects it for supervised application callers.
 	ListPairedDevices(ctx context.Context, in *ListPairedDevicesRequest, opts ...grpc.CallOption) (*ListPairedDevicesResponse, error)
@@ -2591,10 +2595,10 @@ func (c *systemServiceClient) SetBluetoothDiscoverable(ctx context.Context, in *
 	return out, nil
 }
 
-func (c *systemServiceClient) SetBluetoothPairable(ctx context.Context, in *SetBluetoothPairableRequest, opts ...grpc.CallOption) (*BluetoothStatus, error) {
+func (c *systemServiceClient) SetBluetoothIncomingConnections(ctx context.Context, in *SetBluetoothIncomingConnectionsRequest, opts ...grpc.CallOption) (*BluetoothStatus, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BluetoothStatus)
-	err := c.cc.Invoke(ctx, SystemService_SetBluetoothPairable_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, SystemService_SetBluetoothIncomingConnections_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2659,10 +2663,14 @@ type SystemServiceServer interface {
 	// Bluetooth adapter state and discoverability. Present=false when the
 	// backend cannot drive or observe an adapter.
 	GetBluetoothStatus(context.Context, *GetBluetoothStatusRequest) (*BluetoothStatus, error)
+	// Discoverability advertises the adapter and permits new devices to find,
+	// connect and pair. It implies incoming connections; disabling incoming
+	// connections also disables discoverability.
 	SetBluetoothDiscoverable(context.Context, *SetBluetoothDiscoverableRequest) (*BluetoothStatus, error)
-	// Pairable allows new devices to pair while the adapter is not
-	// discoverable. Already-paired devices may always connect while powered.
-	SetBluetoothPairable(context.Context, *SetBluetoothPairableRequest) (*BluetoothStatus, error)
+	// Incoming connections controls inbound links. Off denies even paired
+	// devices while the adapter remains powered for BLE. Turning it off also
+	// disables discoverability.
+	SetBluetoothIncomingConnections(context.Context, *SetBluetoothIncomingConnectionsRequest) (*BluetoothStatus, error)
 	// Paired-device management is a local administrator operation: the daemon
 	// rejects it for supervised application callers.
 	ListPairedDevices(context.Context, *ListPairedDevicesRequest) (*ListPairedDevicesResponse, error)
@@ -2692,8 +2700,8 @@ func (UnimplementedSystemServiceServer) GetBluetoothStatus(context.Context, *Get
 func (UnimplementedSystemServiceServer) SetBluetoothDiscoverable(context.Context, *SetBluetoothDiscoverableRequest) (*BluetoothStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetBluetoothDiscoverable not implemented")
 }
-func (UnimplementedSystemServiceServer) SetBluetoothPairable(context.Context, *SetBluetoothPairableRequest) (*BluetoothStatus, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SetBluetoothPairable not implemented")
+func (UnimplementedSystemServiceServer) SetBluetoothIncomingConnections(context.Context, *SetBluetoothIncomingConnectionsRequest) (*BluetoothStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetBluetoothIncomingConnections not implemented")
 }
 func (UnimplementedSystemServiceServer) ListPairedDevices(context.Context, *ListPairedDevicesRequest) (*ListPairedDevicesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListPairedDevices not implemented")
@@ -2785,20 +2793,20 @@ func _SystemService_SetBluetoothDiscoverable_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SystemService_SetBluetoothPairable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetBluetoothPairableRequest)
+func _SystemService_SetBluetoothIncomingConnections_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetBluetoothIncomingConnectionsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SystemServiceServer).SetBluetoothPairable(ctx, in)
+		return srv.(SystemServiceServer).SetBluetoothIncomingConnections(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SystemService_SetBluetoothPairable_FullMethodName,
+		FullMethod: SystemService_SetBluetoothIncomingConnections_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SystemServiceServer).SetBluetoothPairable(ctx, req.(*SetBluetoothPairableRequest))
+		return srv.(SystemServiceServer).SetBluetoothIncomingConnections(ctx, req.(*SetBluetoothIncomingConnectionsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2913,8 +2921,8 @@ var SystemService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SystemService_SetBluetoothDiscoverable_Handler,
 		},
 		{
-			MethodName: "SetBluetoothPairable",
-			Handler:    _SystemService_SetBluetoothPairable_Handler,
+			MethodName: "SetBluetoothIncomingConnections",
+			Handler:    _SystemService_SetBluetoothIncomingConnections_Handler,
 		},
 		{
 			MethodName: "ListPairedDevices",

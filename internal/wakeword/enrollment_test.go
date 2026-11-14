@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"capsulad/internal/audio"
 	"capsulad/internal/wakeword/oww"
 )
 
@@ -297,7 +298,7 @@ func TestMeasurePolicyRequiresEightyPercent(t *testing.T) {
 }
 
 func TestTrainValidation(t *testing.T) {
-	opts := TrainOptions{ID: "test.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin")}
+	opts := TrainOptions{ID: "test.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin"), InputProcessing: audio.CaptureProcessingTap}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -345,7 +346,7 @@ func TestTrainRejectsDuplicateWordTakes(t *testing.T) {
 		speech[i] = toneTake(0, 16000, 0, float64(6000+i*100))
 	}
 	_, err := Train(context.Background(), Enrollment{Takes: takes, Ambient: rooms, Speech: speech}, TrainOptions{
-		ID: "dup.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin"),
+		ID: "dup.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin"), InputProcessing: audio.CaptureProcessingTap,
 	})
 	if err == nil || !strings.Contains(err.Error(), "duplicates word recording") {
 		t.Fatalf("duplicate takes error = %v", err)
@@ -493,5 +494,69 @@ func TestWarmedLocalNegativeCoversClipOnset(t *testing.T) {
 	}
 	if !onsetChangesContext {
 		t.Fatal("negative training contexts omitted the short clip's onset")
+	}
+}
+
+// The external corpus is an auxiliary training source, not a policy-matching
+// held-out set: calibration and the final certificate must see only the local
+// processed negatives, while CNEG is measured separately.
+func TestEvalNegativeSignalsSeparatesOffPolicyCorpus(t *testing.T) {
+	clf := NewClassifier("word.personal", "word", "en", 1)
+	clf.Threshold = 0.5
+	frames := ContextFrames + 2
+	neg := &Negatives{Streams: []NegativeStream{{
+		Split: "tune", Frames: frames,
+		Embeddings: make([]float32, frames*EmbeddingDim),
+	}}}
+	local := []embeddedSignal{{
+		flat: make([]float32, frames*EmbeddingDim), count: frames,
+		wordStart: -1, wordEnd: -1,
+	}}
+	policy, aux, err := evalNegativeSignals(context.Background(), clf, neg, "tune", local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy) != 1 || len(aux) != 1 {
+		t.Fatalf("policy=%d auxiliary=%d, want 1 and 1", len(policy), len(aux))
+	}
+	if len(policy[0].scores) == 0 || len(aux[0].scores) == 0 {
+		t.Fatal("negative evaluation produced no score windows")
+	}
+}
+
+func TestFinalGateKeepsAuxiliaryVeto(t *testing.T) {
+	localPass := gateMetrics{WordRecordings: 5, Detected: 5, FalseActivations: 0}
+	if err := finalGateError(localPass, gateMetrics{}, gateMetrics{}, 0.5); err != nil {
+		t.Fatalf("clean local and auxiliary metrics rejected: %v", err)
+	}
+	// Auxiliary tune false fires are a separate conservative veto.
+	err := finalGateError(localPass, gateMetrics{FalseActivations: 1}, gateMetrics{}, 0.5)
+	if err == nil || !strings.Contains(err.Error(), "CNEG tune") {
+		t.Fatalf("auxiliary tune false fire did not block installation: %v", err)
+	}
+	// Auxiliary final-test false fires are a hard veto even when local passes.
+	err = finalGateError(localPass, gateMetrics{}, gateMetrics{FalseActivations: 1}, 0.5)
+	if err == nil || !strings.Contains(err.Error(), "CNEG final-test") {
+		t.Fatalf("auxiliary final-test false fire did not block installation: %v", err)
+	}
+	// The local policy gate remains independent and still rejects a local fail.
+	localFail := gateMetrics{WordRecordings: 5, Detected: 3, FalseActivations: 0}
+	if err := finalGateError(localFail, gateMetrics{}, gateMetrics{}, 0.5); err == nil || !strings.Contains(err.Error(), "final test failed") {
+		t.Fatalf("local final-test failure not reported: %v", err)
+	}
+}
+
+func TestTrainOptionsRequireDeclaredProcessing(t *testing.T) {
+	opts := TrainOptions{ID: "test.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin")}
+	if err := opts.check(); err == nil || !strings.Contains(err.Error(), "input processing") {
+		t.Fatalf("missing input processing accepted: %v", err)
+	}
+	opts.InputProcessing = "framework.dsp.v2"
+	if err := opts.check(); err == nil || !strings.Contains(err.Error(), "unsupported input processing") {
+		t.Fatalf("unknown input processing accepted: %v", err)
+	}
+	opts.InputProcessing = audio.CaptureProcessingTap
+	if err := opts.check(); err != nil {
+		t.Fatalf("declared processed policy rejected: %v", err)
 	}
 }

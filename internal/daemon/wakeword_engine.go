@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"capsulad/internal/audio"
 	"capsulad/internal/wakeword"
 )
 
@@ -71,7 +72,9 @@ var trainStageRange = map[string][2]float64{
 // TrainWakeword trains and installs a classifier from the explicitly selected
 // takes. Training and the quality gates run on the device; nothing is uploaded.
 // The installed model is replaced only after Train returns a gated classifier
-// and ctx is still live, so a failed or cancelled run leaves it untouched.
+// and the install's final cancellation check passes, so a failed or cancelled
+// run leaves it untouched. Cancellation that lands after the atomic commit
+// cannot undo the install: that run reports success because the model is live.
 func (d *Daemon) TrainWakeword(ctx context.Context, sel trainSelection, progress func(stage string, fraction float64)) (*wakeword.Classifier, error) {
 	if !wakeTrainMu.TryLock() {
 		return nil, fmt.Errorf("training is already running; wait for it to finish")
@@ -107,7 +110,7 @@ func (d *Daemon) TrainWakeword(ctx context.Context, sel trainSelection, progress
 	}
 	report("load", 0)
 	sel.Display = strings.TrimSpace(sel.Display)
-	en, err := d.loadSelection(sel)
+	en, inputs, err := d.loadSelection(sel)
 	if err != nil {
 		return nil, err
 	}
@@ -121,12 +124,14 @@ func (d *Daemon) TrainWakeword(ctx context.Context, sel trainSelection, progress
 		language = "ru"
 	}
 	clf, err := wakeword.Train(ctx, en, wakeword.TrainOptions{
-		ID:            "word.personal",
-		Display:       sel.Display,
-		Language:      language,
-		Seed:          seed,
-		NegativesPath: d.negativesPath(),
-		Progress:      report,
+		ID:                "word.personal",
+		Display:           sel.Display,
+		Language:          language,
+		Seed:              seed,
+		NegativesPath:     d.negativesPath(),
+		InputProcessing:   inputs.Tap,
+		RawTakesConverted: inputs.RawTakesConverted,
+		Progress:          report,
 	})
 	if err != nil {
 		return nil, err
@@ -136,7 +141,12 @@ func (d *Daemon) TrainWakeword(ctx context.Context, sel trainSelection, progress
 		return nil, err
 	}
 	report("install", 1)
-	if err := d.InstallClassifier(clf); err != nil {
+	// InstallClassifier gates the atomic commit on ctx itself: cancellation
+	// during its validation/engine build or immediately before the rename
+	// leaves the installed model untouched. If the commit wins that race the
+	// classifier is installed, so returning success is the truthful outcome
+	// even when a late cancellation has already detached the browser stream.
+	if err := d.InstallClassifier(ctx, clf); err != nil {
 		return nil, err
 	}
 	return clf, nil
@@ -194,6 +204,29 @@ func (d *Daemon) startWakewordEngine() {
 		d.logs.Warnf("wakeword", "", "engine: %v", err)
 		return
 	}
+	// Inference consumes the same declared cleanup as application capture and
+	// enrollment. Raw audio is not an accepted detection path: if the profile
+	// is unavailable, fail closed and say so rather than score the vendor tap
+	// under an unverified calibration.
+	tap := ""
+	if d.audio != nil {
+		tap = d.audio.FrameProcessingTap()
+	}
+	if tap == "" {
+		d.logs.Errorf("wakeword", "", "capture preprocessing %q is unavailable; inference not started (raw audio is not an accepted detection path)", audio.CaptureProcessingTap)
+		d.wake.SetModels([]wakeword.Model{{
+			ID: clf.ID, DisplayName: clf.Display, Language: clf.Language,
+			EngineID: "framework.embedding-mlp", Available: false,
+		}})
+		return
+	}
+	if declared, ok := clf.InputProcessingTap(); !ok {
+		d.logs.Warnf("wakeword", "", "model %s has no input_audio provenance: it was trained on the physical raw tap, detection now runs on %s, so its calibrated threshold is unverified; detection stays enabled, retrain when convenient",
+			clf.ID, tap)
+	} else if declared != tap {
+		d.logs.Warnf("wakeword", "", "model %s declares capture tap %q but the runtime delivers %q; threshold calibration is unverified; detection stays enabled",
+			clf.ID, declared, tap)
+	}
 	// Training records from the same capture tap. Suppress detections during a
 	// take so saying the word cannot start assistant capture/playback inside it.
 	d.wake.SetGate(func() bool {
@@ -209,7 +242,9 @@ func (d *Daemon) startWakewordEngine() {
 	frames, cancel := d.audio.SubscribeFrames(16)
 	// Two consecutive 80 ms windows above the calibrated threshold match the
 	// policy training validated the model against.
-	runner := wakeword.NewRunner(d.wake, engine, clf.ID, wakeword.RunnerOptions{Threshold: clf.Threshold, MinConsecutive: 2, Trace: d.cfg.WakewordTrace})
+	runner := wakeword.NewRunner(d.wake, engine, clf.ID, wakeword.RunnerOptions{
+		Threshold: clf.Threshold, MinConsecutive: 2, Trace: d.cfg.WakewordTrace, ProcessingTap: tap,
+	})
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var once sync.Once

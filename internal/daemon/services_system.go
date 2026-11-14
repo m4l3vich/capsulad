@@ -43,10 +43,16 @@ type settingsService struct {
 }
 
 func (s *settingsService) GetSettings(ctx context.Context, _ *frameworkv1.GetSettingsRequest) (*frameworkv1.SettingsSnapshot, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "device settings are a local administrator operation"); err != nil {
+		return nil, err
+	}
 	return s.d.settingsSnapshot(s.d.user.Get()), nil
 }
 
 func (s *settingsService) UpdateSettings(ctx context.Context, req *frameworkv1.UpdateSettingsRequest) (*frameworkv1.SettingsSnapshot, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "device settings are a local administrator operation"); err != nil {
+		return nil, err
+	}
 	if req.Values == nil {
 		return nil, status.Error(codes.InvalidArgument, "values are required")
 	}
@@ -62,6 +68,9 @@ func (s *settingsService) UpdateSettings(ctx context.Context, req *frameworkv1.U
 }
 
 func (s *settingsService) WatchSettings(_ *frameworkv1.WatchSettingsRequest, stream frameworkv1.SettingsService_WatchSettingsServer) error {
+	if err := s.d.requireAdministrativeCaller(stream.Context(), "device settings are a local administrator operation"); err != nil {
+		return err
+	}
 	initial, ch, cancel := s.d.user.Watch()
 	defer cancel()
 	if err := stream.Send(s.d.settingsSnapshot(initial)); err != nil {
@@ -92,35 +101,78 @@ func (s *systemService) GetBluetoothStatus(ctx context.Context, _ *frameworkv1.G
 }
 
 func (s *systemService) SetBluetoothDiscoverable(ctx context.Context, req *frameworkv1.SetBluetoothDiscoverableRequest) (*frameworkv1.BluetoothStatus, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "Bluetooth discoverability is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	if s.d.bt == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
 	}
-	if err := s.d.bt.SetDiscoverable(ctx, req.Discoverable); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
-	}
-	return s.bluetoothProto(ctx), nil
-}
-
-// SetBluetoothPairable controls whether new devices may pair while the adapter
-// is not discoverable. It is app-facing; the paired-device list is not.
-func (s *systemService) SetBluetoothPairable(ctx context.Context, req *frameworkv1.SetBluetoothPairableRequest) (*frameworkv1.BluetoothStatus, error) {
-	if s.d.bt == nil {
-		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
-	}
-	// Same invariant as the persisted settings path: do not accept a new source
-	// before the A2DP sink profile it needs is advertised, or the link is
-	// dropped with "profile unavailable" after it bonds.
-	if req.Pairable {
+	// Discoverability invites a source to connect. Do not open that window
+	// before the A2DP Sink exists: a first connection then fails with
+	// "profile unavailable", and the source does not retry just because the
+	// endpoint appears afterwards. Turning discoverability off is always
+	// allowed and never powers the adapter.
+	if req.Discoverable {
 		if err := s.d.ensureBluetoothAdvertisement(); err != nil {
 			return nil, status.Error(codes.FailedPrecondition, "audio profile advertisement: "+err.Error())
 		}
 	}
-	if err := s.d.bt.SetPairable(ctx, req.Pairable); err != nil {
+	if err := s.d.bt.SetDiscoverable(ctx, req.Discoverable); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	if err := s.d.writeUserSettings([]string{"bluetooth_pairable"}, func(v *settings.UserSettings) {
-		v.BluetoothPairable = req.Pairable
-	}); err != nil {
+	fields := []string{"bluetooth_discoverable"}
+	mutate := func(v *settings.UserSettings) { v.BluetoothDiscoverable = req.Discoverable }
+	if req.Discoverable {
+		// Advertising for a new device cannot coexist with denying inbound
+		// links. Persist the implied incoming state so a restart is coherent.
+		fields = append(fields, "bluetooth_incoming_connections")
+		mutate = func(v *settings.UserSettings) {
+			v.BluetoothDiscoverable = true
+			v.BluetoothIncomingConnections = true
+		}
+	}
+	if err := s.d.writeUserSettings(fields, mutate); err != nil {
+		return nil, status.Error(codes.Internal, "adapter changed but the setting could not be persisted: "+err.Error())
+	}
+	return s.bluetoothProto(ctx), nil
+}
+
+// SetBluetoothIncomingConnections controls whether the speaker accepts inbound
+// links. Off denies even paired devices while keeping the adapter powered for
+// BLE; it also clears discoverability, because advertising with no inbound path
+// would be incoherent. It is a local administrator operation: a supervised app
+// must not open the adapter to new sources.
+func (s *systemService) SetBluetoothIncomingConnections(ctx context.Context, req *frameworkv1.SetBluetoothIncomingConnectionsRequest) (*frameworkv1.BluetoothStatus, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "Bluetooth incoming connections is a local administrator operation"); err != nil {
+		return nil, err
+	}
+	if s.d.bt == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Bluetooth is unavailable on this platform")
+	}
+	// Same invariant as the persisted settings path: do not accept a new
+	// source before the A2DP sink profile it needs is advertised, or the link
+	// is dropped with "profile unavailable" after it bonds. Turning incoming
+	// off is always allowed.
+	if req.IncomingConnections {
+		if err := s.d.ensureBluetoothAdvertisement(); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, "audio profile advertisement: "+err.Error())
+		}
+	}
+	if err := s.d.bt.SetIncomingConnections(ctx, req.IncomingConnections); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	fields := []string{"bluetooth_incoming_connections"}
+	mutate := func(v *settings.UserSettings) {
+		v.BluetoothIncomingConnections = req.IncomingConnections
+	}
+	if !req.IncomingConnections {
+		fields = append(fields, "bluetooth_discoverable")
+		mutate = func(v *settings.UserSettings) {
+			v.BluetoothIncomingConnections = false
+			v.BluetoothDiscoverable = false
+		}
+	}
+	if err := s.d.writeUserSettings(fields, mutate); err != nil {
 		return nil, status.Error(codes.Internal, "adapter changed but the setting could not be persisted: "+err.Error())
 	}
 	return s.bluetoothProto(ctx), nil
@@ -170,9 +222,21 @@ func (s *systemService) bluetoothProto(ctx context.Context) *frameworkv1.Bluetoo
 	if err != nil {
 		return &frameworkv1.BluetoothStatus{Present: false, Detail: err.Error()}
 	}
+	detail := st.Detail
+	// Status has no dedicated readiness field, so use the backend explanation
+	// it already carries. Pairing and discoverability depend on an advertised
+	// Audio Sink; saying so prevents an adapter that is up but cannot accept an
+	// audio source from appearing ready.
+	if st.Present && !s.d.bluetoothAudioReady() {
+		if detail != "" {
+			detail += "; "
+		}
+		detail += "audio profile is not advertised (A2DP sink not ready)"
+	}
 	return &frameworkv1.BluetoothStatus{
 		Present: st.Present, Powered: st.Powered, Discoverable: st.Discoverable,
-		Pairable: st.Pairable, Adapter: st.Adapter, Detail: st.Detail,
+		IncomingConnections: st.IncomingConnections, Adapter: st.Adapter,
+		Name: st.Name, Detail: detail,
 	}
 }
 
@@ -184,6 +248,9 @@ func (s *systemService) GetStatus(ctx context.Context, _ *frameworkv1.GetStatusR
 }
 
 func (s *systemService) GetWebUiSecurity(ctx context.Context, _ *frameworkv1.GetWebUiSecurityRequest) (*frameworkv1.WebUiSecurityStatus, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "Web UI security status is a local administrator operation"); err != nil {
+		return nil, err
+	}
 	listen := []string{}
 	if s.d.cfg.WebUIAddr != "" {
 		listen = append(listen, s.d.cfg.WebUIAddr)

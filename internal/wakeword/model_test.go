@@ -308,3 +308,27 @@ func TestEngineResetAndValidation(t *testing.T) {
 		t.Fatalf("score after reset = %v, want 0", got)
 	}
 }
+
+func TestClassifierInputProcessingTap(t *testing.T) {
+	clf := NewClassifier("word.personal", "word", "en", 1)
+	if _, ok := clf.InputProcessingTap(); ok {
+		t.Fatal("new classifier declared input provenance")
+	}
+	clf.Trained = map[string]any{"input_audio": map[string]any{"processing_tap": "framework.dsp.v1"}}
+	tap, ok := clf.InputProcessingTap()
+	if !ok || tap != "framework.dsp.v1" {
+		t.Fatalf("declared tap = %q, declared=%v", tap, ok)
+	}
+	// A JSON round trip must preserve the declaration; model files carry it.
+	raw, err := json.Marshal(clf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Classifier
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if tap, ok := decoded.InputProcessingTap(); !ok || tap != "framework.dsp.v1" {
+		t.Fatalf("round-trip tap = %q, declared=%v", tap, ok)
+	}
+}

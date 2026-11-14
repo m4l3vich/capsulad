@@ -31,6 +31,11 @@ type RunnerOptions struct {
 	WindowSamples  int
 	MinConsecutive int
 	Cooldown       time.Duration
+	// ProcessingTap is the capture provenance inference requires. A frame with
+	// any other tap is rejected and resets streaming state, so undeclared raw
+	// audio cannot silently bypass the production cleanup. Empty accepts no
+	// frame at all; callers must declare the profile they intend to run.
+	ProcessingTap string
 	// Trace logs the peak score twice a second. It is the only way to see a
 	// threshold set too high, so it is opt-in for field diagnosis.
 	Trace bool
@@ -93,7 +98,12 @@ func (r *Runner) HandleFrame(f audio.Frame) {
 		r.resetStream()
 	}
 	r.lastSequence = f.Sequence
-	if f.RateHz != 16000 || len(f.PCM) < 2 || len(f.PCM)%2 != 0 {
+	// Detection must run on the declared preprocessing, not the raw vendor
+	// tap. The daemon passes the effective tap; a mismatch here is a wiring
+	// bug or an unsupported capture profile, so fail closed rather than score
+	// audio the model was not declared against.
+	if r.opts.ProcessingTap == "" || f.ProcessingTap != r.opts.ProcessingTap ||
+		f.RateHz != 16000 || len(f.PCM) < 2 || len(f.PCM)%2 != 0 {
 		r.resetStream()
 		return
 	}

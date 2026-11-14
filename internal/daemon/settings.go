@@ -140,6 +140,12 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 		}
 	}
 	d.router.SetDefault("role.voice_assistant", v.DefaultAssistantAppID)
+	d.reconcileProviderRuns(prev, v)
+	if d.discovery != nil && (prev == nil || prev.Hostname != v.Hostname) {
+		if err := d.discovery.Apply(d.ctx, v.Hostname); err != nil {
+			d.logs.Warnf("mdns", "", "advertise hostname %q: %v", v.Hostname, err)
+		}
+	}
 	if d.launcher != nil {
 		d.launcher.SetTimezone(v.Timezone)
 	}

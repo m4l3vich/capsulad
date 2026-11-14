@@ -125,6 +125,44 @@ func (s *Store) Load() error {
 	return nil
 }
 
+// CredentialsPath names the persisted credential document. The daemon watches
+// it so an out-of-process local administrator (`capsula auth ...`) converges
+// live sessions without polling.
+func (s *Store) CredentialsPath() string { return s.credentialsPath() }
+
+// Reload re-reads credentials changed by another process and reports whether
+// the admin password changed. A password change invalidates every in-memory
+// session; API-key edits leave sessions intact.
+func (s *Store) Reload() (passwordChanged bool, err error) {
+	data, err := os.ReadFile(s.credentialsPath())
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var doc persisted
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return false, fmt.Errorf("parse credentials: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	before := ""
+	if s.doc.Password != nil {
+		before = s.doc.Password.Hash
+	}
+	after := ""
+	if doc.Password != nil {
+		after = doc.Password.Hash
+	}
+	s.doc = doc
+	if before != after {
+		s.sessions = map[string]session{}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (s *Store) persistLocked() error {
 	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return err

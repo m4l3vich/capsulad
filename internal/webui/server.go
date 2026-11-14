@@ -1,9 +1,10 @@
 // Package webui serves the HTTPS browser interface.
 //
-// The listener uses a self-signed certificate; authentication is an Argon2id
+// The listener uses a self-signed certificate. Authentication is an Argon2id
 // admin password with server-side sessions, or a static opaque API key for
-// automation. The UI backend speaks the same local gRPC API over the Unix
-// socket as every other client and is not a second privileged control plane.
+// automation. The SPA and its realtime socket are a thin client of the daemon's
+// local gRPC API over the Unix socket; there is no second control plane and no
+// network gRPC listener.
 package webui
 
 import (
@@ -11,24 +12,41 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html/template"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
+	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"
+	"capsulad/internal/registry"
+	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
+	"capsulad/internal/wakeword"
 	"capsulad/internal/websecurity"
+	"capsulad/internal/wifi"
 )
+
+// distFS is the independently built Vue SPA (web/). It contains only static
+// assets; all data arrives over /ws or the small session API.
+//
+//go:embed all:dist
+var distFS embed.FS
+
+const mediaService = "capsula.contracts.media.v1.MediaPlayerService"
 
 type Server struct {
 	Addr     string
@@ -37,121 +55,71 @@ type Server struct {
 	Logs     *logbus.Bus
 	Platform string
 	Auth     *websecurity.Store
+	// Discovery applies the saved mDNS host name. Optional: a daemon without a
+	// responder still renders and persists the setting.
+	Discovery discovery.Manager
+	// Changes signals topic mutations that have no framework watch stream.
+	// Optional so focused tests can omit it; live topics stay snapshot-only.
+	Changes *uichanges.Hub
+	// Apps resolves application package assets. Optional: without it the
+	// settings-UI endpoint and declaration are unavailable.
+	Apps *registry.Registry
+	// Wifi is the shared station/provisioning controller. Optional: a daemon
+	// without Wi-Fi still serves a snapshot explaining unavailability.
+	Wifi wifi.Controller
+	// Wakeword reads the daemon-owned bounded detection history. Optional so
+	// focused tests render an empty recent-detections list.
+	Wakeword wakewordSource
 	limiter  *loginLimiter
 
-	tmpl *template.Template
+	connMu sync.Mutex
+	conns  map[string]map[*wsConn]struct{}
 }
 
-type pageData struct {
-	Title    string
-	Nav      string
-	Version  string
-	Platform string
-	User     string
-	CSRF     string
-	Message  string
-	Error    string
-	Data     any
-}
-
-type loginData struct {
-	Error string
-	Next  string
-	CSRF  string
+// wakewordSource is the narrow in-process view of daemon wakeword state the
+// authenticated browser surface exposes. It is not reachable from the app
+// protocol: detection history is a local administrator read.
+type wakewordSource interface {
+	RecentDetections(limit int) []wakeword.Detection
 }
 
 type authInfo struct {
 	OK         bool
 	ViaSession bool
 	ViaAPIKey  bool
+	Token      string
 }
 
 type authContextKey struct{}
+type csrfContextKey struct{}
 
-func New(addr string, tlsCfg *tls.Config, conn *grpc.ClientConn, logs *logbus.Bus, platform string, auth *websecurity.Store) (*Server, error) {
-	s := &Server{
+func New(addr string, tlsCfg *tls.Config, conn *grpc.ClientConn, logs *logbus.Bus, platform string, auth *websecurity.Store, disc discovery.Manager, changes *uichanges.Hub) (*Server, error) {
+	if _, err := fs.Stat(distFS, "dist/index.html"); err != nil {
+		return nil, fmt.Errorf("webui: missing embedded SPA build: %w", err)
+	}
+	return &Server{
 		Addr: addr, TLS: tlsCfg, Conn: conn, Logs: logs, Platform: platform, Auth: auth,
-		limiter: newLoginLimiter(),
-	}
-	tmpl, err := template.New("capsula").Funcs(template.FuncMap{
-		"pct": func(v any) int {
-			switch n := v.(type) {
-			case float32:
-				return int(n * 100)
-			case float64:
-				return int(n * 100)
-			}
-			return 0
-		},
-		"rgb":  func(r, g, b uint32) string { return fmt.Sprintf("#%02x%02x%02x", r, g, b) },
-		"json": func(v any) string { return fmt.Sprintf("%v", v) },
-		"secs": func(ms uint32) int { return int(ms / 1000) },
-		"msdate": func(ms int64) string {
-			if ms == 0 {
-				return "unknown"
-			}
-			return time.UnixMilli(ms).UTC().Format(time.RFC3339)
-		},
-		"date": func(t time.Time) string {
-			if t.IsZero() {
-				return "unknown"
-			}
-			return t.UTC().Format(time.RFC3339)
-		},
-		"unq": func(v string) string {
-			if unq, err := strconv.Unquote(v); err == nil {
-				return unq
-			}
-			return v
-		},
-		"clockStatus": clockStatus,
-		"clockDur":    clockDuration,
-		"clockDays":   clockDays,
-		"clockHasDay": clockHasDay,
-	}).Parse(templates)
-	if err != nil {
-		return nil, err
-	}
-	s.tmpl = tmpl
-	return s, nil
+		Discovery: disc, Changes: changes, limiter: newLoginLimiter(), conns: map[string]map[*wsConn]struct{}{},
+	}, nil
 }
 
-// Handler builds the full routing table with authentication middleware.
+// Handler builds the routing table. Static SPA files are public so the login
+// view can load; every data route authenticates explicitly.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /login", s.loginPage)
-	mux.HandleFunc("POST /login", s.loginSubmit)
-	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, "ok")
 	})
-	mux.HandleFunc("GET /", s.overview)
-	mux.HandleFunc("GET /settings", s.settingsPage)
-	mux.HandleFunc("POST /settings", s.updateSettings)
-	mux.HandleFunc("POST /bluetooth", s.bluetoothToggle)
-	mux.HandleFunc("POST /bluetooth/pairable", s.bluetoothPairable)
-	mux.HandleFunc("POST /bluetooth/unpair", s.bluetoothUnpair)
-	mux.HandleFunc("GET /access", s.accessPage)
-	mux.HandleFunc("POST /access/password", s.changePassword)
-	mux.HandleFunc("POST /access/keys", s.createAPIKey)
-	mux.HandleFunc("POST /access/keys/revoke", s.revokeAPIKey)
-	mux.HandleFunc("GET /access/cert.pem", s.certPEM)
-	mux.HandleFunc("GET /diagnostics", s.diagnostics)
-	mux.HandleFunc("GET /wakeword", s.wakewordPage)
-	mux.HandleFunc("GET /wakeword/trainer.js", s.wakewordTrainerJS)
-	mux.HandleFunc("GET /wakeword/samples", s.wakewordSamplesJSON)
-	mux.HandleFunc("POST /wakeword/record", s.wakewordRecord)
-	mux.HandleFunc("POST /wakeword/delete", s.wakewordDelete)
-	mux.HandleFunc("POST /wakeword/train", s.wakewordTrain)
-	mux.HandleFunc("GET /applications/{id}", s.application)
-	mux.HandleFunc("POST /applications/{id}/launch", s.appLaunch)
-	mux.HandleFunc("POST /applications/{id}/stop", s.appStop)
-	mux.HandleFunc("POST /applications/{id}/action", s.appAction)
-	mux.HandleFunc("POST /applications/{id}/clock", s.clockAction)
-	mux.HandleFunc("POST /applications/{id}/settings", s.appSettings)
-	mux.HandleFunc("POST /media", s.mediaAction)
-	mux.HandleFunc("GET /api/status", s.apiStatus)
+	mux.HandleFunc("GET /api/session", s.apiSession)
+	mux.HandleFunc("POST /api/login", s.loginSubmit)
+	mux.HandleFunc("POST /api/logout", s.sessionOnly(s.logout))
+	mux.HandleFunc("POST /api/password", s.sessionOnly(s.changePassword))
+	mux.HandleFunc("GET /api/status", s.anyAuth(s.apiStatus))
+	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
+	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
+	mux.HandleFunc("GET /ws", s.sessionOnly(s.serveWS))
+	mux.Handle("/", s.static())
 	return s.middleware(mux)
 }
 
@@ -169,7 +137,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.Logs.Infof("webui", "", "HTTPS listening on %s (self-signed certificate, password/API-key auth)", ln.Addr())
+	s.Logs.Infof("webui", "", "HTTPS listening on %s (self-signed certificate, password/API-key auth; realtime WebSocket)", ln.Addr())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ServeTLS(ln, "", "") }()
 	select {
@@ -177,11 +145,14 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
+		s.closeAllConns()
 		return nil
 	case err := <-errCh:
 		return err
 	}
 }
+
+// --- middleware ------------------------------------------------------------
 
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,43 +160,51 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-		s.ensureCSRF(w, r)
+			"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+		token := s.ensureCSRF(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), csrfContextKey{}, token)))
+	})
+}
 
-		if r.URL.Path == "/login" || r.URL.Path == "/healthz" {
-			next.ServeHTTP(w, r)
-			return
-		}
+// sessionOnly wraps a handler that requires a browser session. API keys are
+// deliberately not accepted: they are automation read credentials, not a
+// browser-admin authority.
+func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		auth := s.authenticate(r)
-		if !auth.OK {
-			wantsJSON := strings.HasPrefix(r.URL.Path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json")
-			if (r.Method == http.MethodGet || r.Method == http.MethodHead) && !wantsJSON {
-				target := "/login?next=" + url.QueryEscape(r.URL.RequestURI())
-				http.Redirect(w, r, target, http.StatusSeeOther)
-				return
-			}
+		if !auth.OK || !auth.ViaSession {
 			writeUnauthorized(w, r)
 			return
 		}
 		if r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
-				http.Error(w, "invalid form", http.StatusBadRequest)
+				writeJSONError(w, http.StatusBadRequest, "invalid request")
 				return
 			}
-			if auth.ViaSession {
-				if !s.checkOrigin(r) {
-					http.Error(w, "cross-origin form submission rejected", http.StatusForbidden)
-					return
-				}
-				if !s.checkCSRF(r) {
-					http.Error(w, "invalid CSRF token", http.StatusForbidden)
-					return
-				}
+			if !s.checkOrigin(r) {
+				writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
+			if !s.checkCSRF(r) {
+				writeJSONError(w, http.StatusForbidden, "invalid CSRF token")
+				return
 			}
 		}
-		ctx := context.WithValue(r.Context(), authContextKey{}, auth)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth)))
+	}
+}
+
+// anyAuth accepts a session or a static API key. Only the read-only status and
+// public certificate routes use it.
+func (s *Server) anyAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := s.authenticate(r)
+		if !auth.OK {
+			writeUnauthorized(w, r)
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth)))
+	}
 }
 
 func (s *Server) authenticate(r *http.Request) authInfo {
@@ -237,7 +216,7 @@ func (s *Server) authenticate(r *http.Request) authInfo {
 	}
 	if cookie, err := r.Cookie(websecurity.SessionCookieName()); err == nil {
 		if s.Auth.ValidateSession(cookie.Value) {
-			return authInfo{OK: true, ViaSession: true}
+			return authInfo{OK: true, ViaSession: true, Token: cookie.Value}
 		}
 	}
 	return authInfo{}
@@ -256,21 +235,17 @@ func authFrom(ctx context.Context) authInfo {
 }
 
 func writeUnauthorized(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
-		return
-	}
-	http.Error(w, "authentication required", http.StatusUnauthorized)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
 }
 
-func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
 	token := csrfFrom(r.Cookies())
 	if token == "" {
 		var b [24]byte
 		if _, err := rand.Read(b[:]); err != nil {
-			return
+			return ""
 		}
 		token = hex.EncodeToString(b[:])
 		http.SetCookie(w, &http.Cookie{
@@ -278,7 +253,7 @@ func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) {
 			HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 		})
 	}
-	r.Header.Set("X-Capsula-CSRF", token)
+	return token
 }
 
 func csrfFrom(cookies []*http.Cookie) string {
@@ -292,7 +267,10 @@ func csrfFrom(cookies []*http.Cookie) string {
 
 func (s *Server) checkCSRF(r *http.Request) bool {
 	want := csrfFrom(r.Cookies())
-	got := r.PostFormValue("csrf")
+	got := r.Header.Get("X-Capsula-CSRF")
+	if got == "" {
+		got = r.PostFormValue("csrf")
+	}
 	return want != "" && got != "" && subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
@@ -312,46 +290,68 @@ func (s *Server) checkOrigin(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-// --- login / logout --------------------------------------------------------
+// --- session API -----------------------------------------------------------
 
-func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	if s.authenticate(r).OK {
-		http.Redirect(w, r, safeNext(r), http.StatusSeeOther)
-		return
+func (s *Server) apiSession(w http.ResponseWriter, r *http.Request) {
+	auth := s.authenticate(r)
+	csrf := csrfFrom(r.Cookies())
+	if csrf == "" {
+		csrf, _ = r.Context().Value(csrfContextKey{}).(string)
 	}
-	s.renderLogin(w, r, http.StatusOK, "", safeNext(r))
+	resp := map[string]any{
+		"authenticated":  auth.ViaSession,
+		"via_api_key":    auth.ViaAPIKey,
+		"csrf":           csrf,
+		"daemon_version": version.Version,
+		"platform":       s.Platform,
+		"user":           "",
+	}
+	if auth.ViaSession {
+		resp["user"] = "admin"
+	}
+	writeJSONValue(w, http.StatusOK, resp)
 }
 
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if !s.checkOrigin(r) || !s.checkCSRF(r) {
-		http.Error(w, "invalid login request", http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "invalid login request")
 		return
 	}
-	next := safeNext(r)
+	var body struct {
+		Password string `json:"password"`
+		Next     string `json:"next"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && r.PostFormValue("password") != "" {
+		body.Password = r.PostFormValue("password")
+		body.Next = r.PostFormValue("next")
+	}
+	next := sanitizeNext(body.Next)
 	if !s.Auth.PasswordSet() {
-		s.renderLogin(w, r, http.StatusServiceUnavailable,
-			"administrator password is not initialized; run `capsula auth init` on the device", next)
+		writeJSONValue(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "administrator password is not initialized; run `capsula auth init` on the device",
+			"next":  next,
+		})
 		return
 	}
 	host := remoteHost(r)
 	if !s.limiter.Allow(host) {
-		s.renderLogin(w, r, http.StatusTooManyRequests, "too many failed attempts; wait and try again", next)
+		writeJSONError(w, http.StatusTooManyRequests, "too many failed attempts; wait and try again")
 		return
 	}
-	if !s.Auth.VerifyPassword(r.PostFormValue("password")) {
+	if !s.Auth.VerifyPassword(body.Password) {
 		s.limiter.Fail(host)
 		s.Logs.Warnf("webui", "", "failed login from %s", host)
-		s.renderLogin(w, r, http.StatusUnauthorized, "incorrect password", next)
+		writeJSONError(w, http.StatusUnauthorized, "incorrect password")
 		return
 	}
 	s.limiter.Success(host)
 	token, expiry, err := s.Auth.NewSession()
 	if err != nil {
-		http.Error(w, "could not create session", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "could not create session")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -359,38 +359,230 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expiry,
 	})
 	s.Logs.Infof("webui", "", "admin login from %s", host)
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	writeJSONValue(w, http.StatusOK, map[string]any{"ok": true, "next": next})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(websecurity.SessionCookieName()); err == nil {
-		s.Auth.RevokeSession(cookie.Value)
+	auth := authFrom(r.Context())
+	if auth.ViaSession {
+		s.Auth.RevokeSession(auth.Token)
+		s.closeSessionConns(auth.Token)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: websecurity.SessionCookieName(), Value: "", Path: "/",
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	writeJSONValue(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func safeNext(r *http.Request) string {
-	next := r.URL.Query().Get("next")
-	if next == "" {
-		next = r.PostFormValue("next")
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Current string `json:"current"`
+		Next    string `json:"next"`
+		Confirm string `json:"confirm"`
 	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if !s.Auth.VerifyPassword(body.Current) {
+		writeJSONError(w, http.StatusForbidden, "current password is incorrect")
+		return
+	}
+	if len(body.Next) < 8 {
+		writeJSONError(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+	if body.Next != body.Confirm {
+		writeJSONError(w, http.StatusBadRequest, "new passwords do not match")
+		return
+	}
+	if err := s.Auth.SetPassword(body.Next); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// SetPassword invalidates every session. Reissue one for the browser that
+	// just proved knowledge of both passwords, and drop every live socket:
+	// their cookies no longer validate.
+	s.closeAllConns()
+	token, expiry, err := s.Auth.NewSession()
+	if err == nil {
+		http.SetCookie(w, &http.Cookie{
+			Name: websecurity.SessionCookieName(), Value: token, Path: "/",
+			HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expiry,
+		})
+	}
+	writeJSONValue(w, http.StatusOK, map[string]any{"ok": true, "message": "admin password changed; other sessions were revoked"})
+}
+
+// --- automation API --------------------------------------------------------
+
+// apiStatus is the small authenticated JSON surface for API-key automation.
+func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := ctxTimeout(r)
+	defer cancel()
+	info, err := frameworkv1.NewDeviceServiceClient(s.Conn).GetInfo(ctx, &frameworkv1.GetInfoRequest{})
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	resources, _ := frameworkv1.NewDeviceServiceClient(s.Conn).ListResources(ctx, &frameworkv1.ListResourcesRequest{})
+	runs, _ := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{})
+	status, _ := frameworkv1.NewSystemServiceClient(s.Conn).GetStatus(ctx, &frameworkv1.GetStatusRequest{})
+	writeJSONValue(w, http.StatusOK, map[string]any{
+		"device": info, "resources": resources.GetResources(),
+		"runs": runs.GetRuns(), "status": status,
+	})
+}
+
+// certPEM serves the public server certificate for TLS clients to trust.
+func (s *Server) certPEM(w http.ResponseWriter, r *http.Request) {
+	pem, err := os.ReadFile(s.Auth.CertPath())
+	if err != nil {
+		http.Error(w, "certificate unavailable: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="capsula-server.crt"`)
+	_, _ = w.Write(pem)
+}
+
+// --- static SPA ------------------------------------------------------------
+
+func (s *Server) static() http.Handler {
+	sub, err := fs.Sub(distFS, "dist")
+	if err != nil {
+		panic("webui: embedded SPA: " + err.Error())
+	}
+	files := http.FileServer(http.FS(sub))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if info, err := fs.Stat(sub, path); err == nil && !info.IsDir() {
+			if strings.HasPrefix(path, "assets/") {
+				// Vite fingerprints asset names; they never change.
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
+			files.ServeHTTP(w, r)
+			return
+		}
+		// Unknown paths are SPA routes: serve the shell so a deep link works.
+		index, err := fs.ReadFile(sub, "index.html")
+		if err != nil {
+			http.Error(w, "SPA unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(index)
+	})
+}
+
+// --- shared helpers --------------------------------------------------------
+
+func sanitizeNext(next string) string {
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
 		return "/"
 	}
 	return next
 }
 
-func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, message, next string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	data := loginData{Error: message, Next: next, CSRF: r.Header.Get("X-Capsula-CSRF")}
-	if err := s.tmpl.ExecuteTemplate(w, "login", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func (s *Server) applyHostname(ctx context.Context, hostname string) (msg, warn string) {
+	if s.Discovery == nil {
+		return "settings saved", ""
 	}
+	if err := s.Discovery.Apply(ctx, hostname); err != nil {
+		return "settings saved", "hostname saved, but advertising failed: " + err.Error()
+	}
+	if status := s.Discovery.Status(); status.Advertised != "" {
+		return "settings saved; advertising as " + status.Advertised, ""
+	}
+	return "settings saved", ""
+}
+
+func (s *Server) advertisedURL(fqdn string) string {
+	if fqdn == "" {
+		return ""
+	}
+	port := "8443"
+	if _, p, err := net.SplitHostPort(s.Addr); err == nil && p != "" {
+		port = p
+	}
+	return "https://" + fqdn + ":" + port
+}
+
+func (s *Server) routedCall(ctx context.Context, appID, service, rpc string, request []byte) ([][]byte, string, *frameworkv1.AppCallEnd, error) {
+	stream, err := frameworkv1.NewAppBusServiceClient(s.Conn).Call(ctx)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if err := stream.Send(&frameworkv1.RoutedCallRequest{Message: &frameworkv1.RoutedCallRequest_Start{
+		Start: &frameworkv1.RoutedCallStart{TargetAppId: appID, GrpcService: service, RpcName: rpc, TimeoutMs: 5000},
+	}}); err != nil {
+		return nil, "", nil, err
+	}
+	if err := stream.Send(&frameworkv1.RoutedCallRequest{Message: &frameworkv1.RoutedCallRequest_RequestMessage{RequestMessage: request}}); err != nil {
+		return nil, "", nil, err
+	}
+	_ = stream.CloseSend()
+	var out [][]byte
+	var end *frameworkv1.AppCallEnd
+	callID := ""
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			return out, callID, end, err
+		}
+		switch m := resp.GetMessage().(type) {
+		case *frameworkv1.RoutedCallResponse_ResponseMessage:
+			out = append(out, m.ResponseMessage)
+		case *frameworkv1.RoutedCallResponse_End:
+			return out, callID, m.End, nil
+		}
+	}
+}
+
+// routedProtoCall performs one unary app RPC over the public app bus with a
+// binary protobuf request and returns the raw protobuf response. The browser
+// never supplies the service or method names; callers here are fixed entries,
+// and the built-in clock/ring pages use the same public contracts that
+// ordinary applications discover.
+func (s *Server) routedProtoCall(ctx context.Context, appID, service, rpc string, request proto.Message) ([]byte, error) {
+	body, err := proto.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	msgs, _, end, err := s.routedCall(ctx, appID, service, rpc, body)
+	if err != nil {
+		return nil, err
+	}
+	if end != nil && end.GetGrpcStatusCode() != 0 {
+		detail := strings.TrimSpace(end.GetDetail())
+		if detail == "" {
+			detail = "application returned an error"
+		}
+		return nil, fmt.Errorf("%s: %s", grpcCodeName(end.GetGrpcStatusCode()), detail)
+	}
+	if len(msgs) != 1 {
+		return nil, fmt.Errorf("expected one response message, got %d", len(msgs))
+	}
+	return msgs[0], nil
+}
+
+func protoMarshal(m proto.Message) ([]byte, error) { return proto.Marshal(m) }
+
+func protoUnmarshal(b []byte, m proto.Message) error { return proto.Unmarshal(b, m) }
+
+func ctxTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), 5*time.Second)
 }
 
 func remoteHost(r *http.Request) string {
@@ -401,43 +593,67 @@ func remoteHost(r *http.Request) string {
 	return host
 }
 
-// --- shared page helpers ---------------------------------------------------
+func writeJSONValue(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
 
-func (s *Server) base(w http.ResponseWriter, r *http.Request, title, nav string) pageData {
-	a := authFrom(r.Context())
-	user := ""
-	if a.ViaSession {
-		user = "admin"
-	} else if a.ViaAPIKey {
-		user = "API key"
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSONValue(w, status, map[string]string{"error": message})
+}
+
+// --- session connection registry -------------------------------------------
+
+func (s *Server) registerConn(token string, c *wsConn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	set := s.conns[token]
+	if set == nil {
+		set = map[*wsConn]struct{}{}
+		s.conns[token] = set
 	}
-	return pageData{
-		Title: title, Nav: nav, Version: version.Version, Platform: s.Platform,
-		User: user, CSRF: r.Header.Get("X-Capsula-CSRF"),
-		Message: r.URL.Query().Get("msg"), Error: r.URL.Query().Get("err"),
+	set[c] = struct{}{}
+}
+
+func (s *Server) unregisterConn(token string, c *wsConn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	set := s.conns[token]
+	delete(set, c)
+	if len(set) == 0 {
+		delete(s.conns, token)
 	}
 }
 
-func (s *Server) render(w http.ResponseWriter, page string, data pageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpl.ExecuteTemplate(w, page, data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func (s *Server) closeSessionConns(token string) {
+	s.connMu.Lock()
+	list := make([]*wsConn, 0, len(s.conns[token]))
+	for c := range s.conns[token] {
+		list = append(list, c)
+	}
+	s.connMu.Unlock()
+	for _, c := range list {
+		c.closeWith(closePolicyViolation, "session ended")
 	}
 }
 
-func (s *Server) redirect(w http.ResponseWriter, r *http.Request, path, msg, errMsg string) {
-	q := url.Values{}
-	if msg != "" {
-		q.Set("msg", msg)
-	}
-	if errMsg != "" {
-		q.Set("err", errMsg)
-	}
-	http.Redirect(w, r, path+"?"+q.Encode(), http.StatusSeeOther)
-}
+// CloseAllSessions closes every live socket after an out-of-process password
+// change invalidated the session store.
+func (s *Server) CloseAllSessions() { s.closeAllConns() }
 
-func ctxTimeout(r *http.Request) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(r.Context(), 5*time.Second)
+func (s *Server) closeAllConns() {
+	s.connMu.Lock()
+	var list []*wsConn
+	for _, set := range s.conns {
+		for c := range set {
+			list = append(list, c)
+		}
+	}
+	s.connMu.Unlock()
+	for _, c := range list {
+		c.closeWith(closePolicyViolation, "session ended")
+	}
 }
 
 // --- login rate limiting ---------------------------------------------------
@@ -466,8 +682,7 @@ func (l *loginLimiter) Allow(key string) bool {
 	if time.Now().Before(e.until) {
 		return false
 	}
-	if e.failures >= 5 && time.Since(e.until) > 0 && time.Now().After(e.until) {
-		// Lockout elapsed; reset the counter.
+	if e.failures >= 5 && time.Now().After(e.until) {
 		e.failures = 0
 	}
 	return true
@@ -495,4 +710,16 @@ func (l *loginLimiter) Success(key string) {
 	l.mu.Lock()
 	delete(l.entries, key)
 	l.mu.Unlock()
+}
+
+func short(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+func parseUint(s string) uint64 {
+	v, _ := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	return v
 }

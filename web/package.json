@@ -1,0 +1,28 @@
+{
+  "name": "capsula-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Capsula speaker web console",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "material-symbols": "^0.48.3",
+    "vue": "3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "4.6.2",
+    "autoprefixer": "10.4.20",
+    "daisyui": "4.12.23",
+    "postcss": "8.4.49",
+    "tailwindcss": "3.4.17",
+    "vite": "4.5.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -2,25 +2,29 @@ package webui
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
+	"capsulad/internal/uichanges"
 	"capsulad/internal/websecurity"
 )
 
-var csrfRe = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
+type testEnv struct {
+	store *websecurity.Store
+	ts    *httptest.Server
+	back  *fakeBackend
+	srv   *Server
+}
 
-func newAuthTest(t *testing.T) (*websecurity.Store, *httptest.Server) {
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	store := websecurity.Open(t.TempDir(), websecurity.DefaultOptions())
 	if err := store.Load(); err != nil {
@@ -36,28 +40,42 @@ func newAuthTest(t *testing.T) (*websecurity.Store, *httptest.Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	back := newFakeBackend()
+	conn := startFakeGRPC(t, back)
 	logs, _ := logbus.New(ids.NewClock(), 100, "")
-	srv, err := New("127.0.0.1:0", tlsCfg, nil, logs, "test", store)
+	srv, err := New("127.0.0.1:8443", tlsCfg, conn, logs, "test", store, nil, uichanges.New())
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewTLSServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return store, ts
+	return &testEnv{store: store, ts: ts, back: back, srv: srv}
 }
 
-func newClient(t *testing.T, ts *httptest.Server) *http.Client {
+func (e *testEnv) client(t *testing.T) *http.Client {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
-	c := ts.Client()
+	c := e.ts.Client()
 	c.Jar = jar
-	c.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return c
 }
 
-func get(t *testing.T, c *http.Client, url string, headers map[string]string) (int, string, http.Header) {
+func doJSON(t *testing.T, c *http.Client, method, target string, body any, headers map[string]string) (int, map[string]any, http.Header) {
 	t.Helper()
-	req, _ := http.NewRequest("GET", url, nil)
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, _ := http.NewRequest(method, target, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -66,194 +84,180 @@ func get(t *testing.T, c *http.Client, url string, headers map[string]string) (i
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body), resp.Header
+	raw, _ := io.ReadAll(resp.Body)
+	out := map[string]any{}
+	_ = json.Unmarshal(raw, &out)
+	return resp.StatusCode, out, resp.Header
 }
 
-func post(t *testing.T, c *http.Client, target string, form url.Values, headers map[string]string) (int, string, http.Header) {
+func csrfToken(t *testing.T, c *http.Client, target string) string {
 	t.Helper()
-	req, _ := http.NewRequest("POST", target, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	code, body, _ := doJSON(t, c, http.MethodGet, target+"/api/session", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("session endpoint: %d", code)
 	}
-	resp, err := c.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	token, _ := body["csrf"].(string)
+	if token == "" {
+		t.Fatal("session endpoint did not return a CSRF token")
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body), resp.Header
+	return token
 }
 
-func csrfOf(t *testing.T, body string) string {
+func loginSession(t *testing.T, e *testEnv, c *http.Client) string {
 	t.Helper()
-	m := csrfRe.FindStringSubmatch(body)
-	if len(m) != 2 {
-		t.Fatalf("no CSRF token in page")
+	token := csrfToken(t, c, e.ts.URL)
+	code, body, _ := doJSON(t, c, http.MethodPost, e.ts.URL+"/api/login",
+		map[string]string{"password": "correct horse battery", "next": "/settings"},
+		map[string]string{"X-Capsula-CSRF": token})
+	if code != http.StatusOK {
+		t.Fatalf("login: %d %v", code, body)
 	}
-	return m[1]
-}
-
-func TestPasswordLoginSessionAndCSRF(t *testing.T) {
-	store, ts := newAuthTest(t)
-	c := newClient(t, ts)
-
-	code, _, hdr := get(t, c, ts.URL+"/", nil)
-	if code != http.StatusSeeOther || !strings.Contains(hdr.Get("Location"), "/login") {
-		t.Fatalf("unauthenticated page: %d %s", code, hdr.Get("Location"))
+	if next, _ := body["next"].(string); next != "/settings" {
+		t.Fatalf("login next = %q", next)
 	}
-	code, body, _ := get(t, c, ts.URL+"/login", nil)
-	if code != 200 {
-		t.Fatalf("login page: %d", code)
-	}
-	token := csrfOf(t, body)
-
-	form := url.Values{"csrf": {token}, "password": {"wrong"}}
-	code, body, _ = post(t, c, ts.URL+"/login", form, nil)
-	if code != http.StatusUnauthorized || !strings.Contains(body, "incorrect password") {
-		t.Fatalf("wrong password: %d", code)
-	}
-
-	form.Set("password", "correct horse battery")
-	code, _, hdr = post(t, c, ts.URL+"/login", form, map[string]string{"Origin": "null"})
-	if code != http.StatusSeeOther {
-		t.Fatalf("login: %d", code)
-	}
-	if !strings.Contains(hdr.Get("Location"), "/") {
-		t.Fatalf("login redirect: %s", hdr.Get("Location"))
-	}
-	code, body, _ = get(t, c, ts.URL+"/access", nil)
-	if code != 200 || !strings.Contains(body, "self-signed") || !strings.Contains(body, "Administrator password") {
-		t.Fatalf("security page after login: %d", code)
-	}
-	fingerprint, _ := store.CertStatus()
-	if !strings.Contains(body, fingerprint.Fingerprint) {
-		t.Fatal("certificate fingerprint missing from security page")
-	}
-
-	// A concrete mismatched origin is rejected even with a valid CSRF token.
-	code, _, _ = post(t, c, ts.URL+"/access/password", url.Values{
-		"csrf": {csrfOf(t, body)}, "current": {"correct horse battery"},
-		"next": {"another long password"}, "confirm": {"another long password"},
-	}, map[string]string{"Origin": "https://attacker.example"})
-	if code != http.StatusForbidden {
-		t.Fatalf("cross-origin POST accepted: %d", code)
-	}
-
-	// Session POST without CSRF is rejected.
-	code, _, _ = post(t, c, ts.URL+"/access/password", url.Values{
-		"current": {"correct horse battery"}, "next": {"another long password"}, "confirm": {"another long password"},
-	}, nil)
-	if code != http.StatusForbidden {
-		t.Fatalf("password change without CSRF: %d", code)
-	}
-	// With CSRF it succeeds and rotates the session.
-	code, _, hdr = post(t, c, ts.URL+"/access/password", url.Values{
-		"csrf": {csrfOf(t, body)}, "current": {"correct horse battery"},
-		"next": {"another long password"}, "confirm": {"another long password"},
-	}, nil)
-	if code != http.StatusSeeOther {
-		t.Fatalf("password change: %d", code)
-	}
-	if !store.VerifyPassword("another long password") {
-		t.Fatal("new password not stored")
-	}
-	code, _, _ = get(t, c, ts.URL+"/access", nil)
-	if code != 200 {
-		t.Fatalf("session was not reissued after password change: %d", code)
-	}
-
-	// Logout ends the session.
-	code, body, _ = get(t, c, ts.URL+"/access", nil)
-	code, _, hdr = post(t, c, ts.URL+"/logout", url.Values{"csrf": {csrfOf(t, body)}}, nil)
-	if code != http.StatusSeeOther || !strings.Contains(hdr.Get("Location"), "/login") {
-		t.Fatalf("logout: %d %s", code, hdr.Get("Location"))
-	}
-	code, _, _ = get(t, c, ts.URL+"/access", nil)
-	if code != http.StatusSeeOther {
-		t.Fatalf("logout did not revoke session: %d", code)
-	}
-}
-
-func TestStaticAPIKeyAuthAndRevocation(t *testing.T) {
-	store, ts := newAuthTest(t)
-	token, _, err := store.CreateAPIKey("automation")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := newClient(t, ts)
-	headers := map[string]string{"X-API-Key": token}
-
-	code, body, _ := get(t, c, ts.URL+"/access", headers)
-	if code != 200 || !strings.Contains(body, "API keys") {
-		t.Fatalf("API key GET: %d", code)
-	}
-	// Key-authenticated POST does not need a CSRF token.
-	code, _, _ = post(t, c, ts.URL+"/access/password", url.Values{
-		"current": {"correct horse battery"},
-		"next":    {"api key rotated password"},
-		"confirm": {"api key rotated password"},
-	}, headers)
-	if code != http.StatusSeeOther {
-		t.Fatalf("API key password change: %d", code)
-	}
-	if !store.VerifyPassword("api key rotated password") {
-		t.Fatal("API key password change not applied")
-	}
-	// Bearer form is accepted too.
-	code, _, _ = get(t, c, ts.URL+"/access", map[string]string{"Authorization": "Bearer " + token})
-	if code != 200 {
-		t.Fatalf("Bearer auth GET: %d", code)
-	}
-	// Invalid key is denied, not silently treated as anonymous.
-	code, _, _ = get(t, c, ts.URL+"/access", map[string]string{"X-API-Key": "capsula_invalid"})
-	if code != http.StatusSeeOther {
-		t.Fatalf("invalid key was not denied: %d", code)
-	}
-	if err := store.RevokeAPIKey("automation"); err != nil {
-		t.Fatal(err)
-	}
-	code, _, hdr := get(t, c, ts.URL+"/access", headers)
-	if code != http.StatusSeeOther || !strings.Contains(hdr.Get("Location"), "/login") {
-		t.Fatalf("revoked key accepted: %d", code)
-	}
-}
-
-func TestUnauthenticatedJSONIs401(t *testing.T) {
-	_, ts := newAuthTest(t)
-	c := newClient(t, ts)
-	code, _, _ := get(t, c, ts.URL+"/api/status", map[string]string{"Accept": "application/json"})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated API status: %d", code)
-	}
-}
-
-// The overview template is the only place media metadata and the Bluetooth
-// state are formatted; a nil-safe render here guards the page contract.
-func TestOverviewRendersMediaBluetoothAndApps(t *testing.T) {
-	s, err := New("127.0.0.1:0", nil, nil, nil, "test", nil)
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	page := pageData{Title: "Overview", Nav: "overview", CSRF: "tok", Data: overviewData{
-		Bluetooth: &frameworkv1.BluetoothStatus{Present: true, Powered: true, Discoverable: true, Adapter: "hci0", Detail: "adapter reachable"},
-		Providers: []mediaProvider{{AppID: "org.example.player", Name: "Player", Players: []*mediav1.PlayerStatus{{
-			PlayerId: "p1", PlaybackState: mediav1.PlaybackState_PLAYBACK_PLAYING,
-			Title: protoString("Scarlet Fire"), Artist: protoString("Otis McDonald"),
-		}}}},
-		Apps: []*frameworkv1.InstalledApplication{{AppId: "org.example.player", DisplayName: "Player app", Version: "1.0.0"}},
-	}}
-	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "overview", page); err != nil {
-		t.Fatalf("render overview: %v", err)
-	}
-	body := buf.String()
-	for _, want := range []string{"Scarlet Fire", "Otis McDonald", "discoverable", "Player app", "Stop advertising"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("overview missing %q", want)
+	u, _ := url.Parse(e.ts.URL)
+	for _, cookie := range c.Jar.Cookies(u) {
+		if cookie.Name == websecurity.SessionCookieName() {
+			return cookie.Value
 		}
 	}
+	t.Fatal("login did not set a session cookie")
+	return ""
 }
 
-func protoString(v string) *string { return &v }
+func TestSPAAndSessionFlow(t *testing.T) {
+	env := newTestEnv(t)
+	c := env.client(t)
+
+	resp, err := c.Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `id="app"`) {
+		t.Fatalf("SPA shell: %d %s", resp.StatusCode, raw)
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") || !strings.Contains(csp, "connect-src 'self'") {
+		t.Fatalf("CSP = %q", csp)
+	}
+	// Deep links are served the shell as well.
+	resp, err = c.Get(env.ts.URL + "/applications/capsula.clock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `id="app"`) {
+		t.Fatalf("deep link shell: %d", resp.StatusCode)
+	}
+
+	code, body, _ := doJSON(t, c, http.MethodGet, env.ts.URL+"/api/session", nil, nil)
+	if code != http.StatusOK || body["authenticated"] != false {
+		t.Fatalf("unauthenticated session: %d %v", code, body)
+	}
+	token, _ := body["csrf"].(string)
+	if token == "" {
+		t.Fatal("no CSRF token for the SPA")
+	}
+
+	code, body, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/login",
+		map[string]string{"password": "wrong"}, map[string]string{"X-Capsula-CSRF": token})
+	if code != http.StatusUnauthorized || body["error"] != "incorrect password" {
+		t.Fatalf("wrong password: %d %v", code, body)
+	}
+	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/login",
+		map[string]string{"password": "correct horse battery"}, map[string]string{"Origin": "https://attacker.example", "X-Capsula-CSRF": token})
+	if code != http.StatusForbidden {
+		t.Fatalf("cross-origin login accepted: %d", code)
+	}
+	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/login",
+		map[string]string{"password": "correct horse battery"}, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("login without CSRF accepted: %d", code)
+	}
+
+	loginSession(t, env, c)
+	code, body, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/session", nil, nil)
+	if code != http.StatusOK || body["authenticated"] != true {
+		t.Fatalf("authenticated session: %d %v", code, body)
+	}
+	code, _, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/status", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("session /api/status: %d", code)
+	}
+
+	// Password change rotates the session and requires CSRF.
+	token = csrfToken(t, c, env.ts.URL)
+	code, body, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/password",
+		map[string]string{"current": "correct horse battery", "next": "another long password", "confirm": "another long password"},
+		map[string]string{"X-Capsula-CSRF": token})
+	if code != http.StatusOK {
+		t.Fatalf("password change: %d %v", code, body)
+	}
+	if !env.store.VerifyPassword("another long password") {
+		t.Fatal("new password not stored")
+	}
+	code, body, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/session", nil, nil)
+	if code != http.StatusOK || body["authenticated"] != true {
+		t.Fatalf("session not reissued after password change: %d %v", code, body)
+	}
+
+	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/logout", nil,
+		map[string]string{"X-Capsula-CSRF": token})
+	if code != http.StatusOK {
+		t.Fatalf("logout: %d", code)
+	}
+	code, body, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/session", nil, nil)
+	if body["authenticated"] != false {
+		t.Fatalf("logout did not revoke the session: %d %v", code, body)
+	}
+}
+
+func TestAPIKeyBoundary(t *testing.T) {
+	env := newTestEnv(t)
+	token, _, err := env.store.CreateAPIKey("automation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := env.client(t)
+	headers := map[string]string{"X-API-Key": token}
+
+	code, _, _ := doJSON(t, c, http.MethodGet, env.ts.URL+"/api/status", nil, headers)
+	if code != http.StatusOK {
+		t.Fatalf("API key status: %d", code)
+	}
+	code, _, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/cert.pem", nil, headers)
+	if code != http.StatusOK {
+		t.Fatalf("API key certificate: %d", code)
+	}
+	// API keys are not browser-admin authority.
+	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/password",
+		map[string]string{"current": "correct horse battery", "next": "abcdefgh", "confirm": "abcdefgh"},
+		headers)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("API key reached password change: %d", code)
+	}
+	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/logout", nil, headers)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("API key reached logout: %d", code)
+	}
+	resp, err := env.ts.Client().Get(env.ts.URL + "/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("API key reached WebSocket: %d", resp.StatusCode)
+	}
+	if err := env.store.RevokeAPIKey("automation"); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/status", nil, headers)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("revoked API key accepted: %d", code)
+	}
+	if _, _, err := env.store.CreateAPIKey(""); err == nil {
+		t.Fatal("empty key name should fail")
+	}
+}

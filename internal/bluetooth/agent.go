@@ -15,9 +15,10 @@ import (
 // The device is headless, so SSP "Just Works" (NoInputNoOutput) is the only
 // supported pairing method. BlueZ requires a registered agent for a remote
 // device to bond at all; without one a first-time source sees a pairing timeout
-// or a rejected connection. The adapter's Pairable property is the user's
-// pairing mode: a new bond is accepted only while it is on, and a device that
-// is already bonded may authorize its services at any time.
+// or a rejected connection. Discoverability is the user's pairing window: a new
+// bond is accepted only while the adapter is discoverable (which also implies
+// incoming connections are enabled), and a device that is already bonded may
+// authorize its services at any time.
 
 const (
 	bluezAgentManager = "org.bluez.AgentManager1"
@@ -60,7 +61,7 @@ func (a *pairingAgent) AuthorizeService(dbus.ObjectPath, string) *dbus.Error { r
 
 func (a *pairingAgent) allowPairing() *dbus.Error {
 	a.b.mu.Lock()
-	allowed := a.b.status.Present && a.b.status.Pairable
+	allowed := a.b.status.Present && a.b.status.IncomingConnections && a.b.status.Discoverable
 	a.b.mu.Unlock()
 	if !allowed {
 		return errPairingRejected()
@@ -71,7 +72,7 @@ func (a *pairingAgent) allowPairing() *dbus.Error {
 func errPairingRejected() *dbus.Error {
 	return &dbus.Error{
 		Name: "org.bluez.Error.Rejected",
-		Body: []any{"pairing is disabled; enable Bluetooth pairing on the device first"},
+		Body: []any{"pairing is disabled; make the speaker discoverable first"},
 	}
 }
 

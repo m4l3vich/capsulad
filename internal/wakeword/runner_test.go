@@ -2,6 +2,7 @@ package wakeword
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func newTestManager(t *testing.T, available bool) *Manager {
 
 func frameWithSamples(n int) audio.Frame {
 	pcm := make([]byte, n*2)
-	return audio.Frame{PCM: pcm, RateHz: 16000}
+	return audio.Frame{PCM: pcm, RateHz: 16000, ProcessingTap: audio.CaptureProcessingTap}
 }
 
 func TestRunnerFiresAfterTwoWindowsAndRespectsCooldown(t *testing.T) {
@@ -58,7 +59,7 @@ func TestRunnerFiresAfterTwoWindowsAndRespectsCooldown(t *testing.T) {
 	var fired int
 	m.SetOnFire(func(Activation) { fired++ })
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9, 0.9, 0.9}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, Cooldown: 50 * time.Millisecond})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap, Cooldown: 50 * time.Millisecond})
 
 	// Two 80 ms windows above threshold fire once.
 	r.HandleFrame(frameWithSamples(1280))
@@ -90,7 +91,7 @@ func TestRunnerNeedsConsecutiveWindows(t *testing.T) {
 	var fired int
 	m.SetOnFire(func(Activation) { fired++ })
 	engine := &scriptedEngine{scores: []float64{0.9, 0.1, 0.9, 0.1}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 	for i := 0; i < 4; i++ {
 		r.HandleFrame(frameWithSamples(1280))
 	}
@@ -104,7 +105,7 @@ func TestRunnerIgnoresMutedAudioAndResets(t *testing.T) {
 	var fired int
 	m.SetOnFire(func(Activation) { fired++ })
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9, 0.9, 0.9}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 	m.SetMuted(true)
 	for i := 0; i < 4; i++ {
 		r.HandleFrame(frameWithSamples(1280))
@@ -120,7 +121,7 @@ func TestRunnerIgnoresMutedAudioAndResets(t *testing.T) {
 func TestRunnerRejectsWrongRate(t *testing.T) {
 	m := newTestManager(t, true)
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 	f := frameWithSamples(1280)
 	f.RateHz = 48000
 	r.HandleFrame(f)
@@ -138,7 +139,7 @@ func TestRunnerSuspendsWhileGateReportsBusy(t *testing.T) {
 	m.SetResumeDelay(10 * time.Millisecond)
 	m.SetGate(func() bool { return !busy })
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9, 0.9, 0.9}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, Cooldown: 10 * time.Millisecond})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap, Cooldown: 10 * time.Millisecond})
 
 	// The assistant owns audio: the same windows that would fire stay silent.
 	for i := 0; i < 4; i++ {
@@ -178,7 +179,7 @@ func TestRunnerResetsAcrossCaptureDiscontinuities(t *testing.T) {
 			fired := 0
 			m.SetOnFire(func(Activation) { fired++ })
 			engine := &scriptedEngine{scores: []float64{0.9, 0.9, 0.9}}
-			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 			feed := func(samples int, sequence uint64, discontinuity bool) {
 				f := frameWithSamples(samples)
 				f.Sequence, f.Discontinuity = sequence, discontinuity
@@ -218,7 +219,7 @@ func TestRunnerInvalidCaptureResetsPartialWindow(t *testing.T) {
 			fired := 0
 			m.SetOnFire(func(Activation) { fired++ })
 			engine := &scriptedEngine{scores: []float64{0.9, 0.9, 0.9}}
-			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 			r.HandleFrame(frameWithSamples(1280))
 			r.HandleFrame(frameWithSamples(640))
 			r.HandleFrame(tc.frame)
@@ -243,7 +244,7 @@ func TestRunnerRechecksGateForEveryWindow(t *testing.T) {
 	busy := false
 	m.SetGate(func() bool { return !busy })
 	engine := &scriptedEngine{scores: []float64{0.1, 0.9}, onProcess: func() { busy = true }}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap})
 	r.HandleFrame(frameWithSamples(2560))
 	if engine.windows != 1 || len(r.pending) != 0 || engine.resets != 1 {
 		t.Fatalf("processed gated window: windows=%d pending=%d resets=%d", engine.windows, len(r.pending), engine.resets)
@@ -265,7 +266,7 @@ func TestRunnerRejectsGateChangeDuringInference(t *testing.T) {
 					busy = true
 				}
 			}}
-			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, MinConsecutive: 1})
+			r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap, MinConsecutive: 1})
 			r.HandleFrame(frameWithSamples(1280))
 			if fired != 0 || r.lastFireNS != 0 || engine.resets != 1 {
 				t.Fatalf("accepted stale inference: fired=%d cooldown=%d resets=%d", fired, r.lastFireNS, engine.resets)
@@ -279,11 +280,66 @@ func TestRunnerRejectedActivationDoesNotStartCooldown(t *testing.T) {
 	fired := 0
 	m.SetOnFire(func(Activation) { fired++ })
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9}}
-	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, MinConsecutive: 1})
+	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap, MinConsecutive: 1})
 	r.HandleFrame(frameWithSamples(1280))
 	m.SetModels([]Model{{ID: "test.word", Available: true}})
 	r.HandleFrame(frameWithSamples(1280))
 	if fired != 1 {
 		t.Fatalf("rejected activation consumed cooldown: fired=%d", fired)
+	}
+}
+
+// processedProbeEngine records the exact window it scored. It is used at the
+// capture->activation boundary to prove the samples that reach inference are
+// the declared processed samples, and that the resulting score drives the
+// activation rather than a source-text or wiring assumption.
+type processedProbeEngine struct {
+	got     []int16
+	windows int
+}
+
+func (e *processedProbeEngine) Process(samples []int16) float64 {
+	e.windows++
+	e.got = append(e.got[:0], samples...)
+	return 0.9
+}
+
+func (e *processedProbeEngine) Reset() {}
+
+func TestRunnerFeedsDeclaredProcessedFrameAndRejectsRaw(t *testing.T) {
+	m := newTestManager(t, true)
+	fired := 0
+	m.SetOnFire(func(Activation) { fired++ })
+	engine := &processedProbeEngine{}
+	r := NewRunner(m, engine, "test.word", RunnerOptions{
+		Threshold: 0.5, MinConsecutive: 1, ProcessingTap: audio.CaptureProcessingTap,
+	})
+
+	// Different continuous sample values make a raw/processed swap visible.
+	const n = 1280
+	pcm := make([]byte, n*2)
+	for i := range n {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(i-640)))
+	}
+	raw := audio.Frame{PCM: pcm, RateHz: 16000}
+	r.HandleFrame(raw)
+	if engine.windows != 0 || fired != 0 {
+		t.Fatalf("raw frame reached inference: windows=%d fired=%d", engine.windows, fired)
+	}
+
+	processed := raw
+	processed.ProcessingTap = audio.CaptureProcessingTap
+	r.HandleFrame(processed)
+	if engine.windows != 1 {
+		t.Fatalf("declared processed frame scored %d windows, want 1", engine.windows)
+	}
+	for i := 0; i < n; i++ {
+		want := int16(i - 640)
+		if engine.got[i] != want {
+			t.Fatalf("inference sample %d = %d, want %d", i, engine.got[i], want)
+		}
+	}
+	if fired != 1 {
+		t.Fatalf("processed samples did not produce an activation: fired=%d", fired)
 	}
 }

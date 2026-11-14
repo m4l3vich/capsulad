@@ -42,20 +42,34 @@ func TestBluetoothAdminSurface(t *testing.T) {
 	if !statusReply.GetPresent() || !statusReply.GetPowered() {
 		t.Fatalf("adapter status = %+v", statusReply)
 	}
+	if statusReply.GetName() != "Capsula" {
+		t.Fatalf("adapter advertised name = %q", statusReply.GetName())
+	}
 
-	// App-facing: discoverability and pairability.
+	// App-facing: discoverability and incoming connections. Discoverability
+	// implies incoming; disabling incoming clears discoverability.
 	if reply, err := client.SetBluetoothDiscoverable(ctx, &frameworkv1.SetBluetoothDiscoverableRequest{Discoverable: true}); err != nil || !reply.GetDiscoverable() {
 		t.Fatalf("discoverable: reply=%+v err=%v", reply, err)
 	}
-	reply, err := client.SetBluetoothPairable(ctx, &frameworkv1.SetBluetoothPairableRequest{Pairable: true})
+	reply, err := client.SetBluetoothIncomingConnections(ctx, &frameworkv1.SetBluetoothIncomingConnectionsRequest{IncomingConnections: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reply.GetPairable() {
-		t.Fatalf("pairable not applied: %+v", reply)
+	if !reply.GetIncomingConnections() {
+		t.Fatalf("incoming connections not applied: %+v", reply)
 	}
-	if !d.user.Get().Values.BluetoothPairable {
-		t.Fatal("pairable switch was not persisted")
+	if !d.user.Get().Values.BluetoothIncomingConnections || !d.user.Get().Values.BluetoothDiscoverable {
+		t.Fatal("Bluetooth switches were not persisted")
+	}
+	reply, err = client.SetBluetoothIncomingConnections(ctx, &frameworkv1.SetBluetoothIncomingConnectionsRequest{IncomingConnections: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.GetIncomingConnections() || reply.GetDiscoverable() || !reply.GetPowered() {
+		t.Fatalf("incoming off did not keep the radio on and deny/discover off: %+v", reply)
+	}
+	if d.user.Get().Values.BluetoothIncomingConnections || d.user.Get().Values.BluetoothDiscoverable {
+		t.Fatal("incoming off did not persist the dependent discoverable state")
 	}
 
 	// Paired-device management is local-admin only.
@@ -426,7 +440,7 @@ func TestBluetoothResyncStopsSourceLostToOverflow(t *testing.T) {
 	d := &Daemon{ctx: context.Background(), clock: clock, logs: logs}
 	mem := bluetooth.NewMemory()
 	d.bt = mem
-	d.btNative = true
+	d.setBluetoothNative(true)
 	d.dev = backend.NewSimulator(backend.SimulatorOptions{})
 
 	const sourceA, sourceB = "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"time"
 
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
@@ -32,45 +33,44 @@ const (
 // beginRecordingIndicator pulses the ring red for the duration of a take. It
 // is a system capture like the muted-microphone indication, so it overlays
 // whatever an app was showing and the previous presentation resumes on release.
-func (d *Daemon) beginRecordingIndicator() {
+// It returns an error when a visible indication cannot be opened: an
+// enrollment take must not record with only a log line as feedback.
+func (d *Daemon) beginRecordingIndicator() error {
 	if d.pres == nil || d.router == nil {
-		return
+		return fmt.Errorf("presentation manager is unavailable")
 	}
 	ringID := d.ringResourceID()
 	if ringID == "" {
-		return
+		return fmt.Errorf("no ring resource for the recording indication")
 	}
 	params, err := presets.ValidateParams(mustPreset(recordPulsePreset), presets.Params{
 		"speed": 1.0, "color": rgb(255, 0, 0), "min_intensity": 0.08,
 	})
 	if err != nil {
-		d.logf("recording indicator: %v", err)
-		return
+		return fmt.Errorf("recording indicator preset: %w", err)
 	}
 
 	d.recIndMu.Lock()
 	defer d.recIndMu.Unlock()
 	if d.recCaptureID != "" {
-		return
+		return nil
 	}
 	if d.recIndicator == nil {
 		pres, err := d.openAppPresentation(routing.SystemAppID, "", ringID)
 		if err != nil {
-			d.logf("recording indicator: %v", err)
-			return
+			return fmt.Errorf("open recording indicator: %w", err)
 		}
 		d.recIndicator = pres
 	}
 	if err := d.updateAppPresentation(routing.SystemAppID, "", d.recIndicator, presentations.RingEffect(recordPulsePreset, params)); err != nil {
-		d.logf("recording indicator: %v", err)
-		return
+		return fmt.Errorf("draw recording indicator: %w", err)
 	}
 	cap, err := d.acquireAppCapture(routing.SystemAppID, "", ringID, d.recIndicator.ID, routing.TouchNone)
 	if err != nil {
-		d.logf("recording indicator: %v", err)
-		return
+		return fmt.Errorf("select recording indicator: %w", err)
 	}
 	d.recCaptureID = cap.ID
+	return nil
 }
 
 func (d *Daemon) endRecordingIndicator() {
@@ -110,17 +110,40 @@ func (d *Daemon) playRecordingCue(ctx context.Context) error {
 		return fmt.Errorf("play start tones: %w", err)
 	}
 	defer p.Close()
+	if d.audio != nil {
+		d.audio.BeginIndicationCue(p.ID())
+		defer d.audio.EndIndicationCue(p.ID())
+	}
 	if err := p.Write(countdownCuePCM(format)); err != nil {
 		return fmt.Errorf("play start tones: %w", err)
 	}
 	p.CloseInput()
+	// The countdown is three seconds. A context without its own deadline must
+	// not leave enrollment waiting forever, and a volume/mute change while the
+	// cue drains means the take can no longer prove audible feedback.
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	health := time.NewTicker(25 * time.Millisecond)
+	defer health.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case _, ok := <-p.Events():
+		case <-deadline.C:
+			return fmt.Errorf("the recording cue was not consumed by the mixer")
+		case <-health.C:
+			if d.audio.MasterVolume() <= 0 {
+				return fmt.Errorf("master volume dropped to zero during the recording cue")
+			}
+			if d.audio.Muted() {
+				return fmt.Errorf("the microphone was muted during the recording cue")
+			}
+		case ev, ok := <-p.Events():
 			if !ok {
 				return nil
+			}
+			if ev.Notice != nil && ev.Notice.Code != "STREAM_CLOSED" {
+				return fmt.Errorf("the recording cue stopped: %s: %s", ev.Notice.Code, ev.Notice.Detail)
 			}
 		}
 	}

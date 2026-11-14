@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"
 )
 
@@ -51,18 +52,27 @@ type UserSettings struct {
 	// BrightnessMode maps a display/ring resource to "const" or "auto". Auto
 	// follows the ambient-light sensor; a missing entry means "const".
 	BrightnessMode map[string]string `json:"brightness_mode"`
-	// BluetoothPairable allows new devices to pair while the adapter is not
-	// discoverable. Paired devices may connect whenever the adapter is powered.
-	BluetoothPairable bool `json:"bluetooth_pairable"`
+	// BluetoothIncomingConnections allows inbound links. Off denies every
+	// device, including paired ones, while the radio stays powered for BLE.
+	BluetoothIncomingConnections bool `json:"bluetooth_incoming_connections"`
+	// BluetoothDiscoverable advertises the adapter and is the pairing window.
+	// It implies incoming connections; disabling them disables it.
+	BluetoothDiscoverable bool `json:"bluetooth_discoverable"`
 	// StartupSoundEnabled replays the installation startup cue on every boot.
 	// Off by default: the cue plays exactly once on installation regardless,
 	// and afterwards only when the user opts in.
 	StartupSoundEnabled bool `json:"startup_sound_enabled"`
+	// Hostname is the single DNS label advertised as <hostname>.local over
+	// mDNS. It is applied by the discovery manager at startup and on change.
+	Hostname string `json:"hostname"`
 }
 
 const (
 	BrightnessConst = "const"
 	BrightnessAuto  = "auto"
+	// DefaultHostname is the mDNS label for an existing store that predates
+	// the setting. It is also the label a fresh install advertises.
+	DefaultHostname = "capsula"
 )
 
 func DefaultUserSettings() UserSettings {
@@ -76,6 +86,11 @@ func DefaultUserSettings() UserSettings {
 		MutedIndicator:        MutedUntilUnmute,
 		MutedIndicatorDelayMS: 30000,
 		BrightnessMode:        map[string]string{},
+		Hostname:              DefaultHostname,
+		// Paired devices may reconnect out of the box; advertising for new
+		// devices is an explicit privacy choice.
+		BluetoothIncomingConnections: true,
+		BluetoothDiscoverable:        false,
 	}
 }
 
@@ -105,16 +120,64 @@ func OpenUser(path string, logs *logbus.Bus, validate func(UserSettings) error) 
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var doc struct {
-			Revision uint64       `json:"revision"`
-			Values   UserSettings `json:"values"`
+			Revision uint64          `json:"revision"`
+			Values   json.RawMessage `json:"values"`
 		}
 		if err := json.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("parse settings %s: %w", path, err)
 		}
+		var values UserSettings
+		if len(doc.Values) > 0 && string(doc.Values) != "null" {
+			if err := json.Unmarshal(doc.Values, &values); err != nil {
+				return nil, fmt.Errorf("parse settings %s values: %w", path, err)
+			}
+		}
+		var fields map[string]json.RawMessage
+		if len(doc.Values) > 0 && string(doc.Values) != "null" {
+			if err := json.Unmarshal(doc.Values, &fields); err != nil {
+				return nil, fmt.Errorf("parse settings %s fields: %w", path, err)
+			}
+		}
+		_, hasIncoming := fields["bluetooth_incoming_connections"]
+		_, hasDiscoverable := fields["bluetooth_discoverable"]
+		legacy, hasLegacy := fields["bluetooth_pairable"]
+		migratedBluetooth := hasLegacy || !hasIncoming || !hasDiscoverable
+		if !hasIncoming {
+			// Absent means the default, not an explicit "off": paired devices
+			// could reconnect in every prior build while powered.
+			values.BluetoothIncomingConnections = true
+		}
+		if !hasDiscoverable {
+			// The old pairable switch allowed new bonds while hidden. Under
+			// the coherent contract that window is discoverability, so a
+			// legacy "true" keeps the user's ability to pair new devices.
+			values.BluetoothDiscoverable = false
+			if hasLegacy {
+				var pairable bool
+				if err := json.Unmarshal(legacy, &pairable); err != nil {
+					return nil, fmt.Errorf("parse settings %s bluetooth_pairable: %w", path, err)
+				}
+				values.BluetoothDiscoverable = pairable
+			}
+		}
 		if doc.Revision > 0 {
 			s.rev = doc.Revision
 		}
-		s.values = normalize(doc.Values)
+		s.values = normalize(values)
+		if s.values.Hostname == "" {
+			// Stores written before the host name existed are not a deliberate
+			// empty advertisement; seed the documented default. An explicit
+			// empty value is rejected by Update below.
+			s.values.Hostname = DefaultHostname
+		}
+		if migratedBluetooth {
+			// Persist the migrated shape so the obsolete key stops existing on
+			// disk. The revision does not change: this is a schema migration,
+			// not a new user edit.
+			if err := s.persistLocked(s.values, s.rev); err != nil {
+				return nil, fmt.Errorf("migrate settings %s: %w", path, err)
+			}
+		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -137,6 +200,18 @@ func normalize(v UserSettings) UserSettings {
 	}
 	if v.MutedIndicatorDelayMS == 0 {
 		v.MutedIndicatorDelayMS = d.MutedIndicatorDelayMS
+	}
+	// DNS labels are case-insensitive; keep one canonical form so a saved
+	// value and the live advertisement compare equal.
+	v.Hostname = discovery.NormalizeHostname(v.Hostname)
+	// The two Bluetooth controls are dependent: advertising for new devices
+	// requires accepting inbound links, and an adapter that accepts no inbound
+	// link cannot coherently advertise or pair.
+	if v.BluetoothDiscoverable {
+		v.BluetoothIncomingConnections = true
+	}
+	if !v.BluetoothIncomingConnections {
+		v.BluetoothDiscoverable = false
 	}
 	return v
 }
@@ -203,10 +278,24 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 				next.Timezone = patch.Timezone
 			case "brightness_mode":
 				next.BrightnessMode = cloneMap(patch.BrightnessMode)
-			case "bluetooth_pairable":
-				next.BluetoothPairable = patch.BluetoothPairable
+			case "bluetooth_incoming_connections":
+				next.BluetoothIncomingConnections = patch.BluetoothIncomingConnections
+				if !next.BluetoothIncomingConnections {
+					// A patch that turns inbound links off must also clear the
+					// stale discoverable flag copied from the current snapshot;
+					// normalize otherwise sees discoverable=true and re-enables
+					// incoming.
+					next.BluetoothDiscoverable = false
+				}
+			case "bluetooth_discoverable":
+				next.BluetoothDiscoverable = patch.BluetoothDiscoverable
+				if next.BluetoothDiscoverable {
+					next.BluetoothIncomingConnections = true
+				}
 			case "startup_sound_enabled":
 				next.StartupSoundEnabled = patch.StartupSoundEnabled
+			case "hostname":
+				next.Hostname = patch.Hostname
 			default:
 				return UserSnapshot{}, fmt.Errorf("unknown update field %q", f)
 			}
@@ -277,6 +366,9 @@ func validateUser(v UserSettings) error {
 		if _, err := time.LoadLocation(v.Timezone); err != nil {
 			return fmt.Errorf("timezone %q is not an IANA zone name", v.Timezone)
 		}
+	}
+	if err := discovery.ValidateHostname(v.Hostname); err != nil {
+		return fmt.Errorf("hostname %q: %w", v.Hostname, err)
 	}
 	return nil
 }
@@ -381,6 +473,24 @@ type SchemaSetting struct {
 	Required    bool
 }
 
+// StaleRevisionError reports a failed compare-and-swap. Callers map it to
+// ABORTED; it is distinct from invalid input and storage failures.
+type StaleRevisionError struct {
+	Expected uint64
+	Current  uint64
+}
+
+func (e *StaleRevisionError) Error() string {
+	return fmt.Sprintf("app settings revision %d is stale (current %d)", e.Expected, e.Current)
+}
+
+// InvalidValueError wraps a manifest/semantic validation rejection. Callers
+// map it to INVALID_ARGUMENT; storage and IO failures stay plain errors.
+type InvalidValueError struct{ Err error }
+
+func (e *InvalidValueError) Error() string { return e.Err.Error() }
+func (e *InvalidValueError) Unwrap() error { return e.Err }
+
 type AppStore struct {
 	root string
 	logs *logbus.Bus
@@ -451,6 +561,12 @@ func (a *AppStore) Snapshot(appID string) (AppSnapshot, error) {
 	if err != nil {
 		return AppSnapshot{}, err
 	}
+	return snapshotLocked(appID, *schema, st), nil
+}
+
+// snapshotLocked builds the redacted view. The caller holds a.mu so the
+// revision and values are a single consistent snapshot.
+func snapshotLocked(appID string, schema ManifestSchema, st *appState) AppSnapshot {
 	out := AppSnapshot{AppID: appID, Revision: st.rev}
 	for _, def := range schema.Settings {
 		view := AppSettingView{Key: def.Key}
@@ -469,7 +585,7 @@ func (a *AppStore) Snapshot(appID string) (AppSnapshot, error) {
 		}
 		out.Values = append(out.Values, view)
 	}
-	return out, nil
+	return out
 }
 
 // Private returns effective values including masked secrets for delivery to
@@ -520,7 +636,7 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 		return AppSnapshot{}, 0, nil, err
 	}
 	if expected != 0 && expected != st.rev {
-		return AppSnapshot{}, 0, nil, fmt.Errorf("app settings revision %d is stale (current %d)", expected, st.rev)
+		return AppSnapshot{}, 0, nil, &StaleRevisionError{Expected: expected, Current: st.rev}
 	}
 	next := make(map[string]json.RawMessage, len(st.values))
 	for k, v := range st.values {
@@ -551,7 +667,7 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 	}
 	if a.validate != nil {
 		if err := a.validate(appID, next); err != nil {
-			return AppSnapshot{}, 0, nil, err
+			return AppSnapshot{}, 0, nil, &InvalidValueError{Err: err}
 		}
 	}
 	newRev := st.rev + 1
@@ -598,13 +714,29 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 	}
 	if subs := a.subs[appID]; len(subs) > 0 {
 		for _, ch := range subs {
-			select {
-			case ch <- out:
-			default:
-			}
+			pushLatestSnapshot(ch, out)
 		}
 	}
 	return out, newRev, priv, nil
+}
+
+// pushLatestSnapshot keeps a bounded watcher converged on the newest state:
+// when the buffer is full the oldest snapshot is discarded. The caller holds
+// a.mu, so sends and the channel close cannot race.
+func pushLatestSnapshot(ch chan AppSnapshot, snap AppSnapshot) {
+	select {
+	case ch <- snap:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- snap:
+	default:
+	}
 }
 
 func validateJSONValue(def SchemaSetting, v any) error {
@@ -651,14 +783,21 @@ func toFloat(v any) (float64, bool) {
 	}
 }
 
-// WatchApp streams redacted snapshots for one app (Web UI / diagnostics).
+// WatchApp streams redacted snapshots for one app (Web UI / diagnostics). The
+// initial snapshot and the subscription are installed under one lock, so a
+// concurrent Update can never fall between them and be lost.
 func (a *AppStore) WatchApp(appID string) (AppSnapshot, <-chan AppSnapshot, func(), error) {
-	snap, err := a.Snapshot(appID)
-	if err != nil {
-		return AppSnapshot{}, nil, nil, err
+	schema, ok := a.look(appID)
+	if !ok {
+		return AppSnapshot{}, nil, nil, fmt.Errorf("unknown app %s", appID)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	st, err := a.stateLocked(appID)
+	if err != nil {
+		return AppSnapshot{}, nil, nil, err
+	}
+	snap := snapshotLocked(appID, *schema, st)
 	if a.subs[appID] == nil {
 		a.subs[appID] = map[int]chan AppSnapshot{}
 	}

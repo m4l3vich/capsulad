@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ClockService_GetState_FullMethodName        = "/capsula.contracts.clock.v1.ClockService/GetState"
+	ClockService_WatchState_FullMethodName      = "/capsula.contracts.clock.v1.ClockService/WatchState"
 	ClockService_StopwatchStart_FullMethodName  = "/capsula.contracts.clock.v1.ClockService/StopwatchStart"
 	ClockService_StopwatchPause_FullMethodName  = "/capsula.contracts.clock.v1.ClockService/StopwatchPause"
 	ClockService_StopwatchResume_FullMethodName = "/capsula.contracts.clock.v1.ClockService/StopwatchResume"
@@ -27,10 +28,10 @@ const (
 	ClockService_StartTimer_FullMethodName      = "/capsula.contracts.clock.v1.ClockService/StartTimer"
 	ClockService_CancelTimer_FullMethodName     = "/capsula.contracts.clock.v1.ClockService/CancelTimer"
 	ClockService_ListTimers_FullMethodName      = "/capsula.contracts.clock.v1.ClockService/ListTimers"
-	ClockService_SetAlarm_FullMethodName        = "/capsula.contracts.clock.v1.ClockService/SetAlarm"
-	ClockService_SetAlarmEnabled_FullMethodName = "/capsula.contracts.clock.v1.ClockService/SetAlarmEnabled"
-	ClockService_DeleteAlarm_FullMethodName     = "/capsula.contracts.clock.v1.ClockService/DeleteAlarm"
 	ClockService_ListAlarms_FullMethodName      = "/capsula.contracts.clock.v1.ClockService/ListAlarms"
+	ClockService_AddAlarm_FullMethodName        = "/capsula.contracts.clock.v1.ClockService/AddAlarm"
+	ClockService_DeleteAlarm_FullMethodName     = "/capsula.contracts.clock.v1.ClockService/DeleteAlarm"
+	ClockService_SetAlarmEnabled_FullMethodName = "/capsula.contracts.clock.v1.ClockService/SetAlarmEnabled"
 	ClockService_DismissAlert_FullMethodName    = "/capsula.contracts.clock.v1.ClockService/DismissAlert"
 )
 
@@ -38,30 +39,49 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Standard interface exposed by the built-in Clock system app.
-// Clients discover this contract through capsula.framework.v1.AppInterfaceService
-// and invoke it with AppBusService.Call targeting app_id "capsula.clock".
-// All methods are unary; responses carry the authoritative state after the
-// command, so callers can render without a follow-up read.
+// Standard clock/alarm contract exposed by the built-in Clock application.
+//
+// The service is discoverable through capsula.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsula.clock"; there
+// is no separate app socket. Any local caller may use it (supervised apps get
+// the same routed-call path as the daemon's own Web UI).
+//
+// Clock behavior is the product contract:
+//   - A stopwatch starts at zero when idle; start is a no-op while running.
+//   - A timer alerts until it is explicitly dismissed; the alert is not a
+//     transient notification.
+//   - Alarms are recurring schedules stored in the app setting `alarms` (see
+//     documentation on DescribeInterface). Each entry is one five-field dcron
+//     expression. An active alarm alert rings until explicitly dismissed.
+//   - Unrelated setting, timezone or device-setting changes never reset a
+//     running stopwatch or a pending timer.
+//
+// WatchState streams a full snapshot first and then a new snapshot whenever an
+// observable field changes; consumers converge on the latest snapshot even if
+// intermediate transitions are lost.
 type ClockServiceClient interface {
 	GetState(ctx context.Context, in *GetStateRequest, opts ...grpc.CallOption) (*ClockState, error)
-	// A stopwatch starts at zero when idle and is a no-op while running.
-	// Pause/resume preserve accumulated monotonic elapsed time.
-	StopwatchStart(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error)
-	StopwatchPause(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error)
-	StopwatchResume(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error)
-	StopwatchReset(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error)
-	StartTimer(ctx context.Context, in *StartTimerRequest, opts ...grpc.CallOption) (*TimerInfo, error)
-	CancelTimer(ctx context.Context, in *CancelTimerRequest, opts ...grpc.CallOption) (*TimerInfo, error)
+	WatchState(ctx context.Context, in *WatchStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClockState], error)
+	StopwatchStart(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error)
+	StopwatchPause(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error)
+	StopwatchResume(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error)
+	StopwatchReset(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error)
+	StartTimer(ctx context.Context, in *StartTimerRequest, opts ...grpc.CallOption) (*Timer, error)
+	// Cancels one running timer. A completed timer is removed by dismissing its
+	// alert, not by CancelTimer.
+	CancelTimer(ctx context.Context, in *CancelTimerRequest, opts ...grpc.CallOption) (*Timer, error)
 	ListTimers(ctx context.Context, in *ListTimersRequest, opts ...grpc.CallOption) (*ListTimersResponse, error)
-	// SetAlarm with an empty alarm_id creates an alarm; a non-empty id updates
-	// it in place. days_of_week bit 0 is Monday through bit 6 Sunday. Zero
-	// means a one-shot alarm at the next occurrence, disabled after it fires.
-	SetAlarm(ctx context.Context, in *SetAlarmRequest, opts ...grpc.CallOption) (*AlarmInfo, error)
-	SetAlarmEnabled(ctx context.Context, in *SetAlarmEnabledRequest, opts ...grpc.CallOption) (*AlarmInfo, error)
-	DeleteAlarm(ctx context.Context, in *DeleteAlarmRequest, opts ...grpc.CallOption) (*DeleteAlarmResponse, error)
 	ListAlarms(ctx context.Context, in *ListAlarmsRequest, opts ...grpc.CallOption) (*ListAlarmsResponse, error)
-	// Stops the current visible/audible timer or alarm alert immediately.
+	// Adds one five-field dcron expression to the canonical `alarms` setting.
+	// Adding an existing normalized expression is idempotent. expected_revision
+	// is the app-settings revision for compare-and-swap; 0 skips the check.
+	AddAlarm(ctx context.Context, in *AddAlarmRequest, opts ...grpc.CallOption) (*Alarm, error)
+	// Deletes the alarm whose alarm_id identifies its schedule and modifiers.
+	DeleteAlarm(ctx context.Context, in *DeleteAlarmRequest, opts ...grpc.CallOption) (*DeleteAlarmResponse, error)
+	// Disables or re-enables a configured alarm without losing it. Disabling
+	// dismisses that alarm's active alert.
+	SetAlarmEnabled(ctx context.Context, in *SetAlarmEnabledRequest, opts ...grpc.CallOption) (*Alarm, error)
+	// Stops every current timer/alarm alert. An empty alert_id dismisses all.
 	DismissAlert(ctx context.Context, in *DismissAlertRequest, opts ...grpc.CallOption) (*DismissAlertResponse, error)
 }
 
@@ -83,9 +103,28 @@ func (c *clockServiceClient) GetState(ctx context.Context, in *GetStateRequest, 
 	return out, nil
 }
 
-func (c *clockServiceClient) StopwatchStart(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error) {
+func (c *clockServiceClient) WatchState(ctx context.Context, in *WatchStateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClockState], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StopwatchInfo)
+	stream, err := c.cc.NewStream(ctx, &ClockService_ServiceDesc.Streams[0], ClockService_WatchState_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchStateRequest, ClockState]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ClockService_WatchStateClient = grpc.ServerStreamingClient[ClockState]
+
+func (c *clockServiceClient) StopwatchStart(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StopwatchState)
 	err := c.cc.Invoke(ctx, ClockService_StopwatchStart_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -93,9 +132,9 @@ func (c *clockServiceClient) StopwatchStart(ctx context.Context, in *StopwatchCo
 	return out, nil
 }
 
-func (c *clockServiceClient) StopwatchPause(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error) {
+func (c *clockServiceClient) StopwatchPause(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StopwatchInfo)
+	out := new(StopwatchState)
 	err := c.cc.Invoke(ctx, ClockService_StopwatchPause_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -103,9 +142,9 @@ func (c *clockServiceClient) StopwatchPause(ctx context.Context, in *StopwatchCo
 	return out, nil
 }
 
-func (c *clockServiceClient) StopwatchResume(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error) {
+func (c *clockServiceClient) StopwatchResume(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StopwatchInfo)
+	out := new(StopwatchState)
 	err := c.cc.Invoke(ctx, ClockService_StopwatchResume_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -113,9 +152,9 @@ func (c *clockServiceClient) StopwatchResume(ctx context.Context, in *StopwatchC
 	return out, nil
 }
 
-func (c *clockServiceClient) StopwatchReset(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchInfo, error) {
+func (c *clockServiceClient) StopwatchReset(ctx context.Context, in *StopwatchCommandRequest, opts ...grpc.CallOption) (*StopwatchState, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StopwatchInfo)
+	out := new(StopwatchState)
 	err := c.cc.Invoke(ctx, ClockService_StopwatchReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -123,9 +162,9 @@ func (c *clockServiceClient) StopwatchReset(ctx context.Context, in *StopwatchCo
 	return out, nil
 }
 
-func (c *clockServiceClient) StartTimer(ctx context.Context, in *StartTimerRequest, opts ...grpc.CallOption) (*TimerInfo, error) {
+func (c *clockServiceClient) StartTimer(ctx context.Context, in *StartTimerRequest, opts ...grpc.CallOption) (*Timer, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TimerInfo)
+	out := new(Timer)
 	err := c.cc.Invoke(ctx, ClockService_StartTimer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -133,9 +172,9 @@ func (c *clockServiceClient) StartTimer(ctx context.Context, in *StartTimerReque
 	return out, nil
 }
 
-func (c *clockServiceClient) CancelTimer(ctx context.Context, in *CancelTimerRequest, opts ...grpc.CallOption) (*TimerInfo, error) {
+func (c *clockServiceClient) CancelTimer(ctx context.Context, in *CancelTimerRequest, opts ...grpc.CallOption) (*Timer, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TimerInfo)
+	out := new(Timer)
 	err := c.cc.Invoke(ctx, ClockService_CancelTimer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -153,20 +192,20 @@ func (c *clockServiceClient) ListTimers(ctx context.Context, in *ListTimersReque
 	return out, nil
 }
 
-func (c *clockServiceClient) SetAlarm(ctx context.Context, in *SetAlarmRequest, opts ...grpc.CallOption) (*AlarmInfo, error) {
+func (c *clockServiceClient) ListAlarms(ctx context.Context, in *ListAlarmsRequest, opts ...grpc.CallOption) (*ListAlarmsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AlarmInfo)
-	err := c.cc.Invoke(ctx, ClockService_SetAlarm_FullMethodName, in, out, cOpts...)
+	out := new(ListAlarmsResponse)
+	err := c.cc.Invoke(ctx, ClockService_ListAlarms_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clockServiceClient) SetAlarmEnabled(ctx context.Context, in *SetAlarmEnabledRequest, opts ...grpc.CallOption) (*AlarmInfo, error) {
+func (c *clockServiceClient) AddAlarm(ctx context.Context, in *AddAlarmRequest, opts ...grpc.CallOption) (*Alarm, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AlarmInfo)
-	err := c.cc.Invoke(ctx, ClockService_SetAlarmEnabled_FullMethodName, in, out, cOpts...)
+	out := new(Alarm)
+	err := c.cc.Invoke(ctx, ClockService_AddAlarm_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +222,10 @@ func (c *clockServiceClient) DeleteAlarm(ctx context.Context, in *DeleteAlarmReq
 	return out, nil
 }
 
-func (c *clockServiceClient) ListAlarms(ctx context.Context, in *ListAlarmsRequest, opts ...grpc.CallOption) (*ListAlarmsResponse, error) {
+func (c *clockServiceClient) SetAlarmEnabled(ctx context.Context, in *SetAlarmEnabledRequest, opts ...grpc.CallOption) (*Alarm, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListAlarmsResponse)
-	err := c.cc.Invoke(ctx, ClockService_ListAlarms_FullMethodName, in, out, cOpts...)
+	out := new(Alarm)
+	err := c.cc.Invoke(ctx, ClockService_SetAlarmEnabled_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,30 +246,49 @@ func (c *clockServiceClient) DismissAlert(ctx context.Context, in *DismissAlertR
 // All implementations must embed UnimplementedClockServiceServer
 // for forward compatibility.
 //
-// Standard interface exposed by the built-in Clock system app.
-// Clients discover this contract through capsula.framework.v1.AppInterfaceService
-// and invoke it with AppBusService.Call targeting app_id "capsula.clock".
-// All methods are unary; responses carry the authoritative state after the
-// command, so callers can render without a follow-up read.
+// Standard clock/alarm contract exposed by the built-in Clock application.
+//
+// The service is discoverable through capsula.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsula.clock"; there
+// is no separate app socket. Any local caller may use it (supervised apps get
+// the same routed-call path as the daemon's own Web UI).
+//
+// Clock behavior is the product contract:
+//   - A stopwatch starts at zero when idle; start is a no-op while running.
+//   - A timer alerts until it is explicitly dismissed; the alert is not a
+//     transient notification.
+//   - Alarms are recurring schedules stored in the app setting `alarms` (see
+//     documentation on DescribeInterface). Each entry is one five-field dcron
+//     expression. An active alarm alert rings until explicitly dismissed.
+//   - Unrelated setting, timezone or device-setting changes never reset a
+//     running stopwatch or a pending timer.
+//
+// WatchState streams a full snapshot first and then a new snapshot whenever an
+// observable field changes; consumers converge on the latest snapshot even if
+// intermediate transitions are lost.
 type ClockServiceServer interface {
 	GetState(context.Context, *GetStateRequest) (*ClockState, error)
-	// A stopwatch starts at zero when idle and is a no-op while running.
-	// Pause/resume preserve accumulated monotonic elapsed time.
-	StopwatchStart(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error)
-	StopwatchPause(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error)
-	StopwatchResume(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error)
-	StopwatchReset(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error)
-	StartTimer(context.Context, *StartTimerRequest) (*TimerInfo, error)
-	CancelTimer(context.Context, *CancelTimerRequest) (*TimerInfo, error)
+	WatchState(*WatchStateRequest, grpc.ServerStreamingServer[ClockState]) error
+	StopwatchStart(context.Context, *StopwatchCommandRequest) (*StopwatchState, error)
+	StopwatchPause(context.Context, *StopwatchCommandRequest) (*StopwatchState, error)
+	StopwatchResume(context.Context, *StopwatchCommandRequest) (*StopwatchState, error)
+	StopwatchReset(context.Context, *StopwatchCommandRequest) (*StopwatchState, error)
+	StartTimer(context.Context, *StartTimerRequest) (*Timer, error)
+	// Cancels one running timer. A completed timer is removed by dismissing its
+	// alert, not by CancelTimer.
+	CancelTimer(context.Context, *CancelTimerRequest) (*Timer, error)
 	ListTimers(context.Context, *ListTimersRequest) (*ListTimersResponse, error)
-	// SetAlarm with an empty alarm_id creates an alarm; a non-empty id updates
-	// it in place. days_of_week bit 0 is Monday through bit 6 Sunday. Zero
-	// means a one-shot alarm at the next occurrence, disabled after it fires.
-	SetAlarm(context.Context, *SetAlarmRequest) (*AlarmInfo, error)
-	SetAlarmEnabled(context.Context, *SetAlarmEnabledRequest) (*AlarmInfo, error)
-	DeleteAlarm(context.Context, *DeleteAlarmRequest) (*DeleteAlarmResponse, error)
 	ListAlarms(context.Context, *ListAlarmsRequest) (*ListAlarmsResponse, error)
-	// Stops the current visible/audible timer or alarm alert immediately.
+	// Adds one five-field dcron expression to the canonical `alarms` setting.
+	// Adding an existing normalized expression is idempotent. expected_revision
+	// is the app-settings revision for compare-and-swap; 0 skips the check.
+	AddAlarm(context.Context, *AddAlarmRequest) (*Alarm, error)
+	// Deletes the alarm whose alarm_id identifies its schedule and modifiers.
+	DeleteAlarm(context.Context, *DeleteAlarmRequest) (*DeleteAlarmResponse, error)
+	// Disables or re-enables a configured alarm without losing it. Disabling
+	// dismisses that alarm's active alert.
+	SetAlarmEnabled(context.Context, *SetAlarmEnabledRequest) (*Alarm, error)
+	// Stops every current timer/alarm alert. An empty alert_id dismisses all.
 	DismissAlert(context.Context, *DismissAlertRequest) (*DismissAlertResponse, error)
 	mustEmbedUnimplementedClockServiceServer()
 }
@@ -245,38 +303,41 @@ type UnimplementedClockServiceServer struct{}
 func (UnimplementedClockServiceServer) GetState(context.Context, *GetStateRequest) (*ClockState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetState not implemented")
 }
-func (UnimplementedClockServiceServer) StopwatchStart(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error) {
+func (UnimplementedClockServiceServer) WatchState(*WatchStateRequest, grpc.ServerStreamingServer[ClockState]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchState not implemented")
+}
+func (UnimplementedClockServiceServer) StopwatchStart(context.Context, *StopwatchCommandRequest) (*StopwatchState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopwatchStart not implemented")
 }
-func (UnimplementedClockServiceServer) StopwatchPause(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error) {
+func (UnimplementedClockServiceServer) StopwatchPause(context.Context, *StopwatchCommandRequest) (*StopwatchState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopwatchPause not implemented")
 }
-func (UnimplementedClockServiceServer) StopwatchResume(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error) {
+func (UnimplementedClockServiceServer) StopwatchResume(context.Context, *StopwatchCommandRequest) (*StopwatchState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopwatchResume not implemented")
 }
-func (UnimplementedClockServiceServer) StopwatchReset(context.Context, *StopwatchCommandRequest) (*StopwatchInfo, error) {
+func (UnimplementedClockServiceServer) StopwatchReset(context.Context, *StopwatchCommandRequest) (*StopwatchState, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopwatchReset not implemented")
 }
-func (UnimplementedClockServiceServer) StartTimer(context.Context, *StartTimerRequest) (*TimerInfo, error) {
+func (UnimplementedClockServiceServer) StartTimer(context.Context, *StartTimerRequest) (*Timer, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartTimer not implemented")
 }
-func (UnimplementedClockServiceServer) CancelTimer(context.Context, *CancelTimerRequest) (*TimerInfo, error) {
+func (UnimplementedClockServiceServer) CancelTimer(context.Context, *CancelTimerRequest) (*Timer, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelTimer not implemented")
 }
 func (UnimplementedClockServiceServer) ListTimers(context.Context, *ListTimersRequest) (*ListTimersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListTimers not implemented")
 }
-func (UnimplementedClockServiceServer) SetAlarm(context.Context, *SetAlarmRequest) (*AlarmInfo, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SetAlarm not implemented")
+func (UnimplementedClockServiceServer) ListAlarms(context.Context, *ListAlarmsRequest) (*ListAlarmsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAlarms not implemented")
 }
-func (UnimplementedClockServiceServer) SetAlarmEnabled(context.Context, *SetAlarmEnabledRequest) (*AlarmInfo, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SetAlarmEnabled not implemented")
+func (UnimplementedClockServiceServer) AddAlarm(context.Context, *AddAlarmRequest) (*Alarm, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddAlarm not implemented")
 }
 func (UnimplementedClockServiceServer) DeleteAlarm(context.Context, *DeleteAlarmRequest) (*DeleteAlarmResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteAlarm not implemented")
 }
-func (UnimplementedClockServiceServer) ListAlarms(context.Context, *ListAlarmsRequest) (*ListAlarmsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListAlarms not implemented")
+func (UnimplementedClockServiceServer) SetAlarmEnabled(context.Context, *SetAlarmEnabledRequest) (*Alarm, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetAlarmEnabled not implemented")
 }
 func (UnimplementedClockServiceServer) DismissAlert(context.Context, *DismissAlertRequest) (*DismissAlertResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DismissAlert not implemented")
@@ -319,6 +380,17 @@ func _ClockService_GetState_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _ClockService_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchStateRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClockServiceServer).WatchState(m, &grpc.GenericServerStream[WatchStateRequest, ClockState]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ClockService_WatchStateServer = grpc.ServerStreamingServer[ClockState]
 
 func _ClockService_StopwatchStart_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StopwatchCommandRequest)
@@ -446,38 +518,38 @@ func _ClockService_ListTimers_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ClockService_SetAlarm_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetAlarmRequest)
+func _ClockService_ListAlarms_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAlarmsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClockServiceServer).SetAlarm(ctx, in)
+		return srv.(ClockServiceServer).ListAlarms(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ClockService_SetAlarm_FullMethodName,
+		FullMethod: ClockService_ListAlarms_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClockServiceServer).SetAlarm(ctx, req.(*SetAlarmRequest))
+		return srv.(ClockServiceServer).ListAlarms(ctx, req.(*ListAlarmsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ClockService_SetAlarmEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetAlarmEnabledRequest)
+func _ClockService_AddAlarm_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddAlarmRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClockServiceServer).SetAlarmEnabled(ctx, in)
+		return srv.(ClockServiceServer).AddAlarm(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ClockService_SetAlarmEnabled_FullMethodName,
+		FullMethod: ClockService_AddAlarm_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClockServiceServer).SetAlarmEnabled(ctx, req.(*SetAlarmEnabledRequest))
+		return srv.(ClockServiceServer).AddAlarm(ctx, req.(*AddAlarmRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -500,20 +572,20 @@ func _ClockService_DeleteAlarm_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ClockService_ListAlarms_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListAlarmsRequest)
+func _ClockService_SetAlarmEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetAlarmEnabledRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClockServiceServer).ListAlarms(ctx, in)
+		return srv.(ClockServiceServer).SetAlarmEnabled(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ClockService_ListAlarms_FullMethodName,
+		FullMethod: ClockService_SetAlarmEnabled_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClockServiceServer).ListAlarms(ctx, req.(*ListAlarmsRequest))
+		return srv.(ClockServiceServer).SetAlarmEnabled(ctx, req.(*SetAlarmEnabledRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -576,26 +648,32 @@ var ClockService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ClockService_ListTimers_Handler,
 		},
 		{
-			MethodName: "SetAlarm",
-			Handler:    _ClockService_SetAlarm_Handler,
+			MethodName: "ListAlarms",
+			Handler:    _ClockService_ListAlarms_Handler,
 		},
 		{
-			MethodName: "SetAlarmEnabled",
-			Handler:    _ClockService_SetAlarmEnabled_Handler,
+			MethodName: "AddAlarm",
+			Handler:    _ClockService_AddAlarm_Handler,
 		},
 		{
 			MethodName: "DeleteAlarm",
 			Handler:    _ClockService_DeleteAlarm_Handler,
 		},
 		{
-			MethodName: "ListAlarms",
-			Handler:    _ClockService_ListAlarms_Handler,
+			MethodName: "SetAlarmEnabled",
+			Handler:    _ClockService_SetAlarmEnabled_Handler,
 		},
 		{
 			MethodName: "DismissAlert",
 			Handler:    _ClockService_DismissAlert_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchState",
+			Handler:       _ClockService_WatchState_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "capsula/contracts/clock/v1/clock.proto",
 }

@@ -8,6 +8,8 @@ import (
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"
+	"capsulad/internal/settings"
+	"capsulad/internal/uichanges"
 	"capsulad/internal/wakeword"
 )
 
@@ -253,6 +255,11 @@ func (d *Daemon) assistantAppID() string {
 }
 
 func (d *Daemon) deliverActivation(act wakeword.Activation) {
+	// A real detector activation advanced the bounded detection history even
+	// when there is no ready assistant to receive it; refresh the browser view.
+	if act.Origin == "wakeword" {
+		d.publishUI(uichanges.Wakeword)
+	}
 	appID := d.assistantAppID()
 	if appID == "" {
 		d.logs.Warnf("wakeword", "", "activation=%s dropped: no selected assistant", act.ID)
@@ -268,8 +275,15 @@ func (d *Daemon) deliverActivation(act wakeword.Activation) {
 	}
 	if wakeword.ManualOrigin(act.Origin) {
 		msg.Origin = frameworkv1.ActivationOrigin_ACTIVATION_TOUCH
+		msg.HoldToTalk = d.user.Get().Values.TouchHoldMode == settings.HoldToTalk
 	}
+	// Record the grant before delivery so an app that opens the microphone
+	// immediately after receiving the activation still gets its pre-roll. Only
+	// the app that received this activation can attach it; it is one-shot and
+	// expires with the activation's delivery window.
+	d.recordActivationGrant(act.ID, appID, act.ExpiresNS)
 	if err := d.bus.SendApp(appID, &frameworkv1.AppInbound{Message: &frameworkv1.AppInbound_Activation{Activation: msg}}); err != nil {
+		d.consumeActivationGrant(appID, act.ID)
 		d.logs.Warnf("wakeword", appID, "activation=%s delivery failed: %v", act.ID, err)
 		return
 	}
@@ -279,6 +293,63 @@ func (d *Daemon) deliverActivation(act wakeword.Activation) {
 		d.touchActMu.Unlock()
 	}
 	d.logs.Infof("wakeword", appID, "activation=%s delivered", act.ID)
+}
+
+type activationGrant struct {
+	appID     string
+	expiresNS uint64
+}
+
+// recordActivationGrant bounds the table to the live activation window so a
+// stream of undelivered turns cannot grow memory without limit.
+func (d *Daemon) recordActivationGrant(activationID, appID string, expiresNS uint64) {
+	if activationID == "" {
+		return
+	}
+	now := d.clock.NowNS()
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
+	if d.activations == nil {
+		d.activations = map[string]activationGrant{}
+	}
+	for id, grant := range d.activations {
+		if now > grant.expiresNS {
+			delete(d.activations, id)
+		}
+	}
+	d.activations[activationID] = activationGrant{appID: appID, expiresNS: expiresNS}
+}
+
+// activationGrantAllowed reports whether activationID was issued to appID and
+// is still live, without consuming it. Capture startup may yet fail (for
+// example when the visible indication is absent), so the grant is consumed
+// only after a successful open.
+func (d *Daemon) activationGrantAllowed(appID, activationID string) bool {
+	if activationID == "" || appID == "" {
+		return false
+	}
+	now := d.clock.NowNS()
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
+	grant, ok := d.activations[activationID]
+	return ok && grant.appID == appID && now <= grant.expiresNS
+}
+
+// consumeActivationGrant makes an activation grant one-shot: the pre-roll
+// buffer cannot be replayed by reusing the ID.
+func (d *Daemon) consumeActivationGrant(appID, activationID string) bool {
+	if activationID == "" || appID == "" {
+		return false
+	}
+	now := d.clock.NowNS()
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
+	grant, ok := d.activations[activationID]
+	if !ok {
+		return false
+	}
+	delete(d.activations, activationID)
+	return grant.appID == appID && now <= grant.expiresNS
 }
 
 func (d *Daemon) sendTouchRelease() {

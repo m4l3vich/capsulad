@@ -20,6 +20,13 @@ import (
 // not ducked or re-mixed by the software mixer, matching the vendor design
 // where Bluetooth audio bypasses app streams.
 
+// pulseCommand runs pactl for the Bluetooth owner-selection paths. It is a
+// variable so tests can exercise registration ordering without a host
+// PulseAudio; production always reaches the device's pactl.
+var pulseCommand = func(args ...string) ([]byte, error) {
+	return exec.Command("pactl", args...).Output()
+}
+
 // ensurePulseBluetoothModules registers the A2DP/AVRCP endpoints with BlueZ
 // through PulseAudio. Without them the adapter advertises neither Audio Sink
 // nor Headset and a source refuses to connect ("connection-profile-unavailable").
@@ -36,7 +43,7 @@ func (d *Daemon) ensurePulseBluetoothModules() error {
 	if loaded {
 		return nil
 	}
-	out, loadErr := exec.Command("pactl", "load-module", "module-bluetooth-discover").Output()
+	out, loadErr := pulseCommand("load-module", "module-bluetooth-discover")
 	if loadErr != nil {
 		return fmt.Errorf("load pulse bluetooth modules: %w", loadErr)
 	}
@@ -52,7 +59,7 @@ func pulseBluetoothModulesLoaded() bool {
 }
 
 func pulseBluetoothModulesLoadedE() (bool, error) {
-	out, err := exec.Command("pactl", "list", "short", "modules").Output()
+	out, err := pulseCommand("list", "short", "modules")
 	if err != nil {
 		return false, fmt.Errorf("pulse modules: %w", err)
 	}
@@ -345,5 +352,6 @@ func unloadPulseModule(index string) error {
 	if strings.TrimSpace(index) == "" {
 		return nil
 	}
-	return exec.Command("pactl", "unload-module", strings.TrimSpace(index)).Run()
+	_, err := pulseCommand("unload-module", strings.TrimSpace(index))
+	return err
 }

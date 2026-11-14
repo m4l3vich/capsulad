@@ -140,3 +140,70 @@ func TestSessionsExpireAndPasswordChangeRevokes(t *testing.T) {
 		t.Fatal("session survived password change")
 	}
 }
+
+func TestReloadAdoptsOutOfProcessCredentialChanges(t *testing.T) {
+	dir := t.TempDir()
+	daemon := Open(dir, DefaultOptions())
+	if err := daemon.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.SetPassword("first local password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := daemon.CreateAPIKey("first-key"); err != nil {
+		t.Fatal(err)
+	}
+	session, _, err := daemon.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A separate process (the CLI) opens the same store and rewrites it.
+	cli := Open(dir, DefaultOptions())
+	if err := cli.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.SetPassword("second local password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cli.CreateAPIKey("second-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := daemon.Reload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("external password change was not reported")
+	}
+	if daemon.ValidateSession(session) {
+		t.Fatal("session survived an out-of-process password change")
+	}
+	if !daemon.VerifyPassword("second local password") {
+		t.Fatal("reloaded password does not verify")
+	}
+	keys := daemon.ListAPIKeys()
+	if len(keys) != 2 || keys[0].Name != "first-key" || keys[1].Name != "second-key" {
+		t.Fatalf("reloaded keys = %+v", keys)
+	}
+
+	// An API-key-only edit converges without revoking a live session.
+	session2, _, err := daemon.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cli.CreateAPIKey("third-key"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = daemon.Reload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("API-key edit reported as a password change")
+	}
+	if !daemon.ValidateSession(session2) {
+		t.Fatal("API-key edit revoked a live session")
+	}
+}

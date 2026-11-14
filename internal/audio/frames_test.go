@@ -62,7 +62,10 @@ func newAudioManager(t *testing.T, dev backend.AudioDevice) *Manager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(context.Background(), clock, logs, dev, Options{})
+	m := NewManager(context.Background(), clock, logs, dev, Options{
+		IndicationActive: func(string) bool { return true },
+		IndicationCue:    func(string) error { return nil },
+	})
 	if err := m.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -126,10 +129,14 @@ func TestSubscribeFramesCancelClosesChannel(t *testing.T) {
 }
 
 // gatedSource lets the test advance capture by exact chunks, without timing
-// assumptions about the consumer queue.
+// assumptions about the consumer queue. Optional data is streamed in order so
+// a test can compare the delivered frames with offline processing of the same
+// signal.
 type gatedSource struct {
 	sizes   chan int
 	entered chan struct{}
+	data    []byte
+	off     int
 }
 
 func (s *gatedSource) ReadPCM(p []byte) (int, error) {
@@ -138,7 +145,15 @@ func (s *gatedSource) ReadPCM(p []byte) (int, error) {
 	if !ok || n < 0 {
 		return 0, io.EOF
 	}
-	clear(p[:n])
+	if s.data == nil {
+		clear(p[:n])
+		return n, nil
+	}
+	copied := copy(p[:n], s.data[s.off:])
+	if copied < n {
+		clear(p[copied:n])
+	}
+	s.off += copied
 	return n, nil
 }
 
@@ -185,7 +200,7 @@ func TestFrameContinuityAfterDroppedChunksAndSourceErrors(t *testing.T) {
 		t.Fatalf("dropped audio is not visible: sequences %d, %d", first.Sequence, next.Sequence)
 	}
 	m.mu.Lock()
-	last := m.preroll[len(m.preroll)-1]
+	last := m.preroll[len(m.preroll)-1].raw
 	m.mu.Unlock()
 	if last.FirstFrame != 480 {
 		t.Fatalf("partial reads corrupted frame position: got %d, want 480", last.FirstFrame)
@@ -196,4 +211,46 @@ func TestFrameContinuityAfterDroppedChunksAndSourceErrors(t *testing.T) {
 	if !resumed.Discontinuity || resumed.Sequence != 4 {
 		t.Fatalf("source error was hidden: sequence=%d discontinuity=%v", resumed.Sequence, resumed.Discontinuity)
 	}
+}
+
+// A diagnostic/test accessor must report cumulative drops, not the pending
+// value that resets when the consumer drains a later chunk.
+func TestCaptureDroppedFramesCumulative(t *testing.T) {
+	source := &gatedSource{sizes: make(chan int), entered: make(chan struct{}, 1)}
+	m := newAudioManager(t, &gatedDevice{source: source})
+	defer m.Close()
+	capture, err := m.StartCapture("drop.app", "run", CaptureEndpoint, backend.AudioFormat{}, 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The capture queue holds 16 events and the consumer never drains it, so
+	// later chunks are dropped.
+	for range captureQueue + 8 {
+		advanceCapture(t, source, 640)
+	}
+	got := m.CaptureDroppedFrames("drop.app")
+	if got == 0 {
+		t.Fatal("no cumulative drop recorded")
+	}
+	if !m.StopCapture(capture.ID()) {
+		t.Fatal("capture did not stop")
+	}
+	// DROP -> close retention: a caller sampling after EndCapture must still
+	// see the evidence instead of a zero from the removed active capture.
+	if after := m.CaptureDroppedFrames("drop.app"); after != got {
+		t.Fatalf("drop total after close = %d, want %d", after, got)
+	}
+	if other := m.CaptureDroppedFrames("other.app"); other != 0 {
+		t.Fatalf("unrelated app saw %d drops", other)
+	}
+	// A new active capture for the same app must report its own zero, not the
+	// retired snapshot from the previous capture.
+	active, err := m.StartCapture("drop.app", "run2", CaptureEndpoint, backend.AudioFormat{}, 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.CaptureDroppedFrames("drop.app"); got != 0 {
+		t.Fatalf("active zero-drop capture reported retired total %d", got)
+	}
+	m.StopCapture(active.ID())
 }

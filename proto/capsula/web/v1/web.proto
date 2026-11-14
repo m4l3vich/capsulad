@@ -1,0 +1,979 @@
+syntax = "proto3";
+
+package capsula.web.v1;
+
+option go_package = "capsulad/gen/go/capsula/web/v1;webv1";
+
+// Browser control plane for the HTTPS Web UI.
+//
+// This schema is deliberately separate from the framework protocol: it is one
+// authenticated, origin-checked WebSocket per browser session, and every
+// client command maps to a fixed daemon operation. There is no generic
+// service/RPC/bytes escape hatch, no capture or asset stream, and no raw
+// framework settings message. Snapshots carry a topic revision; events carry
+// the revision they advance and a resync flag when a slow consumer lost
+// events, so the browser can converge by re-requesting the snapshot.
+
+// -----------------------------------------------------------------------------
+// Transport envelope
+// -----------------------------------------------------------------------------
+
+message ClientFrame {
+  uint64 request_id = 1;
+  oneof body {
+    Hello hello = 2;
+    SnapshotRequest snapshot_request = 3;
+    Subscribe subscribe = 4;
+    Unsubscribe unsubscribe = 5;
+    Command command = 6;
+    CancelOperation cancel = 7;
+    Ping ping = 8;
+  }
+}
+
+message ServerFrame {
+  uint64 request_id = 1;
+  oneof body {
+    HelloResult hello = 2;
+    Snapshot snapshot = 3;
+    Event event = 4;
+    Result result = 5;
+    Error error = 6;
+    Progress progress = 7;
+    Pong pong = 8;
+  }
+}
+
+message Hello {}
+message HelloResult {
+  string daemon_version = 1;
+  string platform = 2;
+  string user = 3;
+  int64 session_expires_unix_ms = 4;
+  uint32 max_client_frame_bytes = 5;
+}
+
+message Ping {}
+message Pong {}
+
+enum Topic {
+  TOPIC_UNSPECIFIED = 0;
+  TOPIC_OVERVIEW = 1;
+  TOPIC_SETTINGS = 2;
+  TOPIC_APPLICATION = 3;
+  TOPIC_DIAGNOSTICS = 4;
+  TOPIC_WAKEWORD = 5;
+  TOPIC_ACCESS = 6;
+  TOPIC_WIFI = 7;
+}
+
+message SnapshotRequest {
+  Topic topic = 1;
+  string app_id = 2; // Required for TOPIC_APPLICATION.
+}
+
+message Subscribe {
+  Topic topic = 1;
+  string app_id = 2;
+}
+
+message Unsubscribe {
+  Topic topic = 1;
+  string app_id = 2;
+}
+
+message CancelOperation { string operation_id = 1; }
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNAUTHENTICATED = 1;
+  ERROR_CODE_FORBIDDEN = 2;
+  ERROR_CODE_NOT_FOUND = 3;
+  ERROR_CODE_INVALID_ARGUMENT = 4;
+  ERROR_CODE_CONFLICT = 5;
+  ERROR_CODE_UNAVAILABLE = 6;
+  ERROR_CODE_INTERNAL = 7;
+  ERROR_CODE_CANCELLED = 8;
+  ERROR_CODE_TOO_LARGE = 9;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message Snapshot {
+  Topic topic = 1;
+  string app_id = 2;
+  uint64 revision = 3;
+  oneof view {
+    OverviewView overview = 4;
+    SettingsView settings = 5;
+    ApplicationView application = 6;
+    DiagnosticsView diagnostics = 7;
+    WakewordView wakeword = 8;
+    AccessView access = 9;
+    WifiView wifi = 10;
+  }
+}
+
+message Event {
+  Topic topic = 1;
+  string app_id = 2;
+  uint64 revision = 3;
+  // True when this connection lost one or more events (slow consumer or
+  // upstream overflow). The browser must discard local state for the topic and
+  // request a fresh snapshot. topic is TOPIC_UNSPECIFIED for a global resync.
+  bool resync_required = 4;
+  oneof body {
+    OverviewView overview = 5;
+    SettingsView settings = 6;
+    ApplicationView application = 7;
+    DiagnosticsView diagnostics = 8;
+    WakewordView wakeword = 9;
+    AccessView access = 10;
+    LogEntries logs = 11;
+    WifiView wifi = 12;
+    // Low-frequency host metrics sampled only while a diagnostics
+    // subscription is active. It is separate from the full diagnostics view
+    // so runtime sampling does not rebuild logs and runs every tick.
+    SystemMetricsView diagnostics_metrics = 13;
+  }
+}
+
+message LogEntries { repeated LogEntry entries = 1; }
+
+// -----------------------------------------------------------------------------
+// Shared views
+// -----------------------------------------------------------------------------
+
+message DeviceInfo {
+  string device_id = 1;
+  string model = 2;
+  string board_revision = 3;
+  string soc = 4;
+  string kernel = 5;
+  string firmware = 6;
+  string daemon_version = 7;
+  string boot_id = 8;
+  string target_platform = 9;
+  repeated BackendView subsystem_backends = 10;
+}
+
+message BackendView {
+  string subsystem = 1;
+  string backend_id = 2;
+  string status = 3;
+  string detail = 4;
+}
+
+message AudioView {
+  float master_volume = 1;
+  bool microphone_muted = 2;
+  bool microphone_mute_is_hardware = 3;
+}
+
+message BluetoothView {
+  bool present = 1;
+  bool powered = 2;
+  bool discoverable = 3;
+  reserved 4;
+  reserved "pairable";
+  string adapter = 5;
+  string detail = 6;
+  bool incoming_connections = 7;
+  string name = 8;
+}
+
+message PairedDeviceView {
+  string address = 1;
+  string name = 2;
+  bool connected = 3;
+  bool trusted = 4;
+}
+
+message MediaPlayerView {
+  string player_id = 1;
+  string playback_state = 2;
+  repeated string supported_actions = 3;
+  string app_name = 4;
+  string source_name = 5;
+  string media_name = 6;
+  string title = 7;
+  string artist = 8;
+  string album = 9;
+  uint64 duration_ms = 10;
+  uint64 position_ms = 11;
+  uint64 revision = 12;
+}
+
+message MediaProviderView {
+  string app_id = 1;
+  string name = 2;
+  repeated MediaPlayerView players = 3;
+  string error = 4;
+}
+
+message RunView {
+  string run_id = 1;
+  string app_id = 2;
+  uint32 pid = 3;
+  string state = 4;
+  uint64 started_monotonic_ns = 5;
+  int32 exit_code = 6;
+  string status_detail = 7;
+  string runtime = 8;
+  bool selected_default = 9;
+}
+
+message LaunchArgumentView {
+  string name = 1;
+  string description = 2;
+  string value_type = 3;
+  bool required = 4;
+  string value = 5;
+}
+
+message EntrypointView {
+  string runtime = 1;
+  string relative_path = 2;
+  string cpu_architecture = 3;
+  string binary_abi = 4;
+  string framework_sdk_version = 5;
+}
+
+message AppView {
+  string app_id = 1;
+  string display_name = 2;
+  string version = 3;
+  bool start_on_boot = 4;
+  bool single_instance = 5;
+  repeated LaunchArgumentView launch_arguments = 6;
+  repeated string provides = 7;
+  bool background = 8;
+  bool restart_on_failure = 9;
+  EntrypointView entrypoint = 10;
+  bool system_app = 11;
+  bool can_stop = 12;
+  bool can_uninstall = 13;
+}
+
+message ResourceView {
+  string resource_id = 1;
+  string kind = 2;
+  bool available = 3;
+  string routing = 4;
+  repeated string features = 5;
+  string backend_name = 6;
+}
+
+message RoutingView {
+  string resource_id = 1;
+  string configured_default_app_id = 2;
+  string selected_presentation_id = 3;
+  string selected_app_id = 4;
+  uint64 revision = 5;
+}
+
+message LogEntry {
+  uint64 monotonic_time_ns = 1;
+  string component = 2;
+  string app_id = 3;
+  string severity = 4;
+  string message = 5;
+}
+
+message DiscoveryView {
+  bool supported = 1;
+  string hostname = 2;
+  string advertised = 3;
+  string detail = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Settings
+// -----------------------------------------------------------------------------
+
+message MutedIndicatorView {
+  string mode = 1;
+  uint32 delay_ms = 2;
+}
+
+message SettingsValues {
+  map<string, string> default_app_by_resource = 1;
+  string default_assistant_app_id = 2;
+  string wakeword_model_id = 3;
+  bool wakeword_enabled = 4;
+  map<string, float> display_brightness = 5;
+  float master_volume = 6;
+  bool microphone_muted = 7;
+  string touch_hold_mode = 8;
+  MutedIndicatorView muted_microphone_indicator = 9;
+  string timezone = 10;
+  map<string, string> brightness_mode = 11;
+  reserved 12;
+  reserved "bluetooth_pairable";
+  bool startup_sound_enabled = 13;
+  string hostname = 14;
+  bool bluetooth_incoming_connections = 15;
+  bool bluetooth_discoverable = 16;
+}
+
+message WakewordModelView {
+  string model_id = 1;
+  string display_name = 2;
+  string language = 3;
+  string engine_id = 4;
+  bool available = 5;
+}
+
+message WakewordSampleView {
+  string sample_id = 1;
+  string label = 2;
+  uint32 duration_ms = 3;
+  int64 recorded_unix_ms = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Application detail
+// -----------------------------------------------------------------------------
+
+message SettingChoiceView { string value = 1; string label = 2; }
+
+message SettingDefinitionView {
+  string key = 1;
+  string label = 2;
+  string description = 3;
+  string type = 4;
+  string default_value_json = 5;
+  repeated SettingChoiceView choices = 6;
+  bool required = 7;
+  bool restart_required = 8;
+  bool has_min = 9;
+  double min = 10;
+  bool has_max = 11;
+  double max = 12;
+}
+
+message ActionDefinitionView {
+  string action_id = 1;
+  string label = 2;
+  string description = 3;
+  bool confirm_before_run = 4;
+}
+
+message AppConfigSchemaView {
+  string app_id = 1;
+  repeated SettingDefinitionView settings = 2;
+  repeated ActionDefinitionView actions = 3;
+  SettingsUIView settings_ui = 4;
+}
+
+// SettingsUIView announces the application-provided settings document. The
+// browser fetches asset_url from the authenticated Web UI, then renders it in
+// a sandboxed opaque-origin iframe. The asset carries no session access.
+message SettingsUIView {
+  bool available = 1;
+  uint32 api_version = 2;
+  string asset_url = 3;
+}
+
+message SettingStateView {
+  string key = 1;
+  string value_json = 2;
+  bool has_value = 3;
+}
+
+message AppSettingChangeView {
+  string key = 1;
+  string value_json = 2;
+  bool clear = 3;
+}
+
+message InterfaceView {
+  string app_id = 1;
+  string grpc_service = 2;
+  string interface_version = 3;
+  bool available = 4;
+  string summary = 5;
+}
+
+message MethodDocumentationView {
+  string rpc_name = 1;
+  string summary = 2;
+  string semantics_markdown = 3;
+  string request_example_json = 4;
+  string response_example_json = 5;
+}
+
+message InterfaceDescriptionView {
+  string grpc_service = 1;
+  string documentation_markdown = 2;
+  repeated MethodDocumentationView methods = 3;
+}
+
+message ProvenanceView {
+  string status = 1;
+  string detail = 2;
+  string subject_sha256_hex = 3;
+  string verified_repository = 4;
+  string verified_workflow = 5;
+  string verified_commit_sha = 6;
+}
+
+message StopwatchView {
+  string state = 1;
+  int64 elapsed_ms = 2;
+  int64 started_unix_ms = 3;
+}
+
+message TimerView {
+  string timer_id = 1;
+  string label = 2;
+  int64 duration_ms = 3;
+  int64 remaining_ms = 4;
+  string status = 5;
+  int64 started_unix_ms = 6;
+  int64 finished_unix_ms = 7;
+}
+
+message AlarmView {
+  string alarm_id = 1;
+  string label = 2;
+  reserved 3, 4, 5;
+  reserved "hour", "minute", "days_of_week";
+  bool enabled = 6;
+  string timezone = 7;
+  string effective_timezone = 8;
+  int64 next_trigger_unix_ms = 9;
+  string next_trigger_rfc3339 = 10;
+  int64 last_triggered_unix_ms = 11;
+  // The five-field dcron schedule stored in the app's `alarms` setting.
+  string schedule = 12;
+}
+
+message ActiveAlertView {
+  string alert_id = 1;
+  string kind = 2;
+  string source_id = 3;
+  string label = 4;
+  int64 started_unix_ms = 5;
+}
+
+message ClockView {
+  string local_time_rfc3339 = 1;
+  string timezone = 2;
+  StopwatchView stopwatch = 3;
+  repeated TimerView timers = 4;
+  repeated AlarmView alarms = 5;
+  repeated ActiveAlertView active_alerts = 6;
+}
+
+message RingView {
+  string effect = 1;
+  string palette = 2;
+  float brightness = 3;
+  float speed = 4;
+  string presentation_id = 5;
+  bool active = 6;
+  uint64 settings_revision = 7;
+}
+
+message OverviewView {
+  uint64 revision = 1;
+  DeviceInfo device = 2;
+  AudioView audio = 3;
+  BluetoothView bluetooth = 4;
+  repeated PairedDeviceView paired_devices = 5;
+  string bluetooth_error = 6;
+  repeated MediaProviderView providers = 7;
+  repeated AppView apps = 8;
+  repeated RunView runs = 9;
+  map<string, bool> selected_providers = 10;
+  uint64 settings_revision = 11;
+  // False when the overview could not read the settings store; controls that
+  // require compare-and-swap must not send revision 0 in that case.
+  bool settings_available = 12;
+}
+
+message SettingsView {
+  uint64 revision = 1;
+  SettingsValues values = 2;
+  ResourceView display = 3;
+  ResourceView ring = 4;
+  bool ambient_available = 5;
+  repeated AppView apps = 6;
+  repeated WakewordModelView models = 7;
+  DiscoveryView discovery = 8;
+  string discovery_url = 9;
+  BluetoothView bluetooth = 10;
+  string bluetooth_error = 11;
+}
+
+message ApplicationView {
+  uint64 revision = 1;
+  AppView app = 2;
+  AppConfigSchemaView schema = 3;
+  uint64 config_revision = 4;
+  repeated SettingStateView values = 5;
+  repeated InterfaceView interfaces = 6;
+  repeated InterfaceDescriptionView descriptions = 7;
+  repeated RunView runs = 8;
+  ProvenanceView provenance = 9;
+  repeated LogEntry logs = 10;
+  ClockView clock = 11;
+  string clock_error = 12;
+  RingView ring = 13;
+  string ring_error = 14;
+  bool selected_default = 15;
+}
+
+message DiagnosticsView {
+  uint64 revision = 1;
+  DeviceInfo device = 2;
+  repeated ResourceView resources = 3;
+  map<string, RoutingView> routing = 4;
+  repeated RunView runs = 5;
+  repeated LogEntry logs = 6;
+  AudioView audio = 7;
+  map<string, bool> selected_providers = 8;
+  // Host metrics are read-only and sampled at a low fixed rate by the daemon.
+  // Every *Available flag is independent: an unsupported domain leaves its
+  // numbers at zero and is never presented as a measured value.
+  SystemMetricsView metrics = 9;
+}
+
+message SystemMetricsView {
+  // True when this host can be sampled at all. A false value with detail is
+  // the honest unsupported-platform state, not a zero measurement.
+  bool available = 1;
+  string detail = 2;
+  bool cpu_available = 3;
+  double cpu_usage_percent = 4; // busy share over the last sampling interval
+  uint32 cpu_count = 5;
+  bool memory_available = 6;
+  uint64 memory_total_bytes = 7;
+  uint64 memory_used_bytes = 8;
+  bool disk_available = 9;
+  uint64 disk_total_bytes = 10;
+  uint64 disk_free_bytes = 11;
+  bool temperature_available = 12;
+  double soc_temperature_c = 13;
+  uint64 uptime_seconds = 14;
+  // False when /proc/uptime could not be read; uptime_seconds then carries no
+  // meaning and the UI must not render "On for 0m".
+  bool uptime_available = 15;
+}
+
+message WakewordDetectionView {
+  string model_id = 1;
+  string model_display_name = 2;
+  int64 detected_unix_ms = 3;
+}
+
+message WakewordView {
+  uint64 revision = 1;
+  repeated WakewordSampleView samples = 2;
+  repeated WakewordModelView models = 3;
+  // Newest first, capped by the daemon. Only real engine activations appear;
+  // manual buttons, the simulator and the API are not keyword detections.
+  repeated WakewordDetectionView detections = 4;
+}
+
+message AccessStatusView {
+  bool https_enabled = 1;
+  bool bootstrap_complete = 2;
+  bool admin_password_set = 3;
+  uint32 active_api_keys = 4;
+  repeated string listen_addresses = 5;
+  string server_fingerprint = 6;
+  int64 server_expiry_unix_ms = 7;
+  repeated string server_dns_names = 8;
+  repeated string server_ip_addresses = 9;
+}
+
+message ApiKeyView {
+  string name = 1;
+  string prefix = 2;
+  int64 created_unix_ms = 3;
+  bool revoked = 4;
+}
+
+message AccessView {
+  uint64 revision = 1;
+  AccessStatusView status = 2;
+  repeated ApiKeyView keys = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Commands (explicit allowlist; every entry maps to one fixed daemon call)
+// -----------------------------------------------------------------------------
+
+message Command {
+  oneof op {
+    SettingsUpdate settings = 1;
+    LaunchApp launch = 2;
+    StopRun stop = 3;
+    TriggerAppAction action = 4;
+    AppSettingsUpdate app_settings = 5;
+    MediaCommand media = 6;
+    BluetoothCommand bluetooth = 7;
+    RecordSample record_sample = 8;
+    DeleteSample delete_sample = 9;
+    TrainWakeword train = 10;
+    CancelTraining cancel_training = 11;
+    ClockCommand clock = 12;
+    CreateApiKey create_api_key = 13;
+    RevokeApiKey revoke_api_key = 14;
+    WifiCommand wifi = 15;
+  }
+}
+
+message SettingsUpdate {
+  uint64 expected_revision = 1;
+  reserved 6;
+  reserved "device";
+  oneof group {
+    DisplaySettings display = 2;
+    AssistantSettings assistant = 3;
+    MicrophoneSettings microphone = 4;
+    VolumeSettings volume = 5;
+    StartupSoundSettings startup_sound = 7;
+    TimezoneSettings timezone = 8;
+    HostnameSettings hostname = 9;
+    MutedIndicatorSettings muted_indicator = 10;
+  }
+}
+
+enum BrightnessMode {
+  BRIGHTNESS_MODE_UNSPECIFIED = 0;
+  BRIGHTNESS_MODE_CONST = 1;
+  BRIGHTNESS_MODE_AUTO = 2;
+}
+
+message DisplaySettings {
+  string resource_id = 1;
+  string default_app = 2;
+  float brightness = 3; // [0,1] constant level
+  BrightnessMode brightness_mode = 4;
+  // Field names this patch owns: default_app, brightness, brightness_mode.
+  // Empty means every field (legacy callers).
+  repeated string update_fields = 5;
+}
+
+enum TouchBehavior {
+  TOUCH_BEHAVIOR_UNSPECIFIED = 0;
+  TOUCH_BEHAVIOR_SUMMON = 1;
+  TOUCH_BEHAVIOR_TALK = 2;
+}
+
+message AssistantSettings {
+  string default_assistant_app = 1;
+  string wakeword_model = 2;
+  bool wakeword_enabled = 3;
+  TouchBehavior touch_hold = 4;
+  // Field names this patch owns: default_assistant_app, wakeword_model,
+  // wakeword_enabled, touch_hold_mode. Empty means every field.
+  repeated string update_fields = 5;
+}
+
+enum MutedIndicatorMode {
+  MUTED_INDICATOR_MODE_UNSPECIFIED = 0;
+  MUTED_INDICATOR_MODE_IMMEDIATE = 1;
+  MUTED_INDICATOR_MODE_DELAY = 2;
+  MUTED_INDICATOR_MODE_UNTIL_UNMUTED = 3;
+}
+
+message MicrophoneSettings {
+  bool muted = 1;
+  reserved 2, 3;
+  reserved "indicator_mode", "indicator_delay_s";
+}
+
+message MutedIndicatorSettings {
+  MutedIndicatorMode mode = 1;
+  // A false has_delay keeps the stored delay, so changing only the mode never
+  // submits or validates an unrelated unsaved delay draft.
+  bool has_delay = 2;
+  uint32 delay_s = 3;
+  // A false has_mode preserves the stored mode, so saving a delay draft in one
+  // session cannot revert a newer mode selected in another.
+  bool has_mode = 4;
+}
+
+message StartupSoundSettings { bool enabled = 1; }
+message TimezoneSettings { string timezone = 1; }
+message HostnameSettings { string hostname = 1; }
+
+message VolumeSettings { float master_volume = 1; }
+
+message SettingsUpdateResult {
+  uint64 revision = 1;
+  string message = 2;
+  string warning = 3;
+}
+
+message LaunchApp {
+  string app_id = 1;
+  repeated LaunchArgumentView arguments = 2;
+}
+
+message LaunchResult {
+  string run_id = 1;
+  string invocation_id = 2;
+  bool spawned_new_process = 3;
+}
+
+message StopRun {
+  string app_id = 1;
+  string run_id = 2;
+}
+
+message StopResult {
+  bool requested = 1;
+  bool selected_default = 2;
+  string message = 3;
+}
+
+message TriggerAppAction {
+  string app_id = 1;
+  string action_id = 2;
+}
+
+message ActionResult { string invocation_id = 1; }
+
+message AppSettingsUpdate {
+  string app_id = 1;
+  uint64 expected_revision = 2;
+  repeated AppSettingChangeView changes = 3;
+}
+
+message AppSettingsUpdateResult {
+  uint64 revision = 1;
+  string message = 2;
+  repeated SettingStateView values = 3;
+}
+
+enum MediaAction {
+  MEDIA_ACTION_UNSPECIFIED = 0;
+  MEDIA_ACTION_PLAY = 1;
+  MEDIA_ACTION_PAUSE = 2;
+  MEDIA_ACTION_NEXT = 3;
+  MEDIA_ACTION_PREVIOUS = 4;
+}
+
+message MediaCommand {
+  string app_id = 1;
+  string player_id = 2;
+  MediaAction action = 3;
+}
+
+message MediaResult {
+  bool accepted = 1;
+  string detail = 2;
+}
+
+message BluetoothCommand {
+  reserved 2;
+  reserved "set_pairable";
+  oneof action {
+    SetDiscoverable set_discoverable = 1;
+    UnpairDevice unpair = 3;
+    SetIncomingConnections set_incoming_connections = 4;
+  }
+}
+
+message SetDiscoverable { bool discoverable = 1; }
+message SetIncomingConnections { bool incoming_connections = 1; }
+message UnpairDevice { string address = 1; }
+
+message BluetoothResult {
+  string message = 1;
+  // Observed adapter state after the command, so the two toggles reflect
+  // BlueZ truth rather than the requested value.
+  BluetoothView status = 2;
+}
+
+message RecordSample {
+  string label = 1;
+  uint32 duration_ms = 2;
+}
+
+message SampleResult { WakewordSampleView sample = 1; }
+
+message DeleteSample { string sample_id = 1; }
+
+message TrainWakeword {
+  string display_name = 1;
+  string language = 2;
+  uint64 seed = 3;
+  repeated string word_sample_ids = 4;
+  repeated string room_sample_ids = 5;
+  repeated string speech_sample_ids = 6;
+  repeated string false_sample_ids = 7;
+}
+
+message TrainingHandle { string training_id = 1; }
+
+message CancelTraining { string training_id = 1; }
+
+message StartTimer {
+  uint64 duration_ms = 1;
+  string label = 2;
+}
+
+message CancelTimer { string timer_id = 1; }
+
+message SetAlarm {
+  string alarm_id = 1;
+  string label = 2;
+  uint32 hour = 3;
+  uint32 minute = 4;
+  uint32 days_of_week = 5;
+  string timezone = 6;
+  bool enabled = 7;
+}
+
+message SetAlarmEnabled {
+  string alarm_id = 1;
+  bool enabled = 2;
+}
+
+message DeleteAlarm { string alarm_id = 1; }
+
+message DismissAlert { string alert_id = 1; }
+
+message ClockCommand {
+  string app_id = 1;
+  oneof action {
+    Empty stopwatch_start = 2;
+    Empty stopwatch_pause = 3;
+    Empty stopwatch_resume = 4;
+    Empty stopwatch_reset = 5;
+    StartTimer start_timer = 6;
+    CancelTimer cancel_timer = 7;
+    SetAlarm set_alarm = 8;
+    SetAlarmEnabled set_alarm_enabled = 9;
+    DeleteAlarm delete_alarm = 10;
+    DismissAlert dismiss_alert = 11;
+  }
+}
+
+message ClockCommandResult {
+  ClockView clock = 1;
+  string message = 2;
+}
+
+message CreateApiKey { string name = 1; }
+
+message ApiKeyCreated {
+  string name = 1;
+  string value = 2;
+  string prefix = 3;
+}
+
+message RevokeApiKey { string name = 1; }
+
+message Result {
+  oneof value {
+    SettingsUpdateResult settings = 1;
+    LaunchResult launch = 2;
+    StopResult stop = 3;
+    ActionResult action = 4;
+    AppSettingsUpdateResult app_settings = 5;
+    MediaResult media = 6;
+    BluetoothResult bluetooth = 7;
+    SampleResult sample = 8;
+    Empty deleted = 9;
+    TrainingHandle training = 10;
+    ClockCommandResult clock = 11;
+    ApiKeyCreated api_key = 12;
+    Empty revoked = 13;
+    WifiResult wifi = 14;
+  }
+}
+
+message Empty {}
+
+// -----------------------------------------------------------------------------
+// Wi-Fi
+// -----------------------------------------------------------------------------
+
+message WifiView {
+  uint64 revision = 1;
+  bool available = 2;
+  // One of: unavailable, disconnected, connecting, connected, ap_fallback,
+  // error.
+  string state = 3;
+  string interface = 4;
+  string ssid = 5;
+  string ip_address = 6;
+  string detail = 7;
+  bool ap_active = 8;
+  string ap_ssid = 9;
+  string ap_portal_url = 10;
+  repeated WifiKnownNetwork known_networks = 11;
+  string last_error = 12;
+  // Only a Scan result carries results; snapshots and events leave this
+  // empty so merely subscribing never triggers a radio scan.
+  repeated WifiScanResult scan_results = 13;
+  bool scan_supported = 14;
+  string ap_password_hint = 15;
+}
+
+message WifiKnownNetwork {
+  string ssid = 1;
+  string security = 2;
+  bool connected = 3;
+  bool has_password = 4;
+}
+
+message WifiScanResult {
+  string ssid = 1;
+  string security = 2;
+  int32 signal_dbm = 3;
+  uint32 frequency_mhz = 4;
+  bool connected = 5;
+}
+
+message WifiCommand {
+  string ssid = 1;
+  oneof action {
+    Empty scan = 2;
+    WifiConnect connect = 3;
+    WifiForget forget = 4;
+  }
+}
+
+message WifiConnect {
+  string ssid = 1;
+  string passphrase = 2;
+  // One of open, wpa2, wpa2_wpa3, wpa3. Empty means wpa2.
+  string security = 3;
+}
+
+message WifiForget { string ssid = 1; }
+
+message WifiResult {
+  string message = 1;
+  WifiView wifi = 2;
+}
+
+message WakewordClassifierView {
+  string model_id = 1;
+  string display_name = 2;
+  string language = 3;
+  float threshold = 4;
+  uint32 context_frames = 5;
+  uint32 embedding_dim = 6;
+  uint32 projection_width = 7;
+  uint32 hidden_width = 8;
+}
+
+message Progress {
+  string training_id = 1;
+  string stage = 2;
+  float fraction = 3;
+  string log = 4;
+  WakewordClassifierView classifier = 5;
+}

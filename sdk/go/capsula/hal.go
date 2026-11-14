@@ -533,6 +533,11 @@ func (k *Conversation) Close() {
 // --- settings and mixer state ---------------------------------------------
 
 // UserSettings returns the device-wide settings snapshot and its revision.
+//
+// Device settings are a local-administrator operation: a supervised app
+// receives PermissionDenied. Per-turn rules an assistant needs (for example
+// hold-to-talk) arrive on its Activation instead, and app configuration is
+// available through the application-configuration methods.
 func (c *Client) UserSettings(ctx context.Context) (UserSettings, uint64, error) {
 	var snapshot struct {
 		Revision uint64        `json:"revision"`

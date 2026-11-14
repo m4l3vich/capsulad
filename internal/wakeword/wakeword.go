@@ -28,8 +28,22 @@ type Activation struct {
 	Origin    string
 	ModelID   string
 	TimeNS    uint64
+	UnixMS    int64
 	ExpiresNS uint64
 }
+
+// Detection is one real engine activation retained for the authenticated Web
+// UI. It is written at detection time and never reconstructed from logs.
+type Detection struct {
+	ModelID     string
+	DisplayName string
+	TimeNS      uint64
+	UnixMS      int64
+}
+
+// recentDetectionLimit bounds the in-memory history. Detections are rare
+// (the runner enforces a 2.9 s cooldown) and the browser only shows the tail.
+const recentDetectionLimit = 20
 
 type Manager struct {
 	ctx    context.Context
@@ -42,6 +56,8 @@ type Manager struct {
 	enabled bool
 	muted   bool
 	onFire  func(Activation)
+	// recent holds real detector activations only, oldest first.
+	recent []Detection
 	// gate reports whether detection may run right now. The daemon suspends it
 	// during training takes and while the assistant holds audio streams, so
 	// recording the word cannot start an assistant response inside the take.
@@ -146,10 +162,28 @@ func (m *Manager) Available() bool {
 // the stock device has none, and its talk button still summons the assistant.
 func ManualOrigin(origin string) bool {
 	switch origin {
-	case "touch", "play_pause_key", "voice_key", "key", "manual", "simulator":
+	case "touch", "play_pause_key", "key", "manual", "simulator":
 		return true
 	}
 	return false
+}
+
+// RecentDetections returns the newest real detections first, capped at limit.
+func (m *Manager) RecentDetections(limit int) []Detection {
+	if limit <= 0 || limit > recentDetectionLimit {
+		limit = recentDetectionLimit
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(m.recent)
+	if n > limit {
+		n = limit
+	}
+	out := make([]Detection, 0, n)
+	for i := len(m.recent) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, m.recent[i])
+	}
+	return out
 }
 
 // Trigger creates an activation for the selected model. It is the simulator's
@@ -169,11 +203,13 @@ func (m *Manager) Trigger(origin, modelID string) (Activation, bool) {
 	} else if modelID == "" && len(m.models) > 0 {
 		modelID = m.models[0].ID
 	}
+	displayName := ""
 	if !manual {
 		known := false
 		for _, model := range m.models {
 			if model.ID == modelID && model.Available {
 				known = true
+				displayName = model.DisplayName
 				break
 			}
 		}
@@ -186,7 +222,19 @@ func (m *Manager) Trigger(origin, modelID string) (Activation, bool) {
 	now := m.clock.NowNS()
 	act := Activation{
 		ID: ids.New("act"), Origin: origin, ModelID: modelID,
-		TimeNS: now, ExpiresNS: now + uint64(5*time.Second),
+		TimeNS: now, UnixMS: time.Now().UnixMilli(), ExpiresNS: now + uint64(5*time.Second),
+	}
+	// Only the real detector's origin is a detection. Manual buttons, the
+	// simulator and the administrator API remain activations but are not
+	// presented as keyword detections.
+	if origin == "wakeword" {
+		m.recent = append(m.recent, Detection{
+			ModelID: modelID, DisplayName: displayName, TimeNS: now, UnixMS: act.UnixMS,
+		})
+		if len(m.recent) > recentDetectionLimit {
+			copy(m.recent, m.recent[len(m.recent)-recentDetectionLimit:])
+			m.recent = m.recent[:recentDetectionLimit]
+		}
 	}
 	fn := m.onFire
 	m.mu.Unlock()
