@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic, liveState } from '../lib/live.js'
 import { shortId, status } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
 
 // Diagnostics is read-only except for stopping a run. Metrics arrive with the
 // diagnostics snapshot and while the topic is subscribed; this page never
@@ -21,6 +22,20 @@ let metricsRev = 0
 let mergedMetrics = null
 
 const live = computed(() => liveState.value === 'open')
+
+// Readings survive a failed refresh, so the failure is announced once per
+// distinct message rather than pinned above them; an initial failure still
+// uses the unavailable block below.
+let lastRefreshError = ''
+watch(error, (value) => {
+  if (!value) {
+    lastRefreshError = ''
+    return
+  }
+  if (!data.value || value === lastRefreshError) return
+  lastRefreshError = value
+  notify.warning(`Refresh failed: ${value}`)
+})
 
 // --- hardware and backends --------------------------------------------------
 
@@ -131,8 +146,6 @@ const runs = computed(() => data.value?.runs || [])
 const selectedProviders = computed(() => data.value?.selectedProviders || {})
 const busyRun = ref('')
 const actionPending = computed(() => busyRun.value !== '')
-const runNotice = ref('')
-const runError = ref('')
 
 function isSelectedRun(run) {
   return Boolean(run.selectedDefault || selectedProviders.value?.[run.appId])
@@ -142,18 +155,16 @@ async function stopRun(run) {
   if (actionPending.value) return
   const selected = isSelectedRun(run)
   busyRun.value = run.runId
-  runError.value = ''
-  runNotice.value = ''
   try {
     const result = await socket.request({ stop: { appId: run.appId, runId: run.runId } })
     const stop = result.stop || {}
     const isDefault = Boolean(stop.selectedDefault || selected)
-    runNotice.value = isDefault
+    notify.success(isDefault
       ? `${appLabel(run.appId)} was restarted and stays on because it is the default app. Choose another default in Settings to switch it off.`
-      : `${appLabel(run.appId)} was stopped.`
+      : `${appLabel(run.appId)} was stopped.`)
     await refresh()
   } catch (err) {
-    runError.value = err.message
+    notify.error(err.message)
   } finally {
     busyRun.value = ''
   }
@@ -435,11 +446,6 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div v-if="error" role="alert" class="alert alert-error py-2">
-      <span class="text-sm"><strong class="font-semibold">Refresh failed.</strong> {{ error }}</span>
-      <button type="button" class="btn btn-sm btn-outline" :disabled="loading" @click="refresh">Retry</button>
-    </div>
-
     <div v-if="!live && data" role="status" class="alert alert-warning py-2">
       <span class="text-sm">
         The connection to the speaker was lost. These readings are from the last update and will refresh when it
@@ -634,12 +640,6 @@ onUnmounted(() => {
               Apps marked <span class="badge badge-ghost badge-sm">Default</span> keep themselves running, so their
               button says Restart. To switch one off, choose another default in Settings.
             </p>
-          </div>
-
-          <div v-if="runError" role="alert" class="alert alert-error py-2 text-sm"><span>{{ runError }}</span></div>
-          <div v-if="runNotice" role="status" class="alert alert-info py-2 text-sm">
-            <span>{{ runNotice }}</span>
-            <button type="button" class="btn btn-ghost btn-xs" aria-label="Dismiss message" @click="runNotice = ''">Dismiss</button>
           </div>
 
           <div v-if="runs.length" class="overflow-x-auto">

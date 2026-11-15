@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import ModalDialog from '../components/ModalDialog.vue'
+import { notify } from '../lib/toast.js'
 import {
   assetPathError,
   defaultTarget,
@@ -31,18 +32,18 @@ async function load() {
     totalBytes.value = total
     loaded.value = true
   } catch (err) {
-    loadError.value = err.message
+    // The first load has no list to fall back on, so it stays inline; later
+    // failures keep the last list and only announce the miss.
     if (!loaded.value) {
+      loadError.value = err.message
       assets.value = []
       totalBytes.value = 0
+    } else {
+      notify.warning(`Refresh failed: ${err.message}`)
     }
   } finally {
     loading.value = false
   }
-}
-
-function note(message) {
-  notice.value = message
 }
 
 onMounted(load)
@@ -56,8 +57,6 @@ const targetAttempted = ref(false)
 const dragging = ref(false)
 const uploading = ref(false)
 const progress = ref(0)
-const uploadError = ref('')
-const notice = ref('')
 const fileInput = ref(null)
 
 const targetIssue = computed(() => {
@@ -75,11 +74,9 @@ const pickedLabel = computed(() => {
 function chooseFile(file) {
   if (!file) return
   pickedFile.value = file
-  uploadError.value = ''
-  notice.value = ''
   if (!targetTouched.value) target.value = defaultTarget(file.name)
   if (file.size > MAX_ASSET_BYTES) {
-    uploadError.value = `“${file.name}” is ${formatBytes(file.size)}; the store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`
+    notify.error(`“${file.name}” is ${formatBytes(file.size)}; the store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`)
   }
 }
 
@@ -101,7 +98,6 @@ function startDrag(event) {
 
 function onTargetInput() {
   targetTouched.value = true
-  uploadError.value = ''
 }
 
 function resetDraft() {
@@ -113,12 +109,10 @@ function resetDraft() {
 }
 
 async function submitUpload() {
-  uploadError.value = ''
-  notice.value = ''
   targetAttempted.value = true
   if (!canUpload.value) return
   if (pickedFile.value.size > MAX_ASSET_BYTES) {
-    uploadError.value = `The store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`
+    notify.error(`The store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`)
     return
   }
   uploading.value = true
@@ -130,11 +124,11 @@ async function submitUpload() {
       }
     })
     progress.value = 1
-    notice.value = `Saved /assets/${entry.id} (${formatBytes(entry.size_bytes)}).`
+    notify.success(`Saved /assets/${entry.id} (${formatBytes(entry.size_bytes)}).`)
     resetDraft()
     await load()
   } catch (err) {
-    uploadError.value = err.message
+    notify.error(err.message)
   } finally {
     uploading.value = false
   }
@@ -144,11 +138,8 @@ async function submitUpload() {
 
 const deleteTarget = ref(null)
 const deleteBusy = ref(false)
-const deleteError = ref('')
 
 function askDelete(entry) {
-  deleteError.value = ''
-  notice.value = ''
   deleteTarget.value = entry
 }
 
@@ -156,14 +147,13 @@ async function confirmDelete() {
   if (!deleteTarget.value) return
   const entry = deleteTarget.value
   deleteBusy.value = true
-  deleteError.value = ''
   try {
     await deleteAsset(entry.id)
     deleteTarget.value = null
-    note(`Deleted /assets/${entry.id}. Apps referencing it will fail to read it.`)
+    notify.success(`Deleted /assets/${entry.id}. Apps referencing it will fail to read it.`)
     await load()
   } catch (err) {
-    deleteError.value = err.message
+    notify.error(err.message)
   } finally {
     deleteBusy.value = false
   }
@@ -190,11 +180,6 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
       </button>
     </header>
 
-    <div v-if="notice" role="status" class="alert alert-success py-2">
-      <span class="text-sm">{{ notice }}</span>
-      <button type="button" class="btn btn-ghost btn-xs" aria-label="Dismiss message" @click="notice = ''">Dismiss</button>
-    </div>
-
     <section class="card border border-base-300 bg-base-100">
       <div class="card-body gap-4 p-5">
         <div>
@@ -203,10 +188,6 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
             The selected file is sent as the raw request body, up to {{ formatBytes(MAX_ASSET_BYTES) }}.
             Subdirectories in the destination path are created; an existing file is replaced atomically.
           </p>
-        </div>
-
-        <div v-if="uploadError" role="alert" class="alert alert-error py-2 text-sm">
-          <span>{{ uploadError }}</span>
         </div>
 
         <div
@@ -344,9 +325,6 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
         Delete <code class="break-all font-mono text-xs">{{ deleteTarget.path }}</code> from the shared store?
         Apps that read it will fail until another file takes its place. This cannot be undone.
       </p>
-      <div v-if="deleteError" role="alert" class="alert alert-error mt-3 py-2 text-sm">
-        <span>{{ deleteError }}</span>
-      </div>
       <template #footer>
         <button type="button" class="btn btn-ghost" :disabled="deleteBusy" @click="deleteTarget = null">Cancel</button>
         <button

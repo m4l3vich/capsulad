@@ -3,44 +3,57 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import ModalDialog from './ModalDialog.vue'
 import { useSettings } from '../lib/live.js'
+import { notify } from '../lib/toast.js'
 import {
-  LAND_PATHS,
+  CITY_ENTRIES,
+  COUNTRY_PATHS,
   MAP_HEIGHT,
   MAP_WIDTH,
-  MARKER_ENTRIES,
-  PROJECTED_MARKERS,
   entryFor,
-  zoneCatalogue
+  nearestCity,
+  projectPoint,
+  zonePathFor
 } from '../lib/timezones.js'
 
 // Time zone card. The card always shows the full IANA identifier the device
 // stores (or states that it is following its firmware default) plus its local
-// time and UTC offset. Editing happens in a modal map picker: markers and the
-// search list only change the pending selection, and the device is written
-// only when Apply is pressed. The browser's own zone is never offered,
-// selected or submitted automatically.
+// time and UTC offset. Editing happens in a modal map picker: clicking the map
+// asks for the nearest zone.tab city, highlights that zone's real boundary and
+// pins the city; the search list does the same explicitly. Nothing is written
+// until Apply is pressed, and the browser's own zone is never assumed.
 
 const { data, error, update } = useSettings()
 
-const CATALOGUE = zoneCatalogue()
 const RESULT_LIMIT = 40
+
+// Pin geometry is expressed in viewBox units, derived from the map width so a
+// 18000-unit map still gets a few screen pixels of marker.
+const PIN_INNER = Math.round(MAP_WIDTH / 230)
+const PIN_OUTER = Math.round(MAP_WIDTH / 110)
+const PIN_HALO = Math.round(PIN_OUTER * 1.4)
 
 const now = ref(new Date())
 const openPicker = ref(false)
 const draft = ref('')
 const query = ref('')
-const active = ref('')
 const saving = ref(false)
-const dialogError = ref('')
-const statusNote = ref('')
 
 let ticker = null
-let noteTimer = null
 
 const stored = computed(() => String(data.value?.values?.timezone || ''))
 const storedEntry = computed(() => (stored.value ? entryFor(stored.value) : null))
 const draftEntry = computed(() => (draft.value ? entryFor(draft.value) : null))
 const needle = computed(() => query.value.trim().toLowerCase())
+
+// The selected zone's boundary path, drawn with fill-rule="evenodd" so holes
+// (lakes, enclaves) stay unfilled inside it.
+const selectedPath = computed(() => zonePathFor(draft.value))
+
+const pin = computed(() => {
+  const entry = draftEntry.value
+  if (!entry || entry.lat === null || entry.lon === null) return null
+  return projectPoint(entry.lat, entry.lon)
+})
 
 // A push from the device is authoritative for the card, but it must not
 // replace a selection the user is holding in the open dialog. Only an
@@ -51,9 +64,9 @@ watch(stored, (value, previous) => {
 
 const listEntries = computed(() => {
   const value = needle.value
-  if (!value) return MARKER_ENTRIES
-  return CATALOGUE.filter((entry) => (
-    `${entry.zone} ${entry.city} ${entry.region}`.toLowerCase().includes(value)
+  if (!value) return CITY_ENTRIES
+  return CITY_ENTRIES.filter((entry) => (
+    `${entry.zone} ${entry.city} ${entry.country}`.toLowerCase().includes(value)
   ))
 })
 
@@ -111,22 +124,20 @@ function offsetIn(zone) {
   return '—'
 }
 
-function startEditing() {
-  now.value = new Date()
+function resetDialogState() {
   draft.value = stored.value
   query.value = ''
-  active.value = ''
-  dialogError.value = ''
-  statusNote.value = ''
+}
+
+function startEditing() {
+  now.value = new Date()
+  resetDialogState()
   openPicker.value = true
 }
 
 function closeDialog() {
   openPicker.value = false
-  draft.value = stored.value
-  query.value = ''
-  active.value = ''
-  dialogError.value = ''
+  resetDialogState()
 }
 
 // Dismissal is blocked while the patch is in flight; the write settles and the
@@ -137,38 +148,45 @@ function beforeClose() {
 
 function choose(zone) {
   draft.value = zone
-  active.value = zone
-  dialogError.value = ''
 }
 
-function clearActive(zone) {
-  if (active.value === zone) active.value = ''
+/**
+ * Map click: convert the pointer from screen space to viewBox space (honouring
+ * preserveAspectRatio letterboxing), then to lon/lat, then pick the nearest
+ * zone.tab city. No per-city hit targets are rendered.
+ */
+function pickOnMap(event) {
+  const svg = event.currentTarget
+  const rect = svg.getBoundingClientRect()
+  if (!rect.width || !rect.height) return
+  const scale = Math.min(rect.width / MAP_WIDTH, rect.height / MAP_HEIGHT)
+  const left = rect.left + (rect.width - MAP_WIDTH * scale) / 2
+  const top = rect.top + (rect.height - MAP_HEIGHT * scale) / 2
+  const x = (event.clientX - left) / scale
+  const y = (event.clientY - top) / scale
+  if (x < 0 || y < 0 || x > MAP_WIDTH || y > MAP_HEIGHT) return
+  const lon = (x / MAP_WIDTH) * 360 - 180
+  const lat = 90 - (y / MAP_HEIGHT) * 180
+  const nearest = nearestCity(lon, lat)
+  if (nearest) choose(nearest.zone)
 }
 
 async function applyZone() {
   if (saving.value) return
-  if (!draft.value) {
-    dialogError.value = 'Choose a time zone before applying.'
+  const zone = draft.value
+  if (!zone) {
+    notify.warning('Choose a time zone before applying.')
     return
   }
-  const zone = draft.value
   saving.value = true
-  dialogError.value = ''
   try {
     const ok = await update('timezone', { timezone: zone })
     if (ok) {
-      statusNote.value = `Device time zone set to ${zone}.`
+      notify.success(`Device time zone set to ${zone}.`)
       openPicker.value = false
-      draft.value = stored.value
-      query.value = ''
-      active.value = ''
-      if (noteTimer) clearTimeout(noteTimer)
-      noteTimer = setTimeout(() => {
-        statusNote.value = ''
-        noteTimer = null
-      }, 6000)
+      resetDialogState()
     } else {
-      dialogError.value = error.value || 'The device rejected that time zone. Try another.'
+      notify.error(error.value || 'The device rejected that time zone. Try another.')
     }
   } finally {
     saving.value = false
@@ -182,8 +200,6 @@ onMounted(() => {
 onUnmounted(() => {
   if (ticker) clearInterval(ticker)
   ticker = null
-  if (noteTimer) clearTimeout(noteTimer)
-  noteTimer = null
 })
 </script>
 
@@ -217,8 +233,6 @@ onUnmounted(() => {
       Nothing is stored on the device, so it follows its firmware default. Choose a time zone to override it.
     </p>
 
-    <p v-if="statusNote" class="mt-2 text-sm text-success" role="status">{{ statusNote }}</p>
-
     <ModalDialog
       v-if="openPicker"
       title="Choose time zone"
@@ -240,77 +254,68 @@ onUnmounted(() => {
         </label>
 
         <div class="overflow-hidden rounded-box border border-base-300">
-          <div class="bg-base-300/30 p-1 sm:p-2">
+          <div class="bg-base-100">
             <svg
               :viewBox="`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`"
-              class="block w-full"
+              class="block max-h-[44vh] w-full cursor-crosshair"
               preserveAspectRatio="xMidYMid meet"
-              role="group"
-              aria-label="World map with time zone markers"
-              @mouseleave="active = ''"
+              role="img"
+              aria-label="World map of time zones. Click near your location to select the nearest city, or choose a city from the list below."
+              @click="pickOnMap"
             >
-              <rect
-                :width="MAP_WIDTH"
-                :height="MAP_HEIGHT"
-                class="fill-base-100"
-              />
+              <rect :width="MAP_WIDTH" :height="MAP_HEIGHT" class="fill-base-100" />
               <path
-                v-for="(shape, index) in LAND_PATHS"
-                :key="index"
-                :d="shape"
-                class="fill-base-content/15 stroke-base-content/25"
-                stroke-width="1"
+                :d="COUNTRY_PATHS"
+                fill-rule="evenodd"
+                class="fill-base-content/10 stroke-base-content/30"
+                stroke-width="0.7"
                 vector-effect="non-scaling-stroke"
               />
+              <path
+                v-if="selectedPath"
+                :d="selectedPath"
+                fill-rule="evenodd"
+                class="fill-primary/30 stroke-primary"
+                stroke-width="1.2"
+                vector-effect="non-scaling-stroke"
+                pointer-events="none"
+              />
               <g
-                v-for="marker in PROJECTED_MARKERS"
-                :key="marker.zone"
-                class="cursor-pointer outline-none"
-                role="button"
-                tabindex="0"
-                :aria-label="marker.zone"
-                :aria-pressed="draft === marker.zone ? 'true' : 'false'"
-                @click="choose(marker.zone)"
-                @keydown.enter.prevent="choose(marker.zone)"
-                @keydown.space.prevent="choose(marker.zone)"
-                @mouseenter="active = marker.zone"
-                @mouseleave="clearActive(marker.zone)"
-                @focus="active = marker.zone"
-                @blur="active = ''"
+                v-if="pin"
+                :transform="`translate(${pin.x} ${pin.y})`"
+                pointer-events="none"
+                aria-hidden="true"
               >
-                <title>{{ marker.zone }}</title>
-                <circle :cx="marker.x" :cy="marker.y" r="6" fill="transparent" />
+                <circle :r="PIN_HALO" class="fill-base-100/80" />
+                <circle :r="PIN_OUTER" class="fill-primary/25" />
                 <circle
-                  v-if="draft === marker.zone || active === marker.zone"
-                  :cx="marker.x"
-                  :cy="marker.y"
-                  :r="draft === marker.zone ? 4.4 : 3.4"
-                  :class="draft === marker.zone ? 'fill-primary/35' : 'fill-base-content/25'"
-                />
-                <circle
-                  :cx="marker.x"
-                  :cy="marker.y"
-                  :r="draft === marker.zone ? 2.3 : 1.6"
-                  :class="draft === marker.zone ? 'fill-primary' : 'fill-base-content/50'"
+                  :r="PIN_INNER"
+                  class="fill-primary stroke-base-100"
+                  stroke-width="1.5"
+                  vector-effect="non-scaling-stroke"
                 />
               </g>
             </svg>
           </div>
           <p class="flex min-h-[1.75rem] flex-wrap items-center gap-x-1 border-t border-base-300 px-2 py-1 text-xs text-base-content/70">
-            <template v-if="active">
-              <span class="font-mono text-base-content">{{ active }}</span>
+            <template v-if="draft">
+              <span class="font-mono text-base-content">{{ draft }}</span>
               <span aria-hidden="true">·</span>
-              <span>{{ offsetIn(active) }}</span>
+              <span>{{ offsetIn(draft) }}</span>
               <span aria-hidden="true">·</span>
-              <span>{{ clockIn(active) }}</span>
+              <span>{{ clockIn(draft) }}</span>
             </template>
-            <span v-else>Tap a marker or search for a city.</span>
+            <span v-else>Click the map near your location, or search for a city.</span>
+          </p>
+          <p class="border-t border-base-300 px-2 py-1 text-[11px] leading-snug text-base-content/50">
+            Time zone boundaries © timezone-boundary-builder contributors (ODbL 1.0) · Base map Natural Earth (public domain)
           </p>
         </div>
 
         <div class="overflow-hidden rounded-box border border-base-300">
-          <p class="border-b border-base-300 bg-base-200/60 px-3 py-1.5 text-xs font-medium text-base-content/60">
-            {{ needle ? 'Matches' : 'Cities' }}
+          <p class="flex items-center justify-between gap-2 border-b border-base-300 bg-base-200/60 px-3 py-1.5 text-xs font-medium text-base-content/60">
+            <span>{{ needle ? 'Matches' : 'Cities' }}</span>
+            <span>Showing {{ visibleEntries.length }} of {{ resultTotal }}</span>
           </p>
           <ul v-if="visibleEntries.length" class="max-h-56 overflow-y-auto">
             <li v-for="entry in visibleEntries" :key="entry.zone" class="border-b border-base-300 last:border-b-0">
@@ -324,7 +329,7 @@ onUnmounted(() => {
                 <span class="min-w-0">
                   <span class="block truncate font-mono text-sm">{{ entry.zone }}</span>
                   <span class="block truncate text-xs text-base-content/60">
-                    {{ entry.city }}<template v-if="entry.region"> · {{ entry.region }}</template>
+                    {{ entry.city }}<template v-if="entry.country"> · {{ entry.country }}</template>
                   </span>
                 </span>
                 <span class="shrink-0 text-right text-xs text-base-content/60">
@@ -337,25 +342,18 @@ onUnmounted(() => {
           <p v-else class="px-3 py-4 text-sm text-base-content/60">
             No time zones match “{{ query }}”. Try a city like Berlin or a region like Asia.
           </p>
-          <p
-            v-if="resultTotal > visibleEntries.length"
-            class="border-t border-base-300 px-3 py-1.5 text-xs text-base-content/60"
-          >
-            Showing {{ visibleEntries.length }} of {{ resultTotal }} matches — keep typing to narrow the list.
-          </p>
         </div>
 
         <div class="rounded-box bg-base-200/60 px-3 py-2">
           <template v-if="draftEntry">
             <p class="break-all font-mono text-sm font-medium">{{ draftEntry.zone }}</p>
             <p class="text-xs text-base-content/60">
-              {{ draftEntry.city }}<template v-if="draftEntry.region"> · {{ draftEntry.region }}</template>
+              {{ draftEntry.city }}<template v-if="draftEntry.country"> · {{ draftEntry.country }}</template>
               <span class="mx-1" aria-hidden="true">·</span>{{ offsetIn(draft) }}
               <span class="mx-1" aria-hidden="true">·</span>{{ dayClockIn(draft) }}
             </p>
           </template>
           <p v-else class="text-sm text-base-content/60">Choose a time zone to preview it.</p>
-          <p v-if="dialogError" class="mt-1 text-sm text-error" role="alert">{{ dialogError }}</p>
         </div>
       </div>
 
@@ -368,8 +366,7 @@ onUnmounted(() => {
           :aria-busy="saving ? 'true' : 'false'"
           @click="applyZone"
         >
-          <span v-if="saving" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          {{ saving ? 'Applying…' : 'Apply' }}
+          Apply
         </button>
       </template>
     </ModalDialog>

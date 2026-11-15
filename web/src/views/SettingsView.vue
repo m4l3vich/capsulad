@@ -1,8 +1,7 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import WifiSettings from '../components/WifiSettings.vue'
 import WakewordSettings from '../components/WakewordSettings.vue'
-import TimezonePicker from '../components/TimezonePicker.vue'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
 import ModalDialog from '../components/ModalDialog.vue'
@@ -10,13 +9,18 @@ import Icon from '../components/Icon.vue'
 import { socket } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
 import { pct } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
+
+// The timezone map carries its own large module; keep it out of the initial
+// bundle and load it the first time this view renders the picker.
+const TimezonePicker = defineAsyncComponent(() => import('../components/TimezonePicker.vue'))
 
 // Settings is a compact appliance console: every control is either an
 // immediate bounded update (select, slider, toggle) or a local draft submitted
 // by its own button. All authority lives in the settings snapshot; this view
 // only mirrors it and never rewrites a preference the user did not touch.
 
-const { data, error, pending, update } = useSettings()
+const { data, error, update } = useSettings()
 const {
   data: overviewData,
   error: overviewError,
@@ -38,7 +42,6 @@ const resourcePending = { display: new Set(), ring: new Set() }
 const resourceInFlight = { display: new Map(), ring: new Map() }
 const resourceTimers = { display: null, ring: null }
 const busy = ref('')
-const actionError = ref('')
 const btOverride = ref(null)
 const unpairTarget = ref(null)
 
@@ -95,6 +98,33 @@ function savedProvider(token, savedId) {
 }
 
 let hashHandled = false
+
+// Snapshot-carried problems are state, not events: announce each new message
+// once instead of on every push that repeats it.
+let lastBluetoothError = ''
+
+watch(() => data.value?.bluetoothError || '', (message) => {
+  if (!message) {
+    lastBluetoothError = ''
+    return
+  }
+  if (message === lastBluetoothError) return
+  lastBluetoothError = message
+  notify.warning(message)
+}, { immediate: true })
+
+let lastOverviewError = ''
+
+watch(overviewError, (message) => {
+  const text = String(message || '')
+  if (!text) {
+    lastOverviewError = ''
+    return
+  }
+  if (text === lastOverviewError) return
+  lastOverviewError = text
+  notify.warning(text)
+})
 
 watch(data, (view) => {
   if (!view) return
@@ -171,8 +201,7 @@ function send(group, payload) {
 
 async function apply(group, payload) {
   const ok = await send(group, payload)
-  if (ok) actionError.value = ''
-  else actionError.value = error.value || 'The speaker rejected that change.'
+  if (!ok) notify.error(error.value || 'The speaker rejected that change.')
   return ok
 }
 
@@ -212,10 +241,8 @@ async function sendResource(kind, fields, failure) {
   beginFields(kind, fields)
   const ok = await send('display', resourcePayload(kind, fields))
   endFields(kind, fields)
-  if (ok) {
-    actionError.value = ''
-  } else {
-    actionError.value = error.value || failure
+  if (!ok) {
+    notify.error(error.value || failure)
     // The store re-reads on failure; with ownership cleared, sync restores the
     // authoritative value for these fields.
     if (data.value) sync(data.value)
@@ -331,7 +358,6 @@ async function bluetoothCommand(action, payload, failure) {
     return
   }
   busy.value = 'bluetooth'
-  actionError.value = ''
   try {
     const result = await socket.request({ bluetooth: { [action]: payload } })
     if (result?.bluetooth?.status) {
@@ -340,7 +366,7 @@ async function bluetoothCommand(action, payload, failure) {
       ui.bluetooth.discoverable = !!result.bluetooth.status.discoverable
     }
   } catch (err) {
-    actionError.value = err.message || failure
+    notify.error(err.message || failure)
     // The command failed, so the requested value never became authoritative.
     ui.bluetooth.incoming = !!values.value.bluetoothIncomingConnections
     ui.bluetooth.discoverable = !!values.value.bluetoothDiscoverable
@@ -382,13 +408,12 @@ async function confirmUnpair() {
   const device = unpairTarget.value
   if (!device || busy.value) return
   busy.value = 'unpair'
-  actionError.value = ''
   try {
     await socket.request({ bluetooth: { unpair: { deviceId: device.deviceId } } })
     unpairTarget.value = null
     await refreshOverview()
   } catch (err) {
-    actionError.value = err.message
+    notify.error(err.message || 'The device could not be unpaired.')
   } finally {
     busy.value = ''
   }
@@ -406,7 +431,7 @@ const HOSTNAME = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
 async function saveHostname() {
   const hostname = drafts.hostname.trim()
   if (!HOSTNAME.test(hostname)) {
-    actionError.value = 'Use up to 63 letters, numbers or hyphens, starting and ending with a letter or number.'
+    notify.error('Use up to 63 letters, numbers or hyphens, starting and ending with a letter or number.')
     return
   }
   const ok = await apply('hostname', { hostname })
@@ -518,12 +543,6 @@ function jumpTo(id) {
     <div class="flex flex-wrap items-end justify-between gap-2">
       <h1 class="my-2 flex items-center gap-2 text-xl font-semibold leading-tight">
         Settings
-        <span
-          v-if="pending"
-          class="loading loading-spinner loading-sm text-primary"
-          role="status"
-          aria-label="Applying changes"
-        ></span>
       </h1>
       <label class="input input-sm input-bordered flex w-full items-center gap-2 sm:w-64">
         <Icon size="16px">search</Icon>
@@ -551,11 +570,6 @@ function jumpTo(id) {
         {{ section.title }}
       </button>
     </nav>
-
-    <div v-if="actionError" class="alert alert-error py-2" role="alert">
-      <span class="text-sm">{{ actionError }}</span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
-    </div>
 
     <div v-if="!data && !error" class="flex flex-col gap-5" aria-busy="true">
       <div v-for="n in 4" :key="n" class="rounded-box bg-base-100">
@@ -781,10 +795,6 @@ function jumpTo(id) {
             <p v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</p>
           </div>
 
-          <div v-if="data.bluetoothError" class="alert alert-warning py-2" role="status">
-            <span class="text-sm">{{ data.bluetoothError }}</span>
-          </div>
-
           <div class="flex flex-col gap-3">
             <label class="flex cursor-pointer items-start justify-between gap-3">
               <span class="min-w-0">
@@ -823,7 +833,9 @@ function jumpTo(id) {
                 Refresh
               </button>
             </div>
-            <p v-if="overviewError" class="text-xs text-error" role="alert">{{ overviewError }}</p>
+            <p v-if="!overviewData && overviewError" class="text-xs text-base-content/60" role="status">
+              Paired devices are unavailable.
+            </p>
             <p v-else-if="!overviewData" class="text-xs text-base-content/60">Loading paired devices…</p>
             <p v-else-if="!pairedDevices.length" class="text-xs text-base-content/60">No paired devices.</p>
             <ul v-else class="divide-y divide-base-300">

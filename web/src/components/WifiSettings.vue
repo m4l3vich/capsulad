@@ -4,6 +4,7 @@ import ModalDialog from './ModalDialog.vue'
 import Icon from './Icon.vue'
 import { socket } from '../lib/ws.js'
 import { connectWifi, fetchWifi, forgetWifi, scanWifi, subscribeWifi } from '../lib/wifi.js'
+import { notify } from '../lib/toast.js'
 
 // Wi-Fi is an explicit surface: the snapshot never scans, joining is a user
 // action, and the network that is carrying this session cannot be forgotten
@@ -13,14 +14,12 @@ import { connectWifi, fetchWifi, forgetWifi, scanWifi, subscribeWifi } from '../
 
 const view = ref(null)
 const loadError = ref('')
-const actionError = ref('')
 const busy = ref('')
 const scans = ref([])
 const scanned = ref(false)
 const manageOpen = ref(false)
 const forgetting = ref('')
 const joinOpen = ref(false)
-const joinError = ref('')
 const joinTarget = ref('')
 const connect = reactive({ ssid: '', security: 'wpa2', passphrase: '' })
 
@@ -86,7 +85,7 @@ async function refresh() {
     adopt(await fetchWifi())
   } catch (err) {
     if (!view.value) loadError.value = err.message
-    else actionError.value = err.message
+    else notify.warning(err.message)
   }
 }
 
@@ -95,14 +94,13 @@ async function refresh() {
 async function scan() {
   if (busy.value) return
   busy.value = 'scan'
-  actionError.value = ''
   try {
     const next = await scanWifi()
     adopt(next)
     scans.value = next?.scanResults || []
     scanned.value = true
   } catch (err) {
-    actionError.value = err.message
+    notify.error(err.message)
     await refresh()
   } finally {
     busy.value = ''
@@ -126,26 +124,13 @@ function openJoin(network = null) {
     connect.passphrase = ''
   }
   joinTarget.value = network?.ssid || ''
-  joinError.value = ''
-  actionError.value = ''
   joinOpen.value = true
 }
 
 function closeJoin() {
   joinOpen.value = false
-  joinError.value = ''
   joinTarget.value = ''
   connect.passphrase = ''
-}
-
-function reportProblem(message) {
-  if (joinOpen.value) joinError.value = message
-  else actionError.value = message
-}
-
-function clearProblem() {
-  joinError.value = ''
-  actionError.value = ''
 }
 
 function validateConnect() {
@@ -166,11 +151,10 @@ async function submitConnect() {
   if (busy.value) return
   const problem = validateConnect()
   if (problem) {
-    reportProblem(problem)
+    notify.error(problem)
     return
   }
   busy.value = 'connect'
-  clearProblem()
   const ssid = connect.ssid.trim()
   const passphrase = connect.security === 'open' ? '' : connect.passphrase
   try {
@@ -178,7 +162,8 @@ async function submitConnect() {
     adopt(next)
     if (joinOpen.value) closeJoin()
   } catch (err) {
-    reportProblem(err.message)
+    // The dialog stays open so the entered network can be corrected.
+    notify.error(err.message)
     await refresh()
   } finally {
     // Never keep a submitted passphrase in component state.
@@ -204,7 +189,6 @@ async function forget(network) {
     return
   }
   busy.value = 'forget'
-  actionError.value = ''
   try {
     const next = await forgetWifi(network.ssid)
     adopt(next)
@@ -212,7 +196,7 @@ async function forget(network) {
     scans.value = scans.value.filter((entry) => entry.ssid !== network.ssid)
     forgetting.value = ''
   } catch (err) {
-    actionError.value = err.message
+    notify.error(err.message)
     await refresh()
   } finally {
     busy.value = ''
@@ -275,11 +259,6 @@ onUnmounted(() => {
       </div>
 
       <template v-else-if="data">
-        <div v-if="actionError" class="alert alert-error py-2" role="alert">
-          <span class="text-sm">{{ actionError }}</span>
-          <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
-        </div>
-
         <div v-if="!data.available" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3" role="status">
           <p class="text-sm font-medium">Wi-Fi is unavailable on this speaker.</p>
           <p class="text-xs text-base-content/60">Check that Wi-Fi is enabled on the speaker, then try again.</p>
@@ -386,7 +365,7 @@ onUnmounted(() => {
       </template>
     </div>
 
-    <ModalDialog v-if="manageOpen" title="Saved networks" @close="closeManage">
+    <ModalDialog v-if="manageOpen" title="Saved networks" max-width="max-w-lg" @close="closeManage">
       <p class="mb-3 text-sm text-base-content/60">
         The active network stays protected while the console is connected; forget other saved networks here.
       </p>
@@ -436,8 +415,6 @@ onUnmounted(() => {
       @close="closeJoin"
     >
       <form id="wifi-join-form" class="flex flex-col gap-3" novalidate @submit.prevent="submitConnect">
-        <p v-if="joinError" class="alert alert-error py-2 text-sm" role="alert">{{ joinError }}</p>
-
         <label class="flex w-full flex-col gap-1 text-sm">
           <span class="font-medium">Network name</span>
           <input

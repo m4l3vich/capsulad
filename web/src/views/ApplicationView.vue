@@ -4,6 +4,7 @@ import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
 import { logLine, safeJson, shortId, status } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
 
 const props = defineProps({
@@ -14,12 +15,9 @@ const emit = defineEmits(['close'])
 
 const { data, error: loadError, refresh } = useTopic('application', props.appId, { logs: true })
 
-const actionError = ref('')
-const statusMessage = ref('')
 const busy = ref('')
 const settingBusy = ref('')
 const discardPrompt = ref(false)
-const dismissNotice = ref('')
 const launchDirty = ref(false)
 
 const configDraft = reactive({})
@@ -75,8 +73,18 @@ watch(() => data.value?.app, (app) => {
 watch(() => data.value?.schema, syncSettingsState, { immediate: true })
 watch(() => data.value?.values, syncSettingsState, { immediate: true })
 watch(() => data.value?.configRevision, syncSettingsState, { immediate: true })
-watch(settingBusy, (value) => {
-  if (!value && dismissNotice.value) dismissNotice.value = ''
+
+// A refresh failure keeps the previous view; surface it as a toast once per
+// distinct failure instead of a banner.
+let lastLoadError = ''
+watch(loadError, (value) => {
+  if (!value) {
+    lastLoadError = ''
+    return
+  }
+  if (!data.value || value === lastLoadError) return
+  lastLoadError = value
+  notify.warning(`The last refresh failed: ${value}`)
 })
 
 onUnmounted(() => {
@@ -124,19 +132,18 @@ function hasUnsavedInputs() {
 // still in flight. Nothing is discarded silently.
 function requestClose() {
   if (settingBusy.value) {
-    dismissNotice.value = 'Applying changes. Wait for the current save to finish, then close.'
+    notify.info('Changes are still being saved. Wait for the current save to finish, then close.')
     return false
   }
   if (discardPrompt.value) return false
   if (!hasUnsavedInputs()) return true
-  dismissNotice.value = ''
   discardPrompt.value = true
   return false
 }
 
 function discardAndClose() {
   if (settingBusy.value) {
-    dismissNotice.value = 'Applying changes. Wait for the current save to finish, then close.'
+    notify.info('Changes are still being saved. Wait for the current save to finish, then close.')
     discardPrompt.value = false
     return
   }
@@ -183,15 +190,15 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
       }
       syncDrafts(data.value)
       updateFrameHost()
-      actionError.value = ''
       return { ok: true, revision: configRevision, values: data.value.values, message: r?.message || 'Saved.' }
     } catch (err) {
+      const message = err?.message || 'The update failed.'
       if (!data.value || data.value.app?.appId !== app) {
-        return { ok: false, error: err?.message || 'The update failed.' }
+        return { ok: false, error: message }
       }
-      actionError.value = err?.message || 'The update failed.'
+      notify.error(message)
       await refresh()
-      return { ok: false, error: actionError.value, revision: configRevision, values: data.value?.values }
+      return { ok: false, error: message, revision: configRevision, values: data.value?.values }
     }
   }
   const promise = patchChain.then(run, run)
@@ -201,14 +208,11 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
 
 async function applyImmediate(key, value) {
   const token = `set:${key}`
-  actionError.value = ''
-  statusMessage.value = ''
   settingBusy.value = token
   const result = await applyAppChanges([{ key, valueJson: JSON.stringify(value) }], configRevision)
   if (settingBusy.value === token) settingBusy.value = ''
   if (result.ok) {
-    statusMessage.value = 'Setting applied'
-    dismissNotice.value = ''
+    notify.success('Setting applied')
     if (!hasUnsavedInputs()) discardPrompt.value = false
   }
 }
@@ -253,15 +257,13 @@ async function saveConfig() {
   try {
     changes = buildDraftChanges()
   } catch (err) {
-    actionError.value = err.message
+    notify.error(err.message)
     return
   }
   if (!changes.length) {
-    statusMessage.value = 'No text or number changes to save'
+    notify.info('No text or number changes to save')
     return
   }
-  actionError.value = ''
-  statusMessage.value = ''
   settingBusy.value = 'config'
   const result = await applyAppChanges(changes, configRevision)
   settingBusy.value = ''
@@ -272,9 +274,8 @@ async function saveConfig() {
       delete clearMasked[key]
     }
     syncDrafts(data.value)
-    statusMessage.value = 'Configuration saved'
+    notify.success('Configuration saved')
     if (!hasUnsavedInputs()) discardPrompt.value = false
-    dismissNotice.value = ''
   }
 }
 
@@ -317,6 +318,7 @@ async function maybeMountSettingsUI() {
     onStatus: (next) => {
       if (next?.error) {
         frameError.value = next.error
+        notify.error(next.error)
         if (frameTimer) {
           clearTimeout(frameTimer)
           frameTimer = null
@@ -339,16 +341,11 @@ async function maybeMountSettingsUI() {
     frameTimer = null
     if (frameHost && !frameHost.ready) {
       frameError.value = 'The settings document did not become ready.'
+      notify.error(frameError.value)
       frameHost.dispose()
       frameHost = null
     }
   }, 10000)
-}
-
-async function retrySettingsUI() {
-  teardownFrame()
-  await nextTick()
-  await refresh()
 }
 
 function updateFrameHost() {
@@ -370,18 +367,16 @@ function syncLaunchArgs(view) {
 async function act(key, command, message) {
   if (busy.value) return null
   if (liveState.value !== 'open') {
-    actionError.value = 'The speaker is not connected.'
+    notify.error('The speaker is not connected.')
     return null
   }
   busy.value = key
-  actionError.value = ''
-  statusMessage.value = ''
   try {
     const result = await socket.request(command)
-    if (message) statusMessage.value = message
+    if (message) notify.success(message)
     return result
   } catch (err) {
-    actionError.value = err?.message || 'The device rejected the request.'
+    notify.error(err?.message || 'The device rejected the request.')
     return null
   } finally {
     busy.value = ''
@@ -396,7 +391,7 @@ async function launch() {
     const value = String(launchArgs[arg.name] || '').trim()
     if (!value) {
       if (arg.required) {
-        actionError.value = `${arg.name} is required to launch this application.`
+        notify.error(`${arg.name} is required to launch this application.`)
         return
       }
       continue
@@ -405,7 +400,6 @@ async function launch() {
   }
   const result = await act('launch', { launch: { appId: app.appId, arguments: args } }, 'Launch requested')
   if (result?.launch) {
-    statusMessage.value = 'Launch requested'
     launchDirty.value = false
     if (!hasUnsavedInputs()) discardPrompt.value = false
     await refresh()
@@ -417,7 +411,7 @@ async function stop(runItem) {
     `stop:${runItem.runId}`,
     { stop: { appId: props.appId, runId: runItem.runId } }
   )
-  if (result?.stop?.message) statusMessage.value = result.stop.message
+  if (result?.stop?.message) notify.info(result.stop.message)
   await refresh()
 }
 
@@ -427,7 +421,7 @@ async function trigger(action) {
     `action:${action.actionId}`,
     { action: { appId: props.appId, actionId: action.actionId } }
   )
-  if (result?.action) statusMessage.value = 'Action sent'
+  if (result?.action) notify.info('Action sent')
 }
 
 function uptime(ns) {
@@ -451,10 +445,6 @@ function uptime(ns) {
     </div>
 
     <div v-else-if="data" class="flex flex-col gap-4">
-      <div v-if="loadError" class="alert alert-warning py-2" role="status">
-        <span class="text-sm">The last refresh failed: {{ loadError }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Retry</button>
-      </div>
       <div v-if="!connected" class="alert alert-warning py-2" role="status">
         <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
       </div>
@@ -465,23 +455,12 @@ function uptime(ns) {
         <span v-if="data.app.background" class="badge badge-ghost badge-sm">runs in background</span>
       </div>
 
-      <div v-if="actionError" class="alert alert-error py-2" role="alert">
-        <span class="text-sm">{{ actionError }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
-      </div>
-      <div v-else-if="statusMessage" class="alert alert-info py-2" role="status">
-        <span class="text-sm">{{ statusMessage }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="statusMessage = ''">Dismiss</button>
-      </div>
       <div v-if="discardPrompt" class="alert alert-warning py-2" role="alert">
         <span class="text-sm">You have unsaved changes.</span>
         <div class="flex gap-1">
           <button type="button" class="btn btn-sm" @click="discardPrompt = false">Keep editing</button>
           <button type="button" class="btn btn-sm btn-warning" @click="discardAndClose">Discard changes</button>
         </div>
-      </div>
-      <div v-else-if="dismissNotice" class="alert alert-info py-2" role="status">
-        <span class="text-sm">{{ dismissNotice }}</span>
       </div>
 
       <!-- Launch: required arguments are explicit, not guessed. -->
@@ -524,10 +503,6 @@ function uptime(ns) {
         </div>
 
         <div v-if="hasSettingsDocument" class="mt-2 flex flex-col gap-2">
-          <div v-if="frameError" class="alert alert-error py-2" role="alert">
-            <span class="text-sm">{{ frameError }}</span>
-            <button type="button" class="btn btn-sm btn-ghost" @click="retrySettingsUI">Try again</button>
-          </div>
           <iframe
             v-show="!frameError"
             ref="settingsFrame"

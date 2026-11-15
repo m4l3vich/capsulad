@@ -1,16 +1,16 @@
 <script setup>
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import WakewordTrainingDialog from './WakewordTrainingDialog.vue'
 import Icon from './Icon.vue'
 import { socket, topicNames } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
 import { dateTime, durationMs } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
 
 const { data: wakewordData, error: wakewordError, refresh } = useTopic(topicNames.wakeword)
 const { data: settingsData, error: settingsError, pending: settingsPending, update } = useSettings()
 
 const trainingOpen = ref(false)
-const actionError = ref('')
 const deleteBusy = ref('')
 const detectionBusy = ref('')
 const confirmDeleteId = ref('')
@@ -50,6 +50,34 @@ const statusText = computed(() => {
   return 'Detection off'
 })
 
+// Connection failures are state that repeats on every snapshot; announce a new
+// message once and leave the section's own availability notices in place.
+let lastSettingsError = ''
+
+watch(settingsError, (message) => {
+  const text = String(message || '')
+  if (!text) {
+    lastSettingsError = ''
+    return
+  }
+  if (text === lastSettingsError) return
+  lastSettingsError = text
+  notify.warning(`Settings did not update: ${text}`)
+}, { immediate: true })
+
+let lastWakewordError = ''
+
+watch(wakewordError, (message) => {
+  const text = String(message || '')
+  if (!text) {
+    lastWakewordError = ''
+    return
+  }
+  if (text === lastWakewordError) return
+  lastWakewordError = text
+  notify.warning(`The wakeword section could not reach Capsula: ${text}`)
+}, { immediate: true })
+
 function labelFor(sample) {
   if (sample.label === 'word') return 'Wakeword recording'
   return 'Room or phrase recording'
@@ -58,24 +86,22 @@ function labelFor(sample) {
 async function reportFalseDetection(detection) {
   if (!detection.detectionId || detectionBusy.value) return
   detectionBusy.value = detection.detectionId
-  actionError.value = ''
   try {
     await socket.request({ falseDetection: { detectionId: detection.detectionId } }, { timeout: 10000 })
     await refresh()
   } catch (err) {
-    actionError.value = `Could not remove that detection: ${err.message}`
+    notify.error(`Could not remove that detection: ${err.message}`)
   } finally {
     detectionBusy.value = ''
   }
 }
 
 async function apply(payload) {
-  actionError.value = ''
   try {
     const ok = await update('assistant', payload)
-    if (ok === false) actionError.value = 'Capsula did not accept that change.'
+    if (ok === false) notify.error('Capsula did not accept that change.')
   } catch (err) {
-    actionError.value = err?.message || 'The change could not be sent to Capsula.'
+    notify.error(err?.message || 'The change could not be sent to Capsula.')
   }
 }
 
@@ -111,24 +137,14 @@ function askDelete(sample) {
 async function removeTake(sample) {
   clearTimeout(confirmTimer)
   deleteBusy.value = sample.sampleId
-  actionError.value = ''
   try {
     await socket.request({ deleteSample: { sampleId: sample.sampleId } }, { timeout: 10000 })
     confirmDeleteId.value = ''
     await refresh()
   } catch (err) {
-    actionError.value = `Could not delete the recording: ${err.message}`
+    notify.error(`Could not delete the recording: ${err.message}`)
   } finally {
     deleteBusy.value = ''
-  }
-}
-
-async function onRefresh() {
-  actionError.value = ''
-  try {
-    await refresh()
-  } catch (err) {
-    actionError.value = err?.message || 'The device did not return its wakeword state.'
   }
 }
 
@@ -153,29 +169,6 @@ onUnmounted(() => {
       Capsula listens and learns on the device. Your browser never records audio.
     </p>
 
-    <div v-if="actionError" class="alert alert-error py-2" role="alert">
-      <span class="text-sm">{{ actionError }}</span>
-    </div>
-    <div v-if="settingsError" class="alert alert-warning py-2" role="alert">
-      <div class="min-w-0">
-        <p>Settings did not update. Check the connection and try again.</p>
-        <details>
-          <summary class="cursor-pointer text-xs text-base-content/60">Technical details</summary>
-          <p class="mt-1 break-words text-xs text-base-content/60">{{ settingsError }}</p>
-        </details>
-      </div>
-    </div>
-    <div v-if="wakewordError" class="alert alert-error py-2" role="alert">
-      <div class="min-w-0 flex-1">
-        <p>The wakeword section could not reach Capsula.</p>
-        <details>
-          <summary class="cursor-pointer text-xs text-base-content/60">Technical details</summary>
-          <p class="mt-1 break-words text-xs text-base-content/60">{{ wakewordError }}</p>
-        </details>
-      </div>
-      <button type="button" class="btn btn-ghost btn-sm" @click="onRefresh">Try again</button>
-    </div>
-
     <div class="grid gap-3">
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
@@ -194,11 +187,6 @@ onUnmounted(() => {
               @change="toggleEnabled($event.target.checked)"
             />
           </label>
-
-          <p v-if="applying" class="flex items-center gap-2 text-sm text-base-content/60" role="status">
-            <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Applying on Capsula…
-          </p>
 
           <div v-if="!wakewordData && !wakewordError" class="flex items-center gap-2 text-sm text-base-content/60" role="status">
             <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>

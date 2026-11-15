@@ -3,6 +3,8 @@ import { onMounted, onUnmounted, ref } from 'vue'
 
 const props = defineProps({
   title: { type: String, default: 'Dialog' },
+  // Width class for the panel; owners pass a narrower token for short content.
+  maxWidth: { type: String, default: 'max-w-4xl' },
   // Optional veto for dismiss attempts (X, Escape, backdrop). Returning false
   // keeps the dialog open so the owner can ask about unsaved work.
   beforeClose: { type: Function, default: null }
@@ -29,7 +31,10 @@ function close() {
 
 <template>
   <dialog ref="dialog" class="modal" :aria-labelledby="titleId" @cancel.prevent="close">
-    <div class="modal-box flex max-h-[85vh] w-[calc(100vw-1.5rem)] max-w-4xl flex-col overflow-hidden p-0">
+    <div
+      class="modal-box flex max-h-[85vh] w-[calc(100vw-1.5rem)] flex-col overflow-hidden p-0"
+      :class="maxWidth"
+    >
       <div class="flex shrink-0 items-start justify-between gap-3 border-b border-base-300 p-4 pb-3">
         <h2 :id="titleId" class="text-lg font-semibold leading-tight">{{ title }}</h2>
         <button type="button" class="btn btn-sm btn-ghost btn-square -mr-1 -mt-1" aria-label="Close dialog" @click="close">
