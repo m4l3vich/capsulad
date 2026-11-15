@@ -1,0 +1,11 @@
+
+Ÿ
+devtools.protodev.devtools.v1"!
+EchoRequest
+text (	Rtext"P
+EchoResponse
+text (	Rtext
+app_id (	RappId
+run_id (	RrunId2V
+DevToolsServiceC
+Echo.dev.devtools.v1.EchoRequest.dev.devtools.v1.EchoResponseB'Z%capsula/apps/devtools/gen/devtools/v1bproto3

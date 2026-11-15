@@ -70,8 +70,8 @@ type UserSettings struct {
 const (
 	BrightnessConst = "const"
 	BrightnessAuto  = "auto"
-	// DefaultHostname is the mDNS label for an existing store that predates
-	// the setting. It is also the label a fresh install advertises.
+	// DefaultHostname is the mDNS label a fresh install advertises and the
+	// fallback when a settings document carries no valid host name.
 	DefaultHostname = "capsula"
 )
 
@@ -126,38 +126,12 @@ func OpenUser(path string, logs *logbus.Bus, validate func(UserSettings) error) 
 		if err := json.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("parse settings %s: %w", path, err)
 		}
-		var values UserSettings
+		// Unmarshal over the documented defaults: a field missing from the
+		// document keeps its default, a present field replaces it.
+		values := DefaultUserSettings()
 		if len(doc.Values) > 0 && string(doc.Values) != "null" {
 			if err := json.Unmarshal(doc.Values, &values); err != nil {
 				return nil, fmt.Errorf("parse settings %s values: %w", path, err)
-			}
-		}
-		var fields map[string]json.RawMessage
-		if len(doc.Values) > 0 && string(doc.Values) != "null" {
-			if err := json.Unmarshal(doc.Values, &fields); err != nil {
-				return nil, fmt.Errorf("parse settings %s fields: %w", path, err)
-			}
-		}
-		_, hasIncoming := fields["bluetooth_incoming_connections"]
-		_, hasDiscoverable := fields["bluetooth_discoverable"]
-		legacy, hasLegacy := fields["bluetooth_pairable"]
-		migratedBluetooth := hasLegacy || !hasIncoming || !hasDiscoverable
-		if !hasIncoming {
-			// Absent means the default, not an explicit "off": paired devices
-			// could reconnect in every prior build while powered.
-			values.BluetoothIncomingConnections = true
-		}
-		if !hasDiscoverable {
-			// The old pairable switch allowed new bonds while hidden. Under
-			// the coherent contract that window is discoverability, so a
-			// legacy "true" keeps the user's ability to pair new devices.
-			values.BluetoothDiscoverable = false
-			if hasLegacy {
-				var pairable bool
-				if err := json.Unmarshal(legacy, &pairable); err != nil {
-					return nil, fmt.Errorf("parse settings %s bluetooth_pairable: %w", path, err)
-				}
-				values.BluetoothDiscoverable = pairable
 			}
 		}
 		if doc.Revision > 0 {
@@ -165,18 +139,9 @@ func OpenUser(path string, logs *logbus.Bus, validate func(UserSettings) error) 
 		}
 		s.values = normalize(values)
 		if s.values.Hostname == "" {
-			// Stores written before the host name existed are not a deliberate
-			// empty advertisement; seed the documented default. An explicit
-			// empty value is rejected by Update below.
+			// An empty host name is invalid: a document without one advertises
+			// the default instead.
 			s.values.Hostname = DefaultHostname
-		}
-		if migratedBluetooth {
-			// Persist the migrated shape so the obsolete key stops existing on
-			// disk. The revision does not change: this is a schema migration,
-			// not a new user edit.
-			if err := s.persistLocked(s.values, s.rev); err != nil {
-				return nil, fmt.Errorf("migrate settings %s: %w", path, err)
-			}
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -491,6 +456,12 @@ type InvalidValueError struct{ Err error }
 func (e *InvalidValueError) Error() string { return e.Err.Error() }
 func (e *InvalidValueError) Unwrap() error { return e.Err }
 
+// NotFoundError reports a request for an app the registry does not know.
+// Callers map it to NOT_FOUND; it is not a storage failure.
+type NotFoundError struct{ AppID string }
+
+func (e *NotFoundError) Error() string { return fmt.Sprintf("unknown app %s", e.AppID) }
+
 type AppStore struct {
 	root string
 	logs *logbus.Bus
@@ -553,7 +524,7 @@ func (a *AppStore) stateLocked(appID string) (*appState, error) {
 func (a *AppStore) Snapshot(appID string) (AppSnapshot, error) {
 	schema, ok := a.look(appID)
 	if !ok {
-		return AppSnapshot{}, fmt.Errorf("unknown app %s", appID)
+		return AppSnapshot{}, &NotFoundError{AppID: appID}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -593,7 +564,7 @@ func snapshotLocked(appID string, schema ManifestSchema, st *appState) AppSnapsh
 func (a *AppStore) Private(appID string) (uint64, map[string]json.RawMessage, error) {
 	schema, ok := a.look(appID)
 	if !ok {
-		return 0, nil, fmt.Errorf("unknown app %s", appID)
+		return 0, nil, &NotFoundError{AppID: appID}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -623,7 +594,7 @@ type Change struct {
 func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppSnapshot, uint64, map[string]json.RawMessage, error) {
 	schema, ok := a.look(appID)
 	if !ok {
-		return AppSnapshot{}, 0, nil, fmt.Errorf("unknown app %s", appID)
+		return AppSnapshot{}, 0, nil, &NotFoundError{AppID: appID}
 	}
 	defs := map[string]SchemaSetting{}
 	for _, d := range schema.Settings {
@@ -645,7 +616,7 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 	for _, ch := range changes {
 		def, ok := defs[ch.Key]
 		if !ok {
-			return AppSnapshot{}, 0, nil, fmt.Errorf("setting %s is not declared by %s", ch.Key, appID)
+			return AppSnapshot{}, 0, nil, &InvalidValueError{Err: fmt.Errorf("setting %s is not declared by %s", ch.Key, appID)}
 		}
 		if ch.Clear {
 			delete(next, ch.Key)
@@ -653,11 +624,11 @@ func (a *AppStore) Update(appID string, expected uint64, changes []Change) (AppS
 		}
 		if def.Type == "text_masked" {
 			if s, ok := ch.Value.(string); ok && s == "" {
-				return AppSnapshot{}, 0, nil, fmt.Errorf("setting %s: clearing a masked value requires an explicit clear", ch.Key)
+				return AppSnapshot{}, 0, nil, &InvalidValueError{Err: fmt.Errorf("setting %s: clearing a masked value requires an explicit clear", ch.Key)}
 			}
 		}
 		if err := validateJSONValue(def, ch.Value); err != nil {
-			return AppSnapshot{}, 0, nil, err
+			return AppSnapshot{}, 0, nil, &InvalidValueError{Err: err}
 		}
 		raw, err := json.Marshal(ch.Value)
 		if err != nil {
@@ -789,7 +760,7 @@ func toFloat(v any) (float64, bool) {
 func (a *AppStore) WatchApp(appID string) (AppSnapshot, <-chan AppSnapshot, func(), error) {
 	schema, ok := a.look(appID)
 	if !ok {
-		return AppSnapshot{}, nil, nil, fmt.Errorf("unknown app %s", appID)
+		return AppSnapshot{}, nil, nil, &NotFoundError{AppID: appID}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

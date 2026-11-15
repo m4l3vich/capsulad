@@ -702,8 +702,8 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 }
 
 const (
-	msgTrainingCancelledUnchanged = "training cancelled; the installed model is unchanged"
-	msgTrainingResultUnknown      = "training ended before the result was confirmed; the new model may already be installed — refresh the wakeword models to check"
+	msgTrainingCancelledUnchanged  = "training cancelled; the installed model is unchanged"
+	msgTrainingResultUnknown       = "training ended before the result was confirmed; the new model may already be installed — refresh the wakeword models to check"
 	msgTrainingEndedWithoutInstall = "training ended before installation was confirmed; refresh the wakeword models to check"
 )
 

@@ -3294,7 +3294,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // -----------------------------------------------------------------------------
-// Shared framework-provided read-only assets. No new playback service.
+// Shared framework-provided read-only assets. No new playback service. The
+// store directory is the catalog: asset_id is the slash-relative path below the
+// store root, and path is the canonical /assets/<asset_id> location inside
+// every app sandbox. There is no manifest, license or required-asset metadata.
 // -----------------------------------------------------------------------------
 type AssetServiceClient interface {
 	ListAssets(ctx context.Context, in *ListAssetsRequest, opts ...grpc.CallOption) (*ListAssetsResponse, error)
@@ -3323,7 +3326,10 @@ func (c *assetServiceClient) ListAssets(ctx context.Context, in *ListAssetsReque
 // for forward compatibility.
 //
 // -----------------------------------------------------------------------------
-// Shared framework-provided read-only assets. No new playback service.
+// Shared framework-provided read-only assets. No new playback service. The
+// store directory is the catalog: asset_id is the slash-relative path below the
+// store root, and path is the canonical /assets/<asset_id> location inside
+// every app sandbox. There is no manifest, license or required-asset metadata.
 // -----------------------------------------------------------------------------
 type AssetServiceServer interface {
 	ListAssets(context.Context, *ListAssetsRequest) (*ListAssetsResponse, error)

@@ -53,6 +53,6 @@ default = "1000"
 [[settings]]
 key = "reply_asset"
 label = "Reply WAV asset"
-description = "Path relative to the shared read-only /assets asset store, for example audio/assistant/reply.wav. Empty uses the packaged assets/reply.wav. Absolute paths, '..' traversal, symlinks and assets not declared in the store manifest are rejected."
+description = "Path relative to the shared read-only /assets asset store, for example audio/assistant/reply.wav. Empty uses the packaged assets/reply.wav. Absolute paths, '..' traversal, symlinks and files that are not regular .wav assets are rejected."
 type = "text"
 default = ""

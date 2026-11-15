@@ -339,7 +339,7 @@ onUnmounted(() => {
               </div>
               <details class="text-xs text-base-content/60">
                 <summary class="cursor-pointer">Local recovery command</summary>
-                <code class="mt-1 block break-all font-mono">capsula auth set-password</code>
+                <code class="mt-1 block break-all font-mono">capsulad-cli auth set-password</code>
               </details>
             </form>
           </div>

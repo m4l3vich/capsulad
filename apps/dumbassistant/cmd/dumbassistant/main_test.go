@@ -243,7 +243,7 @@ func TestResolveContainedPath(t *testing.T) {
 	}
 }
 
-func TestStoreAssetDeclarationAndLoad(t *testing.T) {
+func TestStoreAssetLoad(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "audio"), 0o755); err != nil {
 		t.Fatal(err)
@@ -256,39 +256,35 @@ func TestStoreAssetDeclarationAndLoad(t *testing.T) {
 	}
 	write("audio/alt.wav", 4)
 	write("audio/other.wav", 3)
-	write("audio/bad.wav", 2)
+	// The store directory is the catalog: a plain WAV needs no declaration.
 	write("audio/undeclared.wav", 2)
+	if err := os.WriteFile(filepath.Join(root, "audio", "bad.txt"),
+		testWAV(t, 1, 1, 16000, 16, make([]byte, 4)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(root, "audio", "alt.wav"), filepath.Join(root, "audio", "link.wav")); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"assets":[
-		{"id":"assistant.alt","path":"audio/alt.wav","media_type":"audio/wav"},
-		{"id":"assistant.other","path":"/assets/audio/other.wav","media_type":"audio/x-wav"},
-		{"id":"assistant.bad","path":"audio/bad.wav","media_type":"video/mp4"},
-		{"id":"assistant.link","path":"audio/link.wav","media_type":"audio/wav"}
-	]}`
-	if err := os.WriteFile(filepath.Join(root, assetManifestName), []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	clip, path, err := loadStoreReply(root, "audio/alt.wav")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if clip.frames() != 4 || path != filepath.Join(root, "audio", "alt.wav") {
-		t.Fatalf("loaded %d frames from %q", clip.frames(), path)
-	}
-	if clip, _, err := loadStoreReply(root, "audio/other.wav"); err != nil || clip.frames() != 3 {
-		t.Fatalf("canonical manifest path: %d frames, %v", clip.frames(), err)
+	for name, frames := range map[string]int{
+		"audio/alt.wav": 4, "audio/other.wav": 3, "audio/undeclared.wav": 2,
+	} {
+		clip, path, err := loadStoreReply(root, name)
+		if err != nil {
+			t.Fatalf("loadStoreReply(%q): %v", name, err)
+		}
+		if clip.frames() != frames || path != filepath.Join(root, filepath.FromSlash(name)) {
+			t.Fatalf("loaded %d frames from %q, want %d", clip.frames(), path, frames)
+		}
 	}
 
 	bad := map[string]string{
-		"audio/undeclared.wav": "not declared",
-		"assets/audio/alt.wav": "not declared",
-		"audio/bad.wav":        "media type",
+		"assets/audio/alt.wav": "no such file",
+		"audio/bad.txt":        ".wav",
 		"audio/link.wav":       "symlink",
 		"../alt.wav":           "..",
 		"/etc/passwd":          "absolute",
+		"audio/missing.wav":    "no such file",
 	}
 	for value, wantError := range bad {
 		_, _, err := loadStoreReply(root, value)
@@ -300,12 +296,11 @@ func TestStoreAssetDeclarationAndLoad(t *testing.T) {
 		}
 	}
 
-	empty := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(empty, "audio"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := loadStoreReply(empty, "audio/alt.wav"); err == nil || !strings.Contains(err.Error(), "manifest") {
-		t.Fatalf("missing manifest error = %v", err)
+	// A file added after startup is immediately usable; there is no cached
+	// manifest to refresh.
+	write("audio/later.wav", 5)
+	if clip, _, err := loadStoreReply(root, "audio/later.wav"); err != nil || clip.frames() != 5 {
+		t.Fatalf("later asset = %d frames, %v", clip.frames(), err)
 	}
 }
 
@@ -343,17 +338,14 @@ func TestApplySettings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(store, "audio"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, frames := range map[string]int{"alt.wav": 8, "undeclared.wav": 4} {
-		if err := os.WriteFile(filepath.Join(store, "audio", name),
-			testWAV(t, 1, 1, 16000, 16, make([]byte, frames)), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(store, assetManifestName),
-		[]byte(`{"assets":[{"id":"assistant.alt","path":"audio/alt.wav","media_type":"audio/wav"}]}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(store, "audio", "alt.wav"),
+		testWAV(t, 1, 1, 16000, 16, make([]byte, 8)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
+	if err := os.WriteFile(filepath.Join(store, "audio", "bad.txt"),
+		testWAV(t, 1, 1, 16000, 16, make([]byte, 4)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	base, path, err := loadPackagedReply(pkgRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -400,10 +392,10 @@ func TestApplySettings(t *testing.T) {
 
 	a.applySettings(&capsula.SettingsChanged{
 		Revision: 9,
-		Values:   []capsula.SettingValue{{Key: "reply_asset", ValueJSON: `"audio/undeclared.wav"`}},
+		Values:   []capsula.SettingValue{{Key: "reply_asset", ValueJSON: `"audio/bad.txt"`}},
 	})
 	if a.settings.clip != other || a.settings.replyPath != filepath.Join(store, "audio", "alt.wav") {
-		t.Fatalf("undeclared asset replaced settings: %+v", a.settings)
+		t.Fatalf("unsupported asset replaced settings: %+v", a.settings)
 	}
 
 	a.applySettings(&capsula.SettingsChanged{

@@ -78,7 +78,7 @@ func main() {
 	}
 	fmt.Fprintf(&js, "const TYPE = { %s };\n\n", strings.Join(consts, ", "))
 
-	fmt.Fprintln(&js, `export function encode(typeName, obj) {
+	fmt.Fprint(&js, `export function encode(typeName, obj) {
   return encodeMessage(SCHEMA, typeName, obj || {});
 }
 

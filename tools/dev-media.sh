@@ -16,11 +16,11 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DATA_DIR=${1:-build/dev-web}
 APP_ID=dev.media
-CLI=$ROOT/build/bin/capsula
+CLI=$ROOT/build/bin/capsulad-cli
 PKG=$ROOT/build/dev-media/pkg-$APP_ID
 
-[ -x "$CLI" ] || { echo "build the CLI first: make capsulad capsula" >&2; exit 1; }
-[ -d "$DATA_DIR" ] || { echo "no simulator data dir at $DATA_DIR; create one with: capsula -data-dir $DATA_DIR auth init -hostname localhost -ip 127.0.0.1" >&2; exit 1; }
+[ -x "$CLI" ] || { echo "build the CLI first: make capsulad capsulad-cli" >&2; exit 1; }
+[ -d "$DATA_DIR" ] || { echo "no simulator data dir at $DATA_DIR; create one with: capsulad-cli -data-dir $DATA_DIR auth init -hostname localhost -ip 127.0.0.1" >&2; exit 1; }
 
 mkdir -p "$PKG"
 if [ "$(go env GOOS)" = darwin ]; then
@@ -54,8 +54,8 @@ service = "capsula.contracts.media.v1.MediaPlayerService"
 version = "1.0.0"
 EOF
 
-# Reinstalling replaces the package, which the registry refuses while a run is
-# alive, so stop any existing run first.
+# Reinstalling replaces the package atomically, but the CLI refuses while a run
+# is alive, so stop any existing run first.
 if [ -d "$DATA_DIR/apps/$APP_ID" ]; then
     for run in $("$CLI" -data-dir "$DATA_DIR" app runs "$APP_ID" 2>/dev/null |
                  sed -n "s/^$APP_ID  *\([^ ]*\) .*/\1/p"); do

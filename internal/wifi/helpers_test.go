@@ -66,18 +66,18 @@ type fakeRunner struct {
 	runs   []runCall
 	starts []runCall
 
-	started        int
-	connected      bool
-	ssid           string
-	networks       []string
-	scanRows       []string
-	scanRequests   int
-	scanFAIL       bool
+	started         int
+	connected       bool
+	ssid            string
+	networks        []string
+	scanRows        []string
+	scanRequests    int
+	scanFAIL        bool
 	connectOnSelect bool
 	failSSID        string
 	statusOverride  func() (string, error)
-	runFunc        func(ctx context.Context, name string, args []string) (string, error)
-	startFunc      func(name string, args []string) (Process, error)
+	runFunc         func(ctx context.Context, name string, args []string) (string, error)
+	startFunc       func(name string, args []string) (Process, error)
 }
 
 func newFakeRunner() *fakeRunner {
@@ -268,11 +268,11 @@ func testManager(t *testing.T, runner *fakeRunner) *linuxManager {
 		APPassword:       "capsulad",
 		StockConfigPaths: []string{},
 		APName:           func(context.Context) (string, error) { return "Capsule-Test", nil },
-		StartupTimeout: 200 * time.Millisecond,
-		ConnectTimeout: 600 * time.Millisecond,
-		ScanTimeout: 300 * time.Millisecond,
-		CommandTimeout: time.Second,
-		Runner: runner,
+		StartupTimeout:   200 * time.Millisecond,
+		ConnectTimeout:   600 * time.Millisecond,
+		ScanTimeout:      300 * time.Millisecond,
+		CommandTimeout:   time.Second,
+		Runner:           runner,
 	}
 	m, err := newLinuxManager(cfg, "wlan0")
 	if err != nil {

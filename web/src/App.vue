@@ -7,6 +7,7 @@ import { socket } from './lib/ws.js'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
 import SettingsView from './views/SettingsView.vue'
+import AssetsView from './views/AssetsView.vue'
 import AccessView from './views/AccessView.vue'
 import DiagnosticsView from './views/DiagnosticsView.vue'
 
@@ -16,6 +17,7 @@ let recovering = null
 const nav = [
   { path: '/', label: 'Overview' },
   { path: '/settings', label: 'Settings' },
+  { path: '/assets', label: 'Assets' },
   { path: '/access', label: 'Access' },
   { path: '/diagnostics', label: 'Diagnostics' }
 ]
@@ -23,6 +25,7 @@ const nav = [
 const views = {
   '/': OverviewView,
   '/settings': SettingsView,
+  '/assets': AssetsView,
   '/access': AccessView,
   '/diagnostics': DiagnosticsView
 }
@@ -178,7 +181,7 @@ async function signOut() {
         <div class="card-body items-start gap-3">
           <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Not found</p>
           <h1 class="text-xl font-semibold">This page does not exist</h1>
-          <p class="text-sm text-base-content/70">The console has Main, Settings, Access and Diagnostics. Use the navigation above or return to Main.</p>
+          <p class="text-sm text-base-content/70">The console has Main, Settings, Assets, Access and Diagnostics. Use the navigation above or return to Main.</p>
           <a v-bind="link('/')" class="btn btn-primary btn-sm">Go to Main</a>
         </div>
       </section>

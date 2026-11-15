@@ -27,9 +27,6 @@ type applicationService struct {
 func (s *applicationService) ListApplications(ctx context.Context, _ *frameworkv1.ListApplicationsRequest) (*frameworkv1.ListApplicationsResponse, error) {
 	out := &frameworkv1.ListApplicationsResponse{}
 	for _, app := range s.d.reg.List() {
-		if isRetiredApp(app.ID()) {
-			continue
-		}
 		out.Applications = append(out.Applications, s.d.appProto(app))
 	}
 	return out, nil
@@ -107,7 +104,10 @@ func (s *applicationService) Stop(ctx context.Context, req *frameworkv1.StopRequ
 
 func (s *applicationService) ListRuns(ctx context.Context, req *frameworkv1.ListRunsRequest) (*frameworkv1.ListRunsResponse, error) {
 	filter := req.AppId
-	if callerApp, _, isApp := s.d.callerIdentity(ctx); isApp {
+	if callerApp, isApp := s.d.applicationCaller(ctx); isApp {
+		if callerApp == "" {
+			return nil, status.Error(codes.PermissionDenied, "application run is not live")
+		}
 		if req.AppId != "" && req.AppId != callerApp {
 			s.d.logs.Warnf("daemon", callerApp, "denied run listing for %q", req.AppId)
 			return nil, status.Error(codes.PermissionDenied, "applications may only list their own runs")
@@ -123,7 +123,10 @@ func (s *applicationService) ListRuns(ctx context.Context, req *frameworkv1.List
 
 func (s *applicationService) WatchRuns(req *frameworkv1.WatchRunsRequest, stream frameworkv1.ApplicationService_WatchRunsServer) error {
 	filter := req.AppId
-	if callerApp, _, isApp := s.d.callerIdentity(stream.Context()); isApp {
+	if callerApp, isApp := s.d.applicationCaller(stream.Context()); isApp {
+		if callerApp == "" {
+			return status.Error(codes.PermissionDenied, "application run is not live")
+		}
 		if req.AppId != "" && req.AppId != callerApp {
 			s.d.logs.Warnf("daemon", callerApp, "denied run watch for %q", req.AppId)
 			return status.Error(codes.PermissionDenied, "applications may only watch their own runs")
@@ -234,13 +237,7 @@ func (s *appConfigService) Update(ctx context.Context, req *frameworkv1.UpdateAp
 	}
 	snap, rev, private, err := s.d.appCfg.Update(req.AppId, req.ExpectedRevision, changes)
 	if err != nil {
-		if strings.Contains(err.Error(), "stale") {
-			return nil, status.Error(codes.Aborted, err.Error())
-		}
-		if st, ok := status.FromError(err); ok && st.Code() == codes.InvalidArgument {
-			return nil, st.Err()
-		}
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, s.d.appSettingsStatus(req.AppId, err)
 	}
 	s.d.pushAppSettings(req.AppId, rev, private)
 	if s.d.uiChanges != nil {
@@ -282,9 +279,6 @@ func (s *appInterfaceService) ListInterfaces(ctx context.Context, req *framework
 		apps = []*registry.App{app}
 	}
 	for _, app := range apps {
-		if isRetiredApp(app.ID()) {
-			continue
-		}
 		runID, running := s.d.bus.ReadyApp(app.ID())
 		if req.RunningOnly && !running {
 			continue

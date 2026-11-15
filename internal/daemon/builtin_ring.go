@@ -748,7 +748,7 @@ func (r *builtinRing) updateSettings(req *ringv1.UpdateSettingsRequest) (*ringv1
 	}
 	snap, rev, _, err := r.d.appCfg.Update(ringAppID, req.GetExpectedRevision(), changes)
 	if err != nil {
-		return nil, appSettingsStatus(err)
+		return nil, r.d.appSettingsStatus(ringAppID, err)
 	}
 	// Apply synchronously so the reply carries the committed values; the
 	// watcher will observe the same revision and is idempotent.

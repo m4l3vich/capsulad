@@ -19,8 +19,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	webv1 "capsulad/gen/go/capsula/web/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	webv1 "capsulad/gen/go/capsula/web/v1"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/websecurity"
 )

@@ -23,17 +23,17 @@ func TestDerivePSKMatchesIEEEVector(t *testing.T) {
 
 func TestNormalizeSecurityAndScanFlags(t *testing.T) {
 	cases := map[string]string{
-		"":                       SecurityWPA2,
-		"wpa2":                   SecurityWPA2,
-		"WPA2-PSK":               SecurityWPA2,
-		"wpa2_wpa3":              SecurityWPA2WPA3,
-		"WPA2/WPA3":              SecurityWPA2WPA3,
-		"wpa3":                   SecurityWPA3,
-		"SAE":                    SecurityWPA3,
-		"open":                   SecurityOpen,
-		"none":                   SecurityOpen,
-		"wpa":                    SecurityWPA,
-		"wep":                    SecurityWEP,
+		"":          SecurityWPA2,
+		"wpa2":      SecurityWPA2,
+		"WPA2-PSK":  SecurityWPA2,
+		"wpa2_wpa3": SecurityWPA2WPA3,
+		"WPA2/WPA3": SecurityWPA2WPA3,
+		"wpa3":      SecurityWPA3,
+		"SAE":       SecurityWPA3,
+		"open":      SecurityOpen,
+		"none":      SecurityOpen,
+		"wpa":       SecurityWPA,
+		"wep":       SecurityWEP,
 	}
 	for in, want := range cases {
 		got, err := NormalizeSecurity(in)

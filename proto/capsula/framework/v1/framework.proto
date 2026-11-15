@@ -5,7 +5,7 @@ option go_package = "capsulad/gen/go/capsula/framework/v1;frameworkv1";
 package capsula.framework.v1;
 
 
-// Capsula Universal Framework, review draft 0.5 (unfrozen).
+// capsulad framework protocol.
 //
 // Local transport ONLY: gRPC over a Unix domain socket, e.g.
 // unix:///run/capsulad/hal.sock
@@ -1242,19 +1242,26 @@ message LogRecord {
 }
 
 // -----------------------------------------------------------------------------
-// Shared framework-provided read-only assets. No new playback service.
+// Shared framework-provided read-only assets. No new playback service. The
+// store directory is the catalog: asset_id is the slash-relative path below the
+// store root, and path is the canonical /assets/<asset_id> location inside
+// every app sandbox. There is no manifest, license or required-asset metadata.
 // -----------------------------------------------------------------------------
 service AssetService {
   rpc ListAssets(ListAssetsRequest) returns (ListAssetsResponse);
 }
-message ListAssetsRequest { string prefix = 1; }
+message ListAssetsRequest {
+  // Matches the start of asset_id. An empty prefix lists the whole store.
+  // A /assets/... prefix is accepted as an alias.
+  string prefix = 1;
+}
 message SharedAssetInfo {
   string asset_id = 1;
   string path = 2; // Canonical /assets/... path inside every app sandbox.
   string media_type = 3;
   string sha256_hex = 4;
-  string license = 5;
-  string attribution = 6;
-  bool required_base_asset = 7;
+  uint64 size_bytes = 5;
+  reserved 6, 7;
+  reserved "license", "attribution", "required_base_asset";
 }
 message ListAssetsResponse { repeated SharedAssetInfo assets = 1; }

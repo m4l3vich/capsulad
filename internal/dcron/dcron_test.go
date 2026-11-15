@@ -34,12 +34,12 @@ func TestParseListKeepsIntraFieldCommas(t *testing.T) {
 
 func TestParseListRejectsAmbiguousOrEmptyEntries(t *testing.T) {
 	for _, in := range []string{
-		"0,30, 7 * * *",     // trailing comma inside a non-final field
+		"0,30, 7 * * *",          // trailing comma inside a non-final field
 		"0 7 * * *, , 0 8 * * *", // empty entry
-		"0 7 * * *,",        // trailing separator
-		"0 7 * *",           // four fields
-		"0 7 * * * 0 8 * * *", // missing separator
-		"0/15 9 * * *",       // bare value/step is not in the grammar
+		"0 7 * * *,",             // trailing separator
+		"0 7 * *",                // four fields
+		"0 7 * * * 0 8 * * *",    // missing separator
+		"0/15 9 * * *",           // bare value/step is not in the grammar
 	} {
 		if _, err := ParseList(in); err == nil {
 			t.Fatalf("ParseList(%q) accepted an invalid list", in)

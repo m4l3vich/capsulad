@@ -25,12 +25,12 @@ import (
 // surface over a real gRPC client connection. It implements only the
 // services the Web UI allowlist touches.
 type fakeBackend struct {
-	mu             sync.Mutex
-	settings       *frameworkv1.SettingsSnapshot
-	apps           []*frameworkv1.InstalledApplication
-	runs           []*frameworkv1.AppRun
-	resources      []*frameworkv1.ResourceInfo
-	logs           []*frameworkv1.LogRecord
+	mu              sync.Mutex
+	settings        *frameworkv1.SettingsSnapshot
+	apps            []*frameworkv1.InstalledApplication
+	runs            []*frameworkv1.AppRun
+	resources       []*frameworkv1.ResourceInfo
+	logs            []*frameworkv1.LogRecord
 	trainingCancel  chan struct{}
 	recordingStart  chan struct{}
 	recordingCancel chan struct{}
@@ -73,8 +73,8 @@ func newFakeBackend() *fakeBackend {
 		logs: []*frameworkv1.LogRecord{
 			{MonotonicTimeNs: 123, Component: "daemon", Severity: "INFO", Message: "ready"},
 		},
-		trainingCancel: make(chan struct{}, 1),
-		recordingStart: make(chan struct{}, 1),
+		trainingCancel:  make(chan struct{}, 1),
+		recordingStart:  make(chan struct{}, 1),
 		recordingCancel: make(chan struct{}, 1),
 	}
 }

@@ -5,11 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 	"capsulad/internal/supervisor"
@@ -193,3 +195,50 @@ func TestPublicAppBusTargetReachableByOrdinaryClient(t *testing.T) {
 		t.Fatalf("undeclared service code = %v, want PermissionDenied", status.Code(err))
 	}
 }
+
+// A connection that is recognizably an application but whose run record is
+// gone must not fall back to administrator access to the run table.
+func TestRunListingRejectsLapsedApplicationIdentity(t *testing.T) {
+	logs, clock := testLogBus(t)
+	defer logs.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup := supervisor.New(ctx, logs, clock, "", nil)
+	d := &Daemon{
+		cfg: Config{SandboxUIDBase: 20000}, sup: sup, logs: logs,
+		runSubs: map[int]chan supervisor.Run{},
+	}
+	svc := &applicationService{d: d}
+	lapsed := grpcpeer.WithCreds(context.Background(), grpcpeer.Creds{UID: 20000, OK: true})
+
+	if _, err := svc.ListRuns(lapsed, &frameworkv1.ListRunsRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("lapsed run list code = %v, want PermissionDenied", status.Code(err))
+	}
+	if _, err := svc.ListRuns(lapsed, &frameworkv1.ListRunsRequest{AppId: "other.app"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("lapsed foreign run list code = %v, want PermissionDenied", status.Code(err))
+	}
+	if err := svc.WatchRuns(&frameworkv1.WatchRunsRequest{}, &testRunStream{ctx: lapsed}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("lapsed run watch code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	// The local administrator keeps the full view.
+	if _, err := svc.ListRuns(context.Background(), &frameworkv1.ListRunsRequest{}); err != nil {
+		t.Fatalf("administrator run list: %v", err)
+	}
+	adminCtx, adminCancel := context.WithCancel(context.Background())
+	adminCancel()
+	if err := svc.WatchRuns(&frameworkv1.WatchRunsRequest{}, &testRunStream{ctx: adminCtx}); err != nil {
+		t.Fatalf("administrator run watch: %v", err)
+	}
+}
+
+// testRunStream is the minimal WatchRuns stream. A filter rejection happens
+// before the first send, and an accepted watch ends when its context is done.
+type testRunStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *testRunStream) Context() context.Context { return s.ctx }
+
+func (s *testRunStream) Send(*frameworkv1.AppRunEvent) error { return nil }

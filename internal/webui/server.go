@@ -30,6 +30,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/assets"
 	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"
 	"capsulad/internal/registry"
@@ -64,6 +65,9 @@ type Server struct {
 	// Apps resolves application package assets. Optional: without it the
 	// settings-UI endpoint and declaration are unavailable.
 	Apps *registry.Registry
+	// Assets is the shared read-only asset store. Optional: without it the
+	// browser asset-management routes report unavailability.
+	Assets *assets.Catalog
 	// Wifi is the shared station/provisioning controller. Optional: a daemon
 	// without Wi-Fi still serves a snapshot explaining unavailability.
 	Wifi wifi.Controller
@@ -118,6 +122,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.anyAuth(s.apiStatus))
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
+	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
+	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))
+	mux.HandleFunc("DELETE /api/assets", s.sessionOnly(s.deleteAsset))
 	mux.HandleFunc("GET /ws", s.sessionOnly(s.serveWS))
 	mux.Handle("/", s.static())
 	return s.middleware(mux)
@@ -176,10 +183,16 @@ func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 			writeUnauthorized(w, r)
 			return
 		}
-		if r.Method == http.MethodPost {
-			if err := r.ParseForm(); err != nil {
-				writeJSONError(w, http.StatusBadRequest, "invalid request")
-				return
+		// Every browser mutation proves same-origin intent and the session's
+		// CSRF token, not just POST. Only form-encoded bodies are parsed here:
+		// a raw body (an asset upload) is left unread for its handler, and its
+		// CSRF proof arrives in the X-Capsula-CSRF header.
+		if isMutatingMethod(r.Method) {
+			if isFormBody(r) {
+				if err := r.ParseForm(); err != nil {
+					writeJSONError(w, http.StatusBadRequest, "invalid request")
+					return
+				}
 			}
 			if !s.checkOrigin(r) {
 				writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
@@ -205,6 +218,32 @@ func (s *Server) anyAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth)))
 	}
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// isFormBody reports whether ParseForm would consume the body. Requests with
+// any other content type (JSON, raw upload bytes) keep their body intact.
+func isFormBody(r *http.Request) bool {
+	switch mediaTypeOf(r) {
+	case "application/x-www-form-urlencoded", "multipart/form-data":
+		return true
+	}
+	return false
+}
+
+func mediaTypeOf(r *http.Request) string {
+	contentType := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = contentType[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(contentType))
 }
 
 func (s *Server) authenticate(r *http.Request) authInfo {
@@ -332,7 +371,7 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	next := sanitizeNext(body.Next)
 	if !s.Auth.PasswordSet() {
 		writeJSONValue(w, http.StatusServiceUnavailable, map[string]any{
-			"error": "administrator password is not initialized; run `capsula auth init` on the device",
+			"error": "administrator password is not initialized; run `capsulad-cli auth init` on the device",
 			"next":  next,
 		})
 		return

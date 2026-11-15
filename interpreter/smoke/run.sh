@@ -23,7 +23,7 @@ PROBE_RUN=""
 TARGET_RUN=""
 DAEMON_PID=""
 DAEMON="$BIN/capsulad"
-CLI="$BIN/capsula"
+CLI="$BIN/capsulad-cli"
 SKIP_INTERPRETER_BUILD=${SKIP_INTERPRETER_BUILD:-1}
 
 say() { printf '%s\n' "$*" >&2; }
@@ -56,7 +56,7 @@ CC=${CC:-cc}
 
 say "building daemon and CLI"
 (cd "$ROOT" && go build -ldflags '-linkmode=external' -o "$DAEMON" ./cmd/capsulad)
-(cd "$ROOT" && go build -ldflags '-linkmode=external' -o "$CLI" ./cmd/capsula)
+(cd "$ROOT" && go build -ldflags '-linkmode=external' -o "$CLI" ./cmd/capsulad-cli)
 
 rm -rf "$DATA"
 mkdir -p "$DATA"

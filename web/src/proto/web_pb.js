@@ -828,7 +828,6 @@ export function encode(typeName, obj) {
 export function decode(typeName, bytes) {
   return decodeMessage(SCHEMA, typeName, bytes);
 }
-
 export const AccessStatusView = {
   type: "capsula.web.v1.AccessStatusView",
   encode(obj) { return encodeMessage(SCHEMA, TYPE.AccessStatusView, obj || {}); },

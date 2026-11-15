@@ -46,7 +46,6 @@ const (
 	defaultReplyFile  = "reply.wav"
 	assetStoreEnv     = "CAPSULA_ASSETS"
 	defaultAssetStore = "/assets"
-	assetManifestName = "manifest.json"
 
 	chunkMS    = 20
 	queueDepth = 8
@@ -1447,18 +1446,6 @@ func packageRoot(argv0 string) (string, error) {
 	return filepath.Dir(abs), nil
 }
 
-// sharedAsset mirrors the standard read-only asset catalog entry. The store
-// manifest is the same file the daemon's asset catalog consumes.
-type sharedAsset struct {
-	ID        string `json:"id"`
-	Path      string `json:"path"`
-	MediaType string `json:"media_type"`
-}
-
-type sharedAssetManifest struct {
-	Assets []sharedAsset `json:"assets"`
-}
-
 func loadPackagedReply(pkgRoot string) (*clip, string, error) {
 	assetRoot := filepath.Join(pkgRoot, "assets")
 	path, err := resolveContainedPath(assetRoot, defaultReplyFile)
@@ -1495,21 +1482,18 @@ func normalizeStoreAsset(value string) (string, string, error) {
 	return clean, canonical, nil
 }
 
+// loadStoreReply resolves one configured reply from the shared read-only asset
+// store. The store is a plain directory with no manifest: any regular,
+// non-symlink file inside it whose name ends in .wav is a valid reply. The
+// daemon performs the same containment and media-type checks when the setting
+// is saved, so a rejected value here means the file changed or disappeared.
 func loadStoreReply(storeRoot, value string) (*clip, string, error) {
 	rel, canonical, err := normalizeStoreAsset(value)
 	if err != nil {
 		return nil, "", err
 	}
-	assets, err := readAssetManifest(storeRoot)
-	if err != nil {
-		return nil, "", err
-	}
-	declared, ok := declaredAsset(assets, canonical)
-	if !ok {
-		return nil, "", fmt.Errorf("asset %q is not declared in %s", canonical, filepath.Join(storeRoot, assetManifestName))
-	}
-	if !wavMediaType(declared.MediaType) {
-		return nil, "", fmt.Errorf("asset %q declares unsupported media type %q", canonical, declared.MediaType)
+	if !wavAssetName(rel) {
+		return nil, "", fmt.Errorf("asset %q must be a .wav file", canonical)
 	}
 	path, err := resolveContainedPath(storeRoot, rel)
 	if err != nil {
@@ -1518,47 +1502,10 @@ func loadStoreReply(storeRoot, value string) (*clip, string, error) {
 	return loadClipFile(path)
 }
 
-func readAssetManifest(storeRoot string) ([]sharedAsset, error) {
-	path := filepath.Join(storeRoot, assetManifestName)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("asset store manifest: %w", err)
-	}
-	var doc sharedAssetManifest
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse asset store manifest: %w", err)
-	}
-	return doc.Assets, nil
-}
-
-// declaredAsset matches the catalog's normalization exactly: an empty path
-// falls back to the asset id, and a missing /assets/ prefix is added.
-func declaredAsset(assets []sharedAsset, canonical string) (sharedAsset, bool) {
-	for _, asset := range assets {
-		path := strings.TrimSpace(asset.Path)
-		if path == "" {
-			path = strings.TrimSpace(asset.ID)
-		}
-		if path == "" {
-			continue
-		}
-		if !strings.HasPrefix(path, "/assets/") {
-			path = "/assets/" + strings.TrimPrefix(path, "/")
-		}
-		if path == canonical {
-			return asset, true
-		}
-	}
-	return sharedAsset{}, false
-}
-
-func wavMediaType(mediaType string) bool {
-	switch strings.ToLower(strings.TrimSpace(mediaType)) {
-	case "", "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave":
-		return true
-	default:
-		return false
-	}
+// wavAssetName is the app's supported reply format: the shared store carries no
+// declared media type, so the extension is the contract.
+func wavAssetName(rel string) bool {
+	return strings.EqualFold(filepath.Ext(rel), ".wav")
 }
 
 func loadClipFile(path string) (*clip, string, error) {
