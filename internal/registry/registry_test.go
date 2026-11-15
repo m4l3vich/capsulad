@@ -259,3 +259,30 @@ func TestBuiltinRegistrationSurvivesRescanAndCannotBeUninstalled(t *testing.T) {
 		t.Fatal("duplicate builtin registration was accepted")
 	}
 }
+
+// The installed package tree must be traversable. artifact.OpenIn stages the
+// tree with os.MkdirTemp, which creates it 0700; the sandbox mounts it
+// read-only and walks it as an unprivileged user, so the directory itself has
+// to be 0755 even though the package's files keep their artifact modes.
+func TestInstallApplicationDirectoryIsTraversable(t *testing.T) {
+	reg := newTestRegistry(t)
+	src := testPackage(t, "0.1.0", map[string]string{"data.txt": "payload"})
+	app, err := reg.Install(src)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	info, err := os.Stat(app.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("installed directory mode = %04o, want 0755", info.Mode().Perm())
+	}
+	file, err := os.Stat(filepath.Join(app.Dir, "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Mode().Perm() != 0o444 {
+		t.Fatalf("package file mode = %04o, want the artifact policy 0444", file.Mode().Perm())
+	}
+}

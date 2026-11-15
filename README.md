@@ -164,10 +164,13 @@ A deployment bundle is a directory or `.tar.gz` with exactly these top-level ent
 `boot/S99btctl.sh`. `make deploy-bundle` assembles that directory from ready-made host-built
 archives — build them first with `make dumbassistant` or `make devapps` — and never packages an
 app. `capsulad-cli deploy PATH` validates the whole bundle before
-changing installed state, installs or updates packages, replaces managed runtime files, activates
-both binaries by rename with a transient `.prev`, optionally installs the boot hook, restarts
-through the boot service and gates on `capsulad -health`. A failure during binary activation
-restores the binaries it replaced and, when a restart was scheduled, restarts the previous stack.
+changing installed state, stages it outside the data partition, stops the daemon, installs or
+updates packages and managed runtime files, replaces both binaries, optionally installs the boot
+hook, restarts through the boot service and gates on `capsulad -health`. A replaced binary is kept
+recoverable only until the health gate passes — renamed aside when the staged file is on the data
+filesystem, otherwise gzip-compressed in staging after the target was removed, since `/data` cannot
+hold two 40 MiB daemons. A failure after the stop restores what was replaced and restarts the
+previous stack.
 On the device the data directory is `/data/capsdemo`:
 
 ```text

@@ -357,6 +357,17 @@ func (r *Registry) InstallPackage(pkg *artifact.Package) (*App, error) {
 		}
 		return nil, fmt.Errorf("activate %s: %w", m.ID, err)
 	}
+	// The staged tree is created by os.MkdirTemp, which is 0700. The sandbox
+	// mounts the package read-only and traverses it as an unprivileged user, so
+	// the directory has to be traversable for the app to start at all. The
+	// package's own file modes are the artifact policy and are left alone.
+	if err := os.Chmod(target, 0o755); err != nil {
+		_ = os.RemoveAll(target)
+		if previous != "" {
+			_ = os.Rename(filepath.Join(previous, "pkg"), target)
+		}
+		return nil, fmt.Errorf("make installed %s traversable: %w", m.ID, err)
+	}
 	if err := r.Rescan(); err != nil {
 		return nil, err
 	}

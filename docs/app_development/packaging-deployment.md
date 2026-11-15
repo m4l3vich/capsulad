@@ -140,8 +140,9 @@ A deployment bundle moves a whole stack onto an existing device. It is a directo
 
 Unknown top-level entries are reported and ignored. `._*` files from BSD tar are ignored.
 Symlinks anywhere in the bundle are rejected. The bundle itself is capped at 64 MiB per file,
-128 MiB unpacked and 8192 entries; extraction reserves 32 MiB of free space for the daemon,
-apps, settings and logs.
+128 MiB unpacked and 8192 entries. The bundle is staged outside the data directory (the
+temporary directory unless `-staging` says otherwise), so unpacking an archive never needs free
+space on the 78.5 MiB partition that already holds the daemon.
 
 ```sh
 capsulad-cli -data-dir /data/capsdemo deploy build/deploy-bundle.tar.gz
@@ -150,9 +151,10 @@ capsulad-cli -data-dir /data/capsdemo deploy build/deploy-bundle -dry-run
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-init-script PATH` | `/etc/init.d/S99btctl.sh` | Boot service invoked to restart the daemon. |
+| `-init-script PATH` | `/etc/init.d/S99btctl.sh` | Boot service invoked to stop and restart the daemon. |
 | `-restart auto\|always\|never` | `auto` | See below. |
 | `-dry-run` | off | Validate and print the plan; change nothing. |
+| `-staging DIR` | temporary directory | Parent of the staging tree (`capsulad-deploy-*`). Never inside the data directory; on the same filesystem only with room for the largest staged tree beside both reserves. |
 | `-timeout DURATION` | `45s` | Time allowed for the restarted daemon to report healthy. |
 
 `-restart` values:
@@ -161,18 +163,25 @@ capsulad-cli -data-dir /data/capsdemo deploy build/deploy-bundle -dry-run
 |---|---|
 | `auto` | Restart if the bundle carries a daemon, `lib/` or any app package. A boot-hook-only bundle does not restart. |
 | `always` | Always restart. |
-| `never` | Never restart. The boot hook is not installed and packages become active at the next manual daemon restart. |
+| `never` | Never stop or restart the daemon. The boot hook is not installed and packages become active at the next manual daemon restart. Replacing the daemon binary is refused while a daemon answers on the socket; a daemon that is already stopped stays stopped. |
 
-Deployment order: every bundle entry is validated first; live runs of apps the bundle replaces
-are stopped through the daemon (if it is unreachable, package management continues offline);
-packages are installed or updated; `lib/` is synced; binaries and the boot hook are activated;
-the daemon is restarted through the boot service; and `capsulad -health` must succeed within the
-timeout. Replaced files are kept as a transient `<file>.prev` only until the health gate passes,
-then removed. If the restart or health gate fails, the previous binaries and boot hook are
-restored and the previous stack is restarted. There is no durable backup.
+Deployment order: every bundle entry is validated first; the data filesystem is checked for the
+space the binary writes cannot free themselves; when a restart is scheduled the daemon is stopped
+through the boot service and its pid is verified gone (`-restart never` instead stops live runs of
+the apps the bundle replaces, if the daemon is reachable); packages are installed or updated and
+`lib/` is synced with nothing running; the boot hook and the CLI are installed; the daemon is
+replaced last; the daemon is restarted through the boot service; and `capsulad -health` must
+succeed within the timeout. A replaced binary is kept recoverable only until the health gate
+passes: as a sibling `<file>.prev` when the staged file is on the data filesystem, otherwise
+gzip-compressed in the staging tree after the target was removed, because `/data` cannot hold the
+old and new daemon at once. The boot hook is copied in place, never renamed (overlayfs refuses
+that). If a step fails after the stop, the previous binaries and hook are restored and the
+previous stack is restarted; a backup that cannot be restored keeps the staging tree, which is
+named in the error. There is no durable backup.
 
-`-dry-run` never executes bundle content. A real deployment probes the incoming daemon only
-after it has been installed.
+`-dry-run` never executes bundle content. A real deployment runs `-version` on the bundle's own
+daemon file in place (raising its mode when needed) before installing it, and never executes it
+under the operator's environment.
 
 ## Device paths
 

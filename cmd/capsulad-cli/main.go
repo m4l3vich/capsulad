@@ -144,9 +144,14 @@ Commands:
   platform ledtest [flags]       drive the display channels directly (bring-up)
   dev <wakeword|gesture|key|raw|state>  simulator injection (development)
 
-Deploy flags: -init-script PATH, -restart auto|always|never, -dry-run, -timeout D.
+Deploy flags: -init-script PATH, -restart auto|always|never, -dry-run, -staging DIR,
+-timeout D. The bundle is staged under the temporary directory (or -staging), never inside
+the data directory and on the data filesystem only with room for the largest staged tree;
+the data partition is checked for the space the binary writes cannot free themselves
+before the daemon is stopped.
 A deployment bundle contains capsulad, capsulad-cli, lib/, apps/ and boot/S99btctl.sh;
-unknown top-level entries are reported and ignored. Binaries are installed as
+unknown top-level entries are reported and ignored. A restarting deployment stops the
+daemon first, installs with nothing running, then restarts it. Binaries are installed as
 <data-dir>/capsulad and <data-dir>/capsulad-cli (0755), lib/ as <data-dir>/lib and
 apps/ under <data-dir>/apps; the boot hook is installed only when the bundle
 carries it and the daemon is restarted.

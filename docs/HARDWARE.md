@@ -424,8 +424,14 @@ contract:
 - `capsulad` starts the retry loop before superseding the vendor stack, so the framework owns the
   descriptor the moment the vendor releases it; it reports `BACKEND_PARTIAL` until then.
 - Once armed it feeds at `timeout/3`, capped at 2 s, and reports `BACKEND_AVAILABLE`.
-- A graceful stop hands the descriptor to a detached `capsulad __capsula_watchdog_feeder` process,
-  so planned restarts and upgrades do not reset the board; the next `capsulad` reclaims it.
+- A graceful stop hands the descriptor to a detached BusyBox `sh` feeder that holds only the
+  inherited descriptor (fd 3) and writes a keepalive every 2 s, so planned restarts and upgrades
+  do not reset the board; the next `capsulad` reclaims it. The feeder is a shell on purpose: a
+  process running a copy of the daemon would keep the old binary's inode alive on `/data` after
+  the daemon exits, which leaves no room to stage a 40 MiB replacement on the 78.5 MiB partition.
+  Its pid file (`run/watchdog.feeder`) records `<pid> shell`; a feeder left by an older release is
+  a daemon copy (`__capsula_watchdog_feeder`) and is asked to hand the timer back through
+  `run/watchdog.handback` before its binary is replaced.
 - A crash or OOM kill of `capsulad` leaves nobody feeding, so the board resets. That is the
   intended fail-safe: the supervisor owns the timer and its death returns the device to a known
   state.

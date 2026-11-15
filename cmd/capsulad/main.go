@@ -20,9 +20,6 @@ func main() {
 	if handled, code := sandbox.HandleHelper(os.Args); handled {
 		os.Exit(code)
 	}
-	if len(os.Args) > 1 && os.Args[1] == daemon.WatchdogFeederArg {
-		os.Exit(daemon.RunWatchdogFeeder())
-	}
 	cfg := daemon.Config{}
 	fs := flag.NewFlagSet("capsulad", flag.ExitOnError)
 	fs.StringVar(&cfg.Platform, "platform", "simulator", "target platform: simulator, rockchip-stock, amlogic-stock, amlogic-alpine")

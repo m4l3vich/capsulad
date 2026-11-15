@@ -55,7 +55,8 @@ capsulad-cli app install build/devapps/dev.hardware     # directory: developer c
 
 # Or a deployment bundle: apps/*.tar.gz beside the daemon, CLI, lib/ and boot/.
 make deploy-bundle BUNDLE_DEVAPPS=1     # copies the archives staged in build/devapps
-capsulad-cli deploy build/deploy-bundle
+capsulad-cli deploy build/deploy-bundle # staging on the data filesystem needs ~162 MiB free
+capsulad-cli deploy build/deploy-bundle -staging /path/on/another/filesystem
 
 capsulad-cli app start dev.hardware              # runs the full self-test
 capsulad-cli app start dev.hardware step=input   # one step

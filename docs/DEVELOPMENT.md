@@ -158,14 +158,42 @@ apps/*.tar.gz               application packages
 boot/S99btctl.sh            boot hook
 ```
 
+`lib/` must contain the SONAME named by `capsula-native.json` (`libcapsula.so.1` on the
+device), not only `libcapsula.so.1.0.0`: the deploy preflight resolves the declared library
+before installing. `make deploy-bundle` materialises the symlinks with `cp -RL`; a bundle
+assembled by hand must do the same.
+
 `capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run]
-[-timeout DURATION]` accepts that directory or the tarball. Flags and steps:
+[-staging DIR] [-timeout DURATION]` accepts that directory or the tarball. `capsulad-cli`
+itself is optional in a device bundle: the running CLI installs a daemon without
+installing a copy of itself. Flags:
 
 - `-dry-run` stages and validates the bundle and prints the plan; nothing durable changes.
 - `-init-script` selects the boot service (default `/etc/init.d/S99btctl.sh`).
 - `-restart auto` (default) restarts when the bundle carries a daemon, `lib/` or apps.
-  `always` restarts unconditionally; `never` skips the restart and the boot-hook install.
+  `always` restarts unconditionally. `never` installs without stopping or restarting the
+  daemon and without installing the boot hook; replacing the daemon binary is refused while a
+  daemon still answers on the framework socket (stop it first, or use `auto`), and a daemon
+  that is already stopped stays stopped until `S99btctl.sh start` or the next boot.
+- `-staging DIR` puts staging below `DIR`; the default is the operating system temporary
+  directory (`/tmp/capsulad-deploy-*`). Staging inside `<data-dir>` is always rejected.
+  Symlinks are resolved before the check, and staging on the data *filesystem* is allowed
+  only when it can hold the largest staged tree beside both reserves (128 MiB unpacked +
+  26 MiB + 8 MiB). A host or simulator data directory on one big volume therefore keeps
+  working; the 78.5 MiB device partition never qualifies, and `/tmp` is a separate tmpfs on
+  the Capsula Mini anyway.
 - `-timeout` bounds the health gate (default 45 s).
+
+Nothing is staged inside `<data-dir>`. The 78.5 MiB data partition already holds the ~40 MiB
+daemon, so a second copy of it does not fit: an archive bundle is unpacked into staging, the
+replaced binaries are backed up there compressed, and `<data-dir>` only ever holds one copy
+of each binary. An archive preflight requires the unpacked tree (about twice the archive
+size) plus a 26 MiB reserve for the compressed backup on the staging filesystem; the
+operator's archive itself stays where it was, and a directory bundle is inspected in place
+and skips the preflight. A second preflight, run before the daemon is stopped, requires
+enough free space on `<data-dir>` for the binary writes that cannot free their own space —
+the full staged CLI size when the running executable *is* the installed CLI, and the
+difference between the staged and installed daemon — plus an 8 MiB reserve.
 
 The steps, in order:
 
@@ -175,23 +203,79 @@ The steps, in order:
 2. Check each incoming app's `[native_sdk]` requirement against the runtime the deployment
    would leave installed: the bundle's own `lib/`, otherwise `<data-dir>/lib`.
 3. Prove the staged daemon runs here and prints `capsulad …` from `-version`; validate the
-   boot hook with `sh -n`.
-4. Stop live runs of apps the bundle replaces, and refuse to continue if one stays alive.
+   boot hook with `sh -n`. The bundle's own file is probed in place (its mode is raised to
+   executable when needed), not copied again.
+4. Check the data filesystem can take the binary writes (see above), then, when a restart is
+   scheduled, stop the daemon with `<init-script> stop` and verify it: a daemon that still
+   answers on the socket, or whose `run/capsulad.pid` still names a live process, fails the
+   deployment before anything is installed. Without a restart (`-restart never`) live runs of
+   the apps this bundle replaces are stopped instead, and the deployment refuses to continue
+   if one stays alive.
 5. Install or update packages, then replace managed files in `<data-dir>/lib` (each file
-   written beside its target and renamed).
-6. Rename `capsulad` and `capsulad-cli` into place, keeping the replaced files as
-   `<name>.prev` until the deployment is accepted.
-7. Install the boot hook when the bundle carries it and a restart is scheduled.
+   written beside its target and renamed) — with the daemon stopped, so a selected provider
+   app is replaced without a stop-for-restart round trip.
+6. Install the boot hook when the bundle carries it and a restart is scheduled: the existing
+   `/etc/init.d/S99btctl.sh` is copied to `<init-script>.prev` and the new hook is written in
+   place. Both steps copy instead of renaming because the hook lives on the overlayfs root,
+   where renaming a lower-layer file fails with `EINVAL`. Doing this before the binaries keeps
+   the post-handback window free of everything but the daemon.
+7. Replace `capsulad-cli`, then `capsulad`. A staged file on the target filesystem is renamed
+   into place, and the replaced binary is kept as `<name>.prev`. A staged file elsewhere (the
+   normal case, since staging is on the temporary filesystem) cannot be renamed: the replaced
+   binary is compressed into staging (~25 MiB for the 40 MiB daemon), the target is
+   removed to release its space, the staged bytes are written directly to the target path and
+   chmodded 0755. No sibling copy of the new binary is ever created on `/data`. A staged file
+   inside the staging tree is deleted once it is written; a directory bundle is left alone
+   unless it shares the target filesystem, where the rename consumes its entry — rebuild the
+   bundle before repeating that path.
 8. Run `<init-script> restart` with `CAPSULA_DATA_DIR` exported, then poll
    `capsulad -health -socket <socket>` until it exits 0 (exit 2 falls back to a framework
    API probe).
-9. On success, remove the `.prev` buffers. On failure, restore the previous binaries and,
-   when a restart was scheduled, restart the previous stack; report the original failure and
-   any step that could not be undone.
+9. On success, remove the transient backups. On failure, restore the replaced binaries and
+   boot hook and restart the previous stack (package installs are not reverted); report the
+   original failure and any step that could not be undone. If a compressed backup cannot be
+   restored, the staging tree is kept and the error names the backup: it is the only remaining
+   copy of that binary.
 
 A bundle without `capsulad`, `capsulad-cli`, `lib/`, `apps/` or `boot/S99btctl.sh` is
 rejected as having no actionable payload. Nothing is written outside `<data-dir>` except
 the boot hook.
+
+### Over adb
+
+The normal device flow does not need a copy of the CLI in `/data` and does not unpack the
+bundle there:
+
+```sh
+# Build for the device, then assemble the bundle on the build host.
+adb -s <device> push build/linux-arm64/<build>/bundle /tmp/capsula-bundle
+adb shell /tmp/capsula-bundle/capsulad-cli -data-dir /data/capsdemo \
+  deploy /tmp/capsula-bundle -timeout 60s
+adb shell /data/capsdemo/capsulad -health -socket /data/capsdemo/run/hal.sock
+```
+
+The bundle may be pushed as a directory or as the `.tar.gz`; a directory avoids a second
+unpacked copy in the tmpfs. Staging defaults to `/tmp/capsulad-deploy-*`; the bundle itself
+can live on `/run` when vendor files consume `/tmp`. Run the CLI from the pushed bundle so
+the installed `/data/capsdemo/capsulad-cli` is not the executable being replaced. Keep a host
+rollback copy of `capsulad` and `capsulad-cli` (`adb pull`) until the health gate and the
+app/web checks pass; a reset during the direct daemon write can leave a truncated target.
+
+### The watchdog window
+
+`S99btctl.sh stop` hands `/dev/watchdog` to a detached feeder, so the hardware timer stays
+armed but is only fed for about 21 s after the last keepalive. A feeder left behind by an older
+daemon is a copy of that daemon and pins its 40 MiB inode on `/data`. The order matters:
+`deploy` first compresses the replaced binary into staging while the feeder is still feeding,
+then asks it to hand the timer back (`run/watchdog.handback`), waits for
+`run/watchdog.feeder` to disappear — which is what releases the replaced inode's space — and
+removes the marker. So the gzip does not consume the window; only removing the old file,
+writing the new binary and restarting do. If the feeder is still there after the wait, the
+deployment aborts before removing the daemon (its space is pinned, so the write could not
+succeed), drops the useless backup and restarts the previous stack. A same-filesystem rename lands instantly; the
+cross-filesystem write is the slow part, and a watchdog reset during it leaves a truncated
+target. Re-run the deployment after the board reboots rather than assuming the binary is
+complete.
 
 ## Device layout and boot hook
 

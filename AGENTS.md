@@ -150,11 +150,13 @@ or equate extra animation with polish.
   daemon does not update installed app packages. Verify installed versions and ready runs, not
   just source or build times.
 - Prefer `capsulad-cli deploy PATH` for a coordinated stack: it validates the whole bundle
-  before writing, checks native SDK requirements, stops replaced apps, installs packages and
-  runtime files, activates binaries by rename, restarts through the boot service and gates on
-  `capsulad -health`. Replaced binaries are kept only as transient `.prev` files and removed
-  after a healthy deployment. A failed deployment restores the binaries it replaced and restarts
-  the previous stack.
+  before writing, checks native SDK requirements, stages outside `/data`, stops the daemon
+  through the boot service, installs packages and runtime files while it is stopped, replaces
+  the binaries, restarts through the boot service and gates on `capsulad -health`. A replaced
+  binary is recoverable only until the health gate passes: as a sibling `.prev` when the staged
+  file is on the data filesystem, otherwise as a gzip copy in staging after the target was
+  removed, because `/data` cannot hold two 40 MiB daemons. A failed deployment restores what it
+  replaced and restarts the previous stack.
 - On Rockchip stock, use the canonical `deploy/rockchip-stock/S99btctl.sh` service and the
   normal health path. Do not revive a second boot service or manually kill the daemon or its
   watchdog feeder. Check storage headroom before staging. Native target compatibility is

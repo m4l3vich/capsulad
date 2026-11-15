@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,25 +29,42 @@ import (
 )
 
 const (
-	deployStagingDir  = ".deploy-staging"
 	defaultInitScript = "/etc/init.d/S99btctl.sh"
 	daemonBinaryName  = "capsulad"
 	cliBinaryName     = "capsulad-cli"
 	bootHookName      = "S99btctl.sh"
+
+	// The detached watchdog feeder publishes its pid under run/ and watches a
+	// handback marker there. A pid file that names the shell feeder means the
+	// old daemon binary is not pinned by that process.
+	daemonPIDName     = "capsulad.pid"
+	watchdogFeederPID = "watchdog.feeder"
+	watchdogHandback  = "watchdog.handback"
+	shellFeederMarker = "shell"
 )
 
 // bundleLimits bound a deployment bundle supplied by an operator, possibly
-// from external media. They are sized for the 78.5 MiB data partition, where
-// the archive is unpacked into the staging tree before it can be inspected.
+// from external media. The archive is unpacked into the staging tree, which
+// lives outside the 78.5 MiB data partition.
 var bundleLimits = artifact.Limits{
 	MaxFileBytes:  64 << 20,
 	MaxTotalBytes: 128 << 20,
 	MaxEntries:    8192,
 }
 
-// extractionReserve is free space kept for the daemon, apps, settings and logs
-// while a bundle archive is unpacked.
-const extractionReserve = 32 << 20
+// extractionRatio estimates the unpacked size of a bundle archive as a
+// multiple of its compressed size. Deploy bundles are Go binaries, which
+// compress to roughly half their size.
+const extractionRatio = 2
+
+// stagingReserve is free space kept available on the staging filesystem
+// besides the extracted bundle: the compressed backup of the replaced daemon
+// is ~24.7 MiB for the 40 MiB binary, so the reserve is that plus a margin.
+const stagingReserve = 26 << 20
+
+// dataReserve is free space kept on the data filesystem besides the binary
+// writes themselves, for the package staging directories and lib/.
+const dataReserve = 8 << 20
 
 // deployment is one validated bundle plus the state needed to apply it.
 type deployment struct {
@@ -70,23 +89,31 @@ type deployment struct {
 	packages    []*artifact.Package
 	libFiles    int
 	needRestart bool
+	// stopped records that the daemon was stopped through the boot service and
+	// has not been restarted yet: every failure after that point must restart
+	// the previous stack before returning.
+	stopped bool
+	// keepStaging preserves the staging tree after a failure, because it holds
+	// the only remaining copy of a binary that could not be restored.
+	keepStaging bool
 	// hook is the replaced boot hook, kept as <init-script>.prev only until
 	// the health gate accepts the deployment.
 	hook *activation
 }
 
-// runDeploy applies a deployment bundle: validate, install/update apps,
-// replace the native runtime, activate the daemon and CLI binaries, restart
-// through the boot service and gate on a healthy daemon. Nothing is written
-// before the bundle has been fully validated.
+// runDeploy applies a deployment bundle: validate, stop the daemon, install
+// apps and the native runtime, replace the daemon and CLI binaries, install
+// the boot hook, restart through the boot service and gate on a healthy daemon.
+// Nothing is written before the bundle has been fully validated.
 func runDeploy(args []string, dataDir, socket string) error {
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
-	initScript := fs.String("init-script", defaultInitScript, "boot service invoked to restart the daemon")
+	initScript := fs.String("init-script", defaultInitScript, "boot service invoked to stop and restart the daemon")
 	restartMode := fs.String("restart", "auto", "restart policy: auto, always or never")
 	dryRun := fs.Bool("dry-run", false, "print the plan without changing installed state")
+	stagingDir := fs.String("staging", "", "staging parent directory (default: the operating system temporary directory)")
 	timeout := fs.Duration("timeout", 45*time.Second, "time to wait for a healthy daemon after restart")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-timeout DURATION]
+		fmt.Fprintf(fs.Output(), `usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]
 
 PATH is a bundle directory or a .tar.gz containing:
   capsulad              daemon binary (installed as <data-dir>/capsulad, 0755)
@@ -96,8 +123,10 @@ PATH is a bundle directory or a .tar.gz containing:
   boot/%s       boot hook (installed as -init-script when present)
 
 Only those top-level entries are meaningful; anything else is reported and
-ignored. Nothing is written outside <data-dir> except the boot hook bundled at
-boot/%s.
+ignored. The bundle is staged under -staging (default: the temporary
+directory), never inside <data-dir>: the 78.5 MiB data partition cannot hold a
+second copy of the daemon while the installed one is still there. Nothing is
+written outside <data-dir> except the boot hook bundled at boot/%s.
 
 Flags:
 `, bootHookName, bootHookName)
@@ -111,7 +140,7 @@ Flags:
 		return err
 	}
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-timeout DURATION]")
+		return fmt.Errorf("usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]")
 	}
 	switch *restartMode {
 	case "auto", "always", "never":
@@ -132,24 +161,42 @@ Flags:
 		dryRun:     *dryRun,
 		timeout:    *timeout,
 	}
-	// A dry run stages the bundle (an archive must be unpacked to be
-	// inspected) outside the data directory and changes nothing durable.
-	if d.dryRun {
-		temp, err := os.MkdirTemp("", "capsula-deploy-")
-		if err != nil {
-			return err
+	// Staging lives outside the data directory. An archive has to be unpacked
+	// to be inspected, the replaced daemon is backed up compressed beside it,
+	// and neither may compete for space with the installed daemon.
+	staging, err := createStaging(*stagingDir)
+	if err != nil {
+		return err
+	}
+	d.staging = staging
+	defer func() {
+		if d.keepStaging {
+			fmt.Fprintf(os.Stderr, "deploy: staging kept at %s\n", d.staging)
+			return
 		}
-		d.staging = temp
-	} else {
-		d.staging = filepath.Join(d.dataDir, deployStagingDir)
-		if err := os.RemoveAll(d.staging); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(d.staging, 0o750); err != nil {
-			return err
+		_ = os.RemoveAll(d.staging)
+	}()
+	// Both sides are resolved first, so a symlink or a bind mount cannot hide a
+	// shared partition.
+	stagingReal := resolvePath(d.staging)
+	dataReal := resolvePath(d.dataDir)
+	if insideDir(dataReal, stagingReal) {
+		return fmt.Errorf("-staging %s is inside the data directory %s; stage on another filesystem", d.staging, d.dataDir)
+	}
+	if sameFilesystem(stagingReal, dataReal) {
+		// Staging on the data filesystem recreates the space shortage this
+		// command exists to avoid, so it is only allowed when that filesystem
+		// can hold the largest possible staged tree beside both reserves. A
+		// host or simulator data directory on one big volume qualifies; the
+		// Capsula Mini's 78.5 MiB /data never does, and /tmp is a separate
+		// tmpfs there anyway.
+		need := uint64(bundleLimits.MaxTotalBytes) + stagingReserve + dataReserve
+		free, known, err := freeSpace(dataReal)
+		if err == nil && known && free < need {
+			return fmt.Errorf("-staging %s is on the data filesystem %s with %s free; staging there needs %s beside the installed daemon, so point -staging at another filesystem",
+				d.staging, d.dataDir, mib(free), mib(need))
 		}
 	}
-	defer os.RemoveAll(d.staging)
 
 	if err := d.prepare(); err != nil {
 		return err
@@ -162,12 +209,42 @@ Flags:
 	return d.apply()
 }
 
+// createStaging makes a private staging directory below parent, or below the
+// operating system temporary directory when parent is empty.
+func createStaging(parent string) (string, error) {
+	if parent == "" {
+		parent = os.TempDir()
+	}
+	abs, err := filepath.Abs(parent)
+	if err != nil {
+		return "", fmt.Errorf("staging directory %s: %w", parent, err)
+	}
+	if err := os.MkdirAll(abs, 0o750); err != nil {
+		return "", fmt.Errorf("staging directory %s: %w", abs, err)
+	}
+	staging, err := os.MkdirTemp(abs, "capsulad-deploy-")
+	if err != nil {
+		return "", fmt.Errorf("staging directory %s: %w", abs, err)
+	}
+	return staging, nil
+}
+
+// resolvePath returns path with symlinks resolved. A path that does not exist
+// yet is returned unchanged: the caller only needs the best available answer.
+func resolvePath(path string) string {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return real
+}
+
 func (d *deployment) daemonPath() string { return filepath.Join(d.dataDir, daemonBinaryName) }
 
 func (d *deployment) appPath(appID string) string { return filepath.Join(d.dataDir, "apps", appID) }
 
 func (d *deployment) prepare() error {
-	root, archive, err := unpackBundle(d.bundlePath, d.staging, d.dataDir)
+	root, archive, err := unpackBundle(d.bundlePath, d.staging)
 	if err != nil {
 		return err
 	}
@@ -175,24 +252,25 @@ func (d *deployment) prepare() error {
 	if err := d.scanBundle(); err != nil {
 		return err
 	}
+	// The bundle (or the tree extracted from it) is already in staging, and a
+	// directory bundle is read in place. Copying the daemon again would need a
+	// second 40 MiB in staging for no benefit: activation installs this file
+	// without ever holding two copies of it.
 	if d.daemonSrc != "" {
-		d.daemonStaged = filepath.Join(d.staging, daemonBinaryName+".new")
-		if err := copyExecutable(d.daemonSrc, d.daemonStaged); err != nil {
-			return fmt.Errorf("stage daemon: %w", err)
-		}
+		d.daemonStaged = d.daemonSrc
 		// A dry run never executes bundle content: the incoming daemon is
 		// untrusted until it is installed and probed after activation.
 		if !d.dryRun {
+			if err := ensureExecutable(d.daemonStaged); err != nil {
+				return err
+			}
 			if err := verifyDaemonBinary(d.daemonStaged); err != nil {
 				return err
 			}
 		}
 	}
 	if d.cliSrc != "" {
-		d.cliStaged = filepath.Join(d.staging, cliBinaryName+".new")
-		if err := copyExecutable(d.cliSrc, d.cliStaged); err != nil {
-			return fmt.Errorf("stage %s: %w", cliBinaryName, err)
-		}
+		d.cliStaged = d.cliSrc
 	}
 	if err := d.checkNativeRequirements(); err != nil {
 		return err
@@ -225,7 +303,7 @@ func (d *deployment) prepare() error {
 }
 
 // unpackBundle accepts a directory or a .tar.gz bundle and returns its root.
-func unpackBundle(path, staging, dataDir string) (string, bool, error) {
+func unpackBundle(path, staging string) (string, bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", false, fmt.Errorf("deployment bundle %s: %w", path, err)
@@ -244,7 +322,9 @@ func unpackBundle(path, staging, dataDir string) (string, bool, error) {
 		return "", false, fmt.Errorf("deployment bundle %s: expected a directory or a .tar.gz archive", path)
 	}
 	dst := filepath.Join(staging, "bundle")
-	if err := checkExtractionSpace(dataDir, bundleLimits.MaxTotalBytes); err != nil {
+	// Only an archive consumes staging space: a directory bundle is inspected
+	// in place.
+	if err := checkExtractionSpace(staging, info.Size()); err != nil {
 		return "", false, fmt.Errorf("deployment bundle %s: %w", path, err)
 	}
 	if err := artifact.Extract(path, dst, bundleLimits); err != nil {
@@ -257,23 +337,26 @@ func unpackBundle(path, staging, dataDir string) (string, bool, error) {
 // It is a variable so tests can exercise the preflight without a full disk.
 var freeSpace = freeSpaceBytes
 
-// checkExtractionSpace refuses to unpack a bundle archive when the target
-// filesystem cannot hold it plus the reserve the daemon needs while the
-// archive is staged. When free space cannot be determined (see freeSpaceBytes)
-// the preflight is skipped; extraction still fails safely and the staging tree
-// is removed.
+// checkExtractionSpace refuses to unpack a bundle archive when the staging
+// filesystem cannot hold the archive's extracted tree plus the reserve the
+// in-flight deployment needs. When free space cannot be determined (see
+// freeSpaceBytes) the preflight is skipped; extraction still fails safely and
+// the staging tree is removed.
 func checkExtractionSpace(dir string, archiveBytes int64) error {
 	free, known, err := freeSpace(dir)
 	if err != nil || !known {
 		return nil
 	}
-	need := uint64(0)
+	extracted := uint64(0)
 	if archiveBytes > 0 {
-		need = uint64(archiveBytes)
+		extracted = uint64(archiveBytes) * extractionRatio
 	}
-	if free < extractionReserve || free-extractionReserve < need {
-		return fmt.Errorf("%s has %s free space; unpacking this bundle needs %s plus a %s reserve, so free space on the data partition and retry",
-			dir, mib(free), mib(need), mib(extractionReserve))
+	// Only the extracted tree and the compressed backup live in staging; the
+	// operator's archive stays where it was.
+	need := extracted + stagingReserve
+	if free < need {
+		return fmt.Errorf("%s has %s free space; unpacking this bundle needs about %s for the extracted tree plus a %s reserve for the compressed backup, so point -staging at a larger filesystem and retry",
+			dir, mib(free), mib(extracted), mib(stagingReserve))
 	}
 	return nil
 }
@@ -482,6 +565,7 @@ func (d *deployment) printPlan(w io.Writer) {
 	}
 	fmt.Fprintf(w, "bundle: %s (%s)\n", d.bundlePath, kind)
 	fmt.Fprintf(w, "data dir: %s\n", d.dataDir)
+	fmt.Fprintf(w, "staging: %s\n", d.staging)
 	for _, pkg := range d.packages {
 		action := "install"
 		if _, err := os.Stat(d.appPath(pkg.Manifest.ID)); err == nil {
@@ -509,23 +593,69 @@ func (d *deployment) printPlan(w io.Writer) {
 		}
 	}
 	if d.needRestart {
-		fmt.Fprintf(w, "restart: %s restart\n", d.initScript)
+		fmt.Fprintf(w, "schedule: %s stop, install, %s restart\n", d.initScript, d.initScript)
 		fmt.Fprintf(w, "health: %s -health -socket %s (up to %s)\n", d.daemonPath(), d.socket, d.timeout)
-	} else {
+	} else if d.restart == "never" {
 		fmt.Fprintln(w, "restart: skipped (-restart never)")
+	} else {
+		fmt.Fprintln(w, "restart: not required (no daemon, lib or app change)")
 	}
 	fmt.Fprintln(w, "trust: bundle contents are applied as supplied; verifying their origin is the operator's decision")
 }
 
+// apply installs the bundle while the daemon is stopped: the boot service is
+// asked to stop it first, packages and the native runtime are installed with
+// nothing running, the binaries and boot hook are replaced, and the daemon is
+// started again through the same service. A restart is therefore never
+// observed by a live daemon, and a selected provider app is replaced without a
+// stop-for-restart round trip.
 func (d *deployment) apply() error {
-	if err := d.stopReplacedApps(); err != nil {
+	// Refuse before the stop: once the daemon is down, a data partition that
+	// cannot take the new binaries has no safe way back.
+	if err := d.checkDataSpace(); err != nil {
 		return err
+	}
+	if d.needRestart {
+		if err := stopViaBootService(d.initScript, d.dataDir); err != nil {
+			return err
+		}
+		// The hook blocks until the process is gone, but verify it: installing
+		// packages under a live daemon is the failure the online path avoids.
+		// Nothing has been changed yet, so no rollback is needed — but the
+		// daemon may well be stopped now, and the device must not be left
+		// without one.
+		if err := waitDaemonStoppedFn(d.socket, filepath.Join(d.dataDir, "run", daemonPIDName), 2*time.Second); err != nil {
+			if rerr := restartViaBootService(d.initScript, d.dataDir); rerr != nil {
+				return fmt.Errorf("%w; the deployment changed nothing and restarting the previous stack also failed: %v", err, rerr)
+			}
+			return fmt.Errorf("%w; the deployment changed nothing and the previous stack was restarted", err)
+		}
+		d.stopped = true
+		fmt.Printf("stopped the daemon through %s stop\n", d.initScript)
+	} else if err := d.stopReplacedApps(); err != nil {
+		// -restart never keeps the daemon running, so live runs of a replaced
+		// package must be stopped before the package tree changes.
+		return err
+	}
+	var activated []activation
+	// fail returns the deployment to a runnable state before reporting. After
+	// the stop, that means restoring whatever was replaced and restarting the
+	// previous stack; before an activation there is nothing to restore but the
+	// daemon is still stopped, so the previous binaries must be restarted.
+	fail := func(cause error) error {
+		if d.stopped {
+			return d.rollback(activated, cause)
+		}
+		if problems := restoreActivations(activated); len(problems) > 0 {
+			return fmt.Errorf("%w; restoring the replaced files failed: %s", cause, strings.Join(problems, "; "))
+		}
+		return cause
 	}
 	root := filepath.Join(d.dataDir, "apps")
 	logs, _ := logbus.New(ids.NewClock(), 100, "")
 	reg, err := registry.Open(root, logs)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	for _, pkg := range d.packages {
 		installed := false
@@ -534,7 +664,7 @@ func (d *deployment) apply() error {
 		}
 		app, err := reg.InstallPackage(pkg)
 		if err != nil {
-			return fmt.Errorf("install app %s: %w", pkg.Manifest.ID, err)
+			return fail(fmt.Errorf("install app %s: %w", pkg.Manifest.ID, err))
 		}
 		verb := "installed"
 		if installed {
@@ -545,41 +675,45 @@ func (d *deployment) apply() error {
 	if d.libSrc != "" {
 		libDst := filepath.Join(d.dataDir, "lib")
 		if err := syncLib(d.libSrc, libDst); err != nil {
-			return err
+			return fail(err)
 		}
 		fmt.Printf("updated native runtime in %s\n", libDst)
 	}
-	activated, err := d.activateBinaries()
-	if err != nil {
-		return err
-	}
-	if d.daemonStaged != "" {
-		fmt.Printf("installed daemon %s\n", d.daemonPath())
-	}
-	if d.cliStaged != "" {
-		fmt.Printf("installed %s\n", filepath.Join(d.dataDir, cliBinaryName))
-	}
 	if d.bootSrc != "" {
 		if d.needRestart {
+			// A tiny direct copy, and rollback restores it: install it before
+			// the binaries so the post-handback window holds only the daemon.
 			if err := d.activateBootHook(d.bootSrc, d.initScript); err != nil {
-				return d.rollback(activated, err)
+				return fail(err)
 			}
 			fmt.Printf("installed boot hook %s\n", d.initScript)
 		} else {
 			fmt.Println("boot hook not installed because -restart never")
 		}
 	}
+	activated, err = d.activateBinaries()
+	if err != nil {
+		return fail(err)
+	}
+	if d.cliStaged != "" {
+		fmt.Printf("installed %s\n", filepath.Join(d.dataDir, cliBinaryName))
+	}
+	if d.daemonStaged != "" {
+		fmt.Printf("installed daemon %s\n", d.daemonPath())
+	}
 	if d.needRestart {
 		if err := restartViaBootService(d.initScript, d.dataDir); err != nil {
-			return d.rollback(activated, fmt.Errorf("restart after deployment: %w", err))
+			return fail(fmt.Errorf("restart after deployment: %w", err))
 		}
 		fmt.Printf("restarted through %s restart\n", d.initScript)
 		if err := waitDaemonHealthy(d.daemonPath(), d.socket, d.timeout); err != nil {
-			return d.rollback(activated, err)
+			return fail(err)
 		}
 		fmt.Println("daemon healthy")
-	} else if len(d.packages) > 0 || d.libSrc != "" {
-		fmt.Println("restart skipped: restart capsulad to activate the installed packages")
+	} else if d.restart == "never" && (d.daemonStaged != "" || d.cliStaged != "" || len(d.packages) > 0 || d.libSrc != "") {
+		fmt.Println("restart skipped (-restart never): the installed changes take effect when capsulad restarts")
+	} else if d.cliStaged != "" && d.daemonStaged == "" && len(d.packages) == 0 && d.libSrc == "" {
+		fmt.Println("CLI installed; no daemon restart is required")
 	}
 	// The deployment is accepted: the transient replacements are no longer
 	// needed for recovery.
@@ -587,16 +721,99 @@ func (d *deployment) apply() error {
 	return nil
 }
 
-// accept drops the transient .prev backups once the deployment passed the
-// health gate. There is no durable backup: the previous files are only kept
-// long enough to undo a failed deployment.
+// accept drops the transient backups once the deployment passed the health
+// gate. There is no durable backup: the previous files are only kept long
+// enough to undo a failed deployment.
 func (d *deployment) accept(activated []activation) {
 	for _, a := range activated {
-		_ = os.Remove(a.previous)
+		a.discard()
 	}
 	if d.hook != nil {
-		_ = os.Remove(d.hook.previous)
+		d.hook.discard()
 	}
+}
+
+// checkDataSpace refuses to start when the data filesystem cannot absorb the
+// binary writes that do not free space of their own: the replacement is written
+// on the same partition as the file it replaces, and a mapped executable keeps
+// its blocks after the directory entry is gone.
+func (d *deployment) checkDataSpace() error {
+	need := uint64(dataReserve)
+	// The running executable is the installed CLI when the operator invoked it
+	// from the data directory; its inode stays mapped, so replacing it frees
+	// nothing. The daemon is stopped (or refused) before it is written, so its
+	// old blocks do come back.
+	pinned := runningExecutable(filepath.Join(d.dataDir, cliBinaryName))
+	if size, ok := d.pinnedWriteSize(d.cliStaged, filepath.Join(d.dataDir, cliBinaryName), pinned); ok {
+		need += size
+	}
+	if size, ok := d.pinnedWriteSize(d.daemonStaged, d.daemonPath(), false); ok {
+		need += size
+	}
+	if need == dataReserve {
+		return nil
+	}
+	free, known, err := freeSpace(d.dataDir)
+	if err != nil || !known {
+		return nil
+	}
+	if free < need {
+		return fmt.Errorf("%s has %s free space; replacing the binaries needs about %s plus a %s reserve, so free space on the data partition and retry",
+			d.dataDir, mib(free), mib(need-dataReserve), mib(dataReserve))
+	}
+	return nil
+}
+
+// pinnedWriteSize reports the bytes a cross-filesystem binary write has to draw
+// from the free space of the data filesystem. ok is false when the staged file
+// is renamed into place on that filesystem and needs no space at all.
+func (d *deployment) pinnedWriteSize(staged, target string, pinned bool) (uint64, bool) {
+	if staged == "" || sameFilesystem(staged, d.dataDir) {
+		return 0, false
+	}
+	info, err := os.Stat(staged)
+	if err != nil {
+		return 0, false
+	}
+	written := uint64(info.Size())
+	released := uint64(0)
+	if !pinned {
+		if targetInfo, err := os.Stat(target); err == nil {
+			released = uint64(targetInfo.Size())
+		}
+	}
+	if written <= released {
+		return 0, true
+	}
+	return written - released, true
+}
+
+// runningExecutable reports whether path is the executable of this process.
+func runningExecutable(path string) bool {
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return false
+	}
+	targetInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(selfInfo, targetInfo)
+}
+
+// daemonServing reports whether a daemon answers on the framework socket. It
+// is a variable so tests can exercise the serving-daemon refusal without a
+// framework server.
+var daemonServing = daemonServingOn
+
+func daemonServingOn(socket string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return probeDaemon(ctx, socket) == nil
 }
 
 // stopReplacedApps stops live runs of apps this bundle replaces. Replacing a
@@ -666,21 +883,82 @@ func (d *deployment) stopReplacedApps() error {
 	}
 }
 
+// activationKind records how the replaced file is kept recoverable until the
+// deployment is accepted.
+type activationKind int
+
+const (
+	// activationRename keeps the replaced file as a sibling, which is free and
+	// atomic when the staged file lives on the target filesystem.
+	activationRename activationKind = iota
+	// activationCompressed keeps a gzip copy in the staging tree, for a staged
+	// file on another filesystem: the 78.5 MiB data partition cannot hold the
+	// old and new 40 MiB daemon at once.
+	activationCompressed
+	// activationCopy keeps a plain copy beside the target, for the overlayfs
+	// boot hook where the lower-layer file may not be renamed.
+	activationCopy
+)
+
+// activation is one replaced file plus the backup that undoes it.
 type activation struct {
 	target    string
 	previous  string
+	kind      activationKind
+	mode      os.FileMode
 	hadBefore bool
 }
 
-// activateBinaries renames each staged binary into place, keeping the replaced
-// file as a transient .prev until the deployment is accepted.
+// restore puts the replaced file back. It is used by both the mid-flight
+// cleanup and the rollback path.
+func (a activation) restore() error {
+	if !a.hadBefore {
+		if err := os.Remove(a.target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	switch a.kind {
+	case activationCompressed:
+		if err := decompressFile(a.previous, a.target, a.mode); err != nil {
+			return err
+		}
+		return os.Remove(a.previous)
+	case activationCopy:
+		// Written in place, like the install: the overlayfs hook cannot be
+		// replaced by renaming over it either.
+		if err := copyFileInPlace(a.previous, a.target, a.mode); err != nil {
+			return err
+		}
+		return os.Remove(a.previous)
+	default:
+		if err := os.Remove(a.target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return os.Rename(a.previous, a.target)
+	}
+}
+
+// discard drops the transient backup once the deployment passed the health
+// gate.
+func (a activation) discard() {
+	if a.previous != "" {
+		_ = os.Remove(a.previous)
+	}
+}
+
+// activateBinaries puts each staged binary in place, keeping the replaced file
+// recoverable until the deployment is accepted.
 func (d *deployment) activateBinaries() ([]activation, error) {
+	// The CLI is installed first: its space may have to be released and its
+	// bytes copied, and none of that should happen between the daemon's
+	// watchdog handback and its restart. The daemon goes last.
 	items := []struct {
 		name   string
 		staged string
 	}{
-		{daemonBinaryName, d.daemonStaged},
 		{cliBinaryName, d.cliStaged},
+		{daemonBinaryName, d.daemonStaged},
 	}
 	var activated []activation
 	for _, it := range items {
@@ -688,35 +966,206 @@ func (d *deployment) activateBinaries() ([]activation, error) {
 			continue
 		}
 		target := filepath.Join(d.dataDir, it.name)
-		a := activation{target: target, previous: target + ".prev"}
-		if _, err := os.Stat(target); err == nil {
-			a.hadBefore = true
-			_ = os.Remove(a.previous)
-			if err := os.Rename(target, a.previous); err != nil {
-				restoreActivations(activated)
-				return nil, fmt.Errorf("preserve %s: %w", target, err)
+		a, err := d.installBinary(it.staged, target, it.name == daemonBinaryName)
+		if err != nil {
+			if problems := restoreActivations(activated); len(problems) > 0 {
+				return nil, fmt.Errorf("%w; restoring the files replaced before it failed: %s", err, strings.Join(problems, "; "))
 			}
-		}
-		if err := os.Rename(it.staged, target); err != nil {
-			if a.hadBefore {
-				_ = os.Rename(a.previous, target)
-			}
-			restoreActivations(activated)
-			return nil, fmt.Errorf("activate %s: %w", target, err)
+			return nil, err
 		}
 		activated = append(activated, a)
 	}
 	return activated, nil
 }
 
-func restoreActivations(activated []activation) {
-	for i := len(activated) - 1; i >= 0; i-- {
-		a := activated[i]
-		_ = os.Remove(a.target)
+// installBinary replaces one executable. A staged file on the target
+// filesystem is renamed into place and the replaced file is kept as a sibling
+// `.prev`, which costs nothing. A staged file elsewhere is copied: the replaced
+// file is compressed into staging, the target is removed to release its space
+// and the staged bytes are written directly to the target path, so the data
+// partition never holds two copies of the daemon.
+func (d *deployment) installBinary(staged, target string, isDaemon bool) (activation, error) {
+	a := activation{target: target, mode: 0o755}
+	info, err := os.Lstat(target)
+	switch {
+	case err == nil && info.Mode()&os.ModeSymlink != 0:
+		return a, fmt.Errorf("%s is a symlink; refusing to replace it", target)
+	case err == nil && !info.Mode().IsRegular():
+		return a, fmt.Errorf("%s is not a regular file", target)
+	case err == nil:
+		a.hadBefore = true
+	case !errors.Is(err, fs.ErrNotExist):
+		return a, err
+	}
+
+	if sameFilesystem(staged, filepath.Dir(target)) {
+		// A rename needs no space, so the handback can happen right before it.
+		// A feeder that will not exit leaves the old inode pinned, which costs
+		// space but does not block the rename.
+		if err := d.releaseDaemonFeeder(isDaemon); err != nil {
+			fmt.Fprintf(os.Stderr, "deploy: warning: %v\n", err)
+		}
+		a.kind = activationRename
 		if a.hadBefore {
-			_ = os.Rename(a.previous, a.target)
+			a.previous = target + ".prev"
+			_ = os.Remove(a.previous)
+			if err := os.Rename(target, a.previous); err != nil {
+				return a, fmt.Errorf("preserve %s: %w", target, err)
+			}
+		}
+		if err := os.Rename(staged, target); err != nil {
+			if a.hadBefore {
+				_ = os.Rename(a.previous, target)
+			}
+			return a, fmt.Errorf("activate %s: %w", target, err)
+		}
+		if err := os.Chmod(target, a.mode); err != nil {
+			return a, fmt.Errorf("set mode on %s: %w", target, err)
+		}
+		return a, nil
+	}
+
+	a.kind = activationCompressed
+	if a.hadBefore {
+		a.previous = filepath.Join(d.staging, filepath.Base(target)+".prev.gz")
+		if err := compressFile(target, a.previous); err != nil {
+			_ = os.Remove(a.previous)
+			return a, fmt.Errorf("back up %s: %w", target, err)
 		}
 	}
+	// The backup is compressed before the feeder hands the timer back: gzip of
+	// the 40 MiB binary must happen while the feeder still feeds the armed
+	// watchdog, not inside the ~21 s the deployment has to finish writing.
+	if err := d.releaseDaemonFeeder(isDaemon); err != nil {
+		// Nothing was removed: the target is intact and its space is still
+		// pinned, so a direct write could not succeed anyway.
+		if a.hadBefore {
+			_ = os.Remove(a.previous)
+		}
+		return a, fmt.Errorf("replace %s: %w", target, err)
+	}
+	if a.hadBefore {
+		if err := os.Remove(target); err != nil {
+			_ = os.Remove(a.previous)
+			return a, fmt.Errorf("release %s: %w", target, err)
+		}
+	}
+	if err := copyFileInPlace(staged, target, a.mode); err != nil {
+		if a.hadBefore {
+			if rerr := a.restore(); rerr != nil {
+				if insideDir(d.staging, a.previous) {
+					d.keepStaging = true
+				}
+				return a, fmt.Errorf("write %s: %v; restoring the previous file also failed: %v (backup kept at %s)", target, err, rerr, a.previous)
+			}
+		}
+		return a, fmt.Errorf("write %s: %w", target, err)
+	}
+	// A staged copy inside the staging tree is one-shot and staging is removed
+	// at the end anyway; dropping it now keeps the temporary filesystem below
+	// its limit. A directory bundle outside staging belongs to the operator and
+	// is left alone.
+	if insideDir(d.staging, staged) {
+		if err := os.Remove(staged); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "deploy: warning: could not remove staged %s: %v\n", staged, err)
+		}
+	}
+	return a, nil
+}
+
+// insideDir reports whether path is dir itself or below it.
+func insideDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// restoreActivations undoes a partially activated list and reports every file
+// that could not be restored.
+// releaseDaemonFeeder releases a legacy feeder's hold on the replaced daemon's
+// inode, or warns that a running daemon keeps it mapped. It runs for the daemon
+// only, and only after the backup has been compressed.
+func (d *deployment) releaseDaemonFeeder(isDaemon bool) error {
+	if !isDaemon {
+		return nil
+	}
+	if d.stopped {
+		return releaseLegacyFeederFn(d)
+	}
+	// This deployment did not stop the daemon. Removing a binary that a live
+	// process still has mapped frees nothing, and the 40 MiB write would have
+	// to fit in the space that is left: refuse instead of gambling.
+	if daemonServing(d.socket) {
+		return fmt.Errorf("the daemon still answers on %s; stop it (or use -restart auto) before replacing its binary", d.socket)
+	}
+	// Not serving: the inode is not mapped by a live daemon, so removing the
+	// file does free its space. A feeder left by an older daemon may still pin
+	// it, so the handback still applies.
+	return releaseLegacyFeederFn(d)
+}
+
+// releaseLegacyFeederFn is the watchdog handback step. It is a variable so a
+// test can assert that it runs after the backup compression.
+var releaseLegacyFeederFn = func(d *deployment) error { return d.releaseLegacyFeeder() }
+
+func restoreActivations(activated []activation) []string {
+	var problems []string
+	for i := len(activated) - 1; i >= 0; i-- {
+		if err := activated[i].restore(); err != nil {
+			problems = append(problems, fmt.Sprintf("restore %s: %v", activated[i].target, err))
+		}
+	}
+	return problems
+}
+
+// sameFilesystem reports whether two paths live on one filesystem, where
+// replacing a target is a free rename and a staged copy costs nothing. It is a
+// variable so tests can exercise the cross-filesystem path without a second
+// mount.
+var sameFilesystem = sameFilesystemOnDisk
+
+// watchdogHandbackWait bounds how long a deploy waits for a legacy feeder to
+// exit. It is short because the armed timer the feeder keeps alive fires within
+// about 21 s, and the binary still has to be copied. It is a variable so tests
+// need not wait for a feeder that never appears.
+var watchdogHandbackWait = 5 * time.Second
+
+// releaseLegacyFeeder asks a feeder left behind by the previous daemon to give
+// the hardware watchdog back and waits for it to exit. The legacy Go feeder is
+// a copy of the old daemon process, so it pins that binary's inode on the data
+// partition: the space only comes back once the process is gone. A shell feeder
+// says so in its pid file and holds no daemon inode, so nothing is requested.
+//
+// The wait is bounded: the feeder keeps an armed timer alive with a ~21 s
+// budget, and the caller still has to copy the new binary into place. A feeder
+// that is still there afterwards is reported as an error: the target must not
+// be removed while its inode is pinned.
+func (d *deployment) releaseLegacyFeeder() error {
+	runDir := filepath.Join(d.dataDir, "run")
+	pidFile := filepath.Join(runDir, watchdogFeederPID)
+	body, err := os.ReadFile(pidFile)
+	if err != nil {
+		return nil
+	}
+	if strings.Contains(string(body), shellFeederMarker) {
+		return nil
+	}
+	handback := filepath.Join(runDir, watchdogHandback)
+	if err := os.WriteFile(handback, []byte("handback"), 0o644); err != nil {
+		return fmt.Errorf("ask the watchdog feeder to release %s: %w", pidFile, err)
+	}
+	// A stale marker would make the next daemon's feeder exit immediately.
+	defer func() { _ = os.Remove(handback) }()
+	deadline := time.Now().Add(watchdogHandbackWait)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pidFile); err != nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("the watchdog feeder in %s is still running after %s; the previous daemon's space is still pinned", pidFile, watchdogHandbackWait)
 }
 
 // rollback restores the binaries and boot hook that were replaced and restarts
@@ -726,44 +1175,44 @@ func (d *deployment) rollback(activated []activation, cause error) error {
 	var problems []string
 	for i := len(activated) - 1; i >= 0; i-- {
 		a := activated[i]
-		failed := a.target + ".failed"
-		_ = os.Remove(failed)
-		if err := os.Rename(a.target, failed); err != nil {
-			problems = append(problems, fmt.Sprintf("%s: %v", a.target, err))
-			continue
-		}
-		if a.hadBefore {
-			if err := os.Rename(a.previous, a.target); err != nil {
-				problems = append(problems, fmt.Sprintf("restore %s: %v", a.target, err))
-				_ = os.Rename(failed, a.target)
-				continue
+		if err := a.restore(); err != nil {
+			problem := fmt.Sprintf("restore %s: %v", a.target, err)
+			if a.hadBefore {
+				problem += fmt.Sprintf(" (backup kept at %s)", a.previous)
+				if insideDir(d.staging, a.previous) {
+					// It is the only copy left: the staging tree must survive.
+					d.keepStaging = true
+				}
 			}
+			problems = append(problems, problem)
 		}
-		_ = os.Remove(failed)
 	}
 	if d.hook != nil {
 		// The hook is restored before the restart below: a syntactically
 		// valid but runtime-broken hook must not drive the rollback restart.
-		if err := os.Remove(d.hook.target); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			problems = append(problems, fmt.Sprintf("remove failed boot hook %s: %v", d.hook.target, err))
-		} else if d.hook.hadBefore {
-			if err := os.Rename(d.hook.previous, d.hook.target); err != nil {
-				problems = append(problems, fmt.Sprintf("restore boot hook %s: %v", d.hook.target, err))
-			}
+		if err := d.hook.restore(); err != nil {
+			problems = append(problems, fmt.Sprintf("restore boot hook %s: %v", d.hook.target, err))
 		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("%w; rollback incomplete: %s", cause, strings.Join(problems, "; "))
 	}
+	// A failure before any activation leaves the binaries alone, but packages
+	// and lib/ are already installed, and the daemon is stopped and still has
+	// to be started again.
+	state := "previous binaries restored"
+	if len(activated) == 0 && d.hook == nil {
+		state = "no binary or boot hook was replaced, but packages and lib/ may have been updated"
+	}
 	if d.needRestart {
 		if err := restartViaBootService(d.initScript, d.dataDir); err != nil {
-			return fmt.Errorf("%w; previous binaries restored but restart failed: %v", cause, err)
+			return fmt.Errorf("%w; %s but restart failed: %v", cause, state, err)
 		}
 		if err := waitDaemonHealthy(d.daemonPath(), d.socket, d.timeout); err != nil {
-			return fmt.Errorf("%w; previous binaries restored but the daemon is not healthy: %v", cause, err)
+			return fmt.Errorf("%w; %s but the daemon is not healthy: %v", cause, state, err)
 		}
 	}
-	return fmt.Errorf("deployment failed; previous binaries restored: %w", cause)
+	return fmt.Errorf("deployment failed; %s: %w", state, cause)
 }
 
 // syncLib replaces the managed runtime files, leaving unrelated operator files
@@ -843,24 +1292,154 @@ func prepareRuntimeDir(dir string) error {
 // hook must be available for the rollback restart: a hook that passes `sh -n`
 // can still fail at runtime, and an unrestorable hook would then block
 // recovery.
+//
+// Both steps copy rather than rename. /etc/init.d sits on the overlayfs root,
+// where renaming a file that still lives in the lower layer fails with
+// EINVAL; writing the path directly forces the copy-up that rename refuses.
 func (d *deployment) activateBootHook(src, dst string) error {
-	a := activation{target: dst, previous: dst + ".prev"}
-	if _, err := os.Lstat(dst); err == nil {
+	a := activation{target: dst, previous: dst + ".prev", kind: activationCopy, mode: 0o755}
+	info, err := os.Lstat(dst)
+	switch {
+	case err == nil && info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("boot hook %s is a symlink; refusing to write through it", dst)
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("boot hook %s is not a regular file", dst)
+	case err == nil:
 		a.hadBefore = true
 		_ = os.Remove(a.previous)
-		if err := os.Rename(dst, a.previous); err != nil {
+		if err := copyFileInPlace(dst, a.previous, a.mode); err != nil {
 			return fmt.Errorf("preserve boot hook %s: %w", dst, err)
 		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	case !errors.Is(err, fs.ErrNotExist):
 		return err
 	}
-	if err := copyFileAtomic(src, dst, 0o755); err != nil {
-		if a.hadBefore {
-			_ = os.Rename(a.previous, dst)
+	if err := copyFileInPlace(src, dst, a.mode); err != nil {
+		installed := fmt.Errorf("install boot hook %s: %w", dst, err)
+		if !a.hadBefore {
+			// The failed write created the file; leave the system as it was.
+			_ = os.Remove(dst)
+			return installed
 		}
-		return fmt.Errorf("install boot hook %s: %w", dst, err)
+		// The write truncates the hook before it can fail, so the previous
+		// script has to be put back here: the activation is not recorded and
+		// the rollback path below never learns about this file.
+		if rerr := copyFileInPlace(a.previous, dst, a.mode); rerr != nil {
+			return fmt.Errorf("%w; restoring the previous hook also failed: %v (backup kept at %s)", installed, rerr, a.previous)
+		}
+		_ = os.Remove(a.previous)
+		return installed
 	}
 	d.hook = &a
+	return nil
+}
+
+// copyFileInPlace writes src over dst through a single open/truncate/write. It
+// needs no sibling, which is what an overlayfs lower-layer file and a
+// single-slot partition both require.
+func copyFileInPlace(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	// The creation mode only applies to a new file.
+	return os.Chmod(dst, mode)
+}
+
+// compressFile is the staging backup step. It is a variable so a test can
+// assert that the backup is compressed before the watchdog is handed back.
+var compressFile = compressFileTo
+
+// compressFileTo writes src to dst through gzip. The staging backup of the
+// replaced daemon costs a fraction of its 40 MiB on disk, which is what lets a
+// single-slot data partition absorb an upgrade.
+func compressFileTo(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(out)
+	if _, err := io.Copy(gz, in); err != nil {
+		gz.Close()
+		out.Close()
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// decompressFile restores a compressed backup directly to dst: it needs room
+// for one copy of the file, never two.
+func decompressFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	gz, err := gzip.NewReader(in)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, gz); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dst, mode)
+}
+
+// ensureExecutable makes a bundle binary runnable in place. The probe executes
+// the file directly, and a copied bundle does not always carry an execute bit;
+// raising the mode costs nothing, unlike a second copy of the binary.
+func ensureExecutable(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&0o111 != 0 {
+		return nil
+	}
+	if err := os.Chmod(path, info.Mode().Perm()|0o755); err != nil {
+		return fmt.Errorf("%s is not executable and its mode cannot be raised: %w", path, err)
+	}
 	return nil
 }
 
@@ -961,14 +1540,10 @@ func probeEnv() ([]string, func()) {
 	}, cleanup
 }
 
-func copyExecutable(src, dst string) error {
-	return copyFileAtomic(src, dst, 0o755)
-}
-
-func restartViaBootService(script, dataDir string) error {
-	cmd := exec.Command(script, "restart")
-	// Stock hooks fix their own data directory; exporting the chosen one keeps
-	// a non-stock hook usable without a second flag vocabulary.
+// bootServiceEnv is the environment for the boot hook: the operator's
+// environment otherwise reaches it, minus a data directory that would override
+// the one this deployment targets.
+func bootServiceEnv(dataDir string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "CAPSULA_DATA_DIR=") {
@@ -976,12 +1551,92 @@ func restartViaBootService(script, dataDir string) error {
 		}
 		env = append(env, kv)
 	}
-	cmd.Env = append(env, "CAPSULA_DATA_DIR="+dataDir)
+	return append(env, "CAPSULA_DATA_DIR="+dataDir)
+}
+
+// stopViaBootService stops the daemon through the boot hook. Stopping first
+// means packages are installed with nothing running: a selected provider app
+// is replaced without the daemon noticing, and the new binaries are never
+// mapped by the old process.
+func stopViaBootService(script, dataDir string) error {
+	cmd := exec.Command(script, "stop")
+	// Stock hooks fix their own data directory; exporting the chosen one keeps
+	// a non-stock hook usable without a second flag vocabulary.
+	cmd.Env = bootServiceEnv(dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s stop: %v (%s)", script, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func restartViaBootService(script, dataDir string) error {
+	cmd := exec.Command(script, "restart")
+	cmd.Env = bootServiceEnv(dataDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s restart: %v (%s)", script, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// waitDaemonStoppedFn is the stop verification. It is a variable so tests can
+// exercise the uncertain-stop path without a serving daemon.
+var waitDaemonStoppedFn = waitDaemonStopped
+
+// waitDaemonStopped confirms the boot service actually stopped the daemon. The
+// stock hook blocks for its own shutdown; a non-stock hook may return early,
+// and installing packages under a live daemon would be unsafe.
+//
+// A daemon that is alive but not answering (starting up, wedged, or just killed
+// and still shutting down) still holds the socket and the binary, so an RPC
+// failure alone is not enough: the pid from the daemon's own pid file has to be
+// gone as well.
+func waitDaemonStopped(socket, pidFile string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := probeDaemon(ctx, socket)
+		cancel()
+		if err != nil {
+			gone, why := daemonPIDGone(pidFile)
+			if gone {
+				return nil
+			}
+			last = why
+		} else {
+			last = fmt.Errorf("the daemon still answers on %s", socket)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the daemon did not stop within %s (%v); stop it before deploying", timeout, last)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// daemonPIDGone reports whether the daemon recorded in pidFile is gone. A
+// missing, empty or stale pid file is good enough: nothing is running.
+func daemonPIDGone(pidFile string) (bool, error) {
+	body, err := os.ReadFile(pidFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", pidFile, err)
+	}
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return true, nil
+	}
+	pid, err := strconv.Atoi(text)
+	if err != nil {
+		return false, fmt.Errorf("%s holds %q, not a pid", pidFile, text)
+	}
+	if !pidAlive(pid) {
+		return true, nil
+	}
+	return false, fmt.Errorf("%s still names running pid %d", pidFile, pid)
 }
 
 // waitDaemonHealthy gates on the installed daemon's -health probe, the same
