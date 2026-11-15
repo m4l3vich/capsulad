@@ -18,8 +18,8 @@ import (
 
 // seedDefaults selects an installed provider on first run without overriding
 // an explicit user choice. The compiled-in clock and ring apps are in the same
-// registry as packages, and removed sample providers are never re-seeded.
-// Provides hints only populate dropdowns; they never grant capabilities.
+// registry as packages. Provides hints only populate dropdowns; they never
+// grant capabilities.
 func (d *Daemon) seedDefaults() {
 	// An existing settings document is authoritative. Both an absent map
 	// entry and an empty value mean the user selected no provider; neither
@@ -77,7 +77,7 @@ func (d *Daemon) seedDefaults() {
 func (d *Daemon) preferredProvider(want string) string {
 	var builtin string
 	for _, app := range d.reg.List() {
-		if isRetiredApp(app.Manifest.ID) || !hasProvide(app.Manifest.Provides, want) {
+		if !hasProvide(app.Manifest.Provides, want) {
 			continue
 		}
 		if app.Manifest.Entrypoint.Runtime != manifest.RuntimeBuiltin {
@@ -97,20 +97,6 @@ func hasProvide(list []string, want string) bool {
 		}
 	}
 	return false
-}
-
-// isRetiredApp reports the sample applications whose behavior moved into the
-// compiled-in system apps or that were removed from the distribution. A
-// package directory left over from an upgrade is ignored at runtime but never
-// deleted: it is excluded from boot, default selection and explicit launches
-// so it cannot compete with the system apps.
-func isRetiredApp(appID string) bool {
-	switch appID {
-	case legacyClockAppID, legacyRingAppID, legacyAssistantAppID, legacyMediaAppID:
-		return true
-	default:
-		return false
-	}
 }
 
 // watchSettings applies every durable settings snapshot to live subsystems.

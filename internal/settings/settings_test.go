@@ -264,7 +264,9 @@ func TestUserSettingsHostnameValidationAndPersistence(t *testing.T) {
 	}
 }
 
-func TestLegacyStoreGetsDefaultHostname(t *testing.T) {
+// A settings document may omit fields: each absent field takes its documented
+// default while stored values survive unchanged.
+func TestMissingSettingsFieldsTakeDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"revision":7,"values":{"master_volume":0.5}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -275,55 +277,13 @@ func TestLegacyStoreGetsDefaultHostname(t *testing.T) {
 	}
 	snap := store.Get()
 	if snap.Revision != 7 || snap.Values.MasterVolume != 0.5 {
-		t.Fatalf("legacy values changed: %+v", snap)
+		t.Fatalf("stored values changed: %+v", snap)
 	}
 	if snap.Values.Hostname != DefaultHostname {
-		t.Fatalf("legacy store hostname = %q, want %q", snap.Values.Hostname, DefaultHostname)
+		t.Fatalf("missing hostname = %q, want %q", snap.Values.Hostname, DefaultHostname)
 	}
-}
-
-func TestLegacyBluetoothPairableMigrates(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		legacy         string
-		wantIncoming   bool
-		wantDiscoveral bool
-	}{
-		{"pairable true keeps the pairing window", `true`, true, true},
-		{"pairable false keeps paired reconnects", `false`, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "settings.json")
-			doc := `{"revision":3,"values":{"master_volume":0.4,"bluetooth_pairable":` + tc.legacy + `}}`
-			if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			store, err := OpenUser(path, testLogs(t), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			snap := store.Get()
-			if snap.Revision != 3 || snap.Values.MasterVolume != 0.4 {
-				t.Fatalf("unrelated values changed: %+v", snap)
-			}
-			if snap.Values.BluetoothIncomingConnections != tc.wantIncoming ||
-				snap.Values.BluetoothDiscoverable != tc.wantDiscoveral {
-				t.Fatalf("migrated Bluetooth = incoming:%v discoverable:%v, want incoming:%v discoverable:%v",
-					snap.Values.BluetoothIncomingConnections, snap.Values.BluetoothDiscoverable,
-					tc.wantIncoming, tc.wantDiscoveral)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(data), "bluetooth_pairable") {
-				t.Fatalf("obsolete key survived migration: %s", data)
-			}
-			if !strings.Contains(string(data), "bluetooth_incoming_connections") ||
-				!strings.Contains(string(data), "bluetooth_discoverable") {
-				t.Fatalf("migrated keys missing: %s", data)
-			}
-		})
+	if !snap.Values.BluetoothIncomingConnections || snap.Values.BluetoothDiscoverable {
+		t.Fatalf("missing Bluetooth fields = %+v, want documented defaults", snap.Values)
 	}
 }
 
@@ -431,3 +391,43 @@ func TestAppSettingsValidatorRejectsBeforeWrite(t *testing.T) {
 }
 
 var errRejectedDelay = errors.New("delay: rejected by validator")
+
+// The daemon maps these error types to gRPC codes; a typo must not look like a
+// storage failure and an unknown app must be NOT_FOUND.
+func TestAppSettingsErrorClassification(t *testing.T) {
+	lookup := func(appID string) (*ManifestSchema, bool) {
+		if appID != "org.example.weather" {
+			return nil, false
+		}
+		return &ManifestSchema{AppID: appID, Settings: []SchemaSetting{
+			{Key: "city", Type: "text"},
+			{Key: "api_key", Type: "text_masked"},
+		}}, true
+	}
+	store, err := OpenApps(filepath.Join(t.TempDir(), "apps"), testLogs(t), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var invalid *InvalidValueError
+	if _, _, _, err := store.Update("org.example.weather", 0, []Change{{Key: "nope", Value: "x"}}); !errors.As(err, &invalid) {
+		t.Fatalf("undeclared key error = %v, want InvalidValueError", err)
+	}
+	if _, _, _, err := store.Update("org.example.weather", 0, []Change{{Key: "api_key", Value: ""}}); !errors.As(err, &invalid) {
+		t.Fatalf("empty masked value error = %v, want InvalidValueError", err)
+	}
+
+	var missing *NotFoundError
+	if _, _, _, err := store.Update("org.example.unknown", 0, nil); !errors.As(err, &missing) {
+		t.Fatalf("unknown app Update error = %v, want NotFoundError", err)
+	}
+	if _, err := store.Snapshot("org.example.unknown"); !errors.As(err, &missing) {
+		t.Fatalf("unknown app Snapshot error = %v, want NotFoundError", err)
+	}
+	if _, _, err := store.Private("org.example.unknown"); !errors.As(err, &missing) {
+		t.Fatalf("unknown app Private error = %v, want NotFoundError", err)
+	}
+	if _, _, _, err := store.WatchApp("org.example.unknown"); !errors.As(err, &missing) {
+		t.Fatalf("unknown app WatchApp error = %v, want NotFoundError", err)
+	}
+}

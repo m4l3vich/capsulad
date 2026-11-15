@@ -1,4 +1,4 @@
-// capsulad is the Capsula Universal Framework daemon.
+// capsulad is the appliance daemon for the Capsula Mini speaker.
 package main
 
 import (
@@ -19,9 +19,6 @@ func main() {
 	ignoreHangup()
 	if handled, code := sandbox.HandleHelper(os.Args); handled {
 		os.Exit(code)
-	}
-	if len(os.Args) > 1 && os.Args[1] == daemon.WatchdogFeederArg {
-		os.Exit(daemon.RunWatchdogFeeder())
 	}
 	cfg := daemon.Config{}
 	fs := flag.NewFlagSet("capsulad", flag.ExitOnError)
@@ -49,7 +46,7 @@ func main() {
 	health := fs.Bool("health", false, "check a running daemon and exit 0 when it serves the framework API")
 	fs.Parse(os.Args[1:])
 	if *showVersion {
-		fmt.Printf("capsulad %s (draft %s, sdk %s)\n", version.Version, version.APIDraft, version.SDKVersion)
+		fmt.Printf("capsulad %s (sdk %s)\n", version.Version, version.SDKVersion)
 		return
 	}
 	if *health {

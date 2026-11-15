@@ -144,24 +144,38 @@ pub unsafe fn input_str<'a>(ptr: *const c_char, len: usize) -> SdkResult<&'a str
         .map_err(|_| SdkError::new(INVALID_ARGUMENT, "input is not valid UTF-8"))
 }
 
-/// Copy bytes into a library-owned, optionally NUL-terminated buffer.
+/// Copy bytes into a library-owned, NUL-terminated buffer.
+///
+/// Allocation invariant (the only one `free_buf` relies on):
+///
+/// * an empty payload returns [`Buf::empty`] — `{data = NULL, len = 0}` — and
+///   owns no allocation;
+/// * every other buffer owns **exactly `len + 1` bytes**, byte `0..len` is the
+///   caller-visible payload and byte `len` is a single NUL sentinel. `Buf.len`
+///   always equals `bytes.len()`, so the sentinel is never counted in `len`.
+///
+/// For JSON/UTF-8 outputs the sentinel is the C string terminator promised by
+/// `capsula.h` (`data[len] == 0`); for raw PCM the sentinel is padding outside
+/// the payload and `len` stays the exact sample byte count.
 pub fn alloc_buf(bytes: Vec<u8>) -> Buf {
     if bytes.is_empty() {
         return Buf::empty();
     }
-    let mut boxed = bytes.into_boxed_slice();
+    let len = bytes.len();
+    let mut payload = bytes;
+    payload.push(0);
+    let mut boxed = payload.into_boxed_slice();
+    debug_assert_eq!(boxed.len(), len + 1);
     let data = boxed.as_mut_ptr();
-    let len = boxed.len();
-    // Leak the allocation; capsula_buf_free reconstructs it.
+    // Leak the allocation; `free_buf` reconstructs `len + 1` bytes from it.
     std::mem::forget(boxed);
     Buf { data, len }
 }
 
+/// Same allocation shape as [`alloc_buf`]: JSON/UTF-8 payload plus the NUL
+/// sentinel at `data[len]`, with `len` excluding it.
 pub fn alloc_json(bytes: Vec<u8>) -> Buf {
-    // JSON/UTF-8 outputs get a trailing NUL for C convenience; `len` excludes it.
-    let mut with_nul = bytes;
-    with_nul.push(0);
-    alloc_buf(with_nul)
+    alloc_buf(bytes)
 }
 
 pub fn alloc_string(value: impl Into<String>) -> Buf {
@@ -174,11 +188,19 @@ pub unsafe fn free_buf(buf: Buf) -> SdkResult<()> {
     if buf.data.is_null() {
         return Ok(());
     }
-    if buf.len == 0 || buf.len > isize::MAX as usize {
+    if buf.len == 0 {
+        // The library never emits {non-NULL, 0}; the documented empty buffer is
+        // {NULL, 0}. Reject instead of inventing a one-byte allocation.
         return Err(SdkError::new(INVALID_ARGUMENT, "invalid buffer"));
     }
-    // All buffers keep a trailing NUL byte; reconstruct exactly that slice.
-    let total = buf.len + 1;
+    // Reconstruct exactly the allocation `alloc_buf` made: `len + 1` bytes.
+    // The addition is checked, so no input can describe an allocation larger
+    // than the one that exists, and the total is inside the `isize::MAX`
+    // allocation-size limit Rust guarantees.
+    let total = buf.len.checked_add(1).filter(|n| *n <= isize::MAX as usize);
+    let Some(total) = total else {
+        return Err(SdkError::new(INVALID_ARGUMENT, "invalid buffer"));
+    };
     let slice = ptr::slice_from_raw_parts_mut(buf.data, total);
     drop(Box::from_raw(slice));
     Ok(())
@@ -218,4 +240,67 @@ pub unsafe fn write_out<T>(out: *mut T, value: T) -> SdkResult<()> {
     }
     ptr::write(out, value);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload_at(buf: Buf) -> Vec<u8> {
+        assert!(!buf.data.is_null(), "non-empty buffer must own memory");
+        assert!(buf.len > 0);
+        let bytes = unsafe { std::slice::from_raw_parts(buf.data, buf.len) }.to_vec();
+        // The sentinel lives inside the allocation: reading it must be in-bounds.
+        let sentinel = unsafe { *buf.data.add(buf.len) };
+        unsafe { free_buf(buf) }.expect("free must succeed");
+        assert_eq!(sentinel, 0, "data[len] must be the NUL sentinel");
+        bytes
+    }
+
+    #[test]
+    fn json_buffer_excludes_nul_from_len() {
+        let payload = br#"{"method":"hal.Status","ok":true}"#.to_vec();
+        let buf = alloc_json(payload.clone());
+        assert_eq!(buf.len, payload.len());
+        assert_eq!(payload_at(buf), payload);
+    }
+
+    #[test]
+    fn string_buffer_excludes_nul_from_len() {
+        let value = "capsula \u{1F680} hello";
+        let buf = alloc_string(value);
+        assert_eq!(buf.len, value.len());
+        assert_eq!(payload_at(buf), value.as_bytes().to_vec());
+    }
+
+    #[test]
+    fn raw_pcm_keeps_exact_length() {
+        // Little-endian s16 samples including embedded NUL bytes.
+        let pcm: Vec<u8> = (0u16..64).map(|s| s.to_le_bytes()[0]).collect();
+        let buf = alloc_buf(pcm.clone());
+        assert_eq!(buf.len, pcm.len(), "raw payload length must be exact");
+        assert_eq!(payload_at(buf), pcm);
+    }
+
+    #[test]
+    fn empty_buffers_are_null_and_zero() {
+        for buf in [alloc_buf(Vec::new()), alloc_json(Vec::new())] {
+            assert!(buf.data.is_null());
+            assert_eq!(buf.len, 0);
+            unsafe { free_buf(buf) }.expect("freeing an empty buffer is a no-op");
+        }
+        let empty = Buf::empty();
+        assert!(empty.data.is_null());
+        assert_eq!(empty.len, 0);
+    }
+
+    #[test]
+    fn free_rejects_impossible_lengths_without_dereferencing() {
+        let dangling = std::ptr::NonNull::<u8>::dangling().as_ptr();
+        for len in [0, usize::MAX, isize::MAX as usize] {
+            let buf = Buf { data: dangling, len };
+            let err = unsafe { free_buf(buf) }.expect_err("impossible length must be rejected");
+            assert_eq!(err.status, INVALID_ARGUMENT);
+        }
+    }
 }

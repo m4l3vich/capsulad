@@ -7,14 +7,13 @@ import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
 import ApplicationView from './ApplicationView.vue'
 import Icon from '../components/Icon.vue'
+import { notify } from '../lib/toast.js'
 
 const { data, error, loading, refresh } = useTopic('overview')
 // const data = ref(null)
 // const error = ref(null)
 // const loading = true
 // const refresh = () => { }
-const actionError = ref('')
-const statusMessage = ref('')
 const busy = ref('')
 const selectedApp = ref('')
 const discoverable = ref(false)
@@ -27,6 +26,19 @@ const apps = computed(() => data.value?.apps || [])
 const runs = computed(() => data.value?.runs || [])
 const providers = computed(() => data.value?.providers || [])
 const selected = computed(() => data.value?.selectedProviders || {})
+
+// A refresh failure keeps the previous snapshot on screen, so it surfaces as a
+// toast rather than replacing the view. Toast once per distinct failure.
+let lastRefreshError = ''
+watch(error, (value) => {
+  if (!value) {
+    lastRefreshError = ''
+    return
+  }
+  if (!data.value || value === lastRefreshError) return
+  lastRefreshError = value
+  notify.warning(`The last refresh failed: ${value}`)
+})
 
 const runsByApp = computed(() => {
   const map = new Map()
@@ -60,18 +72,16 @@ watch(busy, (value) => {
 async function run(key, command, message) {
   if (busy.value) return false
   if (liveState.value !== 'open') {
-    actionError.value = 'The speaker is not connected.'
+    notify.error('The speaker is not connected.')
     return false
   }
   busy.value = key
-  actionError.value = ''
-  statusMessage.value = ''
   try {
     await socket.request(command)
-    if (message) statusMessage.value = message
+    if (message) notify.success(message)
     return true
   } catch (err) {
-    actionError.value = err?.message || 'The device rejected the request.'
+    notify.error(err?.message || 'The device rejected the request.')
     return false
   } finally {
     busy.value = ''
@@ -116,7 +126,7 @@ async function launch(app) {
   const missing = missingArgument(app)
   if (missing) {
     selectedApp.value = app.appId
-    actionError.value = `${app.displayName} needs ${missing.name}; set it in Settings.`
+    notify.error(`${app.displayName} needs ${missing.name}; set it in Settings.`)
     return
   }
   const args = (app.launchArguments || [])
@@ -286,16 +296,6 @@ function trackTime(ms) {
       </h1>
     </div>
 
-    <!-- replace these with position:fixed corner notifications -->
-    <div v-if="actionError" class="alert alert-error py-2" role="alert">
-      <span class="text-sm">{{ actionError }}</span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
-    </div>
-    <div v-else-if="statusMessage" class="alert alert-info py-2" role="status">
-      <span class="text-sm">{{ statusMessage }}</span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="statusMessage = ''">Dismiss</button>
-    </div>
-
     <div v-if="!data && !error" class="grid gap-4 md:grid-cols-4" aria-busy="true">
       <div v-for="n in 4" :key="n" class="card border border-base-300 bg-base-100">
         <div class="card-body gap-3">
@@ -311,11 +311,6 @@ function trackTime(ms) {
     </div>
 
     <template v-else-if="data">
-      <div v-if="error" class="alert alert-warning py-2" role="status">
-        <span class="text-sm">The last refresh failed: {{ error }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Retry</button>
-      </div>
-
       <!-- Compact control bar: connectivity, media, volume and microphone. -->
       <section class="grid gap-4 sm:grid-cols-1 md:grid-cols-3">
         <!-- Audio settings -->

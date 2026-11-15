@@ -1,115 +1,106 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import Icon from './Icon.vue'
+import ModalDialog from './ModalDialog.vue'
 import { useSettings } from '../lib/live.js'
+import { notify } from '../lib/toast.js'
+import {
+  CITY_ENTRIES,
+  COUNTRY_PATHS,
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  entryFor,
+  nearestCity,
+  projectPoint,
+  zonePathFor
+} from '../lib/timezones.js'
 
-// Friendly timezone picker: the default view shows only the speaker's current
-// setting, a phone/computer suggestion and UTC. A bounded city list appears
-// only after the user searches, and the device zone changes only through an
-// explicit Apply. The browser's own zone is never selected or submitted
-// automatically.
+// Time zone card. The card always shows the full IANA identifier the device
+// stores (or states that it is following its firmware default) plus its local
+// time and UTC offset. Editing happens in a modal map picker: clicking the map
+// asks for the nearest zone.tab city, highlights that zone's real boundary and
+// pins the city; the search list does the same explicitly. Nothing is written
+// until Apply is pressed, and the browser's own zone is never assumed.
 
 const { data, error, update } = useSettings()
 
-const FALLBACK_ZONES = [
-  'UTC',
-  'Europe/London',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Europe/Istanbul',
-  'Africa/Cairo',
-  'Africa/Johannesburg',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Shanghai',
-  'Asia/Tokyo',
-  'Asia/Seoul',
-  'Australia/Sydney',
-  'Pacific/Auckland',
-  'America/Sao_Paulo',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles'
-]
+const RESULT_LIMIT = 40
 
-const RESULT_LIMIT = 20
-
-function listZones() {
-  try {
-    const zones = Intl.supportedValuesOf?.('timeZone')
-    if (Array.isArray(zones) && zones.length) return zones
-  } catch (_) { /* older engines: fall back to the curated shortlist */ }
-  return FALLBACK_ZONES
-}
-
-function decorate(zone) {
-  const parts = String(zone).split('/')
-  const city = (parts[parts.length - 1] || zone).replaceAll('_', ' ')
-  const region = parts.length > 1 ? parts.slice(0, -1).join(' · ').replaceAll('_', ' ') : ''
-  return { zone, city, region }
-}
-
-const zones = listZones().map(decorate)
-const zoneIndex = new Map(zones.map((entry) => [entry.zone, entry]))
-
-const browserZone = (() => {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch (_) { return '' }
-})()
+// Pin geometry is expressed in viewBox units, derived from the map width so a
+// 18000-unit map still gets a few screen pixels of marker.
+const PIN_INNER = Math.round(MAP_WIDTH / 230)
+const PIN_OUTER = Math.round(MAP_WIDTH / 110)
+const PIN_HALO = Math.round(PIN_OUTER * 1.4)
 
 const now = ref(new Date())
+const openPicker = ref(false)
+const draft = ref('')
+const query = ref('')
+const saving = ref(false)
+
 let ticker = null
 
 const stored = computed(() => String(data.value?.values?.timezone || ''))
-const query = ref('')
-const selected = ref(stored.value)
-const dirty = ref(false)
-const saving = ref(false)
-const actionError = ref('')
-const note = ref('')
+const storedEntry = computed(() => (stored.value ? entryFor(stored.value) : null))
+const draftEntry = computed(() => (draft.value ? entryFor(draft.value) : null))
+const needle = computed(() => query.value.trim().toLowerCase())
 
-// A push from the device reflects the authoritative zone unless the user is
-// holding an unapplied selection of their own.
-watch(stored, (value) => {
-  if (!dirty.value && value !== selected.value) selected.value = value
+// The selected zone's boundary path, drawn with fill-rule="evenodd" so holes
+// (lakes, enclaves) stay unfilled inside it.
+const selectedPath = computed(() => zonePathFor(draft.value))
+
+const pin = computed(() => {
+  const entry = draftEntry.value
+  if (!entry || entry.lat === null || entry.lon === null) return null
+  return projectPoint(entry.lat, entry.lon)
 })
 
-function friendly(zone) {
-  if (!zone) return null
-  return zoneIndex.get(zone) || decorate(zone)
+// A push from the device is authoritative for the card, but it must not
+// replace a selection the user is holding in the open dialog. Only an
+// untouched draft follows the device.
+watch(stored, (value, previous) => {
+  if (!openPicker.value || draft.value === previous) draft.value = value
+})
+
+const listEntries = computed(() => {
+  const value = needle.value
+  if (!value) return CITY_ENTRIES
+  return CITY_ENTRIES.filter((entry) => (
+    `${entry.zone} ${entry.city} ${entry.country}`.toLowerCase().includes(value)
+  ))
+})
+
+const visibleEntries = computed(() => listEntries.value.slice(0, RESULT_LIMIT))
+const resultTotal = computed(() => listEntries.value.length)
+
+// Formatters are built once per zone/kind; the dialog re-renders the visible
+// list every tick and on every keystroke, so constructing them per call is
+// avoidable work.
+const formatters = new Map()
+
+function formatterFor(key, zone, options) {
+  let formatter = formatters.get(key)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(undefined, { timeZone: zone, ...options })
+    formatters.set(key, formatter)
+  }
+  return formatter
 }
 
-const currentEntry = computed(() => friendly(stored.value))
-const selectedEntry = computed(() => friendly(selected.value))
-
-const hasQuery = computed(() => query.value.trim().length > 0)
-
-function matches(entry, needle) {
-  return `${entry.city} ${entry.region} ${entry.zone}`.toLowerCase().includes(needle)
-}
-
-const filtered = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  if (!needle) return []
-  return zones.filter((entry) => matches(entry, needle)).slice(0, RESULT_LIMIT)
-})
-
-const matchingTotal = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  if (!needle) return 0
-  return zones.filter((entry) => matches(entry, needle)).length
-})
-
-const suggestion = computed(() => (
-  browserZone && browserZone !== stored.value && browserZone !== selected.value ? browserZone : ''
-))
-
-const suggestionEntry = computed(() => friendly(suggestion.value))
-
-function timeIn(zone) {
+function clockIn(zone) {
   if (!zone) return '—'
   try {
-    return new Intl.DateTimeFormat(undefined, {
-      timeZone: zone, weekday: 'short', hour: '2-digit', minute: '2-digit'
+    return formatterFor(`clock|${zone}`, zone, { hour: '2-digit', minute: '2-digit' }).format(now.value)
+  } catch (_) {
+    return '—'
+  }
+}
+
+function dayClockIn(zone) {
+  if (!zone) return '—'
+  try {
+    return formatterFor(`day|${zone}`, zone, {
+      weekday: 'short', hour: '2-digit', minute: '2-digit'
     }).format(now.value)
   } catch (_) {
     return '—'
@@ -120,48 +111,82 @@ function offsetIn(zone) {
   if (!zone) return '—'
   for (const style of ['longOffset', 'shortOffset']) {
     try {
-      const parts = new Intl.DateTimeFormat('en-US', {
-        timeZone: zone, timeZoneName: style
-      }).formatToParts(now.value)
+      const formatter = formatterFor(`offset|${style}|${zone}`, zone, {
+        timeZoneName: style
+      })
+      const parts = formatter.formatToParts(now.value)
       const name = parts.find((part) => part.type === 'timeZoneName')?.value || ''
       if (name) return name.replace('GMT', 'UTC')
-    } catch (_) { /* try the next style */ }
+    } catch (_) {
+      // Try the next style, then give up on the offset only.
+    }
   }
   return '—'
 }
 
-function pick(zone) {
-  selected.value = zone
-  dirty.value = zone !== stored.value
-  actionError.value = ''
-  note.value = ''
+function resetDialogState() {
+  draft.value = stored.value
+  query.value = ''
 }
 
-function useSuggestion() {
-  if (!suggestion.value) return
-  pick(suggestion.value)
-  query.value = ''
-  note.value = 'Phone or computer time zone selected. Press Apply to use it on the speaker.'
+function startEditing() {
+  now.value = new Date()
+  resetDialogState()
+  openPicker.value = true
+}
+
+function closeDialog() {
+  openPicker.value = false
+  resetDialogState()
+}
+
+// Dismissal is blocked while the patch is in flight; the write settles and the
+// dialog closes itself on success.
+function beforeClose() {
+  return !saving.value
+}
+
+function choose(zone) {
+  draft.value = zone
+}
+
+/**
+ * Map click: convert the pointer from screen space to viewBox space (honouring
+ * preserveAspectRatio letterboxing), then to lon/lat, then pick the nearest
+ * zone.tab city. No per-city hit targets are rendered.
+ */
+function pickOnMap(event) {
+  const svg = event.currentTarget
+  const rect = svg.getBoundingClientRect()
+  if (!rect.width || !rect.height) return
+  const scale = Math.min(rect.width / MAP_WIDTH, rect.height / MAP_HEIGHT)
+  const left = rect.left + (rect.width - MAP_WIDTH * scale) / 2
+  const top = rect.top + (rect.height - MAP_HEIGHT * scale) / 2
+  const x = (event.clientX - left) / scale
+  const y = (event.clientY - top) / scale
+  if (x < 0 || y < 0 || x > MAP_WIDTH || y > MAP_HEIGHT) return
+  const lon = (x / MAP_WIDTH) * 360 - 180
+  const lat = 90 - (y / MAP_HEIGHT) * 180
+  const nearest = nearestCity(lon, lat)
+  if (nearest) choose(nearest.zone)
 }
 
 async function applyZone() {
   if (saving.value) return
+  const zone = draft.value
+  if (!zone) {
+    notify.warning('Choose a time zone before applying.')
+    return
+  }
   saving.value = true
-  actionError.value = ''
-  note.value = ''
-  const zone = selected.value
   try {
     const ok = await update('timezone', { timezone: zone })
     if (ok) {
-      dirty.value = false
-      const entry = friendly(zone)
-      note.value = entry
-        ? `Speaker time zone set to ${entry.city}${entry.region ? ` (${entry.region})` : ''}.`
-        : 'The speaker now follows its default time zone.'
+      notify.success(`Device time zone set to ${zone}.`)
+      openPicker.value = false
+      resetDialogState()
     } else {
-      actionError.value = error.value || 'The speaker rejected that time zone.'
-      selected.value = stored.value
-      dirty.value = false
+      notify.error(error.value || 'The device rejected that time zone. Try another.')
     }
   } finally {
     saving.value = false
@@ -169,7 +194,7 @@ async function applyZone() {
 }
 
 onMounted(() => {
-  ticker = setInterval(() => { now.value = new Date() }, 30000)
+  ticker = setInterval(() => { now.value = new Date() }, 15000)
 })
 
 onUnmounted(() => {
@@ -179,144 +204,171 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-3">
-    <div class="space-y-2 rounded-box bg-base-200/60 px-3 py-3">
-      <template v-if="currentEntry">
-        <p class="text-base font-medium">
-          {{ currentEntry.city }}
-          <span v-if="currentEntry.region" class="text-sm font-normal text-base-content/60">{{ currentEntry.region }}</span>
-        </p>
-        <p class="text-sm text-base-content/60">
-          Now: {{ timeIn(stored) }} <span class="text-base-content/60">·</span> {{ offsetIn(stored) }}
-        </p>
-      </template>
-      <template v-else>
-        <p class="text-base font-medium">Speaker default time zone</p>
-        <p class="text-sm text-base-content/60">
-          The speaker uses its own time zone. Choose one below to override it.
-        </p>
-      </template>
-
-      <details class="text-xs text-base-content/60">
-        <summary class="cursor-pointer">Technical details</summary>
-        <p v-if="stored" class="mt-1">
-          Zone identifier: <span class="font-mono">{{ stored }}</span>.
-        </p>
-        <p class="mt-1">With no zone chosen, the speaker follows its firmware default.</p>
-      </details>
+  <div class="rounded-box bg-base-200/60 p-3 sm:p-4">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h3 class="text-lg font-semibold leading-tight">Timezone</h3>
+        <p v-if="stored" class="mt-1 break-all font-mono text-sm font-medium text-base-content">{{ stored }}</p>
+        <p v-else class="mt-1 text-sm text-base-content/70">The device uses its firmware default time zone.</p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost btn-square -mr-1 -mt-1"
+        aria-label="Edit time zone"
+        @click="startEditing"
+      >
+        <Icon size="18px">edit</Icon>
+      </button>
     </div>
 
-    <div v-if="suggestion" class="flex flex-wrap items-center justify-between gap-2 rounded-box bg-base-200/60 p-3" role="status">
-      <span class="text-sm">
-        Your phone or computer uses
-        <strong>{{ suggestionEntry?.city || suggestion }}</strong>.
+    <p v-if="stored" class="mt-2 text-sm text-base-content/70">
+      Local time <span class="font-medium text-base-content">{{ dayClockIn(stored) }}</span>
+      <span class="mx-1 text-base-content/40" aria-hidden="true">·</span>
+      <span class="font-mono">{{ offsetIn(stored) }}</span>
+      <span v-if="storedEntry?.city && storedEntry.city !== stored" class="text-base-content/60">
+        <span class="mx-1 text-base-content/40" aria-hidden="true">·</span>{{ storedEntry.city }}
       </span>
-      <button type="button" class="btn btn-xs btn-outline" @click="useSuggestion">
-        Use this phone or computer’s time zone
-      </button>
-    </div>
-
-    <div class="flex flex-col gap-2 sm:flex-row">
-      <label class="input input-bordered flex flex-1 items-center gap-2">
-        <input
-          v-model="query"
-          type="search"
-          class="grow"
-          placeholder="Search for your city"
-          aria-label="Search for your city or region"
-          autocomplete="off"
-        />
-      </label>
-      <button
-        type="button"
-        class="btn btn-primary sm:w-44"
-        :disabled="saving || !dirty"
-        :aria-busy="saving ? 'true' : 'false'"
-        @click="applyZone"
-      >
-        <span v-if="saving" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-        {{ saving ? 'Applying…' : 'Apply time zone' }}
-      </button>
-    </div>
-
-    <div v-if="dirty" class="rounded-box bg-base-200/60 px-3 py-2 text-sm" role="status">
-      <p>
-        Will use
-        <strong>{{ selected ? (selectedEntry?.city || selected) : 'Speaker default time zone' }}</strong>
-        <span v-if="selected && selectedEntry?.region" class="text-base-content/60">{{ selectedEntry.region }}</span>
-        <span v-if="selected" class="text-base-content/60"> · {{ offsetIn(selected) }} · {{ timeIn(selected) }}</span>
-      </p>
-      <p class="mt-1 text-xs text-base-content/60">Press Apply time zone to change the speaker.</p>
-    </div>
-
-    <p v-if="!hasQuery" class="text-xs text-base-content/60">
-      Type a city or region like “Berlin” or “Asia” to see matching time zones.
+    </p>
+    <p v-else class="mt-2 text-sm text-base-content/60">
+      Nothing is stored on the device, so it follows its firmware default. Choose a time zone to override it.
     </p>
 
-    <div v-if="!hasQuery" class="rounded-box border border-base-300">
-      <p class="px-3 pt-2 text-xs font-medium text-base-content/60">Suggestions</p>
-      <button
-        type="button"
-        :aria-pressed="selected === 'UTC' ? 'true' : 'false'"
-        class="flex w-full items-center justify-between gap-3 border-t border-base-300 px-3 py-2 text-left hover:bg-base-200"
-        :class="selected === 'UTC' ? 'bg-base-300' : ''"
-        @click="pick('UTC')"
-      >
-        <span>
-          <span class="text-sm font-medium">UTC</span>
-          <span class="ml-2 text-xs text-base-content/60">Coordinated Universal Time</span>
-        </span>
-        <span class="shrink-0 text-right text-xs">
-          <span class="font-mono">{{ offsetIn('UTC') }}</span>
-          <span class="ml-2 text-base-content/60">{{ timeIn('UTC') }}</span>
-        </span>
-      </button>
-      <button
-        v-if="stored"
-        type="button"
-        :aria-pressed="selected === '' ? 'true' : 'false'"
-        class="flex w-full items-center justify-between gap-3 border-t border-base-300 px-3 py-2 text-left hover:bg-base-200"
-        :class="selected === '' ? 'bg-base-300' : ''"
-        @click="pick('')"
-      >
-        <span>
-          <span class="text-sm font-medium">Speaker default time zone</span>
-          <span class="ml-2 text-xs text-base-content/60">stop overriding it</span>
-        </span>
-      </button>
-    </div>
+    <ModalDialog
+      v-if="openPicker"
+      title="Choose time zone"
+      :before-close="beforeClose"
+      @close="closeDialog"
+    >
+      <div class="space-y-3">
+        <label class="input input-bordered flex items-center gap-2">
+          <Icon size="18px" class="text-base-content/60">search</Icon>
+          <input
+            v-model="query"
+            type="search"
+            class="grow"
+            placeholder="Search a city or time zone"
+            aria-label="Search a city or time zone"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
 
-    <div v-if="hasQuery" class="max-h-64 overflow-y-auto rounded-box border border-base-300">
-      <button
-        v-for="entry in filtered"
-        :key="entry.zone"
-        type="button"
-        :aria-pressed="selected === entry.zone ? 'true' : 'false'"
-        class="flex w-full items-center justify-between gap-3 border-b border-base-300 px-3 py-2 text-left last:border-b-0 hover:bg-base-200"
-        :class="selected === entry.zone ? 'bg-base-300' : ''"
-        @click="pick(entry.zone)"
-      >
-        <span class="min-w-0">
-          <span class="text-sm font-medium">{{ entry.city }}</span>
-          <span v-if="entry.region" class="ml-2 text-xs text-base-content/60">{{ entry.region }}</span>
-        </span>
-        <span class="shrink-0 text-right text-xs">
-          <span class="font-mono">{{ offsetIn(entry.zone) }}</span>
-          <span class="ml-2 text-base-content/60">{{ timeIn(entry.zone) }}</span>
-        </span>
-      </button>
-      <p v-if="!filtered.length" class="px-3 py-4 text-sm text-base-content/60">
-        No time zones match “{{ query }}”. Try a city like Berlin or a region like Asia.
-      </p>
-      <p v-else-if="matchingTotal > filtered.length" class="border-t border-base-300 px-3 py-2 text-xs text-base-content/60">
-        Showing {{ filtered.length }} of {{ matchingTotal }} matches — keep typing to narrow the list.
-      </p>
-    </div>
+        <div class="overflow-hidden rounded-box border border-base-300">
+          <div class="bg-base-100">
+            <svg
+              :viewBox="`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`"
+              class="block max-h-[44vh] w-full cursor-crosshair"
+              preserveAspectRatio="xMidYMid meet"
+              role="img"
+              aria-label="World map of time zones. Click near your location to select the nearest city, or choose a city from the list below."
+              @click="pickOnMap"
+            >
+              <rect :width="MAP_WIDTH" :height="MAP_HEIGHT" class="fill-base-100" />
+              <path
+                :d="COUNTRY_PATHS"
+                fill-rule="evenodd"
+                class="fill-base-content/10 stroke-base-content/30"
+                stroke-width="0.7"
+                vector-effect="non-scaling-stroke"
+              />
+              <path
+                v-if="selectedPath"
+                :d="selectedPath"
+                fill-rule="evenodd"
+                class="fill-primary/30 stroke-primary"
+                stroke-width="1.2"
+                vector-effect="non-scaling-stroke"
+                pointer-events="none"
+              />
+              <g
+                v-if="pin"
+                :transform="`translate(${pin.x} ${pin.y})`"
+                pointer-events="none"
+                aria-hidden="true"
+              >
+                <circle :r="PIN_HALO" class="fill-base-100/80" />
+                <circle :r="PIN_OUTER" class="fill-primary/25" />
+                <circle
+                  :r="PIN_INNER"
+                  class="fill-primary stroke-base-100"
+                  stroke-width="1.5"
+                  vector-effect="non-scaling-stroke"
+                />
+              </g>
+            </svg>
+          </div>
+          <p class="flex min-h-[1.75rem] flex-wrap items-center gap-x-1 border-t border-base-300 px-2 py-1 text-xs text-base-content/70">
+            <template v-if="draft">
+              <span class="font-mono text-base-content">{{ draft }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ offsetIn(draft) }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ clockIn(draft) }}</span>
+            </template>
+            <span v-else>Click the map near your location, or search for a city.</span>
+          </p>
+          <p class="border-t border-base-300 px-2 py-1 text-[11px] leading-snug text-base-content/50">
+            Time zone boundaries © timezone-boundary-builder contributors (ODbL 1.0) · Base map Natural Earth (public domain)
+          </p>
+        </div>
 
-    <div v-if="actionError" class="alert alert-error" role="alert">{{ actionError }}</div>
-    <p v-else-if="note" class="text-sm text-success" role="status">{{ note }}</p>
-    <p class="text-xs text-base-content/60">
-      Changing the zone restarts clock-driven apps; running timers, the stopwatch and alarms keep their state.
-    </p>
+        <div class="overflow-hidden rounded-box border border-base-300">
+          <p class="flex items-center justify-between gap-2 border-b border-base-300 bg-base-200/60 px-3 py-1.5 text-xs font-medium text-base-content/60">
+            <span>{{ needle ? 'Matches' : 'Cities' }}</span>
+            <span>Showing {{ visibleEntries.length }} of {{ resultTotal }}</span>
+          </p>
+          <ul v-if="visibleEntries.length" class="max-h-56 overflow-y-auto">
+            <li v-for="entry in visibleEntries" :key="entry.zone" class="border-b border-base-300 last:border-b-0">
+              <button
+                type="button"
+                class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200"
+                :class="draft === entry.zone ? 'bg-base-300' : ''"
+                :aria-pressed="draft === entry.zone ? 'true' : 'false'"
+                @click="choose(entry.zone)"
+              >
+                <span class="min-w-0">
+                  <span class="block truncate font-mono text-sm">{{ entry.zone }}</span>
+                  <span class="block truncate text-xs text-base-content/60">
+                    {{ entry.city }}<template v-if="entry.country"> · {{ entry.country }}</template>
+                  </span>
+                </span>
+                <span class="shrink-0 text-right text-xs text-base-content/60">
+                  <span class="block font-mono">{{ offsetIn(entry.zone) }}</span>
+                  <span class="block">{{ clockIn(entry.zone) }}</span>
+                </span>
+              </button>
+            </li>
+          </ul>
+          <p v-else class="px-3 py-4 text-sm text-base-content/60">
+            No time zones match “{{ query }}”. Try a city like Berlin or a region like Asia.
+          </p>
+        </div>
+
+        <div class="rounded-box bg-base-200/60 px-3 py-2">
+          <template v-if="draftEntry">
+            <p class="break-all font-mono text-sm font-medium">{{ draftEntry.zone }}</p>
+            <p class="text-xs text-base-content/60">
+              {{ draftEntry.city }}<template v-if="draftEntry.country"> · {{ draftEntry.country }}</template>
+              <span class="mx-1" aria-hidden="true">·</span>{{ offsetIn(draft) }}
+              <span class="mx-1" aria-hidden="true">·</span>{{ dayClockIn(draft) }}
+            </p>
+          </template>
+          <p v-else class="text-sm text-base-content/60">Choose a time zone to preview it.</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <button type="button" class="btn btn-ghost" :disabled="saving" @click="closeDialog">Cancel</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          :disabled="saving || !draft || draft === stored"
+          :aria-busy="saving ? 'true' : 'false'"
+          @click="applyZone"
+        >
+          Apply
+        </button>
+      </template>
+    </ModalDialog>
   </div>
 </template>

@@ -2,7 +2,10 @@ package webui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -70,6 +73,25 @@ func (s *Server) snapshot(ctx context.Context, topic webv1.Topic, appID string) 
 	return snap, nil
 }
 
+// bluetoothAddressRe matches the address shapes BlueZ may hand back as a
+// device name: six colon- or hyphen-separated octets, or twelve bare hex
+// digits.
+var bluetoothAddressRe = regexp.MustCompile(`^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f]{12}$`)
+
+// displayPairedName returns the paired device name that may be shown to the
+// browser. BlueZ reports the address as the name for a device without an
+// alias, so an address-shaped name is dropped rather than displayed.
+func displayPairedName(address, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.EqualFold(name, strings.TrimSpace(address)) || bluetoothAddressRe.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
 func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) {
 	dev := frameworkv1.NewDeviceServiceClient(s.Conn)
 	info, err := dev.GetInfo(ctx, &frameworkv1.GetInfoRequest{})
@@ -88,7 +110,8 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 	} else {
 		for _, d := range paired.GetDevices() {
 			view.PairedDevices = append(view.PairedDevices, &webv1.PairedDeviceView{
-				Address: d.GetAddress(), Name: d.GetName(), Connected: d.GetConnected(), Trusted: d.GetTrusted(),
+				Name: displayPairedName(d.GetAddress(), d.GetName()), Connected: d.GetConnected(), Trusted: d.GetTrusted(),
+				DeviceId: pairedDeviceID(d.GetAddress()),
 			})
 		}
 	}
@@ -96,7 +119,17 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 	if err != nil {
 		return nil, err
 	}
-	providers, err := s.mediaProviders(ctx, appsResp.GetApplications())
+	// A media provider must be running to be a provider: an installed player
+	// with no run advertises a service the daemon cannot route to. A failed
+	// ListRuns proves nothing, so it yields no providers rather than stale ones.
+	runs, runsErr := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{})
+	running := map[string]bool{}
+	if runsErr == nil {
+		for _, run := range runs.GetRuns() {
+			running[run.GetAppId()] = true
+		}
+	}
+	providers, err := s.mediaProviders(ctx, appsResp.GetApplications(), running)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +144,6 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 	for _, a := range appsResp.GetApplications() {
 		view.Apps = append(view.Apps, s.appListing(a))
 	}
-	runs, _ := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{})
 	view.Runs = runViews(runs.GetRuns(), selected)
 	return view, nil
 }
@@ -308,6 +340,7 @@ func (s *Server) wakewordView(ctx context.Context) (*webv1.WakewordView, error) 
 			}
 			view.Detections = append(view.Detections, &webv1.WakewordDetectionView{
 				ModelId: detection.ModelID, ModelDisplayName: name, DetectedUnixMs: detection.UnixMS,
+				DetectionId: detection.ID,
 			})
 		}
 	}
@@ -393,6 +426,20 @@ func bluetoothView(b *frameworkv1.BluetoothStatus) *webv1.BluetoothView {
 		IncomingConnections: b.GetIncomingConnections(), Adapter: b.GetAdapter(), Detail: b.GetDetail(),
 		Name: b.GetName(),
 	}
+}
+
+// pairedDeviceID derives the stable opaque identifier the browser uses for a
+// paired device. Bluetooth addresses are device-local identity and must never
+// appear in a web view, result, log line or error, so the address is hashed
+// and only a short prefix crosses the boundary. Hashing is normalized first so
+// "AA:BB:…" and "aa:bb:…" resolve to the same device.
+func pairedDeviceID(address string) string {
+	normalized := strings.ToLower(strings.TrimSpace(address))
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // appListing projects an installed application for the browser. Declared
@@ -587,10 +634,10 @@ func (s *Server) logsTail(ctx context.Context, appID string, limit int) []logbus
 	return tail
 }
 
-func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.InstalledApplication) ([]*webv1.MediaProviderView, error) {
+func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.InstalledApplication, running map[string]bool) ([]*webv1.MediaProviderView, error) {
 	var out []*webv1.MediaProviderView
 	for _, a := range apps {
-		if !providesMedia(a) {
+		if !providesMedia(a) || !running[a.GetAppId()] {
 			continue
 		}
 		provider := &webv1.MediaProviderView{AppId: a.GetAppId(), Name: a.GetDisplayName()}

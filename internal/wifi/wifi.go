@@ -23,8 +23,8 @@ const (
 	// short and public: physical possession of the speaker is the credential.
 	APPassword = "capsulad"
 
-	DefaultAPAddress = "192.168.4.1"
-	DefaultAPPrefix  = 24
+	DefaultAPAddress  = "192.168.4.1"
+	DefaultAPPrefix   = 24
 	DefaultPortalPort = 80
 )
 
@@ -47,7 +47,7 @@ var (
 type State string
 
 const (
-	StateUnavailable State = "unavailable"
+	StateUnavailable  State = "unavailable"
 	StateDisconnected State = "disconnected"
 	StateConnecting   State = "connecting"
 	StateConnected    State = "connected"
@@ -136,8 +136,8 @@ type Config struct {
 	Interface string
 	// APAddress is the local address of the provisioning AP. The captive
 	// portal binds only to this address.
-	APAddress string
-	APPrefix  int
+	APAddress  string
+	APPrefix   int
 	PortalPort int
 	// APPassword must be the documented provisioning password in production.
 	// It is a field so tests can use a short fixture without weakening the

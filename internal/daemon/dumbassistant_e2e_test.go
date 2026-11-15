@@ -51,15 +51,12 @@ func TestDumbAssistantSpeechEndedReply(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(store, "audio", "assistant"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"alt.wav", "undeclared.wav"} {
-		if err := os.WriteFile(filepath.Join(store, "audio", "assistant", name), alt, 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(store, "audio", "assistant", "alt.wav"), alt, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	storeManifest := `{"assets":[
-		{"id":"assistant.alt","path":"audio/assistant/alt.wav","media_type":"audio/wav"}
-	]}`
-	if err := os.WriteFile(filepath.Join(store, "manifest.json"), []byte(storeManifest), 0o644); err != nil {
+	// A non-WAV file is a real store entry but not a playable reply; the
+	// daemon rejects it on media type, not on manifest membership.
+	if err := os.WriteFile(filepath.Join(store, "audio", "assistant", "notes.txt"), []byte("not audio"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	conn := dialTest(t, d.cfg.SocketPath)
@@ -85,7 +82,7 @@ func TestDumbAssistantSpeechEndedReply(t *testing.T) {
 		{"reply_asset", jsonString("/etc/passwd")},
 		{"reply_asset", jsonString("../escape.wav")},
 		{"reply_asset", jsonString("audio/assistant/missing.wav")},
-		{"reply_asset", jsonString("audio/assistant/undeclared.wav")},
+		{"reply_asset", jsonString("audio/assistant/notes.txt")},
 	}
 	for _, change := range rejected {
 		_, err := cfg.Update(ctx, &frameworkv1.UpdateAppConfigurationRequest{

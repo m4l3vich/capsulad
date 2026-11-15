@@ -126,7 +126,7 @@ func (s *Store) Load() error {
 }
 
 // CredentialsPath names the persisted credential document. The daemon watches
-// it so an out-of-process local administrator (`capsula auth ...`) converges
+// it so an out-of-process local administrator (`capsulad-cli auth ...`) converges
 // live sessions without polling.
 func (s *Store) CredentialsPath() string { return s.credentialsPath() }
 
@@ -533,7 +533,7 @@ func (s *Store) CertStatus() (CertInfo, error) {
 // is requested or required; authentication happens at the HTTP layer.
 func (s *Store) TLSConfig() (*tls.Config, error) {
 	if _, err := os.Stat(s.CertPath()); err != nil {
-		return nil, fmt.Errorf("server certificate missing; run `capsula auth init`")
+		return nil, fmt.Errorf("server certificate missing; run `capsulad-cli auth init`")
 	}
 	pair, err := tls.LoadX509KeyPair(s.CertPath(), s.KeyPath())
 	if err != nil {

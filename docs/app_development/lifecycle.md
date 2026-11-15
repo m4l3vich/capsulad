@@ -1,0 +1,294 @@
+# Lifecycle, identity and environment
+
+`capsulad` owns the whole process lifecycle. An app never daemonizes, never forks a supervisor,
+never opens a socket and never assigns itself an identity. It is started by the framework, told
+who it is, connects to the framework socket, declares itself ready, serves events, and exits
+when its run ends.
+
+## Launch
+
+The launcher performs these steps in order; a failure at any step ends the launch with an error
+and no process:
+
+1. Resolve the installed manifest and the configured `[native_sdk]` requirement.
+2. Check binary compatibility: `architecture` must be `aarch64`/`arm64` and `abi` must describe
+   a Linux ABI. Script runtimes must have their host installed.
+3. Resolve the entrypoint inside the immutable package directory. A symlink that escapes the
+   package is rejected; a native entrypoint must exist and must not be a directory.
+4. Choose the probed sandbox mode (`namespaces`, `mountns`, `uid` or `none`) and build the
+   command. Script runtimes run the installed host with the package script as its argument.
+5. Build the environment (next section), spawn the process, and start collecting its stdout and
+   stderr.
+6. Record a run in `APP_STARTING` state with a fresh run ID. The run ID is newly generated for
+   every start; it never repeats.
+
+The simulator skips the architecture/ABI check so a host build runs there. Everything else is
+identical, which is why an app that runs in the simulator runs on the device once built for
+`aarch64`/`linux-gnu`.
+
+## Identity
+
+Identity comes from the connection, not from a claim:
+
+- The app sends `AppHello{run_id}` on `AppBusService.Connect`. The daemon resolves that run ID
+  to a supervised process and compares the process ID with the Unix-socket peer credentials.
+  A mismatch, an unknown run, or a claim on a compiled-in system app's run is
+  `PERMISSION_DENIED`.
+- A connection with a sandbox UID or a supervised PID but no run ID is still treated as an app.
+  It cannot become an administrator by silence.
+- **Administrator** means a local daemon, CLI or Web UI caller with no app identity.
+  **App scope** means a supervised app addressing its own state. An app may address only itself.
+- `AppReady` marks the run READY; that is when `ApplicationService` reports `APP_READY` and the
+  app's declared interfaces become `available`.
+
+## Environment
+
+The launcher injects these variables. Read them; never hard-code a path.
+
+| Variable | Meaning |
+|---|---|
+| `CAPSULA_SOCKET` | The framework's Unix socket. `/run/capsulad/hal.sock` in namespace modes; the host path otherwise. |
+| `CAPSULA_RUN_ID` | This run's identity. Required by `Connect`. |
+| `CAPSULA_APP_ID` | The installed app ID. |
+| `CAPSULA_SDK` | The framework SDK version the daemon reports for this platform. |
+| `CAPSULA_LIBRARY` | Absolute path of the compatible `libcapsula`. `/capsula/lib/libcapsula.so.1` in namespace modes. |
+| `CAPSULA_LIBRARY_DIR` | Directory for the library's own dependency resolution. |
+| `CAPSULA_ASSETS` | The read-only asset store: `/assets` in namespace modes, the host path otherwise. |
+| `CAPSULA_APP_DIR` | Script hosts only (quickjs, micropython): the package root, `/app` in namespace modes and the host path otherwise. Native apps do not receive this variable. |
+| `CAPSULA_INTERPRETER` | Script runtimes only: the engine executable that is running the script. |
+| `TZ` | The resolved device timezone, when one is configured. |
+
+Do not assume a working directory: namespace modes start at `/`, `uid` mode inherits the
+daemon's directory, and only `none` runs from the package root. Script apps read
+`CAPSULA_APP_DIR`; native apps locate package files relative to their own executable path,
+since the launcher starts them by absolute path.
+
+Inside a namespace sandbox the filesystem view is fixed:
+
+```text
+/app                   the installed package, read-only
+/assets                the shared asset store, read-only
+/run/capsulad/hal.sock the framework socket
+/capsula/lib           the native runtime and script hosts, read-only
+```
+
+In `uid` and `none` modes the same contract holds with host paths; the variables tell you
+which.
+
+## Run states
+
+```text
+APP_STARTING ──AppReady──► APP_READY ──stop or failure──► APP_STOPPING ──► APP_EXITED
+      │                        │
+      └────exit/exec error─────┴──────────────────────────────────────► APP_FAILED
+```
+
+| State | Meaning |
+|---|---|
+| `APP_STARTING` | A process exists; no `AppReady` yet. |
+| `APP_READY` | The bus handshake completed. Interfaces are available and events are delivered. |
+| `APP_STOPPING` | A stop was requested; the process is expected to exit. |
+| `APP_EXITED` | The process ended after a deliberate stop. |
+| `APP_FAILED` | The process ended without a deliberate stop, or its framework connection was lost. |
+
+`AppRun` carries `run_id`, `app_id`, `pid`, `state`, `started_monotonic_ns`, `exit_code`,
+`status_detail` and `runtime`. An app can watch its own runs through
+`ApplicationService.ListRuns`/`WatchRuns`; a local administrator can watch any app.
+
+Exit codes follow the operating system: a signal is reported as `128 + signal` (`143` for
+`SIGTERM`, `137` for `SIGKILL`), a normal exit is its own code, and a deliberate stop sets the
+detail `stopped`.
+
+## Invocations
+
+A launch is one of two things:
+
+- **Spawn** — a new supervised run is created. The app receives `AppLaunchInvocation` after it
+  reports ready.
+- **Invocation** — a `single_instance` app that is already running receives the launch on its
+  existing run instead of a second process.
+
+`AppLaunchInvocation` = `{invocation_id, arguments:[{name, value}]}`. Arguments are validated
+against the manifest before anything is spawned: undeclared names, wrong types and missing
+required arguments fail the launch with `INVALID_ARGUMENT`. Values are never shell-parsed.
+
+Delivery rules:
+
+- A ready singleton receives the invocation immediately.
+- A starting singleton holds it in a per-run queue bounded at **8**; a ninth returns an error
+  and the launch fails. The invocation expires after **30 s** if the app never becomes ready,
+  with a logged warning.
+- A non-singleton launch always spawns, even if a run is already alive.
+- `invocation_id` is also returned to the caller (`LaunchResult.invocation_id`), so it can
+  correlate the outcome.
+
+Report the outcome with `AppInvocationResult{invocation_id, accepted, detail}`. It is a
+notification: the framework logs it and no error comes back if you skip it.
+
+```go
+Invocation: func(ctx context.Context, inv *capsula.LaunchInvocation) {
+    // apply inv.Arguments, then:
+    _ = client.NotifyInvocationResult(inv.ID, true, "applied")
+},
+```
+
+## Assistant activations
+
+An assistant app is a normal app that claims the `voice_assistant` role and is selected as the
+device's assistant. Turns arrive as `AssistantActivation` on the app bus:
+
+| Field | Meaning |
+|---|---|
+| `activation_id` | Identity of this turn. One-shot; never reused. |
+| `origin` | `ACTIVATION_WAKEWORD`, `ACTIVATION_TOUCH` or `ACTIVATION_API`. |
+| `matched_model_id` | The wakeword model that matched, empty for touch/API. |
+| `monotonic_time_ns` | When the framework decided to activate. |
+| `expires_monotonic_ns` | The window in which the turn and its pre-roll are valid. |
+| `hold_to_talk` | True for a touch activation while the device is in hold-to-talk mode. |
+
+Behaviour an assistant must implement:
+
+- The framework does not launch the assistant per turn. It is already running and ready.
+- The app decides when to begin capture; beginning late loses the audio before it opened.
+- Passing `activation_id` when opening the microphone attaches the bounded pre-roll for that
+  turn. Only the app that received the activation can use it, and only once.
+- With `hold_to_talk=true`, the release arrives as `AssistantInputReleased{activation_id}` on
+  the same stream and ends input. In summon mode the turn may outlive the hold.
+- The app is responsible for ending the turn: close the microphone and conversation streams.
+
+## Settings delivery
+
+| Moment | What the app receives |
+|---|---|
+| Right after `AppReady` | `AppSettingsChanged{revision, values}` with the current snapshot, including unmasked `text_masked` values. |
+| Any accepted update | `AppSettingsChanged` with the new revision and values. |
+| Update while the app is not running | Nothing is queued; the value is stored and arrives at the next ready. |
+| Update to a compiled-in system app | Not applicable; system apps read the settings store directly. |
+
+The app-private event is the **only** surface that carries `text_masked` values in clear; the
+generic `Get` and the Web UI redact them. Values are JSON-encoded strings
+(`"text"`, `true`, `42`, `1.5`); a key with no stored value is simply absent, which means "use
+the declared default".
+
+## Actions
+
+`ApplicationConfigurationService.TriggerAction` (or the Web UI) reaches a declared action:
+
+- The app must be **ready**; triggering an action on a non-running app fails.
+- The action ID must be declared in the manifest; anything else fails.
+- The app receives `AppActionInvoked{action_invocation_id, action_id}`.
+- `AppActionResult{action_invocation_id, succeeded, detail}` is optional and is a notification.
+
+Actions are not settings: nothing about an action is persisted, and `confirm_before_run` is a
+UI behaviour only.
+
+## Stop, restart and backoff
+
+### Deliberate stop
+
+`ApplicationService.Stop` and `capsulad-cli app stop RUN_ID` ask the run to end:
+
+1. The supervisor sends `SIGTERM` and moves the run to `APP_STOPPING`.
+2. If the process is still alive after **5 s**, it is killed with `SIGKILL`.
+3. The run becomes `APP_EXITED` with detail `stopped`.
+
+A deliberate stop is not a failure and does not trigger a restart — **unless** the app is the
+operator-selected default provider for a resource or the assistant role. In that case the
+framework restarts it, because a selected provider must remain available; deselecting it,
+uninstalling it or shutting the daemon down is the durable off switch.
+
+Shutdown behaves the same way for every run (SIGTERM, then kill), with a 5 s total shutdown
+budget; shutdown cancels the restart context first, so nothing is restarted.
+
+### Failure
+
+These are failures, not stops:
+
+- a non-zero exit;
+- death by an unhandled signal;
+- losing the framework connection (the daemon stops the orphaned process and applies the
+  restart policy).
+
+A failed run is `APP_FAILED` and its restart depends on three things:
+
+| Condition | Restarts? |
+|---|---|
+| `restart_on_failure = true` | yes |
+| the app is the selected default provider or assistant | yes, even with `restart_on_failure = false` |
+| neither | no; the run stays failed |
+
+### Backoff
+
+Repeated failures back off so a crash loop cannot spin the process table:
+
+| Consecutive failure | Delay before restart |
+|---|---|
+| 1st | immediate |
+| 2nd | 1 s |
+| 3rd | 2 s |
+| 4th | 4 s |
+| 5th and later | 8 s |
+
+A run that stays READY for **30 s** resets the counter, so an app that ran well and then crashed
+restarts immediately. A run that reports ready and dies at once keeps accumulating.
+
+### Boot
+
+On daemon start, in order: compiled-in system apps, then every installed app with
+`start_on_boot = true` or `background = true`, then the configured default provider for each
+resource and the selected assistant. An app that is already running is not started twice.
+
+`background = true` therefore has two effects: the app is started at boot, and deselecting it
+does not stop it. `start_on_boot = true` gives the same protection from deselection.
+
+## Graceful shutdown: what an app must do
+
+Every terminal path — stop request, lost connection, crash — must leave the framework able to
+clean up. An app is expected to:
+
+1. Stop producing output and close presentations (`ClosePresentation`, then close the stream).
+2. Release captures (`ReleaseCapture`, or close the capture stream).
+3. Close audio streams: a playback `Close` drains, `Abort` discards; a capture close releases
+   the microphone and its indication.
+4. Close conversations.
+5. End every inbound call (`AppCallReply{end}`), even on error.
+6. Close the bus (`client.Close()`) and exit.
+
+The framework also cleans up after a dead process: presentations, captures, audio streams,
+pending invocations and touch ownership are released when the run ends. That cleanup is a
+safety net, not a substitute — a stream held until the process dies keeps a resource occupied
+while the app is still alive.
+
+## What the app sees as logs
+
+The framework collects the app's `stdout` and `stderr` as structured log records:
+
+- component `app.stdout` or `app.stderr`, severity `info`, `app_id` set to the app;
+- one record per line, each line truncated to 8000 characters;
+- a single line longer than 64 KiB is a hard failure, not a split: the reader stops at that
+  point and the rest of that stream (stdout or stderr, independently) is dropped for the life
+  of the run. Once the pipe buffer fills, further writes by the app block.
+
+Emit short lines ending in `\n`; never log one large blob. Chunk long payloads yourself (for
+example every 1000 characters on separate lines) and write diagnostics to the stream you still
+need.
+
+`capsula.log(message)` (Go: `log.Print`/`fmt.Fprintln`) writes to `stderr` with the prefix
+`capsula-script:`, so it appears as an `app.stderr` record. The Go and Rust bindings' log
+callbacks are local hooks; they do not forward to the daemon.
+
+An app can read **its own** records through `DiagnosticsService.WatchLogs` (pass its own
+`app_id` or leave it empty). Any other app ID is `PERMISSION_DENIED`, and framework records stay
+administrator-only. Administrators read the same stream with
+`capsulad-cli logs -app ID -n N`.
+
+## Assistant and provider lifecycle rules
+
+- A provider is selected by app ID in device settings, never by a port or a stable output
+  identifier.
+- Selecting a provider starts it if it is installed and not running.
+- Deselecting a provider stops it, unless it declares `start_on_boot` or `background`.
+- Uninstalling a provider requires it to be stopped first, and removing the selection is the
+  durable way to keep it off.
+- A presentation is owned by one run; when that run ends, its presentations and captures are
+  released and routing recomputes selection.

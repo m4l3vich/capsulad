@@ -158,7 +158,7 @@ func newLinuxManager(cfg Config, iface string) (*linuxManager, error) {
 	m := &linuxManager{
 		cfg: cfg, iface: iface, tools: tools, store: store,
 		stockConfigs: stockConfigs,
-		ctx: lifetime, cancel: cancel, revision: 1,
+		ctx:          lifetime, cancel: cancel, revision: 1,
 	}
 	m.status = Status{
 		Available:     true,

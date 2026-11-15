@@ -1,17 +1,18 @@
 <script setup>
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import WakewordTrainingDialog from './WakewordTrainingDialog.vue'
 import Icon from './Icon.vue'
 import { socket, topicNames } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
 import { dateTime, durationMs } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
 
 const { data: wakewordData, error: wakewordError, refresh } = useTopic(topicNames.wakeword)
 const { data: settingsData, error: settingsError, pending: settingsPending, update } = useSettings()
 
 const trainingOpen = ref(false)
-const actionError = ref('')
 const deleteBusy = ref('')
+const detectionBusy = ref('')
 const confirmDeleteId = ref('')
 let confirmTimer = null
 
@@ -49,27 +50,58 @@ const statusText = computed(() => {
   return 'Detection off'
 })
 
+// Connection failures are state that repeats on every snapshot; announce a new
+// message once and leave the section's own availability notices in place.
+let lastSettingsError = ''
+
+watch(settingsError, (message) => {
+  const text = String(message || '')
+  if (!text) {
+    lastSettingsError = ''
+    return
+  }
+  if (text === lastSettingsError) return
+  lastSettingsError = text
+  notify.warning(`Settings did not update: ${text}`)
+}, { immediate: true })
+
+let lastWakewordError = ''
+
+watch(wakewordError, (message) => {
+  const text = String(message || '')
+  if (!text) {
+    lastWakewordError = ''
+    return
+  }
+  if (text === lastWakewordError) return
+  lastWakewordError = text
+  notify.warning(`The wakeword section could not reach Capsula: ${text}`)
+}, { immediate: true })
+
 function labelFor(sample) {
   if (sample.label === 'word') return 'Wakeword recording'
   return 'Room or phrase recording'
 }
 
-function languageName(code) {
-  if (!code) return ''
-  const value = String(code)
-  if (value.toLowerCase() === 'ru') return 'Russian'
-  if (value.toLowerCase() === 'en') return 'English'
-  if (value.toLowerCase() === 'any') return 'Any language'
-  return value
+async function reportFalseDetection(detection) {
+  if (!detection.detectionId || detectionBusy.value) return
+  detectionBusy.value = detection.detectionId
+  try {
+    await socket.request({ falseDetection: { detectionId: detection.detectionId } }, { timeout: 10000 })
+    await refresh()
+  } catch (err) {
+    notify.error(`Could not remove that detection: ${err.message}`)
+  } finally {
+    detectionBusy.value = ''
+  }
 }
 
 async function apply(payload) {
-  actionError.value = ''
   try {
     const ok = await update('assistant', payload)
-    if (ok === false) actionError.value = 'Capsula did not accept that change.'
+    if (ok === false) notify.error('Capsula did not accept that change.')
   } catch (err) {
-    actionError.value = err?.message || 'The change could not be sent to Capsula.'
+    notify.error(err?.message || 'The change could not be sent to Capsula.')
   }
 }
 
@@ -105,24 +137,14 @@ function askDelete(sample) {
 async function removeTake(sample) {
   clearTimeout(confirmTimer)
   deleteBusy.value = sample.sampleId
-  actionError.value = ''
   try {
     await socket.request({ deleteSample: { sampleId: sample.sampleId } }, { timeout: 10000 })
     confirmDeleteId.value = ''
     await refresh()
   } catch (err) {
-    actionError.value = `Could not delete the recording: ${err.message}`
+    notify.error(`Could not delete the recording: ${err.message}`)
   } finally {
     deleteBusy.value = ''
-  }
-}
-
-async function onRefresh() {
-  actionError.value = ''
-  try {
-    await refresh()
-  } catch (err) {
-    actionError.value = err?.message || 'The device did not return its wakeword state.'
   }
 }
 
@@ -141,39 +163,16 @@ onUnmounted(() => {
     <div class="card-body gap-3 p-4">
     <div class="flex flex-wrap items-center gap-2">
       <Icon size="20px">record_voice_over</Icon>
-      <h2 id="wakeword-settings-title" class="flex-grow text-base font-semibold">Wakeword</h2>
+      <h2 id="wakeword-settings-title" class="flex-grow text-lg font-semibold">Wakeword</h2>
     </div>
     <p class="text-xs text-base-content/60">
       Capsula listens and learns on the device. Your browser never records audio.
     </p>
 
-    <div v-if="actionError" class="alert alert-error py-2" role="alert">
-      <span class="text-sm">{{ actionError }}</span>
-    </div>
-    <div v-if="settingsError" class="alert alert-warning py-2" role="alert">
-      <div class="min-w-0">
-        <p>Settings did not update. Check the connection and try again.</p>
-        <details>
-          <summary class="cursor-pointer text-xs text-base-content/60">Technical details</summary>
-          <p class="mt-1 break-words text-xs text-base-content/60">{{ settingsError }}</p>
-        </details>
-      </div>
-    </div>
-    <div v-if="wakewordError" class="alert alert-error py-2" role="alert">
-      <div class="min-w-0 flex-1">
-        <p>The wakeword section could not reach Capsula.</p>
-        <details>
-          <summary class="cursor-pointer text-xs text-base-content/60">Technical details</summary>
-          <p class="mt-1 break-words text-xs text-base-content/60">{{ wakewordError }}</p>
-        </details>
-      </div>
-      <button type="button" class="btn btn-ghost btn-sm" @click="onRefresh">Try again</button>
-    </div>
-
-    <div class="grid gap-3 xl:grid-cols-2">
+    <div class="grid gap-3">
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
-          <h3 class="text-sm font-semibold">Detection</h3>
+          <h3 class="text-base font-semibold">Enable detection</h3>
 
           <label class="flex cursor-pointer items-start justify-between gap-4">
             <span class="min-w-0">
@@ -189,11 +188,6 @@ onUnmounted(() => {
             />
           </label>
 
-          <p v-if="applying" class="flex items-center gap-2 text-sm text-base-content/60" role="status">
-            <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Applying on Capsula…
-          </p>
-
           <div v-if="!wakewordData && !wakewordError" class="flex items-center gap-2 text-sm text-base-content/60" role="status">
             <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
             Waiting for Capsula…
@@ -201,16 +195,16 @@ onUnmounted(() => {
           <div v-else-if="wakewordError" class="text-sm text-base-content/60" role="status">
             Capsula’s wakeword state is unavailable until the connection recovers.
           </div>
-          <div v-else-if="!installedAvailable" class="rounded-box bg-base-100 p-3" role="status">
+          <div v-else-if="!installedAvailable" role="status">
             <p class="text-sm font-medium">Capsula does not have a wakeword yet.</p>
             <p class="mt-1 text-xs text-base-content/60">
               Use “Create a wakeword” in the next block to get started. Until then, detection stays unavailable.
             </p>
           </div>
-          <div v-else-if="!selectedModel?.available" class="rounded-box bg-base-100 p-3 text-sm text-warning" role="status">
+          <p v-else-if="!selectedModel?.available" class="text-sm text-warning" role="status">
             Detection starts once you choose a ready wakeword.
-          </div>
-          <div v-else-if="enabled && settingsReady && !assistantSelected" class="rounded-box bg-base-100 p-3" role="status">
+          </p>
+          <div v-else-if="enabled && settingsReady && !assistantSelected" role="status">
             <p class="text-sm font-medium text-warning">No assistant is chosen yet.</p>
             <p class="mt-1 text-xs text-base-content/60">
               Capsula hears the wakeword but will not answer until you choose an assistant above.
@@ -228,7 +222,7 @@ onUnmounted(() => {
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-sm font-semibold">Your wakeword</h3>
+            <h3 class="text-base font-semibold">Your wakeword</h3>
             <button
               type="button"
               class="btn btn-primary btn-sm"
@@ -259,20 +253,7 @@ onUnmounted(() => {
                 @change="selectModel(model)"
               />
               <div class="min-w-0 flex-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-medium">{{ model.displayName || 'Personal wakeword' }}</span>
-                  <span class="badge badge-sm" :class="model.available ? 'badge-success' : 'badge-warning'">
-                    {{ model.available ? 'Ready' : 'Not ready' }}
-                  </span>
-                  <span v-if="model.language" class="badge badge-ghost badge-sm">{{ languageName(model.language) }}</span>
-                  <span v-if="selectedModelId === model.modelId" class="badge badge-primary badge-sm">In use</span>
-                </div>
-                <details class="mt-1">
-                  <summary class="cursor-pointer text-xs text-base-content/60">Technical details</summary>
-                  <p class="mt-1 break-all font-mono text-xs text-base-content/60">
-                    {{ model.modelId }}<span v-if="model.engineId"> · {{ model.engineId }}</span>
-                  </p>
-                </details>
+                <span class="font-medium">{{ model.displayName || 'Personal wakeword' }}</span>
               </div>
             </li>
           </ul>
@@ -282,10 +263,6 @@ onUnmounted(() => {
           <div v-else class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
             No wakeword has been set up yet. Use “Create a wakeword” to get started.
           </div>
-
-          <p class="text-sm text-base-content/60">
-            Capsula keeps one wakeword. A new recording session replaces it only after the new recordings pass the checks. Your choice and the detection switch are not changed automatically.
-          </p>
 
           <details v-if="samples.length" class="rounded-box bg-base-100">
             <summary class="cursor-pointer px-4 py-3 text-sm font-medium">
@@ -317,29 +294,40 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="rounded-box bg-base-200/60 xl:col-span-2">
+      <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-sm font-semibold">Recent detections</h3>
+            <h3 class="text-base font-semibold">Recent detections</h3>
             <span class="badge badge-ghost badge-sm">{{ detections.length }}</span>
           </div>
-          <p class="text-sm text-base-content/60">
-            Times Capsula heard your wakeword hands-free, newest first. Button presses are not listed.
-          </p>
           <div v-if="!wakewordData && !wakewordError" class="skeleton h-16 w-full"></div>
           <ul v-else-if="detections.length" class="divide-y divide-base-300 rounded-box bg-base-100">
-            <li v-for="(detection, index) in detections" :key="`${detection.detectedUnixMs}-${detection.modelId}-${index}`" class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 py-2 text-sm">
-              <span class="font-medium">{{ detection.modelDisplayName || 'Your wakeword' }}</span>
-              <span class="text-xs text-base-content/60">{{ dateTime(detection.detectedUnixMs) }}</span>
+            <li
+              v-for="(detection, index) in detections"
+              :key="detection.detectionId || `${detection.detectedUnixMs}-${detection.modelId}-${index}`"
+              class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2 text-sm"
+            >
+              <span class="min-w-0">
+                <span class="block font-medium">{{ detection.modelDisplayName || 'Your wakeword' }}</span>
+                <span class="block text-xs text-base-content/60">{{ dateTime(detection.detectedUnixMs) }}</span>
+              </span>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                :aria-label="`Mark as false detection: ${detection.modelDisplayName || 'Your wakeword'} at ${dateTime(detection.detectedUnixMs)}`"
+                :disabled="!detection.detectionId || Boolean(detectionBusy)"
+                @click="reportFalseDetection(detection)"
+              >
+                <span v-if="detectionBusy === detection.detectionId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+                False detection
+              </button>
             </li>
           </ul>
           <div v-else-if="wakewordError" class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/60">
             Detection history is unavailable while the connection is down.
           </div>
           <div v-else class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/60">
-            <template v-if="!enabled">Detection is off, so Capsula is not listening for the wakeword.</template>
-            <template v-else-if="!selectedModel?.available">No wakeword is ready to use yet, so there is nothing to detect.</template>
-            <template v-else>Capsula has not heard the wakeword hands-free yet. Detections appear here when it does.</template>
+            No wakeword detections yet.
           </div>
         </div>
       </div>

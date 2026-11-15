@@ -1,9 +1,10 @@
 <script setup>
-import { computed, nextTick, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic } from '../lib/live.js'
 import { changePassword, runAuthMutation } from '../lib/session.js'
 import { dateTime } from '../lib/format.js'
+import { notify } from '../lib/toast.js'
 
 // Access is the only page that changes credentials. Password changes revoke
 // every other browser session and close every live socket, including this
@@ -13,7 +14,19 @@ import { dateTime } from '../lib/format.js'
 // /api/session and owns the single reconnect.
 
 const { data, error: loadError, loading, refresh } = useTopic(topicNames.access)
-const statusMessage = ref('')
+
+// A refresh failure keeps the last received state on screen; announce it once
+// per distinct failure instead of pinning a banner above the page.
+let lastLoadError = ''
+watch(loadError, (value) => {
+  if (!value) {
+    lastLoadError = ''
+    return
+  }
+  if (!data.value || value === lastLoadError) return
+  lastLoadError = value
+  notify.warning(`Refresh failed: ${value} Showing the last received access state.`)
+})
 
 // --- password ---------------------------------------------------------------
 
@@ -21,8 +34,6 @@ const password = reactive({ current: '', next: '', confirm: '' })
 const passwordTouched = reactive({ current: false, next: false, confirm: false })
 const passwordAttempted = ref(false)
 const passwordBusy = ref(false)
-const passwordError = ref('')
-const passwordNotice = ref('')
 
 const passwordIssues = computed(() => ({
   current: password.current ? '' : 'Enter the current administrator password.',
@@ -44,8 +55,6 @@ function resetPasswordDrafts() {
 }
 
 async function submitPassword() {
-  passwordError.value = ''
-  passwordNotice.value = ''
   if (!passwordValid.value) {
     passwordAttempted.value = true
     return
@@ -54,12 +63,12 @@ async function submitPassword() {
   try {
     const message = await runAuthMutation(() =>
       changePassword(password.current, password.next, password.confirm))
-    passwordNotice.value = message
+    notify.success(message)
     resetPasswordDrafts()
     // The shell's expired handler awaits the same in-flight mutation, then
     // reloads the session with the reissued cookie and reconnects the socket.
   } catch (err) {
-    passwordError.value = err.message
+    notify.error(err.message)
   } finally {
     passwordBusy.value = false
   }
@@ -71,7 +80,6 @@ const KEY_NAME = /^[A-Za-z0-9_.-]{1,64}$/
 
 const keyName = ref('')
 const keyBusy = ref(false)
-const keyError = ref('')
 const keyNameAttempted = ref(false)
 const newKey = ref(null)
 const secretCopied = ref(false)
@@ -85,7 +93,6 @@ const keyNameIssue = computed(() => {
 const keyNameValid = computed(() => !keyNameIssue.value)
 
 async function createKey() {
-  keyError.value = ''
   if (!keyNameValid.value) {
     keyNameAttempted.value = true
     return
@@ -97,10 +104,10 @@ async function createKey() {
     secretCopied.value = false
     keyName.value = ''
     keyNameAttempted.value = false
-    note('API key created; copy it now, it is not shown again')
+    notify.success('API key created; copy it now, it is not shown again')
     await refresh()
   } catch (err) {
-    keyError.value = err.message
+    notify.error(err.message)
   } finally {
     keyBusy.value = false
   }
@@ -111,9 +118,9 @@ async function copySecret() {
   try {
     await navigator.clipboard.writeText(newKey.value.value)
     secretCopied.value = true
-    note('API key copied to the clipboard')
+    notify.success('API key copied to the clipboard')
   } catch (_) {
-    note('Clipboard unavailable; select the key text and copy it manually')
+    notify.warning('Clipboard unavailable; select the key text and copy it manually')
   }
 }
 
@@ -127,13 +134,11 @@ function dismissSecret() {
 const revokeDialog = ref(null)
 const revokeTarget = ref(null)
 const revokeBusy = ref(false)
-const revokeError = ref('')
 
 const keys = computed(() => data.value?.keys || [])
 const activeKeyCount = computed(() => keys.value.filter((key) => !key.revoked).length)
 
 function askRevoke(key) {
-  revokeError.value = ''
   revokeTarget.value = key
   nextTick(() => {
     if (!revokeDialog.value?.open) revokeDialog.value?.showModal()
@@ -148,15 +153,14 @@ async function confirmRevoke() {
   const key = revokeTarget.value
   if (!key || revokeBusy.value) return
   revokeBusy.value = true
-  revokeError.value = ''
   try {
     await socket.request({ revokeApiKey: { name: key.name } })
     if (newKey.value?.name === key.name) dismissSecret()
     closeRevoke()
-    note(`API key “${key.name}” revoked`)
+    notify.success(`API key “${key.name}” revoked`)
     await refresh()
   } catch (err) {
-    revokeError.value = err.message
+    notify.error(err.message)
   } finally {
     revokeBusy.value = false
   }
@@ -164,7 +168,6 @@ async function confirmRevoke() {
 
 function onRevokeClosed() {
   revokeTarget.value = null
-  revokeError.value = ''
 }
 
 function onRevokeCancel(event) {
@@ -193,12 +196,6 @@ const certNames = computed(() => [
 ])
 const listeners = computed(() => status.value?.listenAddresses || [])
 
-// --- plumbing ---------------------------------------------------------------
-
-function note(message) {
-  statusMessage.value = message
-}
-
 onUnmounted(() => {
   // The plaintext key never outlives the page that revealed it.
   newKey.value = null
@@ -226,16 +223,6 @@ onUnmounted(() => {
       </button>
     </header>
 
-    <div v-if="statusMessage" role="status" class="alert alert-info py-2">
-      <span class="text-sm">{{ statusMessage }}</span>
-      <button type="button" class="btn btn-ghost btn-xs" aria-label="Dismiss message" @click="statusMessage = ''">Dismiss</button>
-    </div>
-
-    <div v-if="data && loadError" role="status" class="alert alert-warning py-2">
-      <span class="text-sm"><strong class="font-semibold">Refresh failed.</strong> {{ loadError }} Showing the last received access state.</span>
-      <button type="button" class="btn btn-sm btn-outline" :disabled="loading" @click="refresh">Retry</button>
-    </div>
-
     <div v-if="!data && loadError" role="alert" class="alert alert-error">
       <span><strong class="font-semibold">Access state unavailable.</strong> {{ loadError }}</span>
       <button type="button" class="btn btn-sm btn-outline" @click="refresh">Try again</button>
@@ -260,13 +247,6 @@ onUnmounted(() => {
               <p class="mt-1 text-sm text-base-content/70">
                 Changing it signs out every other browser and briefly reconnects this page.
               </p>
-            </div>
-
-            <div v-if="passwordError" role="alert" class="alert alert-error py-2 text-sm">
-              <span>{{ passwordError }}</span>
-            </div>
-            <div v-if="passwordNotice" role="status" class="alert alert-success py-2 text-sm">
-              <span>{{ passwordNotice }}</span>
             </div>
 
             <form class="space-y-3" novalidate :aria-busy="passwordBusy" @submit.prevent="submitPassword">
@@ -339,7 +319,7 @@ onUnmounted(() => {
               </div>
               <details class="text-xs text-base-content/60">
                 <summary class="cursor-pointer">Local recovery command</summary>
-                <code class="mt-1 block break-all font-mono">capsula auth set-password</code>
+                <code class="mt-1 block break-all font-mono">capsulad-cli auth set-password</code>
               </details>
             </form>
           </div>
@@ -436,8 +416,6 @@ onUnmounted(() => {
             </div>
             <span class="badge badge-outline">{{ activeKeyCount }} active</span>
           </div>
-
-          <div v-if="keyError" role="alert" class="alert alert-error py-2 text-sm"><span>{{ keyError }}</span></div>
 
           <form class="flex flex-col gap-2 sm:flex-row sm:items-start" novalidate @submit.prevent="createKey">
             <label class="block w-full sm:max-w-sm">
@@ -537,7 +515,6 @@ onUnmounted(() => {
           Revoke <code class="font-mono font-semibold">{{ revokeTarget?.name }}</code>?
           Any script using it will stop working immediately. This cannot be undone.
         </p>
-        <div v-if="revokeError" role="alert" class="alert alert-error mt-3 py-2 text-sm"><span>{{ revokeError }}</span></div>
         <div class="modal-action">
           <button type="button" class="btn btn-sm btn-ghost" :disabled="revokeBusy" @click="closeRevoke">Cancel</button>
           <button type="button" class="btn btn-sm btn-error" :disabled="revokeBusy" @click="confirmRevoke">

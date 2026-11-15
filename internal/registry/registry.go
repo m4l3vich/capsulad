@@ -14,11 +14,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 
+	"capsulad/internal/artifact"
 	"capsulad/internal/logbus"
 	"capsulad/internal/manifest"
 )
-
-const ManifestFile = "manifest.toml"
 
 type Interface struct {
 	Service    string
@@ -85,11 +84,13 @@ func (r *Registry) Rescan() error {
 	r.mu.RUnlock()
 	apps := map[string]*App{}
 	for _, e := range entries {
-		if !e.IsDir() {
+		// Staging and retired package directories are dot-prefixed so an
+		// interrupted install can never be mistaken for an installed app.
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		dir := filepath.Join(r.root, e.Name())
-		mf := filepath.Join(dir, ManifestFile)
+		mf := filepath.Join(dir, artifact.ManifestFile)
 		if _, err := os.Stat(mf); err != nil {
 			continue
 		}
@@ -286,25 +287,86 @@ func (a *App) InterfacesFor(service string) (Interface, bool) {
 	return Interface{}, false
 }
 
-// Install copies a validated package tree into the registry and rescans.
-// Symlinks are rejected to keep the immutable tree self-contained.
+// Install admits a validated package directory or .tar.gz archive and installs
+// it.
 func (r *Registry) Install(src string) (*App, error) {
-	m, err := manifest.Load(src, filepath.Join(src, ManifestFile))
+	stage, err := os.MkdirTemp(r.root, ".install-")
+	if err != nil {
+		return nil, fmt.Errorf("stage package: %w", err)
+	}
+	defer os.RemoveAll(stage)
+	pkg, err := artifact.OpenIn(stage, src)
 	if err != nil {
 		return nil, err
 	}
+	defer pkg.Close()
+	return r.InstallPackage(pkg)
+}
+
+// InstallPackage installs an already-opened artifact. The new tree is staged
+// inside the apps root, the installed directory is moved aside, the staged
+// tree is renamed into place and only then is the old directory removed: a
+// failed install or update leaves the previous installation intact and never
+// exposes a partial package.
+//
+// The caller's staged tree is consumed: it is renamed into the apps root when
+// it already lives on that filesystem, so a package is only ever copied once
+// on the 78.5 MiB data partition.
+func (r *Registry) InstallPackage(pkg *artifact.Package) (*App, error) {
+	if pkg == nil || pkg.Manifest == nil {
+		return nil, fmt.Errorf("package is required")
+	}
+	m := pkg.Manifest
 	if r.IsBuiltin(m.ID) {
 		return nil, fmt.Errorf("app %s is a built-in system application and cannot be replaced", m.ID)
 	}
-	dst := filepath.Join(r.root, m.ID)
-	if _, err := os.Stat(dst); err == nil {
-		return nil, fmt.Errorf("app %s is already installed; remove %s first", m.ID, dst)
+	target := filepath.Join(r.root, m.ID)
+	stage, err := os.MkdirTemp(r.root, ".stage-")
+	if err != nil {
+		return nil, fmt.Errorf("stage package: %w", err)
 	}
-	if err := copyTree(src, dst); err != nil {
-		// A partial package must not survive a failed install: on the 78.5 MiB
-		// data partition it would silently consume the space a retry needs.
-		_ = os.RemoveAll(dst)
-		return nil, err
+	defer os.RemoveAll(stage)
+	staged := filepath.Join(stage, "pkg")
+	if err := os.Rename(pkg.Dir, staged); err != nil {
+		copied, copyErr := artifact.OpenIn(stage, pkg.Dir)
+		if copyErr != nil {
+			return nil, fmt.Errorf("stage package: %w", copyErr)
+		}
+		defer copied.Close()
+		staged = copied.Dir
+	}
+
+	previous := ""
+	if _, err := os.Stat(target); err == nil {
+		retired, err := os.MkdirTemp(r.root, ".previous-")
+		if err != nil {
+			return nil, fmt.Errorf("stage previous package: %w", err)
+		}
+		previous = retired
+		if err := os.Rename(target, filepath.Join(previous, "pkg")); err != nil {
+			_ = os.RemoveAll(previous)
+			return nil, fmt.Errorf("set aside installed %s: %w", m.ID, err)
+		}
+	}
+	if previous != "" {
+		defer os.RemoveAll(previous)
+	}
+	if err := os.Rename(staged, target); err != nil {
+		if previous != "" {
+			_ = os.Rename(filepath.Join(previous, "pkg"), target)
+		}
+		return nil, fmt.Errorf("activate %s: %w", m.ID, err)
+	}
+	// The staged tree is created by os.MkdirTemp, which is 0700. The sandbox
+	// mounts the package read-only and traverses it as an unprivileged user, so
+	// the directory has to be traversable for the app to start at all. The
+	// package's own file modes are the artifact policy and are left alone.
+	if err := os.Chmod(target, 0o755); err != nil {
+		_ = os.RemoveAll(target)
+		if previous != "" {
+			_ = os.Rename(filepath.Join(previous, "pkg"), target)
+		}
+		return nil, fmt.Errorf("make installed %s traversable: %w", m.ID, err)
 	}
 	if err := r.Rescan(); err != nil {
 		return nil, err
@@ -314,40 +376,6 @@ func (r *Registry) Install(src string) (*App, error) {
 		return nil, fmt.Errorf("installed app %s was not discovered", m.ID)
 	}
 	return app, nil
-}
-
-func copyTree(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("package contains a symlink: %s", path)
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if strings.HasPrefix(rel, "..") {
-			return fmt.Errorf("path escapes package: %s", path)
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		mode := os.FileMode(0o444)
-		if info.Mode()&0o111 != 0 {
-			mode = 0o555
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, mode)
-	})
 }
 
 // Uninstall removes an installed package directory.

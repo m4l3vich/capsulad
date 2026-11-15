@@ -71,8 +71,8 @@ type clockAlarm struct {
 	// schedule last fired. Wall time (not UTC) deduplicates the repeated hour
 	// at a fall-back DST transition and still prevents a 200 ms tick from
 	// re-ringing the same minute.
-	lastTriggerKey string
-	lastTriggeredMS   uint64
+	lastTriggerKey  string
+	lastTriggeredMS uint64
 }
 
 func (a *clockAlarm) entry() dcron.Entry {
@@ -213,8 +213,8 @@ func newBuiltinClock(d *Daemon, segmentID string) *builtinClock {
 		alertSig: map[string]clockDisplay{}, audioCache: map[string][]byte{},
 		watchers:        map[int]chan *clockv1.ClockState{},
 		selfDisabledIDs: map[string]bool{},
-		now:      time.Now,
-		mono:     func() uint64 { return d.clock.NowNS() },
+		now:             time.Now,
+		mono:            func() uint64 { return d.clock.NowNS() },
 	}
 	c.ringID = d.ringResourceID()
 	return c
@@ -2020,7 +2020,7 @@ func (c *builtinClock) addAlarm(schedule, zone, label string, oneShot, disabled 
 		if existing.ID() == entry.ID() {
 			snap, err := c.writeAlarmState(current, labels, rev)
 			if err != nil {
-				return nil, appSettingsStatus(err)
+				return nil, c.d.appSettingsStatus(clockAppID, err)
 			}
 			c.applySettings(snap.Revision, snap.Values)
 			return c.alarmInfoForEntry(existing), nil
@@ -2029,7 +2029,7 @@ func (c *builtinClock) addAlarm(schedule, zone, label string, oneShot, disabled 
 	next := append(append([]dcron.Entry(nil), current...), entry)
 	snap, err := c.writeAlarmState(next, labels, rev)
 	if err != nil {
-		return nil, appSettingsStatus(err)
+		return nil, c.d.appSettingsStatus(clockAppID, err)
 	}
 	// Apply synchronously so a GetState immediately after AddAlarm observes
 	// the new entry; the settings watcher will apply the same revision again.
@@ -2069,7 +2069,7 @@ func (c *builtinClock) deleteAlarm(alarmID string, expectedRevision uint64) (*cl
 	delete(labels, target.ID())
 	snap, err := c.writeAlarmState(next, labels, rev)
 	if err != nil {
-		return nil, appSettingsStatus(err)
+		return nil, c.d.appSettingsStatus(clockAppID, err)
 	}
 	c.mu.Lock()
 	delete(c.selfDisabledIDs, target.ID())
@@ -2113,7 +2113,7 @@ func (c *builtinClock) setAlarmEnabled(alarmID string, enabled bool, expectedRev
 	}
 	snap, err := c.writeAlarmState(next, labels, rev)
 	if err != nil {
-		return nil, appSettingsStatus(err)
+		return nil, c.d.appSettingsStatus(clockAppID, err)
 	}
 	// Clear the one-shot self-disable marker only after the write commits.
 	// A stale/failed CAS therefore leaves the ringing one-shot untouched.

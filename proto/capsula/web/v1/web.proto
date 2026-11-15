@@ -186,10 +186,16 @@ message BluetoothView {
 }
 
 message PairedDeviceView {
-  string address = 1;
+  // The Bluetooth address is device-local identity and never crosses the
+  // browser boundary. Clients refer to a paired device by the opaque ID.
+  reserved 1;
+  reserved "address";
   string name = 2;
   bool connected = 3;
   bool trusted = 4;
+  // Stable opaque identifier derived from the address; safe to display and
+  // round-trip through UnpairDevice.
+  string device_id = 5;
 }
 
 message MediaPlayerView {
@@ -573,6 +579,8 @@ message WakewordDetectionView {
   string model_id = 1;
   string model_display_name = 2;
   int64 detected_unix_ms = 3;
+  // Opaque per-detection identity so the browser can dismiss one entry.
+  string detection_id = 4;
 }
 
 message WakewordView {
@@ -630,8 +638,13 @@ message Command {
     CreateApiKey create_api_key = 13;
     RevokeApiKey revoke_api_key = 14;
     WifiCommand wifi = 15;
+    FalseDetection false_detection = 16;
   }
 }
+
+// FalseDetection dismisses one stored detection the user judged spurious. It
+// is purely presentational: no training data is affected.
+message FalseDetection { string detection_id = 1; }
 
 message SettingsUpdate {
   uint64 expected_revision = 1;
@@ -789,7 +802,11 @@ message BluetoothCommand {
 
 message SetDiscoverable { bool discoverable = 1; }
 message SetIncomingConnections { bool incoming_connections = 1; }
-message UnpairDevice { string address = 1; }
+message UnpairDevice {
+  reserved 1;
+  reserved "address";
+  string device_id = 2;
+}
 
 message BluetoothResult {
   string message = 1;

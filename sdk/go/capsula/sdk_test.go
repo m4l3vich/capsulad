@@ -236,15 +236,6 @@ func TestABIAndStatusErrors(t *testing.T) {
 	}
 }
 
-func TestMissingCapabilities(t *testing.T) {
-	if missing := missingCapabilities([]string{CapabilityABIV1, CapabilityAudioPlayback}); len(missing) != 0 {
-		t.Fatalf("missing = %v", missing)
-	}
-	if missing := missingCapabilities([]string{"capsula.made.up"}); len(missing) != 1 {
-		t.Fatalf("missing = %v", missing)
-	}
-}
-
 func TestTimeoutMillis(t *testing.T) {
 	if got := timeoutMillis(nil, 0); got != 0 {
 		t.Fatalf("no timeout = %d", got)

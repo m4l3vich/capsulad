@@ -35,6 +35,9 @@ type Activation struct {
 // Detection is one real engine activation retained for the authenticated Web
 // UI. It is written at detection time and never reconstructed from logs.
 type Detection struct {
+	// ID is a runtime-only identity for the entry, so the browser can dismiss
+	// a single false detection. It is never persisted.
+	ID          string
 	ModelID     string
 	DisplayName string
 	TimeNS      uint64
@@ -186,6 +189,24 @@ func (m *Manager) RecentDetections(limit int) []Detection {
 	return out
 }
 
+// DismissDetection removes one stored detection by its runtime ID and reports
+// whether it existed. Ordering of the remaining entries is preserved; the
+// browser calls this when the user marks a detection as a false positive.
+func (m *Manager) DismissDetection(id string) bool {
+	if id == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, d := range m.recent {
+		if d.ID == id {
+			m.recent = append(m.recent[:i], m.recent[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // Trigger creates an activation for the selected model. It is the simulator's
 // manual detection path and the hook a real DSP engine calls. Manual origins are
 // not gated on detector availability; engine detections still are.
@@ -229,7 +250,7 @@ func (m *Manager) Trigger(origin, modelID string) (Activation, bool) {
 	// presented as keyword detections.
 	if origin == "wakeword" {
 		m.recent = append(m.recent, Detection{
-			ModelID: modelID, DisplayName: displayName, TimeNS: now, UnixMS: act.UnixMS,
+			ID: ids.New("det"), ModelID: modelID, DisplayName: displayName, TimeNS: now, UnixMS: act.UnixMS,
 		})
 		if len(m.recent) > recentDetectionLimit {
 			copy(m.recent, m.recent[len(m.recent)-recentDetectionLimit:])

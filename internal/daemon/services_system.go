@@ -347,10 +347,10 @@ type assetService struct {
 
 func (s *assetService) ListAssets(ctx context.Context, req *frameworkv1.ListAssetsRequest) (*frameworkv1.ListAssetsResponse, error) {
 	out := &frameworkv1.ListAssetsResponse{}
-	for _, a := range s.d.assets.List(req.Prefix) {
+	for _, a := range s.d.assets.List(req.GetPrefix()) {
 		out.Assets = append(out.Assets, &frameworkv1.SharedAssetInfo{
 			AssetId: a.ID, Path: a.Path, MediaType: a.MediaType, Sha256Hex: a.SHA256,
-			License: a.License, Attribution: a.Attribution, RequiredBaseAsset: a.Required,
+			SizeBytes: uint64(a.Size),
 		})
 	}
 	return out, nil

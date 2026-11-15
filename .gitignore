@@ -1,12 +1,15 @@
 build/
 .capsula/
-_capsula-mini-deploy-backup/
+_capsula-mini-*/
+probe
 *.log
 .DS_Store
 __pycache__/
 *.pyc
 sdk/native/target/
 sdk/rust/target/
-sdk/rust/Cargo.lock
 web/node_modules/
 apps/dumbassistant/dumbassistant
+/capsulad
+/capsulad-cli
+/protogen

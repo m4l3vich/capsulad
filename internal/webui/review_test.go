@@ -626,7 +626,7 @@ func TestZeroExpectedRevisionIsRejected(t *testing.T) {
 
 	conn.send(&webv1.ClientFrame{RequestId: 81, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
 		Op: &webv1.Command_AppSettings{AppSettings: &webv1.AppSettingsUpdate{
-			AppId: "org.example.player",
+			AppId:   "org.example.player",
 			Changes: []*webv1.AppSettingChangeView{{Key: "effect", ValueJson: `"pulse"`}},
 		}},
 	}}})

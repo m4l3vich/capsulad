@@ -2,11 +2,11 @@
 import { ref } from 'vue'
 import { navigate } from '../router.js'
 import { login, runAuthMutation, session } from '../lib/session.js'
+import { notify } from '../lib/toast.js'
 
 defineProps({ expired: { type: Boolean, default: false } })
 
 const password = ref('')
-const error = ref('')
 const busy = ref(false)
 
 function nextPath() {
@@ -16,7 +16,6 @@ function nextPath() {
 
 async function submit() {
   if (busy.value || !password.value) return
-  error.value = ''
   busy.value = true
   try {
     const target = await runAuthMutation(() => login(password.value, nextPath()))
@@ -25,7 +24,7 @@ async function submit() {
     // only the requested destination is left for this view to apply.
     navigate(target, { replace: true })
   } catch (err) {
-    error.value = err?.message || 'Sign in failed'
+    notify.error(err?.message || 'Sign in failed')
   } finally {
     busy.value = false
   }
@@ -49,9 +48,6 @@ async function submit() {
         <div v-if="expired" class="alert alert-warning py-2" role="alert">
           <span class="text-sm">The session ended. Please sign in again.</span>
         </div>
-        <div v-if="error" class="alert alert-error py-2" role="alert">
-          <span class="text-sm">{{ error }}</span>
-        </div>
 
         <form class="flex flex-col gap-3" @submit.prevent="submit">
           <label class="form-control w-full">
@@ -74,7 +70,7 @@ async function submit() {
 
         <p class="text-xs leading-relaxed text-base-content/60">
           The certificate is self-signed; compare its fingerprint with
-          <code class="rounded bg-base-200 px-1 py-0.5 font-mono">capsula cert status</code>.
+          <code class="rounded bg-base-200 px-1 py-0.5 font-mono">capsulad-cli cert status</code>.
         </p>
       </div>
     </main>

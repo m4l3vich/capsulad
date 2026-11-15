@@ -26,9 +26,6 @@ const (
 // singleton receives AppLaunchInvocation in place; a starting singleton holds
 // a bounded, expiring invocation; ordinary apps spawn a new supervised run.
 func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocationID string, spawned bool, err error) {
-	if isRetiredApp(appID) {
-		return "", "", false, fmt.Errorf("application %s is retired and ignored; remove its package directory to reclaim space", appID)
-	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return "", "", false, fmt.Errorf("application %s is not installed", appID)
@@ -374,7 +371,7 @@ func (d *Daemon) Stop(runID string) bool {
 // isSelectedDefault reports whether appID is still an installed provider that
 // the persisted settings choose for a resource or for the assistant role.
 func (d *Daemon) isSelectedDefault(appID string) bool {
-	if appID == "" || isRetiredApp(appID) {
+	if appID == "" {
 		return false
 	}
 	app, ok := d.reg.Get(appID)
@@ -503,7 +500,7 @@ func (d *Daemon) pushAppSettings(appID string, rev uint64, values map[string]jso
 // running. It never resurrects an app the user explicitly stopped mid-flight;
 // selection changes and boot are the triggers.
 func (d *Daemon) ensureRunning(appID string) {
-	if appID == "" || isRetiredApp(appID) {
+	if appID == "" {
 		return
 	}
 	if _, ok := d.reg.Get(appID); !ok {
@@ -519,9 +516,6 @@ func (d *Daemon) ensureRunning(appID string) {
 
 func (d *Daemon) startBootApps() {
 	for _, app := range d.reg.List() {
-		if isRetiredApp(app.Manifest.ID) {
-			continue
-		}
 		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
 			continue // started by startSystemApps before this pass
 		}

@@ -48,9 +48,13 @@ if [ -f "$BOOTLOG" ] && [ "$(wc -c <"$BOOTLOG")" -gt 65536 ]; then
     : >"$BOOTLOG"
 fi
 
-# This busybox has no `pgrep -x`, and the detached watchdog feeder shares the
-# `capsulad` process name. Match the daemon by comm plus cmdline, never by
-# name alone: killing the feeder can reset the board once the timer is armed.
+# This busybox has no `pgrep -x`, so match the daemon by comm plus cmdline,
+# never by name alone. The detached watchdog feeder started by this release is a
+# plain /bin/sh process that only writes to an inherited descriptor, so it never
+# matches on comm. A feeder left by an older release is a copy of the daemon
+# (its __capsula_watchdog_feeder subcommand), so it shares comm and has to be
+# excluded by its cmdline: killing it can reset the board once the timer is
+# armed.
 is_daemon() {
     [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
     [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "capsulad" ] || return 1

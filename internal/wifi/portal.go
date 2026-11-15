@@ -204,8 +204,8 @@ func (p *portal) handleConnect(w http.ResponseWriter, r *http.Request) {
 	security, err := NormalizeSecurity(req.Security)
 	if err != nil || !validSSID(req.SSID) {
 		p.renderPage(w, r, portalPage{
-			Token: p.issueToken(p.clientIP(r)),
-			Notice: "Enter a valid network name and security mode.",
+			Token:       p.issueToken(p.clientIP(r)),
+			Notice:      "Enter a valid network name and security mode.",
 			ConnectSSID: req.SSID,
 		})
 		return
@@ -214,16 +214,16 @@ func (p *portal) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if security != SecurityOpen && (len(req.Passphrase) < 8 || len(req.Passphrase) > 63 ||
 		strings.ContainsAny(req.Passphrase, "\x00\r\n")) {
 		p.renderPage(w, r, portalPage{
-			Token: p.issueToken(p.clientIP(r)),
-			Notice: "The password must be 8-63 characters without control characters.",
+			Token:       p.issueToken(p.clientIP(r)),
+			Notice:      "The password must be 8-63 characters without control characters.",
 			ConnectSSID: req.SSID,
 		})
 		return
 	}
 	if security == SecurityWEP {
 		p.renderPage(w, r, portalPage{
-			Token: p.issueToken(p.clientIP(r)),
-			Notice: "WEP networks are not supported.",
+			Token:       p.issueToken(p.clientIP(r)),
+			Notice:      "WEP networks are not supported.",
 			ConnectSSID: req.SSID,
 		})
 		return
@@ -412,15 +412,15 @@ func (p *portal) tokenMAC(clientIP, payload string) string {
 }
 
 type portalPage struct {
-	Token            string
-	Status           Status
-	Known            []KnownNetwork
-	Scans            []ScanResult
-	Scanned          bool
-	Notice           string
-	APPassword       string
-	ConnectSSID      string
-	ConnectSecurity  string
+	Token           string
+	Status          Status
+	Known           []KnownNetwork
+	Scans           []ScanResult
+	Scanned         bool
+	Notice          string
+	APPassword      string
+	ConnectSSID     string
+	ConnectSecurity string
 }
 
 type portalConnectPage struct{ SSID string }

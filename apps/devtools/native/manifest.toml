@@ -1,0 +1,71 @@
+id = "dev.hardware"
+name = "Hardware Devtools"
+version = "0.1.0"
+description = "Development-only hardware and framework self-test: device info, segment and ring presentations, touch capture, microphone capture, tone playback, app settings, AppBus echo."
+background = false
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "native"
+path = "devtools"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app uses the public framework services and AppBus only; it never reaches
+# into daemon internals. [native_sdk] is requirement metadata the supervisor
+# checks before install and launch.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[settings]]
+key = "note"
+label = "Probe note"
+description = "Written by the settings step to prove app-scoped CAS updates. The step reads the current value, writes a new one, and reads it back."
+type = "text"
+default = "devtools"
+
+[[actions]]
+id = "selftest"
+label = "Run every self-test step"
+
+[[actions]]
+id = "info"
+label = "Read device info and audio state"
+
+[[actions]]
+id = "display"
+label = "Show a known digit pattern on the segment display"
+
+[[actions]]
+id = "ring"
+label = "Show a known pattern on the ring"
+
+[[actions]]
+id = "audio"
+label = "Capture one second of microphone PCM and play a generated tone"
+
+[[actions]]
+id = "input"
+label = "Watch bounded partial and full touch captures"
+
+[[actions]]
+id = "settings"
+label = "Read and write the probe note setting"
+
+[[actions]]
+id = "echo"
+label = "Call the AppBus echo service"
+
+[[arguments]]
+name = "step"
+description = "One step name, or selftest. An empty value runs selftest."
+type = "text"
+
+[[interfaces]]
+service = "dev.devtools.v1.DevToolsService"
+version = "v1"
+descriptor = "proto/devtools.protoset"

@@ -4,9 +4,12 @@ import { link, navigate, route, startRouter } from './router.js'
 import { authMutationSettled, loadSession, logout, runAuthMutation, session, watchAuthSocket } from './lib/session.js'
 import { liveState } from './lib/live.js'
 import { socket } from './lib/ws.js'
+import { dismissToast, notify } from './lib/toast.js'
+import ToastHost from './components/ToastHost.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
 import SettingsView from './views/SettingsView.vue'
+import AssetsView from './views/AssetsView.vue'
 import AccessView from './views/AccessView.vue'
 import DiagnosticsView from './views/DiagnosticsView.vue'
 
@@ -16,6 +19,7 @@ let recovering = null
 const nav = [
   { path: '/', label: 'Overview' },
   { path: '/settings', label: 'Settings' },
+  { path: '/assets', label: 'Assets' },
   { path: '/access', label: 'Access' },
   { path: '/diagnostics', label: 'Diagnostics' }
 ]
@@ -23,6 +27,7 @@ const nav = [
 const views = {
   '/': OverviewView,
   '/settings': SettingsView,
+  '/assets': AssetsView,
   '/access': AccessView,
   '/diagnostics': DiagnosticsView
 }
@@ -36,6 +41,36 @@ const connection = computed(() => ({
   expired: { label: 'Session ended', dot: 'bg-error' },
   closed: { label: 'Offline', dot: 'bg-error' }
 }[liveState.value] || { label: 'Offline', dot: 'bg-error' }))
+
+// Connection feedback lives in the toast stack: one slot, replaced in place as
+// the socket moves between states, so it never stacks on repeated retries and
+// never duplicates the header dot. Only meaningful while signed in; the login
+// screen has no live connection of its own.
+const CONNECTION_TOAST_ID = 'connection-state'
+const connectionToasts = {
+  connecting: () => notify.info('Connecting to the speaker…', { id: CONNECTION_TOAST_ID }),
+  reconnecting: () => notify.warning(
+    'Connection lost. Reconnecting; the page keeps its last snapshot until the device answers.',
+    { id: CONNECTION_TOAST_ID }
+  ),
+  // The page cannot act on a closed socket until it reopens, so this one stays.
+  closed: () => notify.error(
+    'The realtime connection is closed. Live controls are unavailable until it reconnects.',
+    { id: CONNECTION_TOAST_ID, timeout: 0 }
+  )
+}
+
+watch(
+  [liveState, () => session.authenticated],
+  ([state, authenticated]) => {
+    if (!authenticated || state === 'open') {
+      dismissToast(CONNECTION_TOAST_ID)
+      return
+    }
+    connectionToasts[state]?.()
+  },
+  { immediate: true }
+)
 
 function isActive(path) {
   return route.path === path
@@ -158,29 +193,18 @@ async function signOut() {
     </header>
 
     <main id="main" class="mx-auto w-full max-w-6xl flex-1 px-3 py-4 sm:px-5">
-      <div v-if="liveState === 'connecting'" class="alert alert-info mb-4 py-2" role="status">
-        <span class="loading loading-spinner loading-xs"></span>
-        <span class="text-sm">Connecting to the speaker…</span>
-      </div>
-      <div v-else-if="liveState === 'reconnecting'" class="alert alert-warning mb-4 py-2" role="status">
-        <span class="text-sm">Connection lost. Reconnecting; the page keeps its last snapshot until the device answers.</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="socket.connect()">Retry now</button>
-      </div>
-      <div v-else-if="liveState === 'closed'" class="alert alert-error mb-4 py-2" role="alert">
-        <span class="text-sm">The realtime connection is closed. Live controls are unavailable until it reconnects.</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="socket.connect()">Reconnect</button>
-      </div>
-
       <component :is="view" v-if="view" />
 
       <section v-else class="card border border-base-300 bg-base-100">
         <div class="card-body items-start gap-3">
           <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Not found</p>
           <h1 class="text-xl font-semibold">This page does not exist</h1>
-          <p class="text-sm text-base-content/70">The console has Main, Settings, Access and Diagnostics. Use the navigation above or return to Main.</p>
+          <p class="text-sm text-base-content/70">The console has Main, Settings, Assets, Access and Diagnostics. Use the navigation above or return to Main.</p>
           <a v-bind="link('/')" class="btn btn-primary btn-sm">Go to Main</a>
         </div>
       </section>
     </main>
   </div>
+
+  <ToastHost />
 </template>

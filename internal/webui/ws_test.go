@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -17,13 +18,16 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	webv1 "capsulad/gen/go/capsula/web/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	webv1 "capsulad/gen/go/capsula/web/v1"
 	"capsulad/internal/manifest"
 	"capsulad/internal/registry"
 	"capsulad/internal/uichanges"
+	"capsulad/internal/wakeword"
 	"capsulad/internal/websecurity"
 )
 
@@ -819,5 +823,232 @@ func TestOverviewListingCarriesAppActions(t *testing.T) {
 	// An app the registry does not know is listed without invented actions.
 	if len(player.GetActions()) != 0 {
 		t.Fatalf("player actions = %v, want none", player.GetActions())
+	}
+}
+
+// TestOverviewHidesPairedAddressAndUnlaunchedProviders covers two browser
+// boundaries at once: a paired device is identified by an opaque ID (never its
+// Bluetooth address), and an installed media player that was never launched is
+// not offered as a provider because nothing can route to its service.
+func TestOverviewHidesPairedAddressAndUnlaunchedProviders(t *testing.T) {
+	env := newTestEnv(t)
+	conn, _, _ := connectSession(t, env)
+	conn.send(&webv1.ClientFrame{RequestId: 30, Body: &webv1.ClientFrame_SnapshotRequest{
+		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_OVERVIEW},
+	}})
+	overview := conn.waitSnapshot(t, 30).GetOverview()
+
+	paired := overview.GetPairedDevices()
+	if len(paired) != 1 || paired[0].GetName() != "Phone" {
+		t.Fatalf("paired devices = %v", paired)
+	}
+	if paired[0].GetDeviceId() == "" {
+		t.Fatal("paired device has no opaque id")
+	}
+	if want := pairedDeviceID("AA:BB:CC:DD:EE:FF"); paired[0].GetDeviceId() != want {
+		t.Fatalf("device id = %q, want %q", paired[0].GetDeviceId(), want)
+	}
+	// The address must not survive anywhere in the serialized view, including
+	// unknown fields or a stray mirrored field.
+	raw, err := proto.Marshal(overview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("AA:BB:CC:DD:EE:FF")) ||
+		bytes.Contains(bytes.ToLower(raw), []byte("aa:bb:cc:dd:ee:ff")) {
+		t.Fatalf("overview leaks the device address: %q", raw)
+	}
+
+	providers := overview.GetProviders()
+	if len(providers) != 1 || providers[0].GetAppId() != "org.example.player" {
+		t.Fatalf("providers = %v, want only the running player", providers)
+	}
+}
+
+// TestUnpairDeviceByOpaqueID proves the browser unpairs without ever holding
+// the address: the opaque ID resolves against the pairing list and only the
+// framework call carries the real address.
+func TestUnpairDeviceByOpaqueID(t *testing.T) {
+	env := newTestEnv(t)
+	conn, _, _ := connectSession(t, env)
+	unpairedCalls := func() []string {
+		env.back.mu.Lock()
+		defer env.back.mu.Unlock()
+		return append([]string(nil), env.back.unpaired...)
+	}
+
+	conn.send(&webv1.ClientFrame{RequestId: 31, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+		Op: &webv1.Command_Bluetooth{Bluetooth: &webv1.BluetoothCommand{
+			Action: &webv1.BluetoothCommand_Unpair{Unpair: &webv1.UnpairDevice{
+				DeviceId: pairedDeviceID("aa:bb:cc:dd:ee:ff"),
+			}},
+		}},
+	}}})
+	result := conn.waitResult(t, 31).GetBluetooth()
+	if !strings.Contains(result.GetMessage(), "Phone") {
+		t.Fatalf("unpair message = %q, want the device name", result.GetMessage())
+	}
+	if strings.Contains(result.GetMessage(), "AA:BB") || strings.Contains(result.GetMessage(), "aa:bb") {
+		t.Fatalf("unpair message leaks the address: %q", result.GetMessage())
+	}
+	if got := unpairedCalls(); len(got) != 1 || got[0] != "AA:BB:CC:DD:EE:FF" {
+		t.Fatalf("framework unpair calls = %v, want the real address", got)
+	}
+
+	// An unknown ID is refused before any framework call.
+	conn.send(&webv1.ClientFrame{RequestId: 32, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+		Op: &webv1.Command_Bluetooth{Bluetooth: &webv1.BluetoothCommand{
+			Action: &webv1.BluetoothCommand_Unpair{Unpair: &webv1.UnpairDevice{DeviceId: "000000000000"}},
+		}},
+	}}})
+	for {
+		frame := conn.read()
+		if frame.GetRequestId() != 32 {
+			continue
+		}
+		if e := frame.GetError(); e != nil {
+			if e.GetCode() != webv1.ErrorCode_ERROR_CODE_NOT_FOUND {
+				t.Fatalf("unknown device error = %v", e)
+			}
+			break
+		}
+	}
+	if got := unpairedCalls(); len(got) != 1 {
+		t.Fatalf("unknown device still unpair-ed: %v", got)
+	}
+}
+
+// TestUnnamedPairedDeviceNeverExposesAddress covers BlueZ handing back the
+// address as the name of a device without an alias: neither the overview's
+// display name nor the unpair success message may carry the address.
+func TestUnnamedPairedDeviceNeverExposesAddress(t *testing.T) {
+	env := newTestEnv(t)
+	const ghostAddress = "11:22:33:44:55:66"
+	env.back.mu.Lock()
+	env.back.extraPaired = []*frameworkv1.PairedDevice{{Address: ghostAddress, Name: ghostAddress, Trusted: true}}
+	env.back.mu.Unlock()
+	conn, _, _ := connectSession(t, env)
+
+	conn.send(&webv1.ClientFrame{RequestId: 40, Body: &webv1.ClientFrame_SnapshotRequest{
+		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_OVERVIEW},
+	}})
+	overview := conn.waitSnapshot(t, 40).GetOverview()
+
+	var ghost *webv1.PairedDeviceView
+	for _, device := range overview.GetPairedDevices() {
+		if device.GetDeviceId() == pairedDeviceID(ghostAddress) {
+			ghost = device
+		}
+	}
+	if ghost == nil {
+		t.Fatalf("unnamed device missing from overview: %v", overview.GetPairedDevices())
+	}
+	if ghost.GetName() != "" {
+		t.Fatalf("unnamed device display name = %q, want empty", ghost.GetName())
+	}
+	raw, err := proto.Marshal(overview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(ghostAddress)) ||
+		bytes.Contains(raw, []byte(strings.ReplaceAll(ghostAddress, ":", ""))) {
+		t.Fatalf("overview leaks the unnamed device address: %q", raw)
+	}
+
+	conn.send(&webv1.ClientFrame{RequestId: 41, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+		Op: &webv1.Command_Bluetooth{Bluetooth: &webv1.BluetoothCommand{
+			Action: &webv1.BluetoothCommand_Unpair{Unpair: &webv1.UnpairDevice{DeviceId: ghost.GetDeviceId()}},
+		}},
+	}}})
+	result := conn.waitResult(t, 41).GetBluetooth()
+	if result.GetMessage() != "Device unpaired" {
+		t.Fatalf("unpair message = %q, want the unnamed fallback", result.GetMessage())
+	}
+	if strings.Contains(result.GetMessage(), ghostAddress) ||
+		strings.Contains(result.GetMessage(), strings.ReplaceAll(ghostAddress, ":", "")) {
+		t.Fatalf("unpair message leaks the address: %q", result.GetMessage())
+	}
+	env.back.mu.Lock()
+	unpaired := append([]string(nil), env.back.unpaired...)
+	env.back.mu.Unlock()
+	if len(unpaired) != 1 || unpaired[0] != ghostAddress {
+		t.Fatalf("framework unpair calls = %v, want the real address", unpaired)
+	}
+}
+
+// TestDismissFalseDetection covers the dismissal round trip: the snapshot
+// carries an opaque detection ID, the command removes exactly that entry, and
+// an unknown ID is rejected rather than silently ignored.
+func TestDismissFalseDetection(t *testing.T) {
+	env := newTestEnv(t)
+	env.srv.Wakeword = &fakeWakeword{detections: []wakeword.Detection{
+		{ID: "det_keep", ModelID: "m1", DisplayName: "Marusia", UnixMS: 200},
+		{ID: "det_drop", ModelID: "m1", DisplayName: "Marusia", UnixMS: 100},
+	}}
+	conn, _, _ := connectSession(t, env)
+
+	detections := func(requestID uint64) []*webv1.WakewordDetectionView {
+		conn.send(&webv1.ClientFrame{RequestId: requestID, Body: &webv1.ClientFrame_SnapshotRequest{
+			SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_WAKEWORD},
+		}})
+		return conn.waitSnapshot(t, requestID).GetWakeword().GetDetections()
+	}
+
+	before := detections(40)
+	if len(before) != 2 {
+		t.Fatalf("detections = %v, want 2", before)
+	}
+	for _, d := range before {
+		if d.GetDetectionId() == "" {
+			t.Fatalf("detection %v has no id", d)
+		}
+	}
+
+	conn.send(&webv1.ClientFrame{RequestId: 41, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+		Op: &webv1.Command_FalseDetection{FalseDetection: &webv1.FalseDetection{DetectionId: " det_drop "}},
+	}}})
+	if conn.waitResult(t, 41).GetDeleted() == nil {
+		t.Fatal("dismissal did not return a deleted result")
+	}
+
+	after := detections(42)
+	if len(after) != 1 || after[0].GetDetectionId() != "det_keep" {
+		t.Fatalf("detections after dismissal = %v", after)
+	}
+
+	conn.send(&webv1.ClientFrame{RequestId: 43, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+		Op: &webv1.Command_FalseDetection{FalseDetection: &webv1.FalseDetection{DetectionId: "det_gone"}},
+	}}})
+	for {
+		frame := conn.read()
+		if frame.GetRequestId() != 43 {
+			continue
+		}
+		if e := frame.GetError(); e != nil {
+			if e.GetCode() != webv1.ErrorCode_ERROR_CODE_NOT_FOUND {
+				t.Fatalf("unknown detection error = %v", e)
+			}
+			break
+		}
+	}
+}
+
+// A failed run listing proves nothing about which providers are live, so the
+// overview offers none instead of listing installed-but-unroutable players.
+func TestOverviewDropsProvidersWhenRunsAreUnknown(t *testing.T) {
+	env := newTestEnv(t)
+	env.back.mu.Lock()
+	env.back.runsErr = status.Error(codes.Unavailable, "run table unavailable")
+	env.back.mu.Unlock()
+	conn, _, _ := connectSession(t, env)
+	conn.send(&webv1.ClientFrame{RequestId: 50, Body: &webv1.ClientFrame_SnapshotRequest{
+		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_OVERVIEW},
+	}})
+	overview := conn.waitSnapshot(t, 50).GetOverview()
+	if len(overview.GetProviders()) != 0 {
+		t.Fatalf("providers = %v, want none when runs are unknown", overview.GetProviders())
+	}
+	if len(overview.GetRuns()) != 0 {
+		t.Fatalf("runs = %v, want none", overview.GetRuns())
 	}
 }

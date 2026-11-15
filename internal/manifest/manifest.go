@@ -103,9 +103,8 @@ type GitHubAttestation struct {
 // is installed or launched; it is not a negotiation. A binding that loads the
 // library still verifies the ABI independently at startup.
 type NativeSDK struct {
-	ABIMajor             int      `toml:"abi_major"`
-	MinMinor             int      `toml:"min_minor"`
-	RequiredCapabilities []string `toml:"required_capabilities"`
+	ABIMajor int `toml:"abi_major"`
+	MinMinor int `toml:"min_minor"`
 }
 
 type Manifest struct {
@@ -134,17 +133,6 @@ type Manifest struct {
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
-const capabilityPattern = "lowercase letters, digits, '.', '_' or '-'"
-
-var capabilityRe = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
-
-// ValidNativeCapability reports whether name is a well-formed capability
-// identifier. Capabilities are a shared vocabulary between apps and the native
-// runtime build, so the manifest and runtime metadata use one rule.
-func ValidNativeCapability(name string) bool {
-	return capabilityRe.MatchString(name)
-}
-
 var settingTypes = map[string]bool{
 	"text": true, "text_masked": true, "boolean": true,
 	"integer": true, "number": true, "select": true,
@@ -165,9 +153,17 @@ func Load(root, file string) (*Manifest, error) {
 	if extra := md.Undecoded(); len(extra) > 0 {
 		keys := make([]string, 0, len(extra))
 		for _, k := range extra {
+			// The native SDK capability requirement was removed, but packages
+			// installed before that change still carry the key; they must keep
+			// loading. The ABI requirement under native_sdk remains.
+			if k.String() == "native_sdk.required_capabilities" {
+				continue
+			}
 			keys = append(keys, k.String())
 		}
-		return nil, fmt.Errorf("unknown manifest keys: %s", strings.Join(keys, ", "))
+		if len(keys) > 0 {
+			return nil, fmt.Errorf("unknown manifest keys: %s", strings.Join(keys, ", "))
+		}
 	}
 	m.Dir = root
 	if err := m.Validate(); err != nil {
@@ -263,16 +259,6 @@ func (m *Manifest) Validate() error {
 		}
 		if n.MinMinor < 0 {
 			return fmt.Errorf("app %s: native_sdk.min_minor must not be negative", m.ID)
-		}
-		seenCaps := map[string]bool{}
-		for _, c := range n.RequiredCapabilities {
-			if !ValidNativeCapability(c) {
-				return fmt.Errorf("app %s: native_sdk capability %q must match %s", m.ID, c, capabilityPattern)
-			}
-			if seenCaps[c] {
-				return fmt.Errorf("app %s: duplicate native_sdk capability %q", m.ID, c)
-			}
-			seenCaps[c] = true
 		}
 	}
 	if err := validateRelPath("entrypoint.path", m.Entrypoint.Path, m.Entrypoint.Runtime != RuntimeBuiltin); err != nil {

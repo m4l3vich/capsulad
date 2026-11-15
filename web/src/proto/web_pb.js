@@ -261,6 +261,7 @@ export const SCHEMA = Object.freeze({
     { no: 13, name: "createApiKey", kind: "message", type: "capsula.web.v1.CreateApiKey" },
     { no: 14, name: "revokeApiKey", kind: "message", type: "capsula.web.v1.RevokeApiKey" },
     { no: 15, name: "wifi", kind: "message", type: "capsula.web.v1.WifiCommand" },
+    { no: 16, name: "falseDetection", kind: "message", type: "capsula.web.v1.FalseDetection" },
   ] },
   "capsula.web.v1.CreateApiKey": { name: "capsula.web.v1.CreateApiKey", fields: [
     { no: 1, name: "name", kind: "string" },
@@ -337,6 +338,9 @@ export const SCHEMA = Object.freeze({
     { no: 11, name: "logs", kind: "message", type: "capsula.web.v1.LogEntries" },
     { no: 12, name: "wifi", kind: "message", type: "capsula.web.v1.WifiView" },
     { no: 13, name: "diagnosticsMetrics", kind: "message", type: "capsula.web.v1.SystemMetricsView" },
+  ] },
+  "capsula.web.v1.FalseDetection": { name: "capsula.web.v1.FalseDetection", fields: [
+    { no: 1, name: "detectionId", kind: "string" },
   ] },
   "capsula.web.v1.Hello": { name: "capsula.web.v1.Hello", fields: [
   ] },
@@ -452,10 +456,10 @@ export const SCHEMA = Object.freeze({
     { no: 12, name: "settingsAvailable", kind: "bool" },
   ] },
   "capsula.web.v1.PairedDeviceView": { name: "capsula.web.v1.PairedDeviceView", fields: [
-    { no: 1, name: "address", kind: "string" },
     { no: 2, name: "name", kind: "string" },
     { no: 3, name: "connected", kind: "bool" },
     { no: 4, name: "trusted", kind: "bool" },
+    { no: 5, name: "deviceId", kind: "string" },
   ] },
   "capsula.web.v1.Ping": { name: "capsula.web.v1.Ping", fields: [
   ] },
@@ -727,7 +731,7 @@ export const SCHEMA = Object.freeze({
     { no: 2, name: "actionId", kind: "string" },
   ] },
   "capsula.web.v1.UnpairDevice": { name: "capsula.web.v1.UnpairDevice", fields: [
-    { no: 1, name: "address", kind: "string" },
+    { no: 2, name: "deviceId", kind: "string" },
   ] },
   "capsula.web.v1.Unsubscribe": { name: "capsula.web.v1.Unsubscribe", fields: [
     { no: 1, name: "topic", kind: "enum" },
@@ -750,6 +754,7 @@ export const SCHEMA = Object.freeze({
     { no: 1, name: "modelId", kind: "string" },
     { no: 2, name: "modelDisplayName", kind: "string" },
     { no: 3, name: "detectedUnixMs", kind: "int64" },
+    { no: 4, name: "detectionId", kind: "string" },
   ] },
   "capsula.web.v1.WakewordModelView": { name: "capsula.web.v1.WakewordModelView", fields: [
     { no: 1, name: "modelId", kind: "string" },
@@ -820,7 +825,7 @@ export const SCHEMA = Object.freeze({
   ] },
 });
 
-const TYPE = { AccessStatusView: "capsula.web.v1.AccessStatusView", AccessView: "capsula.web.v1.AccessView", ActionDefinitionView: "capsula.web.v1.ActionDefinitionView", ActionResult: "capsula.web.v1.ActionResult", ActiveAlertView: "capsula.web.v1.ActiveAlertView", AlarmView: "capsula.web.v1.AlarmView", ApiKeyCreated: "capsula.web.v1.ApiKeyCreated", ApiKeyView: "capsula.web.v1.ApiKeyView", AppConfigSchemaView: "capsula.web.v1.AppConfigSchemaView", AppSettingChangeView: "capsula.web.v1.AppSettingChangeView", AppSettingsUpdate: "capsula.web.v1.AppSettingsUpdate", AppSettingsUpdateResult: "capsula.web.v1.AppSettingsUpdateResult", AppView: "capsula.web.v1.AppView", ApplicationView: "capsula.web.v1.ApplicationView", AssistantSettings: "capsula.web.v1.AssistantSettings", AudioView: "capsula.web.v1.AudioView", BackendView: "capsula.web.v1.BackendView", BluetoothCommand: "capsula.web.v1.BluetoothCommand", BluetoothResult: "capsula.web.v1.BluetoothResult", BluetoothView: "capsula.web.v1.BluetoothView", CancelOperation: "capsula.web.v1.CancelOperation", CancelTimer: "capsula.web.v1.CancelTimer", CancelTraining: "capsula.web.v1.CancelTraining", ClientFrame: "capsula.web.v1.ClientFrame", ClockCommand: "capsula.web.v1.ClockCommand", ClockCommandResult: "capsula.web.v1.ClockCommandResult", ClockView: "capsula.web.v1.ClockView", Command: "capsula.web.v1.Command", CreateApiKey: "capsula.web.v1.CreateApiKey", DeleteAlarm: "capsula.web.v1.DeleteAlarm", DeleteSample: "capsula.web.v1.DeleteSample", DeviceInfo: "capsula.web.v1.DeviceInfo", DiagnosticsView: "capsula.web.v1.DiagnosticsView", DiscoveryView: "capsula.web.v1.DiscoveryView", DismissAlert: "capsula.web.v1.DismissAlert", DisplaySettings: "capsula.web.v1.DisplaySettings", Empty: "capsula.web.v1.Empty", EntrypointView: "capsula.web.v1.EntrypointView", Error: "capsula.web.v1.Error", Event: "capsula.web.v1.Event", Hello: "capsula.web.v1.Hello", HelloResult: "capsula.web.v1.HelloResult", HostnameSettings: "capsula.web.v1.HostnameSettings", InterfaceDescriptionView: "capsula.web.v1.InterfaceDescriptionView", InterfaceView: "capsula.web.v1.InterfaceView", LaunchApp: "capsula.web.v1.LaunchApp", LaunchArgumentView: "capsula.web.v1.LaunchArgumentView", LaunchResult: "capsula.web.v1.LaunchResult", LogEntries: "capsula.web.v1.LogEntries", LogEntry: "capsula.web.v1.LogEntry", MediaCommand: "capsula.web.v1.MediaCommand", MediaPlayerView: "capsula.web.v1.MediaPlayerView", MediaProviderView: "capsula.web.v1.MediaProviderView", MediaResult: "capsula.web.v1.MediaResult", MethodDocumentationView: "capsula.web.v1.MethodDocumentationView", MicrophoneSettings: "capsula.web.v1.MicrophoneSettings", MutedIndicatorSettings: "capsula.web.v1.MutedIndicatorSettings", MutedIndicatorView: "capsula.web.v1.MutedIndicatorView", OverviewView: "capsula.web.v1.OverviewView", PairedDeviceView: "capsula.web.v1.PairedDeviceView", Ping: "capsula.web.v1.Ping", Pong: "capsula.web.v1.Pong", Progress: "capsula.web.v1.Progress", ProvenanceView: "capsula.web.v1.ProvenanceView", RecordSample: "capsula.web.v1.RecordSample", ResourceView: "capsula.web.v1.ResourceView", Result: "capsula.web.v1.Result", RevokeApiKey: "capsula.web.v1.RevokeApiKey", RingView: "capsula.web.v1.RingView", RoutingView: "capsula.web.v1.RoutingView", RunView: "capsula.web.v1.RunView", SampleResult: "capsula.web.v1.SampleResult", ServerFrame: "capsula.web.v1.ServerFrame", SetAlarm: "capsula.web.v1.SetAlarm", SetAlarmEnabled: "capsula.web.v1.SetAlarmEnabled", SetDiscoverable: "capsula.web.v1.SetDiscoverable", SetIncomingConnections: "capsula.web.v1.SetIncomingConnections", SettingChoiceView: "capsula.web.v1.SettingChoiceView", SettingDefinitionView: "capsula.web.v1.SettingDefinitionView", SettingStateView: "capsula.web.v1.SettingStateView", SettingsUIView: "capsula.web.v1.SettingsUIView", SettingsUpdate: "capsula.web.v1.SettingsUpdate", SettingsUpdateResult: "capsula.web.v1.SettingsUpdateResult", SettingsValues: "capsula.web.v1.SettingsValues", SettingsView: "capsula.web.v1.SettingsView", Snapshot: "capsula.web.v1.Snapshot", SnapshotRequest: "capsula.web.v1.SnapshotRequest", StartTimer: "capsula.web.v1.StartTimer", StartupSoundSettings: "capsula.web.v1.StartupSoundSettings", StopResult: "capsula.web.v1.StopResult", StopRun: "capsula.web.v1.StopRun", StopwatchView: "capsula.web.v1.StopwatchView", Subscribe: "capsula.web.v1.Subscribe", SystemMetricsView: "capsula.web.v1.SystemMetricsView", TimerView: "capsula.web.v1.TimerView", TimezoneSettings: "capsula.web.v1.TimezoneSettings", TrainWakeword: "capsula.web.v1.TrainWakeword", TrainingHandle: "capsula.web.v1.TrainingHandle", TriggerAppAction: "capsula.web.v1.TriggerAppAction", UnpairDevice: "capsula.web.v1.UnpairDevice", Unsubscribe: "capsula.web.v1.Unsubscribe", VolumeSettings: "capsula.web.v1.VolumeSettings", WakewordClassifierView: "capsula.web.v1.WakewordClassifierView", WakewordDetectionView: "capsula.web.v1.WakewordDetectionView", WakewordModelView: "capsula.web.v1.WakewordModelView", WakewordSampleView: "capsula.web.v1.WakewordSampleView", WakewordView: "capsula.web.v1.WakewordView", WifiCommand: "capsula.web.v1.WifiCommand", WifiConnect: "capsula.web.v1.WifiConnect", WifiForget: "capsula.web.v1.WifiForget", WifiKnownNetwork: "capsula.web.v1.WifiKnownNetwork", WifiResult: "capsula.web.v1.WifiResult", WifiScanResult: "capsula.web.v1.WifiScanResult", WifiView: "capsula.web.v1.WifiView" };
+const TYPE = { AccessStatusView: "capsula.web.v1.AccessStatusView", AccessView: "capsula.web.v1.AccessView", ActionDefinitionView: "capsula.web.v1.ActionDefinitionView", ActionResult: "capsula.web.v1.ActionResult", ActiveAlertView: "capsula.web.v1.ActiveAlertView", AlarmView: "capsula.web.v1.AlarmView", ApiKeyCreated: "capsula.web.v1.ApiKeyCreated", ApiKeyView: "capsula.web.v1.ApiKeyView", AppConfigSchemaView: "capsula.web.v1.AppConfigSchemaView", AppSettingChangeView: "capsula.web.v1.AppSettingChangeView", AppSettingsUpdate: "capsula.web.v1.AppSettingsUpdate", AppSettingsUpdateResult: "capsula.web.v1.AppSettingsUpdateResult", AppView: "capsula.web.v1.AppView", ApplicationView: "capsula.web.v1.ApplicationView", AssistantSettings: "capsula.web.v1.AssistantSettings", AudioView: "capsula.web.v1.AudioView", BackendView: "capsula.web.v1.BackendView", BluetoothCommand: "capsula.web.v1.BluetoothCommand", BluetoothResult: "capsula.web.v1.BluetoothResult", BluetoothView: "capsula.web.v1.BluetoothView", CancelOperation: "capsula.web.v1.CancelOperation", CancelTimer: "capsula.web.v1.CancelTimer", CancelTraining: "capsula.web.v1.CancelTraining", ClientFrame: "capsula.web.v1.ClientFrame", ClockCommand: "capsula.web.v1.ClockCommand", ClockCommandResult: "capsula.web.v1.ClockCommandResult", ClockView: "capsula.web.v1.ClockView", Command: "capsula.web.v1.Command", CreateApiKey: "capsula.web.v1.CreateApiKey", DeleteAlarm: "capsula.web.v1.DeleteAlarm", DeleteSample: "capsula.web.v1.DeleteSample", DeviceInfo: "capsula.web.v1.DeviceInfo", DiagnosticsView: "capsula.web.v1.DiagnosticsView", DiscoveryView: "capsula.web.v1.DiscoveryView", DismissAlert: "capsula.web.v1.DismissAlert", DisplaySettings: "capsula.web.v1.DisplaySettings", Empty: "capsula.web.v1.Empty", EntrypointView: "capsula.web.v1.EntrypointView", Error: "capsula.web.v1.Error", Event: "capsula.web.v1.Event", FalseDetection: "capsula.web.v1.FalseDetection", Hello: "capsula.web.v1.Hello", HelloResult: "capsula.web.v1.HelloResult", HostnameSettings: "capsula.web.v1.HostnameSettings", InterfaceDescriptionView: "capsula.web.v1.InterfaceDescriptionView", InterfaceView: "capsula.web.v1.InterfaceView", LaunchApp: "capsula.web.v1.LaunchApp", LaunchArgumentView: "capsula.web.v1.LaunchArgumentView", LaunchResult: "capsula.web.v1.LaunchResult", LogEntries: "capsula.web.v1.LogEntries", LogEntry: "capsula.web.v1.LogEntry", MediaCommand: "capsula.web.v1.MediaCommand", MediaPlayerView: "capsula.web.v1.MediaPlayerView", MediaProviderView: "capsula.web.v1.MediaProviderView", MediaResult: "capsula.web.v1.MediaResult", MethodDocumentationView: "capsula.web.v1.MethodDocumentationView", MicrophoneSettings: "capsula.web.v1.MicrophoneSettings", MutedIndicatorSettings: "capsula.web.v1.MutedIndicatorSettings", MutedIndicatorView: "capsula.web.v1.MutedIndicatorView", OverviewView: "capsula.web.v1.OverviewView", PairedDeviceView: "capsula.web.v1.PairedDeviceView", Ping: "capsula.web.v1.Ping", Pong: "capsula.web.v1.Pong", Progress: "capsula.web.v1.Progress", ProvenanceView: "capsula.web.v1.ProvenanceView", RecordSample: "capsula.web.v1.RecordSample", ResourceView: "capsula.web.v1.ResourceView", Result: "capsula.web.v1.Result", RevokeApiKey: "capsula.web.v1.RevokeApiKey", RingView: "capsula.web.v1.RingView", RoutingView: "capsula.web.v1.RoutingView", RunView: "capsula.web.v1.RunView", SampleResult: "capsula.web.v1.SampleResult", ServerFrame: "capsula.web.v1.ServerFrame", SetAlarm: "capsula.web.v1.SetAlarm", SetAlarmEnabled: "capsula.web.v1.SetAlarmEnabled", SetDiscoverable: "capsula.web.v1.SetDiscoverable", SetIncomingConnections: "capsula.web.v1.SetIncomingConnections", SettingChoiceView: "capsula.web.v1.SettingChoiceView", SettingDefinitionView: "capsula.web.v1.SettingDefinitionView", SettingStateView: "capsula.web.v1.SettingStateView", SettingsUIView: "capsula.web.v1.SettingsUIView", SettingsUpdate: "capsula.web.v1.SettingsUpdate", SettingsUpdateResult: "capsula.web.v1.SettingsUpdateResult", SettingsValues: "capsula.web.v1.SettingsValues", SettingsView: "capsula.web.v1.SettingsView", Snapshot: "capsula.web.v1.Snapshot", SnapshotRequest: "capsula.web.v1.SnapshotRequest", StartTimer: "capsula.web.v1.StartTimer", StartupSoundSettings: "capsula.web.v1.StartupSoundSettings", StopResult: "capsula.web.v1.StopResult", StopRun: "capsula.web.v1.StopRun", StopwatchView: "capsula.web.v1.StopwatchView", Subscribe: "capsula.web.v1.Subscribe", SystemMetricsView: "capsula.web.v1.SystemMetricsView", TimerView: "capsula.web.v1.TimerView", TimezoneSettings: "capsula.web.v1.TimezoneSettings", TrainWakeword: "capsula.web.v1.TrainWakeword", TrainingHandle: "capsula.web.v1.TrainingHandle", TriggerAppAction: "capsula.web.v1.TriggerAppAction", UnpairDevice: "capsula.web.v1.UnpairDevice", Unsubscribe: "capsula.web.v1.Unsubscribe", VolumeSettings: "capsula.web.v1.VolumeSettings", WakewordClassifierView: "capsula.web.v1.WakewordClassifierView", WakewordDetectionView: "capsula.web.v1.WakewordDetectionView", WakewordModelView: "capsula.web.v1.WakewordModelView", WakewordSampleView: "capsula.web.v1.WakewordSampleView", WakewordView: "capsula.web.v1.WakewordView", WifiCommand: "capsula.web.v1.WifiCommand", WifiConnect: "capsula.web.v1.WifiConnect", WifiForget: "capsula.web.v1.WifiForget", WifiKnownNetwork: "capsula.web.v1.WifiKnownNetwork", WifiResult: "capsula.web.v1.WifiResult", WifiScanResult: "capsula.web.v1.WifiScanResult", WifiView: "capsula.web.v1.WifiView" };
 
 export function encode(typeName, obj) {
   return encodeMessage(SCHEMA, typeName, obj || {});
@@ -829,7 +834,6 @@ export function encode(typeName, obj) {
 export function decode(typeName, bytes) {
   return decodeMessage(SCHEMA, typeName, bytes);
 }
-
 export const AccessStatusView = {
   type: "capsula.web.v1.AccessStatusView",
   encode(obj) { return encodeMessage(SCHEMA, TYPE.AccessStatusView, obj || {}); },
@@ -1029,6 +1033,11 @@ export const Event = {
   type: "capsula.web.v1.Event",
   encode(obj) { return encodeMessage(SCHEMA, TYPE.Event, obj || {}); },
   decode(bytes) { return decodeMessage(SCHEMA, TYPE.Event, bytes); },
+};
+export const FalseDetection = {
+  type: "capsula.web.v1.FalseDetection",
+  encode(obj) { return encodeMessage(SCHEMA, TYPE.FalseDetection, obj || {}); },
+  decode(bytes) { return decodeMessage(SCHEMA, TYPE.FalseDetection, bytes); },
 };
 export const Hello = {
   type: "capsula.web.v1.Hello",

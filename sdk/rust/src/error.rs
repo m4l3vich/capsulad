@@ -82,12 +82,8 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.grpc_code() {
-            Some(code) => write!(
-                f,
-                "capsula status {} (gRPC {}): {}",
-                self.status, code, self.message
-            ),
-            None => write!(f, "capsula status {}: {}", self.status, self.message),
+            Some(code) => write!(f, "capsulad gRPC status {}: {}", code, self.message),
+            None => write!(f, "capsulad status {}: {}", self.status, self.message),
         }
     }
 }

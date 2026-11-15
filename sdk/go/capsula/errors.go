@@ -3,7 +3,6 @@ package capsula
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // ErrClosed is returned by calls made after the client's bus has ended.
@@ -48,17 +47,6 @@ func (e *ABIError) Error() string {
 	return fmt.Sprintf("capsula: native library ABI %d.%d is incompatible; this SDK requires ABI %d.%d "+
 		"(rebuild or reinstall the shared runtime)", e.ActualMajor, e.ActualMinor,
 		e.RequiredMajor, e.RequiredMinor)
-}
-
-// CapabilityError reports capabilities that the loaded engine does not
-// provide but the caller required.
-type CapabilityError struct {
-	Missing []string
-}
-
-func (e *CapabilityError) Error() string {
-	return fmt.Sprintf("capsula: native library is missing required capabilities: %s",
-		strings.Join(e.Missing, ", "))
 }
 
 // StatusError is a framework/app call failure. Code is a canonical gRPC status

@@ -139,14 +139,14 @@ type Daemon struct {
 	builtins *builtinProviders
 	router   *routing.Router
 
-	systemMu       sync.Mutex
-	systemApps     map[string]*SystemApp
-	systemRunMu    sync.Mutex
-	systemFailMu   sync.Mutex
-	systemFailures map[string]int
+	systemMu         sync.Mutex
+	systemApps       map[string]*SystemApp
+	systemRunMu      sync.Mutex
+	systemFailMu     sync.Mutex
+	systemFailures   map[string]int
 	systemRestarting map[string]bool
-	appValidatorMu sync.RWMutex
-	appValidators  map[string]func(values map[string]json.RawMessage) error
+	appValidatorMu   sync.RWMutex
+	appValidators    map[string]func(values map[string]json.RawMessage) error
 
 	user       *settings.UserStore
 	autoMu     sync.Mutex
@@ -303,11 +303,19 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	cfg.LogFile, cfg.TrustedRootPath = abs(cfg.LogFile), abs(cfg.TrustedRootPath)
 	ctx, cancel := context.WithCancel(parent)
 	clock := ids.NewClock()
-	for _, dir := range []string{cfg.DataDir, cfg.RunDir, cfg.AppsDir, cfg.AssetsDir} {
+	for _, dir := range []string{cfg.DataDir, cfg.RunDir, cfg.AppsDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			cancel()
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
+	}
+	if err := os.MkdirAll(cfg.AssetsDir, 0o755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("create %s: %w", cfg.AssetsDir, err)
+	}
+	if err := os.Chmod(cfg.AssetsDir, 0o755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("set %s mode: %w", cfg.AssetsDir, err)
 	}
 	logPath := cfg.LogFile
 	if logPath == "" {
@@ -377,11 +385,6 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 
 	if d.reg, err = registry.Open(cfg.AppsDir, logs); err != nil {
 		return nil, err
-	}
-	for _, app := range d.reg.List() {
-		if isRetiredApp(app.ID()) {
-			logs.Warnf("registry", app.ID(), "retired sample application is ignored; its package directory is left untouched")
-		}
 	}
 	d.user, err = settings.OpenUser(filepath.Join(cfg.DataDir, "settings.json"), logs, d.validateUserSettings)
 	if err != nil {
@@ -458,9 +461,6 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.builtins = newBuiltins(d)
 	d.appCfg.SetValidator(d.validateAppSettings)
 	d.registerAssistantSettingsValidator()
-	// Migration validates persisted default IDs against the registry, so it
-	// must run after the compiled-in apps are registered.
-	d.migrateLegacyState()
 
 	d.audio = audio.NewManager(ctx, clock, logs, d.dev.Audio(), audio.Options{
 		IndicationActive: d.indicationActive,
@@ -648,6 +648,7 @@ func (d *Daemon) Run() error {
 			d.logs.Errorf("webui", "", "init failed: %v", err)
 		} else {
 			web.Apps = d.reg
+			web.Assets = d.assets
 			web.Wifi = d.wifiMgr
 			web.Wakeword = d.wake
 			d.web = web
@@ -658,7 +659,7 @@ func (d *Daemon) Run() error {
 			}()
 		}
 	} else if d.cfg.WebUIAddr != "" {
-		d.logs.Warnf("webui", "", "HTTPS disabled: run `capsula auth init` (self-signed certificate + admin password)")
+		d.logs.Warnf("webui", "", "HTTPS disabled: run `capsulad-cli auth init` (self-signed certificate + admin password)")
 	}
 	if d.cfg.DevAdminSocket != "" {
 		d.adminSrv = d.startAdmin(d.cfg.DevAdminSocket)
@@ -1064,17 +1065,11 @@ func (d *Daemon) validateUserSettings(v settings.UserSettings) error {
 		if appID == "" {
 			continue
 		}
-		if isRetiredApp(appID) {
-			return fmt.Errorf("application %s is retired and cannot be selected", appID)
-		}
 		if _, ok := d.reg.Get(appID); !ok {
 			return fmt.Errorf("application %s is not installed", appID)
 		}
 	}
 	if v.DefaultAssistantAppID != "" {
-		if isRetiredApp(v.DefaultAssistantAppID) {
-			return fmt.Errorf("assistant application %s is retired and cannot be selected", v.DefaultAssistantAppID)
-		}
 		if _, ok := d.reg.Get(v.DefaultAssistantAppID); !ok {
 			return fmt.Errorf("assistant application %s is not installed", v.DefaultAssistantAppID)
 		}
