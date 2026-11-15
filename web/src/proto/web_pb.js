@@ -146,6 +146,7 @@ export const SCHEMA = Object.freeze({
     { no: 11, name: "systemApp", kind: "bool" },
     { no: 12, name: "canStop", kind: "bool" },
     { no: 13, name: "canUninstall", kind: "bool" },
+    { no: 14, name: "actions", kind: "message", repeated: true, type: "capsula.web.v1.ActionDefinitionView" },
   ] },
   "capsula.web.v1.ApplicationView": { name: "capsula.web.v1.ApplicationView", fields: [
     { no: 1, name: "revision", kind: "uint64" },

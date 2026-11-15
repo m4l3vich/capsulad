@@ -71,7 +71,7 @@ onScopeDispose(() => {
         max="100"
         step="1"
         aria-label="Master output volume"
-        :disabled="!available"
+        :disabled="!available || applying"
         @pointerdown="dragging = true"
         @pointerup="endDrag"
         @pointercancel="endDrag"
@@ -82,7 +82,6 @@ onScopeDispose(() => {
     </div>
     <p v-if="!data" class="text-xs text-base-content/60">Waiting for the speaker’s settings…</p>
     <p v-else-if="liveState !== 'open'" class="text-xs text-warning">Disconnected: changes are paused.</p>
-    <p v-else-if="pending" class="text-xs text-base-content/60">Applying…</p>
     <p v-else-if="error" class="text-xs text-error">{{ error }}</p>
   </div>
 </template>

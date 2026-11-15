@@ -1,9 +1,8 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { MediaAction } from '../proto/web_pb.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { socket } from '../lib/ws.js'
-import { status } from '../lib/format.js'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
 import ApplicationView from './ApplicationView.vue'
@@ -136,6 +135,101 @@ function selectedRole(appId) {
   return !!selected.value[appId]
 }
 
+// Declared manifest actions arrive with the overview listing; an app that
+// declares none simply has no menu to offer.
+function actionsOf(app) {
+  return app.actions || []
+}
+
+async function runAction(app, action) {
+  closeMenu()
+  const label = action.label || action.actionId
+  if (action.confirmBeforeRun && !window.confirm(`${label}?`)) return
+  await run(
+    `action:${app.appId}:${action.actionId}`,
+    { action: { appId: app.appId, actionId: action.actionId } },
+    `${label} sent to ${app.displayName}`
+  )
+}
+
+// One popover at a time: the media card shows its first provider, and the
+// badge menu switches which provider it renders. The selection falls back to
+// the first provider when the chosen one disappears.
+const activeProviderId = ref('')
+const activeProvider = computed(() => {
+  const list = providers.value
+  if (!list.length) return null
+  return list.find((provider) => provider.appId === activeProviderId.value) || list[0]
+})
+const otherProviders = computed(() =>
+  providers.value.filter((provider) => provider.appId !== activeProvider.value?.appId))
+
+function selectProvider(provider) {
+  activeProviderId.value = provider.appId
+  closeMenu()
+}
+
+function playerCount(provider) {
+  const count = (provider.players || []).length
+  return `${count} player${count === 1 ? '' : 's'}`
+}
+
+// --- popover menus ---------------------------------------------------------
+
+const openMenu = ref('')
+let menuTrigger = null
+
+function toggleMenu(key, event) {
+  if (openMenu.value === key) {
+    closeMenu()
+    return
+  }
+  openMenu.value = key
+  menuTrigger = event?.currentTarget || null
+  // Move focus into the freshly rendered menu so it is usable from the
+  // keyboard; Escape still returns focus to the trigger.
+  nextTick(() => {
+    menuTrigger?.parentElement?.querySelector('[role="menu"] button:not([disabled])')?.focus()
+  })
+}
+
+function closeMenu(restoreFocus = false) {
+  const trigger = menuTrigger
+  openMenu.value = ''
+  menuTrigger = null
+  if (restoreFocus) trigger?.focus()
+}
+
+// A menu closes on any press outside its own trigger/menu wrapper. Presses on
+// another trigger close this menu first, then the trigger's click opens that
+// one.
+function onMenuPointerDown(event) {
+  const owner = event.target instanceof Element ? event.target.closest('[data-menu]') : null
+  if (owner?.getAttribute('data-menu') === openMenu.value) return
+  closeMenu()
+}
+
+function onMenuKeyDown(event) {
+  if (event.key !== 'Escape' || !openMenu.value) return
+  event.preventDefault()
+  closeMenu(true)
+}
+
+watch(openMenu, (key) => {
+  if (key) {
+    document.addEventListener('pointerdown', onMenuPointerDown)
+    document.addEventListener('keydown', onMenuKeyDown)
+    return
+  }
+  document.removeEventListener('pointerdown', onMenuPointerDown)
+  document.removeEventListener('keydown', onMenuKeyDown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', onMenuPointerDown)
+  document.removeEventListener('keydown', onMenuKeyDown)
+})
+
 const media = {
   play: MediaAction.MEDIA_ACTION_PLAY,
   pause: MediaAction.MEDIA_ACTION_PAUSE,
@@ -183,7 +277,7 @@ function trackTime(ms) {
 <template>
   <div class="flex flex-col gap-4">
     <div class="flex flex-wrap items-end justify-between gap-2">
-      <h1 v-if="!data && !error && loading" class="text-xl font-semibold leading-tight my-2 text-primary flex align-center gap-4">
+      <h1 v-if="!data && !error && loading" class="text-xl font-semibold leading-tight my-2 text-primary flex items-center gap-4">
         <span class="loading loading-spinner loading-md"></span>
         Still loading…
       </h1>
@@ -192,6 +286,7 @@ function trackTime(ms) {
       </h1>
     </div>
 
+    <!-- replace these with position:fixed corner notifications -->
     <div v-if="actionError" class="alert alert-error py-2" role="alert">
       <span class="text-sm">{{ actionError }}</span>
       <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
@@ -223,6 +318,120 @@ function trackTime(ms) {
 
       <!-- Compact control bar: connectivity, media, volume and microphone. -->
       <section class="grid gap-4 sm:grid-cols-1 md:grid-cols-3">
+        <!-- Audio settings -->
+        <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
+          <div class="flex items-center gap-2">
+            <Icon size="16px">volume_up</Icon>
+            <span class="text-xs font-medium uppercase tracking-wide">Master volume</span>
+          </div>
+          <VolumeControl />
+          <MicrophoneControl />
+        </div>
+
+        <!-- Now playing -->
+        <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
+          <div class="flex items-center gap-2">
+            <Icon size="16px">video_library</Icon>
+            <span class="text-xs font-medium uppercase tracking-wide flex-grow">Now playing</span>
+            <div v-if="otherProviders.length" class="relative" data-menu="providers">
+              <button
+                type="button"
+                class="badge badge-primary badge-sm cursor-pointer"
+                aria-haspopup="menu"
+                :aria-expanded="openMenu === 'providers'"
+                :title="`Show the other ${otherProviders.length} media provider${otherProviders.length === 1 ? '' : 's'}`"
+                @click="toggleMenu('providers', $event)"
+              >+{{ otherProviders.length }} more</button>
+              <ul
+                v-if="openMenu === 'providers'"
+                role="menu"
+                aria-label="Other media providers"
+                class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
+              >
+                <li v-for="provider in otherProviders" :key="provider.appId" role="none">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200"
+                    @click="selectProvider(provider)"
+                  >
+                    <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId }}</span>
+                    <span class="text-[11px] text-base-content/60">
+                      {{ provider.error || playerCount(provider) }}
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+          <p v-if="!providers.length" class="text-sm my-auto">Nothing is playing.</p>
+          <div v-else class="flex min-w-0 flex-col gap-1">
+            <p v-if="providers.length > 1" class="truncate text-[11px] text-base-content/60">
+              {{ activeProvider.name || 'Media app' }}
+            </p>
+            <p v-if="activeProvider.error" class="text-xs text-error">{{ activeProvider.error }}</p>
+            <p v-else-if="!(activeProvider.players || []).length" class="text-xs text-base-content/60">
+              No active player.
+            </p>
+            <ul v-else class="flex flex-col gap-2">
+              <li v-for="player in activeProvider.players" :key="player.playerId" class="flex min-w-0 flex-col gap-1.5">
+                <div class="flex min-w-0 items-start justify-between items-center gap-2">
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-medium">{{ player.title || player.mediaName || 'Untitled media' }}</p>
+                    <p class="truncate text-xs text-base-content/60">
+                      {{ [player.artist, player.album].filter(Boolean).join(' · ') || player.sourceName || player.playerId }}
+                    </p>
+                  </div>
+                  <span class="text-[11px] tabular-nums">
+                    {{ trackTime(player.positionMs) }} / {{ trackTime(player.durationMs) }}
+                  </span>
+                </div>
+                <div class="flex flex-wrap gap-2 items-center">
+                  <button
+                    v-if="showPlay(player) && !showPause(player)"
+                    type="button"
+                    class="btn btn-primary btn-xs"
+                    :disabled="!!busy || liveState !== 'open'"
+                    @click="mediaAction(activeProvider, player, 'play')"
+                  >
+                    <Icon size="20px">play_arrow</Icon>
+                  </button>
+                  <button
+                    v-if="showPause(player)"
+                    type="button"
+                    class="btn btn-primary btn-xs"
+                    :disabled="!!busy || liveState !== 'open'"
+                    @click="mediaAction(activeProvider, player, 'pause')"
+                  >
+                    <Icon size="20px">pause</Icon>
+                  </button>
+                  <progress
+                    class="progress progress-primary h-1.5 flex-1"
+                    :value="Number(player.positionMs) || 0"
+                    :max="Number(player.durationMs)"
+                  ></progress>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    :disabled="!!busy || liveState !== 'open' || !supports(player, 'SKIP_PREVIOUS')"
+                    @click="mediaAction(activeProvider, player, 'previous')"
+                  >
+                    <Icon size="20px">skip_previous</Icon>
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    :disabled="!!busy || liveState !== 'open' || !supports(player, 'SKIP_NEXT')"
+                    @click="mediaAction(activeProvider, player, 'next')"
+                  >
+                    <Icon size="20px">skip_next</Icon>
+                  </button>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </div>
+
         <!-- Bluetooth speaker -->
         <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
           <div class="flex items-center gap-2">
@@ -262,142 +471,96 @@ function trackTime(ms) {
           </template>
           <p v-else class="text-xs text-base-content/60">{{ bluetooth?.detail || 'Bluetooth is not available.' }}</p>
         </div>
-
-        <!-- Now playing -->
-        <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-xs font-medium uppercase tracking-wide text-base-content/60">Now playing</span>
-          </div>
-          <p v-if="!providers.length" class="text-sm my-auto">Nothing is playing.</p>
-          <div v-else class="flex min-w-0 flex-col gap-2">
-            <div v-for="provider in providers" :key="provider.appId" class="flex min-w-0 flex-col gap-1">
-              <p v-if="providers.length > 1" class="truncate text-[11px] text-base-content/60">
-                {{ provider.name || 'Media app' }}
-              </p>
-              <p v-if="provider.error" class="text-xs text-error">{{ provider.error }}</p>
-              <p v-else-if="!(provider.players || []).length" class="text-xs text-base-content/60">
-                No active player.
-              </p>
-              <ul v-else class="flex flex-col gap-2">
-                <li v-for="player in provider.players" :key="player.playerId" class="flex min-w-0 flex-col gap-1.5">
-                  <div class="flex min-w-0 items-start justify-between gap-2">
-                    <div class="min-w-0">
-                      <p class="truncate text-sm font-medium">{{ player.title || player.mediaName || 'Untitled media' }}</p>
-                      <p class="truncate text-xs text-base-content/60">
-                        {{ [player.artist, player.album].filter(Boolean).join(' · ') || player.sourceName || player.playerId }}
-                      </p>
-                    </div>
-                    <span class="badge badge-sm shrink-0" :class="playing(player) ? 'badge-success' : 'badge-ghost'">
-                      {{ status(player.playbackState) || 'idle' }}
-                    </span>
-                  </div>
-                  <div v-if="Number(player.durationMs) > 0" class="flex items-center gap-2">
-                    <progress
-                      class="progress progress-primary h-1.5 flex-1"
-                      :value="Number(player.positionMs) || 0"
-                      :max="Number(player.durationMs)"
-                    ></progress>
-                    <span class="text-[11px] tabular-nums text-base-content/60">
-                      {{ trackTime(player.positionMs) }} / {{ trackTime(player.durationMs) }}
-                    </span>
-                  </div>
-                  <div class="flex flex-wrap gap-1">
-                    <button
-                      v-if="supports(player, 'SKIP_PREVIOUS')"
-                      type="button"
-                      class="btn btn-ghost btn-xs"
-                      :disabled="!!busy || liveState !== 'open'"
-                      @click="mediaAction(provider, player, 'previous')"
-                    >Previous</button>
-                    <button
-                      v-if="showPlay(player) && !showPause(player)"
-                      type="button"
-                      class="btn btn-primary btn-xs"
-                      :disabled="!!busy || liveState !== 'open'"
-                      @click="mediaAction(provider, player, 'play')"
-                    >Play</button>
-                    <button
-                      v-if="showPause(player)"
-                      type="button"
-                      class="btn btn-primary btn-xs"
-                      :disabled="!!busy || liveState !== 'open'"
-                      @click="mediaAction(provider, player, 'pause')"
-                    >Pause</button>
-                    <button
-                      v-if="supports(player, 'SKIP_NEXT')"
-                      type="button"
-                      class="btn btn-ghost btn-xs"
-                      :disabled="!!busy || liveState !== 'open'"
-                      @click="mediaAction(provider, player, 'next')"
-                    >Next</button>
-                  </div>
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <!-- Audio settings -->
-        <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
-          <div class="flex items-center gap-2">
-            <Icon size="16px">volume_up</Icon>
-            <span class="text-xs font-medium uppercase tracking-wide">Master volume</span>
-          </div>
-          <VolumeControl />
-          <MicrophoneControl />
-        </div>
       </section>
 
-      <!-- Installed applications: Launch stays here, Settings opens the modal. -->
+      <!-- Installed applications list -->
       <section class="card border border-base-300 bg-base-100">
-        <div class="card-body gap-2 p-4">
-          <div class="flex items-center justify-between gap-2">
-            <h2 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">Installed applications</h2>
-            <span class="badge badge-ghost badge-sm">{{ apps.length }}</span>
+        <div class="card-body gap-3 p-4">
+          <div class="flex items-center gap-2">
+            <Icon size="20px">widgets</Icon>
+            <h2 class="text-sm font-semibold uppercase tracking-wide">Installed applications</h2>
+            <span class="badge badge-soft badge-primary badge-sm">{{ apps.length }}</span>
           </div>
-          <div v-if="apps.length" class="overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th scope="col">Application</th>
-                  <th scope="col" class="hidden sm:table-cell">Version</th>
-                  <th scope="col" class="hidden md:table-cell">State</th>
-                  <th scope="col" class="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="app in apps" :key="app.appId" class="align-top">
-                  <td>
-                    <div class="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        class="link link-hover text-left font-medium"
-                        :title="app.appId"
-                        @click="selectedApp = app.appId"
-                      >{{ app.displayName }}</button>
-                      <span v-if="app.systemApp" class="badge badge-outline badge-xs">built-in</span>
-                      <span v-if="selectedRole(app.appId)" class="badge badge-primary badge-xs">default</span>
-                    </div>
-                  </td>
-                  <td class="hidden sm:table-cell data-value">{{ app.version || '—' }}</td>
-                  <td class="hidden md:table-cell">
-                    <span v-if="isRunning(app.appId)" class="badge badge-success badge-sm">Running</span>
-                    <span v-else class="text-xs text-base-content/60">Stopped</span>
-                  </td>
-                  <td>
-                    <div class="flex justify-end gap-1">
-                      <button
-                        type="button"
-                        class="btn btn-primary btn-xs"
-                        :disabled="!!busy || liveState !== 'open'"
-                        @click="launch(app)"
-                      >Launch</button>
-                      <button type="button" class="btn btn-ghost btn-xs" @click="selectedApp = app.appId">Settings</button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-if="apps.length" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <article
+              v-for="app in apps"
+              :key="app.appId"
+              class="flex min-w-0 flex-col gap-3 rounded-lg border border-base-300 p-3"
+            >
+              <div class="min-w-0 flex justify-between">
+                <div>
+                  <p class="truncate text-sm font-semibold" :title="app.appId">{{ app.displayName }}</p>
+                  <p class="truncate text-xs text-base-content/60 data-value">{{ app.version || '—' }}</p>
+                </div>
+
+                <div class="flex flex-wrap gap-1.5">
+                  <span v-if="app.systemApp" class="badge badge-outline badge-sm opacity-50">built-in</span>
+                  <span v-if="selectedRole(app.appId)" class="badge badge-primary badge-sm">default</span>
+                </div>
+              </div>
+              <div class="mt-auto flex flex-wrap items-center justify-between gap-2">
+                <span v-if="isRunning(app.appId)" class="badge badge-success badge-md" role="status">Running</span>
+                <button
+                  v-else
+                  type="button"
+                  class="btn btn-primary btn-xs"
+                  :disabled="!!busy || liveState !== 'open'"
+                  @click="launch(app)"
+                >
+                  <Icon size="16px">play_arrow</Icon>
+                  Launch
+                </button>
+                <div class="flex items-center gap-1">
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    :aria-label="`Settings for ${app.displayName}`"
+                    @click="selectedApp = app.appId"
+                  >
+                    <Icon size="16px">settings</Icon>
+                    Settings
+                  </button>
+                  <div class="relative" :data-menu="`actions:${app.appId}`">
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs"
+                      aria-haspopup="menu"
+                      :aria-expanded="openMenu === `actions:${app.appId}`"
+                      :aria-label="`Actions for ${app.displayName}`"
+                      :title="`Run a declared action for ${app.displayName}`"
+                      @click="toggleMenu(`actions:${app.appId}`, $event)"
+                    >
+                      <Icon size="16px">more_vert</Icon>
+                      Actions
+                    </button>
+                    <ul
+                      v-if="openMenu === `actions:${app.appId}`"
+                      role="menu"
+                      :aria-label="`Actions for ${app.displayName}`"
+                      class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
+                    >
+                      <li v-for="action in actionsOf(app)" :key="action.actionId" role="none">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50"
+                          :disabled="!!busy || liveState !== 'open'"
+                          @click="runAction(app, action)"
+                        >
+                          <span class="font-medium">{{ action.label || action.actionId }}</span>
+                          <span v-if="action.description" class="text-[11px] font-normal text-base-content/60">
+                            {{ action.description }}
+                          </span>
+                        </button>
+                      </li>
+                      <li v-if="!actionsOf(app).length" class="menu-disabled px-2 py-1.5 opacity-50 w-full">
+                        This app doesn't declare any actions.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </article>
           </div>
           <p v-else class="text-sm text-base-content/60">No applications are installed.</p>
         </div>

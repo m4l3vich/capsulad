@@ -33,7 +33,7 @@ const views = {
 const view = computed(() => views[route.path] || null)
 
 const connection = computed(() => ({
-  open: { label: 'Live', dot: 'bg-success' },
+  open: { label: 'Connected', dot: 'bg-success' },
   connecting: { label: 'Connecting', dot: 'bg-warning' },
   reconnecting: { label: 'Reconnecting', dot: 'bg-warning' },
   expired: { label: 'Session ended', dot: 'bg-error' },
@@ -117,7 +117,6 @@ async function signOut() {
     <div class="card w-full max-w-sm border border-base-300 bg-base-100 shadow-sm">
       <div class="card-body gap-4" aria-busy="true" aria-live="polite">
         <div class="flex items-center gap-2 font-semibold tracking-tight">
-          <span class="grid h-7 w-7 place-items-center rounded-lg bg-primary text-[10px] font-bold text-primary-content">C</span>
           capsulad
         </div>
         <div class="skeleton h-3 w-2/3"></div>
@@ -135,7 +134,7 @@ async function signOut() {
         <div class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
           <a
             v-bind="link('/')"
-            class="whitespace-nowrap rounded px-1 py-1 font-mono text-sm font-semibold tracking-tight"
+            class="whitespace-nowrap rounded px-1 py-1 font-mono text-sm font-semibold tracking-tight text-primary"
             title="capsulad main page"
           >capsulad v{{ session.version || '—' }}</a>
 
@@ -150,7 +149,7 @@ async function signOut() {
             >{{ item.label }}</a>
           </nav>
 
-          <div class="ml-auto flex items-center gap-2">
+          <div class="ml-auto flex items-center gap-3">
             <span class="inline-flex items-center gap-1.5 text-xs text-base-content/70" role="status" :aria-label="connection.label">
               <span class="inline-block h-2 w-2 rounded-full" :class="connection.dot"></span>
               <span class="hidden sm:inline">{{ connection.label }}</span>

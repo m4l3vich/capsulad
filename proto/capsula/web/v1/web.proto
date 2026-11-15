@@ -256,6 +256,10 @@ message AppView {
   bool system_app = 11;
   bool can_stop = 12;
   bool can_uninstall = 13;
+  // Declared manifest actions, the same definitions DescribeAppConfiguration
+  // returns. Carrying them on the listing lets the SPA offer an app's actions
+  // without one configuration read per installed application.
+  repeated ActionDefinitionView actions = 14;
 }
 
 message ResourceView {

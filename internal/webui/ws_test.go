@@ -21,6 +21,8 @@ import (
 
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	webv1 "capsulad/gen/go/capsula/web/v1"
+	"capsulad/internal/manifest"
+	"capsulad/internal/registry"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/websecurity"
 )
@@ -759,5 +761,63 @@ func TestImmediateSettingsGroupsDoNotSubmitUnrelatedFields(t *testing.T) {
 	if !muted || timezone != "UTC" || hostname != "capsula" || startup {
 		t.Fatalf("microphone gate changed unrelated fields: muted=%v timezone=%q hostname=%q startup=%v",
 			muted, timezone, hostname, startup)
+	}
+}
+
+// The overview app listing carries each installed app's declared actions, so
+// the SPA can offer them from the card without a configuration read per app.
+func TestOverviewListingCarriesAppActions(t *testing.T) {
+	env := newTestEnv(t)
+	reg, err := registry.Open(t.TempDir(), env.srv.Logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = reg.RegisterBuiltin(&registry.App{Manifest: &manifest.Manifest{
+		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
+		Actions: []manifest.Action{
+			{ID: "timer_start", Label: "Start timer"},
+			{ID: "timer_cancel", Label: "Cancel timer",
+				Description: "Cancel the running timer.", ConfirmBeforeRun: true},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.srv.Apps = reg
+
+	conn, _, _ := connectSession(t, env)
+	conn.send(&webv1.ClientFrame{RequestId: 12, Body: &webv1.ClientFrame_SnapshotRequest{
+		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_OVERVIEW},
+	}})
+	apps := conn.waitSnapshot(t, 12).GetOverview().GetApps()
+
+	var clock, player *webv1.AppView
+	for _, app := range apps {
+		switch app.GetAppId() {
+		case "capsula.clock":
+			clock = app
+		case "org.example.player":
+			player = app
+		}
+	}
+	if clock == nil || player == nil {
+		t.Fatalf("overview apps = %v", apps)
+	}
+	actions := clock.GetActions()
+	if len(actions) != 2 {
+		t.Fatalf("clock actions = %v, want 2", actions)
+	}
+	if actions[0].GetActionId() != "timer_start" || actions[0].GetLabel() != "Start timer" ||
+		actions[0].GetConfirmBeforeRun() {
+		t.Fatalf("start action = %v", actions[0])
+	}
+	if actions[1].GetActionId() != "timer_cancel" || !actions[1].GetConfirmBeforeRun() ||
+		actions[1].GetDescription() != "Cancel the running timer." {
+		t.Fatalf("cancel action = %v", actions[1])
+	}
+	// An app the registry does not know is listed without invented actions.
+	if len(player.GetActions()) != 0 {
+		t.Fatalf("player actions = %v, want none", player.GetActions())
 	}
 }

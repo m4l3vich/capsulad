@@ -109,7 +109,7 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 	}
 	view.SelectedProviders = selected
 	for _, a := range appsResp.GetApplications() {
-		view.Apps = append(view.Apps, appView(a))
+		view.Apps = append(view.Apps, s.appListing(a))
 	}
 	runs, _ := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx, &frameworkv1.ListRunsRequest{})
 	view.Runs = runViews(runs.GetRuns(), selected)
@@ -137,7 +137,7 @@ func (s *Server) settingsView(ctx context.Context) (*webv1.SettingsView, error) 
 	}
 	if apps, err := frameworkv1.NewApplicationServiceClient(s.Conn).ListApplications(ctx, &frameworkv1.ListApplicationsRequest{}); err == nil {
 		for _, a := range apps.GetApplications() {
-			view.Apps = append(view.Apps, appView(a))
+			view.Apps = append(view.Apps, s.appListing(a))
 		}
 	}
 	if models, err := frameworkv1.NewAssistantServiceClient(s.Conn).ListWakewordModels(ctx, &frameworkv1.ListWakewordModelsRequest{}); err == nil {
@@ -179,7 +179,7 @@ func (s *Server) applicationView(ctx context.Context, appID string) (*webv1.Appl
 	if app == nil {
 		return nil, status.Errorf(codes.NotFound, "application %q is not installed", appID)
 	}
-	view := &webv1.ApplicationView{App: appView(app)}
+	view := &webv1.ApplicationView{App: s.appListing(app)}
 	selected := false
 	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
 		selected = isSelectedProvider(settings.GetValues(), appID)
@@ -393,6 +393,29 @@ func bluetoothView(b *frameworkv1.BluetoothStatus) *webv1.BluetoothView {
 		IncomingConnections: b.GetIncomingConnections(), Adapter: b.GetAdapter(), Detail: b.GetDetail(),
 		Name: b.GetName(),
 	}
+}
+
+// appListing projects an installed application for the browser. Declared
+// actions are not part of the framework's application listing, so they come
+// from the registry manifest: the same definitions DescribeAppConfiguration
+// returns, attached here so a listing can offer them without one configuration
+// read per installed application.
+func (s *Server) appListing(a *frameworkv1.InstalledApplication) *webv1.AppView {
+	v := appView(a)
+	if v == nil || s.Apps == nil {
+		return v
+	}
+	app, ok := s.Apps.Get(a.GetAppId())
+	if !ok || app.Manifest == nil {
+		return v
+	}
+	for _, action := range app.Manifest.Actions {
+		v.Actions = append(v.Actions, &webv1.ActionDefinitionView{
+			ActionId: action.ID, Label: action.Label, Description: action.Description,
+			ConfirmBeforeRun: action.ConfirmBeforeRun,
+		})
+	}
+	return v
 }
 
 func appView(a *frameworkv1.InstalledApplication) *webv1.AppView {

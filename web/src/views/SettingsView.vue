@@ -6,6 +6,7 @@ import TimezonePicker from '../components/TimezonePicker.vue'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
 import ModalDialog from '../components/ModalDialog.vue'
+import Icon from '../components/Icon.vue'
 import { socket } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
 import { pct } from '../lib/format.js'
@@ -357,7 +358,7 @@ function toggleDiscoverable(event) {
 function reloadOverview() {
   // A failed re-read is already exposed through overviewError; swallow the
   // rejection so a click cannot surface as an unhandled promise.
-  refreshOverview().catch(() => {})
+  refreshOverview().catch(() => { })
 }
 
 function askUnpair(device) {
@@ -410,31 +411,43 @@ onUnmounted(() => {
 const sections = [
   {
     id: 'voice-assistant',
+    icon: 'robot_2',
     title: 'Voice assistant',
-    keywords: ['voice', 'assistant', 'wakeword', 'summon', 'talk', 'touch', 'wake word', 'training']
+    keywords: ['voice', 'assistant', 'summon', 'talk', 'touch']
+  },
+  {
+    id: 'wakeword',
+    icon: 'record_voice_over',
+    title: 'Wakeword',
+    keywords: ['wakeword', 'wake word', 'detection', 'training', 'recordings', 'model']
   },
   {
     id: 'display-ring',
+    icon: 'fluorescent',
     title: 'Display & ring',
     keywords: ['display', 'ring', 'led', 'segment', 'brightness', 'ambient', 'auto', 'default app']
   },
   {
     id: 'microphone',
+    icon: 'mic',
     title: 'Microphone',
     keywords: ['microphone', 'mic', 'mute', 'hide', 'delay', 'indicator', 'privacy']
   },
   {
     id: 'bluetooth',
+    icon: 'bluetooth',
     title: 'Bluetooth',
     keywords: ['bluetooth', 'pair', 'unpair', 'discoverable', 'incoming', 'speaker']
   },
   {
     id: 'wifi',
+    icon: 'wifi',
     title: 'Wi-Fi',
     keywords: ['wifi', 'wi-fi', 'network', 'ssid', 'password', 'scan', 'portal', 'wireless']
   },
   {
     id: 'device',
+    icon: 'schedule',
     title: 'Time & device',
     keywords: ['device', 'timezone', 'time', 'zone', 'clock', 'hostname', 'name', 'volume', 'sound', 'startup']
   }
@@ -489,391 +502,383 @@ function jumpTo(id) {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <header class="space-y-3">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-          <p class="max-w-2xl text-sm opacity-70">
-            Selects, sliders and toggles apply immediately. Text fields stay as your draft until you press
-            their button, even when another session or the speaker changes something.
-          </p>
-          <p v-if="pending" class="mt-1 flex items-center gap-2 text-xs opacity-60" role="status">
-            <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Applying…
-          </p>
-        </div>
-        <label class="input input-bordered flex w-full items-center gap-2 sm:w-72">
-          <svg class="h-4 w-4 opacity-60" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" d="M9 3a6 6 0 104.472 10.007l3.26 3.26a1 1 0 001.415-1.414l-3.26-3.26A6 6 0 009 3zm-4 6a4 4 0 118 0 4 4 0 01-8 0z" clip-rule="evenodd" />
-          </svg>
-          <input
-            v-model="query"
-            type="search"
-            class="grow"
-            placeholder="Filter settings"
-            aria-label="Filter settings sections"
-            autocomplete="off"
-          />
-        </label>
-      </div>
-
-      <nav class="flex flex-wrap items-center gap-1" aria-label="Settings sections">
-        <a
-          v-for="section in sections"
-          :key="section.id"
-          :href="`#${section.id}`"
-          class="btn btn-xs btn-ghost"
-          :class="visible[section.id] ? '' : 'opacity-40'"
-          @click.prevent="jumpTo(section.id)"
-        >{{ section.title }}</a>
-      </nav>
-    </header>
-
-    <div v-if="actionError" class="alert alert-error" role="alert">
-      <span>{{ actionError }}</span>
+  <div class="flex flex-col gap-5">
+    <div class="flex flex-wrap items-end justify-between gap-2">
+      <h1 class="my-2 flex items-center gap-2 text-xl font-semibold leading-tight">
+        Settings
+        <span
+          v-if="pending"
+          class="loading loading-spinner loading-sm text-primary"
+          role="status"
+          aria-label="Applying changes"
+        ></span>
+      </h1>
+      <label class="input input-sm input-bordered flex w-full items-center gap-2 sm:w-64">
+        <Icon size="16px">search</Icon>
+        <input
+          v-model="query"
+          type="search"
+          class="grow text-sm"
+          placeholder="Filter settings"
+          aria-label="Filter settings sections"
+          autocomplete="off"
+        />
+      </label>
     </div>
 
-    <div v-if="!data && !error" class="grid gap-3 md:grid-cols-2">
-      <div class="card bg-base-100 shadow-sm"><div class="card-body gap-2">
-        <div class="skeleton h-4 w-32"></div>
-        <div class="skeleton h-20 w-full"></div>
-      </div></div>
-      <div class="card bg-base-100 shadow-sm"><div class="card-body gap-2">
-        <div class="skeleton h-4 w-40"></div>
-        <div class="skeleton h-20 w-full"></div>
-      </div></div>
+    <nav class="flex flex-wrap items-center gap-x-4 gap-y-1" aria-label="Settings sections">
+      <button
+        v-for="section in sections"
+        :key="section.id"
+        type="button"
+        class="btn btn-ghost btn-sm"
+        :class="visible[section.id] ? '' : 'opacity-40'"
+        @click="jumpTo(section.id)"
+      >
+        <Icon size="20px">{{ section.icon }}</Icon>
+        {{ section.title }}
+      </button>
+    </nav>
+
+    <div v-if="actionError" class="alert alert-error py-2" role="alert">
+      <span class="text-sm">{{ actionError }}</span>
+      <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
+    </div>
+
+    <div v-if="!data && !error" class="grid gap-5 md:grid-cols-2" aria-busy="true">
+      <div v-for="n in 4" :key="n" class="rounded-box bg-base-100">
+        <div class="flex flex-col gap-3 p-4">
+          <div class="skeleton h-3 w-1/3"></div>
+          <div class="skeleton h-8 w-full"></div>
+          <div class="skeleton h-8 w-2/3"></div>
+        </div>
+      </div>
     </div>
 
     <div v-else-if="!data" class="alert alert-error" role="alert">
-      <span>
+      <span class="text-sm">
         <strong>Settings unavailable.</strong>
-        {{ error }} The console reconnects automatically when the speaker is reachable.
+        {{ error }} The web UI reconnects automatically when the device is reachable.
       </span>
     </div>
 
     <template v-else>
-      <div v-show="!visibleCount" class="alert" role="status">
-        <span>No settings match “{{ query }}”.</span>
+      <div v-show="!visibleCount" class="alert py-2" role="status">
+        <span class="text-sm">No settings match “{{ query }}”.</span>
         <button type="button" class="btn btn-sm btn-ghost" @click="clearSearch">Clear filter</button>
       </div>
 
-      <div v-show="visible['voice-assistant']" class="space-y-3">
-        <section id="voice-assistant" class="card scroll-mt-24 bg-base-100 shadow-sm">
-          <div class="card-body gap-4">
-            <div>
-              <h2 class="card-title text-lg">Voice assistant</h2>
-              <p class="text-sm opacity-70">
-                The assistant app answers wakeword and touch summons. Wakeword detection and voice training live
-                with the assistant below.
-              </p>
+      <section
+        v-show="visible['voice-assistant']"
+        id="voice-assistant"
+        class="scroll-mt-24 rounded-box bg-base-100"
+      >
+        <div class="flex flex-col gap-3 p-4 sm:p-5">
+          <div class="flex items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">record_voice_over</Icon>
+            <h2 class="text-base font-semibold">Voice assistant</h2>
+          </div>
+          <div class="grid gap-3 md:grid-cols-2">
+            <label class="flex flex-col gap-1 text-sm">
+              <div class="alert flex-grow">
+                Choose an app that will launch when you hold the assistant button on the speaker.
+              </div>
+              <span class="font-medium mt-2">Default assistant app</span>
+              <select
+                v-model="ui.assistant.app"
+                class="select select-bordered select-sm w-full"
+                @change="applyAssistant(['default_assistant_app'])"
+              >
+                <option value="">— none —</option>
+                <option
+                  v-if="savedProvider('voice_assistant', ui.assistant.app)"
+                  :value="ui.assistant.app"
+                >
+                  {{ savedProvider('voice_assistant', ui.assistant.app).label }}
+                </option>
+                <option v-for="app in providerApps('voice_assistant')" :key="app.appId" :value="app.appId">
+                  {{ providerLabel(app) }}
+                </option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <div class="alert flex-grow">
+                <template v-if="ui.assistant.touch === 'summon'">
+                  "Hold to summon" — hold the button, the assistant activates, you release it — assistant continues to listen.
+                </template>
+                <template v-if="ui.assistant.touch === 'talk'">
+                  "Hold to talk" — hold the button, the assistant activates, you release it — assistant stops listening.
+                </template>
+              </div>
+              <span class="font-medium mt-2">Touch and hold</span>
+              <select
+                v-model="ui.assistant.touch"
+                class="select select-bordered select-sm w-full"
+                @change="applyAssistant(['touch_hold_mode'])"
+              >
+                <option value="summon">Hold to summon</option>
+                <option value="talk">Hold to talk</option>
+              </select>
+            </label>
+          </div>
+          <p v-if="!providerApps('voice_assistant').length" class="text-xs text-base-content/60">
+            No installed app provides a voice assistant.
+          </p>
+        </div>
+      </section>
+
+      <div v-show="visible['wakeword']" id="wakeword" class="scroll-mt-24">
+        <WakewordSettings />
+      </div>
+
+      <section
+        v-show="visible['display-ring']"
+        id="display-ring"
+        class="scroll-mt-24 rounded-box bg-base-100"
+      >
+        <div class="flex flex-col gap-4 p-4 sm:p-5">
+          <div class="flex items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">display_settings</Icon>
+            <h2 class="text-base font-semibold">Display &amp; ring</h2>
+          </div>
+
+          <div
+            v-for="kind in ['display', 'ring']"
+            :key="kind"
+            class="flex flex-col gap-3 rounded-box bg-base-200/60 p-3 sm:p-4"
+          >
+            <div class="flex items-center gap-2">
+              <h3 class="flex-grow text-sm font-semibold">
+                {{ kind === 'display' ? 'Segment display' : 'LED ring' }}
+              </h3>
+              <span v-if="!data[kind]" class="text-xs text-base-content/60">not reported</span>
             </div>
 
-            <div class="grid gap-3 md:grid-cols-2">
-              <label class="form-control w-full">
-                <span class="label-text mb-1">Default assistant</span>
+            <div v-if="data[kind]" class="grid gap-3 md:grid-cols-2">
+              <label class="flex flex-col gap-1 text-sm">
+                <span class="font-medium">Default application</span>
                 <select
-                  v-model="ui.assistant.app"
-                  class="select select-bordered w-full"
-                  @change="applyAssistant(['default_assistant_app'])"
+                  v-model="ui[kind].app"
+                  class="select select-bordered select-sm w-full"
+                  @change="applyResourceNow(kind, ['default_app'])"
                 >
                   <option value="">— none —</option>
                   <option
-                    v-if="savedProvider('voice_assistant', ui.assistant.app)"
-                    :value="ui.assistant.app"
+                    v-if="savedProvider(providerToken(kind), ui[kind].app)"
+                    :value="ui[kind].app"
                   >
-                    {{ savedProvider('voice_assistant', ui.assistant.app).label }}
+                    {{ savedProvider(providerToken(kind), ui[kind].app).label }}
                   </option>
-                  <option v-for="app in providerApps('voice_assistant')" :key="app.appId" :value="app.appId">
+                  <option v-for="app in providerApps(providerToken(kind))" :key="app.appId" :value="app.appId">
                     {{ providerLabel(app) }}
                   </option>
                 </select>
               </label>
-              <label class="form-control w-full">
-                <span class="label-text mb-1">Touch and hold</span>
-                <select
-                  v-model="ui.assistant.touch"
-                  class="select select-bordered w-full"
-                  @change="applyAssistant(['touch_hold_mode'])"
-                >
-                  <option value="summon">Hold to summon</option>
-                  <option value="talk">Hold to talk</option>
-                </select>
-              </label>
-            </div>
-            <p v-if="!providerApps('voice_assistant').length" class="text-xs opacity-60">
-              No installed app provides a voice assistant. Install one to choose it here.
-            </p>
-            <p class="text-xs opacity-60">
-              <template v-if="ui.assistant.touch === 'talk'">
-                Release to end listening.
-              </template>
-              <template v-else>
-                Let the assistant decide when you have finished.
-              </template>
-            </p>
 
-            <div class="divider my-0"></div>
-            <div id="wakeword" class="scroll-mt-24">
-              <WakewordSettings />
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <div v-show="visible['display-ring']" class="space-y-3">
-        <section id="display-ring" class="card scroll-mt-24 bg-base-100 shadow-sm">
-          <div class="card-body gap-5">
-            <div>
-              <h2 class="card-title text-lg">Display &amp; ring</h2>
-              <p class="text-sm opacity-70">
-                Default apps own their output. Brightness is either set by you or adjusted to the room light.
-              </p>
-            </div>
-
-            <div v-for="kind in ['display', 'ring']" :key="kind" class="space-y-3">
-              <div class="flex items-center gap-2">
-                <h3 class="font-medium">{{ kind === 'display' ? 'Segment display' : 'LED ring' }}</h3>
-                <span v-if="!data[kind]" class="badge badge-ghost badge-sm">not reported</span>
-              </div>
-
-              <div v-if="data[kind]" class="grid gap-3 md:grid-cols-2">
-                <label class="form-control w-full">
-                  <span class="label-text mb-1">Default application</span>
-                  <select
-                    v-model="ui[kind].app"
-                    class="select select-bordered w-full"
-                    @change="applyResourceNow(kind, ['default_app'])"
-                  >
-                    <option value="">— none —</option>
-                    <option
-                      v-if="savedProvider(providerToken(kind), ui[kind].app)"
-                      :value="ui[kind].app"
-                    >
-                      {{ savedProvider(providerToken(kind), ui[kind].app).label }}
-                    </option>
-                    <option v-for="app in providerApps(providerToken(kind))" :key="app.appId" :value="app.appId">
-                      {{ providerLabel(app) }}
-                    </option>
-                  </select>
-                </label>
-
-                <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="label-text">Brightness</span>
-                    <span class="badge badge-ghost badge-sm">{{ ui[kind].mode === 'auto' ? 'auto' : `${ui[kind].brightness}%` }}</span>
-                  </div>
-                  <input
-                    v-model.number="ui[kind].brightness"
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="1"
-                    class="range range-primary range-sm w-full"
-                    :disabled="ui[kind].mode === 'auto'"
-                    :aria-label="`${kind === 'display' ? 'Segment display' : 'LED ring'} constant brightness`"
-                    @pointerdown="beginDrag(kind)"
-                    @pointerup="endDrag(kind)"
-                    @change="endDrag(kind)"
-                    @input="markResource(kind, ['brightness'])"
-                  />
-                  <label class="label cursor-pointer justify-start gap-2 py-0">
-                    <input
-                      type="checkbox"
-                      class="checkbox checkbox-sm"
-                      :checked="ui[kind].mode === 'auto'"
-                      :disabled="!ambient && ui[kind].mode !== 'auto'"
-                      @change="toggleAuto(kind, $event)"
-                    />
-                    <span class="label-text">Automatically adjust to room light</span>
-                  </label>
-                  <p v-if="!ambient" class="text-xs text-warning">
-                    This speaker has no room-light sensor, so automatic adjustment is off. Your set brightness
-                    is used.
-                  </p>
-                  <p v-else-if="ui[kind].mode === 'auto'" class="text-xs opacity-60">
-                    The slider is off while automatic adjustment is on.
-                  </p>
+              <div class="flex flex-col gap-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-sm font-medium">Brightness</span>
+                  <span class="text-sm tabular-nums text-base-content/60">
+                    {{ ui[kind].mode === 'auto' ? 'auto' : `${ui[kind].brightness}%` }}
+                  </span>
                 </div>
+                <input
+                  v-model.number="ui[kind].brightness"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  class="range range-primary range-sm w-full"
+                  :disabled="ui[kind].mode === 'auto'"
+                  :aria-label="`${kind === 'display' ? 'Segment display' : 'LED ring'} constant brightness`"
+                  @pointerdown="beginDrag(kind)"
+                  @pointerup="endDrag(kind)"
+                  @change="endDrag(kind)"
+                  @input="markResource(kind, ['brightness'])"
+                />
+                <label class="flex cursor-pointer items-center justify-start gap-2">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    :checked="ui[kind].mode === 'auto'"
+                    :disabled="!ambient && ui[kind].mode !== 'auto'"
+                    @change="toggleAuto(kind, $event)"
+                  />
+                  <span class="text-sm">Adjust to room light automatically</span>
+                </label>
+                <p v-if="!ambient" class="text-xs text-warning">
+                  No room-light sensor: your brightness is used.
+                </p>
+                <p v-else-if="ui[kind].mode === 'auto'" class="text-xs text-base-content/60">
+                  The slider is off while automatic adjustment is on.
+                </p>
               </div>
-              <p v-if="!providerApps(providerToken(kind)).length" class="text-xs opacity-60">
-                No installed app provides this output. Choose none or install one.
-              </p>
             </div>
+            <p v-if="!providerApps(providerToken(kind)).length" class="text-xs text-base-content/60">
+              No installed app provides this output.
+            </p>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
 
-      <div v-show="visible['microphone']" class="space-y-3">
-        <section id="microphone" class="card scroll-mt-24 bg-base-100 shadow-sm">
-          <div class="card-body gap-4">
-            <div>
-              <h2 class="card-title text-lg">Microphone</h2>
-              <p class="text-sm opacity-70">
-                Muting stops the microphone everywhere. The muted light can hide after a delay without
-                changing the mute state.
-              </p>
-            </div>
-
+      <section
+        v-show="visible['microphone']"
+        id="microphone"
+        class="scroll-mt-24 rounded-box bg-base-100"
+      >
+        <div class="flex flex-col gap-3 p-4 sm:p-5">
+          <div class="flex items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">mic</Icon>
+            <h2 class="text-base font-semibold">Microphone</h2>
+          </div>
+          <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <MicrophoneControl />
-
-            <div class="divider my-0"></div>
-
-            <label class="form-control w-full md:max-w-sm">
-              <span class="label-text mb-1">Hide the muted light</span>
-              <select v-model="ui.indicator" class="select select-bordered w-full" @change="applyIndicator">
+            <label class="flex w-full flex-col gap-1 text-sm md:w-64">
+              <span class="font-medium">Hide the muted light</span>
+              <select v-model="ui.indicator" class="select select-bordered select-sm w-full" @change="applyIndicator">
                 <option v-for="option in indicatorOptions" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </option>
               </select>
             </label>
-            <p class="text-xs opacity-60">
-              “Never” is the default: the muted light stays visible until the microphone is unmuted. Changing
-              this never changes the saved delay.
-            </p>
           </div>
-        </section>
-      </div>
+          <p class="text-xs text-base-content/60">
+            “Never” keeps the muted light visible until you unmute; changing this never changes the saved delay.
+          </p>
+        </div>
+      </section>
 
-      <div v-show="visible['bluetooth']" class="space-y-3">
-        <section id="bluetooth" class="card scroll-mt-24 bg-base-100 shadow-sm">
-          <div class="card-body gap-4">
-            <div class="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <h2 class="card-title text-lg">Bluetooth</h2>
-                <p class="text-sm opacity-70">Choose how phones, tablets and speakers connect over Bluetooth.</p>
-              </div>
-              <div class="flex items-center gap-2">
-                <span v-if="btStatus" class="badge" :class="btStatus.powered ? 'badge-success' : 'badge-ghost'">
-                  {{ btStatus.powered ? 'Bluetooth on' : 'Bluetooth off' }}
+      <section
+        v-show="visible['bluetooth']"
+        id="bluetooth"
+        class="scroll-mt-24 rounded-box bg-base-100"
+      >
+        <div class="flex flex-col gap-4 p-4 sm:p-5">
+          <div class="flex flex-wrap items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">bluetooth</Icon>
+            <h2 class="flex-grow text-base font-semibold">Bluetooth</h2>
+            <span v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</span>
+            <span v-if="btStatus" class="text-xs font-medium" :class="btStatus.powered ? 'text-success' : 'text-base-content/60'">
+              {{ btStatus.powered ? 'On' : 'Off' }}
+            </span>
+          </div>
+
+          <div v-if="data.bluetoothError" class="alert alert-warning py-2" role="status">
+            <span class="text-sm">{{ data.bluetoothError }}</span>
+          </div>
+
+          <div class="grid gap-3 md:grid-cols-2">
+            <label class="flex cursor-pointer items-start justify-between gap-3">
+              <span class="min-w-0">
+                <span class="block text-sm font-medium">Speaker mode</span>
+                <span class="mt-0.5 block text-xs text-base-content/60">
+                  Accept audio from already-paired devices. Turning this off keeps a connected device connected.
                 </span>
-                <span v-if="btStatus?.name" class="font-mono text-xs opacity-60">{{ btStatus.name }}</span>
-              </div>
+              </span>
+              <input
+                type="checkbox"
+                class="toggle toggle-primary toggle-sm mt-1 shrink-0"
+                :checked="ui.bluetooth.incoming"
+                :disabled="!btStatus?.present || busy === 'bluetooth'"
+                @change="toggleIncoming"
+              />
+            </label>
+            <label class="flex cursor-pointer items-start justify-between gap-3">
+              <span class="min-w-0">
+                <span class="block text-sm font-medium">Pair new devices</span>
+                <span class="mt-0.5 block text-xs text-base-content/60">Let nearby devices find and pair with this speaker.</span>
+              </span>
+              <input
+                type="checkbox"
+                class="toggle toggle-primary toggle-sm mt-1 shrink-0"
+                :checked="ui.bluetooth.discoverable"
+                :disabled="!btStatus?.present || busy === 'bluetooth'"
+                @change="toggleDiscoverable"
+              />
+            </label>
+          </div>
+
+          <div class="flex flex-col gap-2">
+            <div class="flex items-center gap-2">
+              <h3 class="flex-grow text-sm font-semibold">Paired devices</h3>
+              <button type="button" class="btn btn-ghost btn-xs" :disabled="!overviewData" @click="reloadOverview">
+                Refresh
+              </button>
             </div>
-
-            <div v-if="data.bluetoothError" class="alert alert-warning" role="status">{{ data.bluetoothError }}</div>
-
-            <div class="space-y-2">
-              <label class="label cursor-pointer justify-start gap-3 py-0">
-                <input
-                  type="checkbox"
-                  class="toggle toggle-primary"
-                  :checked="ui.bluetooth.incoming"
-                  :disabled="!btStatus?.present || busy === 'bluetooth'"
-                  @change="toggleIncoming"
-                />
-                <span>
-                  <span class="label-text block">Speaker mode</span>
-                  <span class="block text-xs opacity-60">
-                    Accept audio from paired devices. Turning this off does not disconnect a device already
-                    connected.
-                  </span>
-                </span>
-              </label>
-              <label class="label cursor-pointer justify-start gap-3 py-0">
-                <input
-                  type="checkbox"
-                  class="toggle toggle-primary"
-                  :checked="ui.bluetooth.discoverable"
-                  :disabled="!btStatus?.present || busy === 'bluetooth'"
-                  @change="toggleDiscoverable"
-                />
-                <span>
-                  <span class="label-text block">Pair new devices</span>
-                  <span class="block text-xs opacity-60">
-                    Let nearby devices find and pair with this speaker.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            <div class="divider my-0"></div>
-
-            <div>
-              <div class="mb-2 flex items-center justify-between gap-2">
-                <h3 class="font-medium">Paired devices</h3>
-                <button type="button" class="btn btn-xs btn-ghost" :disabled="!overviewData" @click="reloadOverview">
-                  Refresh
-                </button>
-              </div>
-              <p v-if="overviewError" class="text-sm text-error" role="alert">{{ overviewError }}</p>
-              <p v-else-if="!overviewData" class="text-sm opacity-70">Loading paired devices…</p>
-              <p v-else-if="!pairedDevices.length" class="text-sm opacity-70">No paired devices.</p>
-              <ul v-else class="space-y-1">
-                <li
-                  v-for="device in pairedDevices"
-                  :key="device.address"
-                  class="flex flex-wrap items-center justify-between gap-2 rounded-box border border-base-300 px-3 py-2"
+            <p v-if="overviewError" class="text-xs text-error" role="alert">{{ overviewError }}</p>
+            <p v-else-if="!overviewData" class="text-xs text-base-content/60">Loading paired devices…</p>
+            <p v-else-if="!pairedDevices.length" class="text-xs text-base-content/60">No paired devices.</p>
+            <ul v-else class="divide-y divide-base-300">
+              <li
+                v-for="device in pairedDevices"
+                :key="device.address"
+                class="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
+              >
+                <div class="min-w-0">
+                  <p class="flex items-center gap-1.5 truncate text-sm font-medium">
+                    {{ device.name || 'Unnamed device' }}
+                    <span v-if="device.connected" class="badge badge-success badge-sm">connected</span>
+                  </p>
+                  <p class="truncate font-mono text-xs text-base-content/60">{{ device.address }}</p>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-outline"
+                  :disabled="busy === 'unpair'"
+                  @click="askUnpair(device)"
                 >
-                  <div class="min-w-0">
-                    <p class="truncate text-sm font-medium">
-                      {{ device.name || 'Unnamed device' }}
-                      <span v-if="device.connected" class="badge badge-success badge-sm ml-1">connected</span>
-                    </p>
-                    <p class="font-mono text-xs opacity-60">{{ device.address }}</p>
-                  </div>
-                  <button
-                    type="button"
-                    class="btn btn-xs btn-outline"
-                    :disabled="busy === 'unpair'"
-                    @click="askUnpair(device)"
-                  >
-                    Unpair
-                  </button>
-                </li>
-              </ul>
-            </div>
+                  Unpair
+                </button>
+              </li>
+            </ul>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
 
       <div v-show="visible['wifi']">
         <WifiSettings />
       </div>
 
-      <div v-show="visible['device']" class="space-y-3">
-        <section id="device" class="card scroll-mt-24 bg-base-100 shadow-sm">
-          <div class="card-body gap-5">
-            <div>
-              <h2 class="card-title text-lg">Time &amp; device</h2>
-              <p class="text-sm opacity-70">Time zone, speaker name, volume and the boot chime.</p>
-            </div>
+      <section
+        v-show="visible['device']"
+        id="device"
+        class="scroll-mt-24 rounded-box bg-base-100"
+      >
+        <div class="flex flex-col gap-4 p-4 sm:p-5">
+          <div class="flex items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">schedule</Icon>
+            <h2 class="text-base font-semibold">Time &amp; device</h2>
+          </div>
 
-            <div class="space-y-3">
-              <h3 class="font-medium">Time zone</h3>
-              <TimezonePicker />
-            </div>
+          <div class="grid gap-4 md:grid-cols-2">
+            <TimezonePicker class="md:col-span-2" />
 
-            <div class="divider my-0"></div>
-
-            <div class="space-y-3">
-              <h3 class="font-medium">Speaker name</h3>
-              <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
-                <label class="form-control w-full sm:max-w-xs">
-                  <span class="label-text mb-1">Name on your network</span>
-                  <input
-                    v-model="drafts.hostname"
-                    type="text"
-                    class="input input-bordered w-full"
-                    maxlength="63"
-                    autocomplete="off"
-                    spellcheck="false"
-                    @input="dirty.hostname = true"
-                  />
-                </label>
+            <div class="flex flex-col gap-2 rounded-box bg-base-200/60 p-3 sm:p-4">
+              <h3 class="text-sm font-semibold">Speaker name</h3>
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  v-model="drafts.hostname"
+                  type="text"
+                  class="input input-bordered input-sm w-full sm:max-w-xs"
+                  maxlength="63"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-label="Speaker name on your network"
+                  @input="dirty.hostname = true"
+                />
                 <button
                   type="button"
-                  class="btn btn-sm btn-outline sm:mb-0.5"
+                  class="btn btn-sm btn-outline"
                   :disabled="!dirty.hostname"
                   @click="saveHostname"
                 >
                   Save name
                 </button>
               </div>
-              <p class="text-xs opacity-60">
+              <p class="text-xs text-base-content/60">
                 Other devices on your home network can use this name to find the speaker.
               </p>
-              <details class="text-xs opacity-70">
+              <details class="text-xs text-base-content/60">
                 <summary class="cursor-pointer">Technical details</summary>
                 <p class="mt-1">
                   A single DNS label, advertised as <code>&lt;name&gt;.local</code>.
@@ -887,25 +892,25 @@ function jumpTo(id) {
               </details>
             </div>
 
-            <div class="divider my-0"></div>
-
-            <VolumeControl />
-
-            <label class="label cursor-pointer justify-start gap-3 py-0">
-              <input
-                type="checkbox"
-                class="toggle toggle-primary"
-                :checked="ui.startup"
-                @change="toggleStartup"
-              />
-              <span>
-                <span class="label-text block">Startup sound</span>
-                <span class="block text-xs opacity-60">Play the chime on every boot.</span>
-              </span>
-            </label>
+            <div class="flex flex-col gap-3 rounded-box bg-base-200/60 p-3 sm:p-4">
+              <h3 class="text-sm font-semibold">Sound and boot</h3>
+              <VolumeControl />
+              <label class="flex cursor-pointer items-start justify-between gap-3">
+                <span class="min-w-0">
+                  <span class="block text-sm font-medium">Startup sound</span>
+                  <span class="block text-xs text-base-content/60">Play the chime on every boot.</span>
+                </span>
+                <input
+                  type="checkbox"
+                  class="toggle toggle-primary toggle-sm mt-1 shrink-0"
+                  :checked="ui.startup"
+                  @change="toggleStartup"
+                />
+              </label>
+            </div>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
     </template>
 
     <ModalDialog v-if="unpairTarget" title="Unpair device" @close="unpairTarget = null">
