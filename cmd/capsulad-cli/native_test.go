@@ -25,7 +25,7 @@ func TestCheckNativeSDKRequirementInstallGate(t *testing.T) {
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "capsula-native.json"),
-		[]byte(`{"abi_major":1,"abi_minor":0,"capabilities":["capsula.abi.v1"],"library":"libcapsula.so.1"}`), 0o444); err != nil {
+		[]byte(`{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`), 0o444); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "libcapsula.so.1"), []byte("shared object"), 0o555); err != nil {

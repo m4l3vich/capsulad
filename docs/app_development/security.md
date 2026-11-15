@@ -97,8 +97,8 @@ confinement is implemented by identity checks on each method, not by hiding the 
   try to acquire an administrator identity by omitting or forging identity.
 - Replay an activation ID, request another app's pre-roll, or capture after the visible/audible
   microphone indication is gone.
-- Treat `provides`, `[native_sdk]` capabilities or a `[github_attestation]` as permissions. They
-  are hints and requirements.
+- Treat `provides`, a `[native_sdk]` ABI requirement or a `[github_attestation]` as permissions.
+  They are hints and requirements.
 - Use the custom settings UI to attempt network access, frames, forms, popups, host DOM access,
   app-bus calls or another app's settings. The frame is opaque-origin and receives no session or
   socket.
@@ -158,26 +158,22 @@ GitHub being reachable. Verified origin attests build integrity under that polic
 a statement that the code or its runtime behavior is safe, and it never changes what the app may
 do. Script packages cannot carry provenance evidence in this contract.
 
-## Capability declaration
+## Native SDK ABI requirement
 
-A native app that loads the shared SDK runtime declares a requirement, not a grant:
+A native app that loads the shared SDK runtime declares an ABI requirement, not a grant:
 
 ```toml
 [native_sdk]
 abi_major = 1
 min_minor = 0
-required_capabilities = ["capsula.service.presentation", "capsula.audio.capture"]
 ```
 
 - The requirement is preflighted at install and again at launch against the installed runtime's
-  metadata (`capsula-native.json`). A wrong major, a too-new minor or a missing capability is a
-  hard install failure naming what is missing.
+  metadata (`capsula-native.json`). A wrong major or a too-new minor is a hard install failure
+  naming the mismatch.
 - The binding independently re-checks the library it loaded at startup.
-- The capability vocabulary describes SDK features (transport shapes, services, audio fast path,
-  deadlines, cancellation). It does not enumerate per-method permissions; those are decided by
-  the daemon from the caller's identity.
-- Declare what you use. Declaring everything makes an app fail on a runtime that is otherwise
-  sufficient.
+- The ABI requirement describes the shared library contract only. It does not enumerate
+  per-method permissions; those are decided by the daemon from the caller's identity.
 
 `ApplicationService.ListRuntimes` reports which runtimes are available, with an implementation
 version and a detail string. A missing script host is a clear launch failure, not a silent
@@ -205,4 +201,4 @@ administrative boundary.
 - Handle `PERMISSION_DENIED` as final; do not probe other identities or run IDs.
 - Release every presentation, capture, audio stream and conversation on every exit path.
 - Do not rely on the simulator's sandbox mode as evidence about the device.
-- Build native binaries for the target ABI and declare only the SDK capabilities you use.
+- Build native binaries for the target ABI and declare the ABI requirement that matches it.

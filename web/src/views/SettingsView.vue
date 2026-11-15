@@ -47,6 +47,18 @@ const apps = computed(() => data.value?.apps || [])
 const ambient = computed(() => Boolean(data.value?.ambientAvailable))
 const btStatus = computed(() => btOverride.value || data.value?.bluetooth || null)
 const pairedDevices = computed(() => overviewData.value?.pairedDevices || [])
+// What the speaker answers to on the network: the advertised name already
+// carries its `.local` suffix. Without one, only the saved hostname is honest;
+// an unsaved draft is not a name the speaker answers to yet.
+const advertisedName = computed(() => {
+  const advertised = String(data.value?.discovery?.advertised || '').trim()
+  if (advertised) return advertised
+  const saved = String(values.value.hostname || '').trim()
+  return `${saved || 'capsula'}.local`
+})
+// Naming can be unavailable on the running platform; that is not the same as
+// the name being discoverable, so the copy must not promise it.
+const namingUnsupported = computed(() => Boolean(data.value?.discovery) && !data.value.discovery.supported)
 
 // Provider roles are manifest hints used only to populate these dropdowns;
 // they are not entitlements. A saved app is never replaced or hidden: when it
@@ -372,7 +384,7 @@ async function confirmUnpair() {
   busy.value = 'unpair'
   actionError.value = ''
   try {
-    await socket.request({ bluetooth: { unpair: { address: device.address } } })
+    await socket.request({ bluetooth: { unpair: { deviceId: device.deviceId } } })
     unpairTarget.value = null
     await refreshOverview()
   } catch (err) {
@@ -502,7 +514,7 @@ function jumpTo(id) {
 </script>
 
 <template>
-  <div class="flex flex-col gap-5">
+  <div class="mx-auto w-full max-w-2xl flex flex-col gap-5">
     <div class="flex flex-wrap items-end justify-between gap-2">
       <h1 class="my-2 flex items-center gap-2 text-xl font-semibold leading-tight">
         Settings
@@ -545,7 +557,7 @@ function jumpTo(id) {
       <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
     </div>
 
-    <div v-if="!data && !error" class="grid gap-5 md:grid-cols-2" aria-busy="true">
+    <div v-if="!data && !error" class="flex flex-col gap-5" aria-busy="true">
       <div v-for="n in 4" :key="n" class="rounded-box bg-base-100">
         <div class="flex flex-col gap-3 p-4">
           <div class="skeleton h-3 w-1/3"></div>
@@ -575,10 +587,10 @@ function jumpTo(id) {
       >
         <div class="flex flex-col gap-3 p-4 sm:p-5">
           <div class="flex items-center gap-2">
-            <Icon size="18px" class="text-base-content/60">record_voice_over</Icon>
-            <h2 class="text-base font-semibold">Voice assistant</h2>
+            <Icon size="20px" class="text-base-content/60">record_voice_over</Icon>
+            <h2 class="text-lg font-semibold">Voice assistant</h2>
           </div>
-          <div class="grid gap-3 md:grid-cols-2">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="flex flex-col gap-1 text-sm">
               <div class="alert flex-grow">
                 Choose an app that will launch when you hold the assistant button on the speaker.
@@ -638,8 +650,8 @@ function jumpTo(id) {
       >
         <div class="flex flex-col gap-4 p-4 sm:p-5">
           <div class="flex items-center gap-2">
-            <Icon size="18px" class="text-base-content/60">display_settings</Icon>
-            <h2 class="text-base font-semibold">Display &amp; ring</h2>
+            <Icon size="20px" class="text-base-content/60">display_settings</Icon>
+            <h2 class="text-lg font-semibold">Display &amp; ring</h2>
           </div>
 
           <div
@@ -648,18 +660,18 @@ function jumpTo(id) {
             class="flex flex-col gap-3 rounded-box bg-base-200/60 p-3 sm:p-4"
           >
             <div class="flex items-center gap-2">
-              <h3 class="flex-grow text-sm font-semibold">
+              <h3 class="flex-grow text-base font-semibold">
                 {{ kind === 'display' ? 'Segment display' : 'LED ring' }}
               </h3>
               <span v-if="!data[kind]" class="text-xs text-base-content/60">not reported</span>
             </div>
 
-            <div v-if="data[kind]" class="grid gap-3 md:grid-cols-2">
-              <label class="flex flex-col gap-1 text-sm">
+            <template v-if="data[kind]">
+              <label class="flex flex-col gap-1.5 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                 <span class="font-medium">Default application</span>
                 <select
                   v-model="ui[kind].app"
-                  class="select select-bordered select-sm w-full"
+                  class="select select-bordered select-sm w-full sm:w-64"
                   @change="applyResourceNow(kind, ['default_app'])"
                 >
                   <option value="">— none —</option>
@@ -682,30 +694,33 @@ function jumpTo(id) {
                     {{ ui[kind].mode === 'auto' ? 'auto' : `${ui[kind].brightness}%` }}
                   </span>
                 </div>
-                <input
-                  v-model.number="ui[kind].brightness"
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  class="range range-primary range-sm w-full"
-                  :disabled="ui[kind].mode === 'auto'"
-                  :aria-label="`${kind === 'display' ? 'Segment display' : 'LED ring'} constant brightness`"
-                  @pointerdown="beginDrag(kind)"
-                  @pointerup="endDrag(kind)"
-                  @change="endDrag(kind)"
-                  @input="markResource(kind, ['brightness'])"
-                />
-                <label class="flex cursor-pointer items-center justify-start gap-2">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                   <input
-                    type="checkbox"
-                    class="checkbox checkbox-sm"
-                    :checked="ui[kind].mode === 'auto'"
-                    :disabled="!ambient && ui[kind].mode !== 'auto'"
-                    @change="toggleAuto(kind, $event)"
+                    v-model.number="ui[kind].brightness"
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    class="range range-primary range-sm w-full sm:flex-1"
+                    :disabled="ui[kind].mode === 'auto'"
+                    :aria-label="`${kind === 'display' ? 'Segment display' : 'LED ring'} constant brightness`"
+                    @pointerdown="beginDrag(kind)"
+                    @pointerup="endDrag(kind)"
+                    @change="endDrag(kind)"
+                    @input="markResource(kind, ['brightness'])"
                   />
-                  <span class="text-sm">Adjust to room light automatically</span>
-                </label>
+                  <label class="flex shrink-0 cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-sm"
+                      aria-label="Automatic brightness"
+                      :checked="ui[kind].mode === 'auto'"
+                      :disabled="!ambient && ui[kind].mode !== 'auto'"
+                      @change="toggleAuto(kind, $event)"
+                    />
+                    <span class="text-sm">Automatic</span>
+                  </label>
+                </div>
                 <p v-if="!ambient" class="text-xs text-warning">
                   No room-light sensor: your brightness is used.
                 </p>
@@ -713,7 +728,7 @@ function jumpTo(id) {
                   The slider is off while automatic adjustment is on.
                 </p>
               </div>
-            </div>
+            </template>
             <p v-if="!providerApps(providerToken(kind)).length" class="text-xs text-base-content/60">
               No installed app provides this output.
             </p>
@@ -728,14 +743,18 @@ function jumpTo(id) {
       >
         <div class="flex flex-col gap-3 p-4 sm:p-5">
           <div class="flex items-center gap-2">
-            <Icon size="18px" class="text-base-content/60">mic</Icon>
-            <h2 class="text-base font-semibold">Microphone</h2>
+            <Icon size="20px" class="text-base-content/60">mic</Icon>
+            <h2 class="text-lg font-semibold">Microphone</h2>
           </div>
-          <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-            <MicrophoneControl />
-            <label class="flex w-full flex-col gap-1 text-sm md:w-64">
+          <div class="flex flex-col gap-3">
+            <MicrophoneControl class="[&>label]:flex-row-reverse [&>label]:justify-between" />
+            <label class="flex flex-col gap-1.5 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
               <span class="font-medium">Hide the muted light</span>
-              <select v-model="ui.indicator" class="select select-bordered select-sm w-full" @change="applyIndicator">
+              <select
+                v-model="ui.indicator"
+                class="select select-bordered select-sm w-full sm:w-64"
+                @change="applyIndicator"
+              >
                 <option v-for="option in indicatorOptions" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </option>
@@ -754,20 +773,19 @@ function jumpTo(id) {
         class="scroll-mt-24 rounded-box bg-base-100"
       >
         <div class="flex flex-col gap-4 p-4 sm:p-5">
-          <div class="flex flex-wrap items-center gap-2">
-            <Icon size="18px" class="text-base-content/60">bluetooth</Icon>
-            <h2 class="flex-grow text-base font-semibold">Bluetooth</h2>
-            <span v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</span>
-            <span v-if="btStatus" class="text-xs font-medium" :class="btStatus.powered ? 'text-success' : 'text-base-content/60'">
-              {{ btStatus.powered ? 'On' : 'Off' }}
-            </span>
+          <div class="flex flex-col gap-1">
+            <div class="flex items-center gap-2">
+              <Icon size="20px" class="text-base-content/60">bluetooth</Icon>
+              <h2 class="text-lg font-semibold">Bluetooth</h2>
+            </div>
+            <p v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</p>
           </div>
 
           <div v-if="data.bluetoothError" class="alert alert-warning py-2" role="status">
             <span class="text-sm">{{ data.bluetoothError }}</span>
           </div>
 
-          <div class="grid gap-3 md:grid-cols-2">
+          <div class="flex flex-col gap-3">
             <label class="flex cursor-pointer items-start justify-between gap-3">
               <span class="min-w-0">
                 <span class="block text-sm font-medium">Speaker mode</span>
@@ -811,16 +829,13 @@ function jumpTo(id) {
             <ul v-else class="divide-y divide-base-300">
               <li
                 v-for="device in pairedDevices"
-                :key="device.address"
+                :key="device.deviceId"
                 class="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
               >
-                <div class="min-w-0">
-                  <p class="flex items-center gap-1.5 truncate text-sm font-medium">
-                    {{ device.name || 'Unnamed device' }}
-                    <span v-if="device.connected" class="badge badge-success badge-sm">connected</span>
-                  </p>
-                  <p class="truncate font-mono text-xs text-base-content/60">{{ device.address }}</p>
-                </div>
+                <p class="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium">
+                  {{ device.name || 'Unnamed device' }}
+                  <span v-if="device.connected" class="badge badge-success badge-sm">connected</span>
+                </p>
                 <button
                   type="button"
                   class="btn btn-xs btn-outline"
@@ -846,15 +861,15 @@ function jumpTo(id) {
       >
         <div class="flex flex-col gap-4 p-4 sm:p-5">
           <div class="flex items-center gap-2">
-            <Icon size="18px" class="text-base-content/60">schedule</Icon>
-            <h2 class="text-base font-semibold">Time &amp; device</h2>
+            <Icon size="20px" class="text-base-content/60">schedule</Icon>
+            <h2 class="text-lg font-semibold">Time &amp; device</h2>
           </div>
 
-          <div class="grid gap-4 md:grid-cols-2">
-            <TimezonePicker class="md:col-span-2" />
+          <div class="flex flex-col gap-4">
+            <TimezonePicker class="w-full" />
 
             <div class="flex flex-col gap-2 rounded-box bg-base-200/60 p-3 sm:p-4">
-              <h3 class="text-sm font-semibold">Speaker name</h3>
+              <h3 class="text-base font-semibold">Speaker name</h3>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <input
                   v-model="drafts.hostname"
@@ -875,25 +890,20 @@ function jumpTo(id) {
                   Save name
                 </button>
               </div>
-              <p class="text-xs text-base-content/60">
-                Other devices on your home network can use this name to find the speaker.
+              <p v-if="namingUnsupported" class="text-xs text-base-content/60">
+                The speaker name is saved as
+                <code class="font-mono">{{ advertisedName }}</code>
+                and will be advertised when network naming is available.
               </p>
-              <details class="text-xs text-base-content/60">
-                <summary class="cursor-pointer">Technical details</summary>
-                <p class="mt-1">
-                  A single DNS label, advertised as <code>&lt;name&gt;.local</code>.
-                  <template v-if="data.discovery?.advertised">
-                    Currently advertised as <code>{{ data.discovery.advertised }}</code>.
-                  </template>
-                  <template v-else-if="data.discovery && !data.discovery.supported">
-                    mDNS advertising is unavailable; the name is stored for when a responder exists.
-                  </template>
-                </p>
-              </details>
+              <p v-else class="text-xs text-base-content/60">
+                The speaker can be discovered as
+                <code class="font-mono">{{ advertisedName }}</code>
+                on the network.
+              </p>
             </div>
 
             <div class="flex flex-col gap-3 rounded-box bg-base-200/60 p-3 sm:p-4">
-              <h3 class="text-sm font-semibold">Sound and boot</h3>
+              <h3 class="text-base font-semibold">Sound and boot</h3>
               <VolumeControl />
               <label class="flex cursor-pointer items-start justify-between gap-3">
                 <span class="min-w-0">
@@ -915,7 +925,7 @@ function jumpTo(id) {
 
     <ModalDialog v-if="unpairTarget" title="Unpair device" @close="unpairTarget = null">
       <p class="text-sm">
-        Unpair <strong>{{ unpairTarget.name || unpairTarget.address }}</strong>? It will be forgotten by
+        Unpair <strong>{{ unpairTarget.name || 'Unnamed device' }}</strong>? It will be forgotten by
         Bluetooth and must pair again to reconnect.
       </p>
       <template #footer>

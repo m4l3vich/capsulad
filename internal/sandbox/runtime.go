@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -20,8 +19,7 @@ import (
 // through the launcher environment instead of bundling their own.
 const (
 	// RuntimeMetadataFile is emitted by the native build next to the shared
-	// library. It describes the ABI and capability vocabulary the installed
-	// runtime provides.
+	// library. It describes the ABI the installed runtime provides.
 	RuntimeMetadataFile = "capsula-native.json"
 
 	// NamespaceLibraryDir is the fixed read-only location of the runtime
@@ -59,20 +57,18 @@ type RuntimeStatus struct {
 // RuntimeInfo is the on-disk metadata format. Unknown fields are ignored so a
 // newer native build can add diagnostics without breaking the supervisor.
 type RuntimeInfo struct {
-	ABIMajor     int      `json:"abi_major"`
-	ABIMinor     int      `json:"abi_minor"`
-	Capabilities []string `json:"capabilities"`
-	Library      string   `json:"library"`
+	ABIMajor int    `json:"abi_major"`
+	ABIMinor int    `json:"abi_minor"`
+	Library  string `json:"library"`
 }
 
 // Runtime describes one installed shared native SDK.
 type Runtime struct {
-	Dir          string
-	File         string // file name relative to Dir
-	ABIMajor     int
-	ABIMinor     int
-	Capabilities map[string]bool
-	Metadata     bool // capsula-native.json was present and valid
+	Dir      string
+	File     string // file name relative to Dir
+	ABIMajor int
+	ABIMinor int
+	Metadata bool // capsula-native.json was present and valid
 	// Interpreters maps a script runtime to its installed host executable.
 	// A runtime without a host is absent from the map; that is the only
 	// truthful answer until the host is staged beside the library.
@@ -232,7 +228,7 @@ func findRuntime(dir string, strict bool) (*Runtime, error) {
 	}
 
 	rt := &Runtime{
-		Dir: dir, Capabilities: map[string]bool{},
+		Dir:          dir,
 		Interpreters: map[manifest.Runtime]Interpreter{},
 	}
 	metaPath := filepath.Join(dir, RuntimeMetadataFile)
@@ -275,9 +271,6 @@ func findRuntime(dir string, strict bool) (*Runtime, error) {
 			rt.ABIMinor = md.ABIMinor
 			rt.Metadata = true
 			rt.File = md.Library
-			for _, capability := range md.Capabilities {
-				rt.Capabilities[capability] = true
-			}
 		}
 	case os.IsNotExist(readErr):
 		if strict {
@@ -289,7 +282,6 @@ func findRuntime(dir string, strict bool) (*Runtime, error) {
 		}
 	}
 	if !metaOK {
-		rt.Capabilities = map[string]bool{}
 		rt.File = ""
 	}
 
@@ -418,11 +410,6 @@ func validateMetadata(md *RuntimeInfo) error {
 	if md.ABIMinor < 0 {
 		return fmt.Errorf("declares negative abi_minor %d", md.ABIMinor)
 	}
-	for _, capability := range md.Capabilities {
-		if !manifest.ValidNativeCapability(capability) {
-			return fmt.Errorf("declares malformed capability %q", capability)
-		}
-	}
 	return nil
 }
 
@@ -451,9 +438,8 @@ func withinDir(dir, path string) bool {
 }
 
 // CheckRequirement reports whether the installed runtime satisfies an app's
-// declared ABI and capability requirements. Major versions must match, the
-// installed minor must cover the requested minimum, and every requested
-// capability must be present.
+// declared ABI requirement. Major versions must match and the installed minor
+// must cover the requested minimum.
 func CheckRequirement(rt *Runtime, req manifest.NativeSDK) error {
 	if rt == nil {
 		return fmt.Errorf("native SDK runtime is not installed")
@@ -464,28 +450,7 @@ func CheckRequirement(rt *Runtime, req manifest.NativeSDK) error {
 	if req.MinMinor > rt.ABIMinor {
 		return fmt.Errorf("app requires native SDK ABI %d.%d or newer but the installed runtime provides %d.%d (install a newer runtime)", req.ABIMajor, req.MinMinor, rt.ABIMajor, rt.ABIMinor)
 	}
-	var missing []string
-	for _, capability := range req.RequiredCapabilities {
-		if !rt.Capabilities[capability] {
-			missing = append(missing, capability)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("installed native SDK runtime lacks required capabilities %s (available: %s)", strings.Join(missing, ", "), describeCapabilities(rt.Capabilities))
-	}
 	return nil
-}
-
-func describeCapabilities(capabilities map[string]bool) string {
-	if len(capabilities) == 0 {
-		return "none"
-	}
-	names := make([]string, 0, len(capabilities))
-	for name := range capabilities {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
 }
 
 // LibraryEnv is the launch environment that points an app at the shared SDK.

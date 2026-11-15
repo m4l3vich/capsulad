@@ -175,9 +175,12 @@ ERROR-level lines and kept wakeword enabled with the microphone unmuted.
 
 The Wakeword section lists the single personal-model slot with its availability, the saved takes on
 the device and recent hands-free detections newest first, capped at 20, engine-origin only (manual
-talk-key activations are not detections). Training replaces `word.personal` atomically only after
-the checks pass; there is no separate delete-model action, and closing the dialog while idle changes
-nothing. Training is serialized, cancellable and bounded to 30 minutes by the Web UI.
+talk-key activations are not detections). Each detection carries an opaque runtime ID: marking one a
+false detection removes it from that list and changes nothing else — no audio, sample or classifier
+state is affected, and the entry is gone from the next snapshot. Training replaces `word.personal`
+atomically only after the checks pass; there is no separate delete-model action, and closing the
+dialog while idle changes nothing. Training is serialized, cancellable and bounded to 30 minutes by
+the Web UI.
 
 A warm `CNEG0002` corpus must already exist at `<data-dir>/wakeword/negatives.bin` (or at
 `-wakeword-negatives`); it is not an inference dependency, and a cold corpus is refused rather than

@@ -59,8 +59,7 @@
 // negotiation is unloaded normally.
 //
 // There is no static transport fallback: if the shared library cannot be
-// loaded, its ABI major is not 1, its v1 table is incomplete, or
-// Env.RequiredCapabilities names something this binding does not implement,
-// construction fails with a typed error (LibraryError, ABIError or
-// CapabilityError) before any framework state is touched.
+// loaded, its ABI major is not 1, or its v1 table is incomplete, construction
+// fails with a typed error (LibraryError or ABIError) before any framework
+// state is touched.
 package capsula

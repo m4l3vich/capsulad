@@ -17,10 +17,6 @@ type Env struct {
 	RunID   string
 	AppID   string
 	SDK     string
-	// RequiredCapabilities is checked against the capability vocabulary this
-	// binding implements. Launchers normally enforce the same list from
-	// capsula-native.json before starting the app.
-	RequiredCapabilities []string
 }
 
 // Enums are plain uint8 values. Their JSON encoding uses the canonical

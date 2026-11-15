@@ -17,26 +17,11 @@ sdk = "0.5"
 
 # The app links only the Go SDK, which dlopens the shared Capsula engine. The
 # engine is injected by the launcher and is never bundled into this package.
-# Every capability below is exercised by the assistant: activations, settings
-# and invocation notifications over the app bus, microphone capture and PCM
-# playback, device settings for hold-to-talk mode, and ring presentations and
-# captures over audio and routing services.
+# [native_sdk] is requirement metadata the supervisor checks before install and
+# launch.
 [native_sdk]
 abi_major = 1
 min_minor = 0
-required_capabilities = [
-  "capsula.service.audio",
-  "capsula.audio.capture",
-  "capsula.audio.playback",
-  "capsula.audio.pcm-fast-path",
-  "capsula.service.presentation",
-  "capsula.service.routing",
-  "capsula.service.assistant",
-  "capsula.service.settings",
-  "capsula.bus.connect",
-  "capsula.bus.events",
-  "capsula.bus.notifications",
-]
 
 [[actions]]
 id = "dismiss"

@@ -67,3 +67,45 @@ func TestRecentDetectionsRecordOnlyEngineOrigin(t *testing.T) {
 		t.Fatalf("limited detections = %d, want 3", len(got))
 	}
 }
+
+// Dismissing a false detection removes exactly that entry, keeps the rest in
+// newest-first order, and reports an unknown ID as absent.
+func TestDismissDetection(t *testing.T) {
+	logs, _ := logbus.New(ids.NewClock(), 100, "")
+	m := NewManager(context.Background(), ids.NewClock(), logs, []Model{
+		{ID: "word.personal", DisplayName: "Hey Capsula", EngineID: "framework.embedding-mlp", Available: true},
+	})
+	defer m.Close()
+	m.SetEnabled(true)
+	for i := 0; i < 3; i++ {
+		if _, ok := m.Trigger("wakeword", "word.personal"); !ok {
+			t.Fatal("engine activation rejected")
+		}
+	}
+	before := m.RecentDetections(20)
+	if len(before) != 3 {
+		t.Fatalf("detections = %d, want 3", len(before))
+	}
+	for _, d := range before {
+		if d.ID == "" {
+			t.Fatalf("detection %+v has no id", d)
+		}
+	}
+
+	if !m.DismissDetection(before[1].ID) {
+		t.Fatal("stored detection was not dismissed")
+	}
+	after := m.RecentDetections(20)
+	if len(after) != 2 {
+		t.Fatalf("detections after dismissal = %d, want 2", len(after))
+	}
+	if after[0].ID != before[0].ID || after[1].ID != before[2].ID {
+		t.Fatalf("order changed after dismissal: %+v", after)
+	}
+	if m.DismissDetection(before[1].ID) {
+		t.Fatal("dismissing an already-dismissed detection reported success")
+	}
+	if m.DismissDetection("") {
+		t.Fatal("empty id was accepted")
+	}
+}

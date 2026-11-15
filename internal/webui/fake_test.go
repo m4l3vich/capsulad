@@ -19,6 +19,7 @@ import (
 	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
 	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	"capsulad/internal/wakeword"
 )
 
 // fakeBackend is a small in-process daemon used to exercise the browser
@@ -35,6 +36,15 @@ type fakeBackend struct {
 	recordingStart  chan struct{}
 	recordingCancel chan struct{}
 	clockRunning    bool
+	// runsErr fails ListRuns so a test can prove the overview falls back to no
+	// providers rather than offering apps whose run state is unknown.
+	runsErr error
+	// unpaired records the addresses the framework was asked to remove, so a
+	// test can prove the opaque ID resolved to the real device.
+	unpaired []string
+	// extraPaired is appended to the default pairing list so a test can model
+	// BlueZ reporting the address as an unaliased device's name.
+	extraPaired []*frameworkv1.PairedDevice
 	// overviewGate delays GetInfo so a test can mutate state while a snapshot
 	// is being built. It is nil unless a test installs it; overviewEntered
 	// signals that the snapshot read has started.
@@ -61,10 +71,16 @@ func newFakeBackend() *fakeBackend {
 				Provides: []string{"segment_display_provider"}},
 			{AppId: "org.example.player", DisplayName: "Player", Version: "2.1.0", CanStop: true,
 				Provides: []string{"media_player"}},
+			// Installed but never launched: a media provider with no run must not
+			// appear in the overview, because nothing can route to its service.
+			{AppId: "org.example.idle", DisplayName: "Idle Player", Version: "1.0.0", CanStop: true,
+				Provides: []string{"media_player"}},
 		},
 		runs: []*frameworkv1.AppRun{
 			{RunId: "run-1", AppId: "capsula.clock", Pid: 42, State: frameworkv1.AppRunState_APP_READY,
 				Runtime: frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN},
+			{RunId: "run-2", AppId: "org.example.player", Pid: 43, State: frameworkv1.AppRunState_APP_READY,
+				Runtime: frameworkv1.ApplicationRuntime_RUNTIME_NATIVE},
 		},
 		resources: []*frameworkv1.ResourceInfo{
 			{ResourceId: "display.segment.front", Kind: frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY, Available: true},
@@ -192,9 +208,13 @@ func (f *fakeSystem) GetBluetoothStatus(context.Context, *frameworkv1.GetBluetoo
 		Adapter: "hci0", Detail: "ready", Name: "Capsula"}, nil
 }
 func (f *fakeSystem) ListPairedDevices(context.Context, *frameworkv1.ListPairedDevicesRequest) (*frameworkv1.ListPairedDevicesResponse, error) {
-	return &frameworkv1.ListPairedDevicesResponse{Devices: []*frameworkv1.PairedDevice{
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	devices := []*frameworkv1.PairedDevice{
 		{Address: "AA:BB:CC:DD:EE:FF", Name: "Phone", Connected: true},
-	}}, nil
+	}
+	devices = append(devices, f.b.extraPaired...)
+	return &frameworkv1.ListPairedDevicesResponse{Devices: devices}, nil
 }
 func (f *fakeSystem) SetBluetoothDiscoverable(context.Context, *frameworkv1.SetBluetoothDiscoverableRequest) (*frameworkv1.BluetoothStatus, error) {
 	return &frameworkv1.BluetoothStatus{Present: true, Powered: true, Discoverable: true, IncomingConnections: true}, nil
@@ -202,7 +222,10 @@ func (f *fakeSystem) SetBluetoothDiscoverable(context.Context, *frameworkv1.SetB
 func (f *fakeSystem) SetBluetoothIncomingConnections(context.Context, *frameworkv1.SetBluetoothIncomingConnectionsRequest) (*frameworkv1.BluetoothStatus, error) {
 	return &frameworkv1.BluetoothStatus{Present: true, Powered: true, IncomingConnections: true}, nil
 }
-func (f *fakeSystem) UnpairDevice(context.Context, *frameworkv1.UnpairDeviceRequest) (*frameworkv1.UnpairDeviceResponse, error) {
+func (f *fakeSystem) UnpairDevice(_ context.Context, req *frameworkv1.UnpairDeviceRequest) (*frameworkv1.UnpairDeviceResponse, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	f.b.unpaired = append(f.b.unpaired, req.GetAddress())
 	return &frameworkv1.UnpairDeviceResponse{Removed: true}, nil
 }
 func (f *fakeSystem) GetStatus(context.Context, *frameworkv1.GetStatusRequest) (*frameworkv1.SystemStatus, error) {
@@ -222,6 +245,9 @@ func (f *fakeApps) ListApplications(context.Context, *frameworkv1.ListApplicatio
 func (f *fakeApps) ListRuns(_ context.Context, req *frameworkv1.ListRunsRequest) (*frameworkv1.ListRunsResponse, error) {
 	f.b.mu.Lock()
 	defer f.b.mu.Unlock()
+	if f.b.runsErr != nil {
+		return nil, f.b.runsErr
+	}
 	var out []*frameworkv1.AppRun
 	for _, run := range f.b.runs {
 		if req.GetAppId() == "" || run.GetAppId() == req.GetAppId() {
@@ -476,6 +502,36 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 }
 
 func protoString(v string) *string { return &v }
+
+// fakeWakeword is a minimal in-process wakewordSource. It keeps its entries
+// newest first, mirroring the manager's browser-facing order, and applies the
+// same dismissal semantics without starting a detector.
+type fakeWakeword struct {
+	mu         sync.Mutex
+	detections []wakeword.Detection
+}
+
+func (f *fakeWakeword) RecentDetections(limit int) []wakeword.Detection {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(f.detections)
+	if limit > 0 && n > limit {
+		n = limit
+	}
+	return append([]wakeword.Detection(nil), f.detections[:n]...)
+}
+
+func (f *fakeWakeword) DismissDetection(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, d := range f.detections {
+		if d.ID == id {
+			f.detections = append(f.detections[:i], f.detections[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
 
 // compile-time assertion that the fake covers every registered service.
 var _ = json.Marshal

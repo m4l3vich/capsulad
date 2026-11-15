@@ -55,9 +55,6 @@ func Connect(ctx context.Context, env Env) (*Client, error) {
 	if env.RunID == "" {
 		return nil, errors.New("capsula: run_id is required")
 	}
-	if missing := missingCapabilities(env.RequiredCapabilities); len(missing) > 0 {
-		return nil, &CapabilityError{Missing: missing}
-	}
 	timeout := timeoutMillis(ctx, 10*time.Second)
 	handle, err := connectNative(env.Library, env.Socket, env.RunID, env.AppID, timeout)
 	if err != nil {

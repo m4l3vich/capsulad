@@ -102,7 +102,6 @@ abi = "linux-gnu"
 [native_sdk]
 abi_major = 1
 min_minor = 0
-required_capabilities = ["capsula.service.presentation"]
 ```
 
 `main.go`:

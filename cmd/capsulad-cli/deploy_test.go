@@ -91,7 +91,7 @@ func TestAppPackageDefaultName(t *testing.T) {
 func TestDeployDryRunChangesNothing(t *testing.T) {
 	bundle := t.TempDir()
 	writeTestFile(t, bundle, "capsulad", "#!/bin/sh\necho 'capsulad test (sdk 0.5)'\n", 0o755)
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"capabilities":[],"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
 	writeTestFile(t, bundle, "boot/S99btctl.sh", "#!/bin/sh\nexit 0\n", 0o755)
 	dataDir := t.TempDir()
 	initScript := filepath.Join(t.TempDir(), "S99btctl.sh")
@@ -433,7 +433,7 @@ func TestDeployResolvesDataDirAbsolute(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle := t.TempDir()
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"capabilities":[],"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
 
 	out, err := captureStdout(t, func() error {
 		return runDeploy([]string{bundle, "-dry-run"}, "relative-data", "")

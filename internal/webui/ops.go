@@ -45,6 +45,7 @@ var browserOperationVocabulary = []string{
 	"settings", "launch", "stop", "action", "app_settings", "media",
 	"bluetooth", "record_sample", "delete_sample", "train",
 	"cancel_training", "clock", "create_api_key", "revoke_api_key", "wifi",
+	"false_detection",
 }
 
 // dispatch is an explicit allowlist: each typed command maps to one fixed
@@ -86,6 +87,8 @@ func (s *Server) dispatch(c *wsConn, reqID uint64, cmd *webv1.Command, ctx conte
 		s.opRevokeKey(c, reqID, op.RevokeApiKey)
 	case *webv1.Command_Wifi:
 		s.opWifi(c, reqID, op.Wifi)
+	case *webv1.Command_FalseDetection:
+		s.opFalseDetection(c, reqID, op.FalseDetection)
 	default:
 		c.sendError(reqID, webv1.ErrorCode_ERROR_CODE_FORBIDDEN, "operation is not in the browser allowlist")
 	}
@@ -535,16 +538,40 @@ func (s *Server) opBluetooth(c *wsConn, reqID uint64, cmd *webv1.BluetoothComman
 			message = "Bluetooth incoming connections disabled"
 		}
 	case *webv1.BluetoothCommand_Unpair:
-		address := strings.TrimSpace(action.Unpair.GetAddress())
-		if address == "" {
-			c.sendError(reqID, errInvalid, "device address is required")
+		deviceID := strings.TrimSpace(action.Unpair.GetDeviceId())
+		if deviceID == "" {
+			c.sendError(reqID, errInvalid, "device id is required")
 			return
 		}
-		if _, err := sys.UnpairDevice(ctx, &frameworkv1.UnpairDeviceRequest{Address: address}); err != nil {
+		// The browser never holds an address: resolve the opaque ID against the
+		// current pairing list and hand the real address to the framework only.
+		paired, err := sys.ListPairedDevices(ctx, &frameworkv1.ListPairedDevicesRequest{})
+		if err != nil {
 			c.sendError(reqID, classifyError(err), rpcMessage(err))
 			return
 		}
-		message = "Device " + address + " unpaired"
+		address, deviceName := "", ""
+		for _, d := range paired.GetDevices() {
+			if pairedDeviceID(d.GetAddress()) == deviceID {
+				address, deviceName = d.GetAddress(), strings.TrimSpace(d.GetName())
+				break
+			}
+		}
+		if address == "" {
+			c.sendError(reqID, errNotFound, "device not found")
+			return
+		}
+		if _, err := sys.UnpairDevice(ctx, &frameworkv1.UnpairDeviceRequest{Address: address}); err != nil {
+			// The framework's detail quotes the address it was given; the
+			// browser gets the classification only.
+			c.sendError(reqID, classifyError(err), "could not unpair the device")
+			return
+		}
+		if name := displayPairedName(address, deviceName); name != "" {
+			message = "Device " + name + " unpaired"
+		} else {
+			message = "Device unpaired"
+		}
 	default:
 		c.sendError(reqID, errInvalid, "unknown bluetooth action")
 		return
@@ -609,6 +636,24 @@ func (s *Server) opDeleteSample(c *wsConn, reqID uint64, del *webv1.DeleteSample
 		return
 	}
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Deleted{Deleted: &webv1.Empty{}}})
+}
+
+func (s *Server) opFalseDetection(c *wsConn, reqID uint64, cmd *webv1.FalseDetection) {
+	id := strings.TrimSpace(cmd.GetDetectionId())
+	if id == "" {
+		c.sendError(reqID, errInvalid, "detection id is required")
+		return
+	}
+	if s.Wakeword == nil {
+		c.sendError(reqID, errInternal, "wakeword history is unavailable")
+		return
+	}
+	if !s.Wakeword.DismissDetection(id) {
+		c.sendError(reqID, errNotFound, "detection not found")
+		return
+	}
+	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Deleted{Deleted: &webv1.Empty{}}})
+	s.publish(uichanges.Wakeword)
 }
 
 func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {

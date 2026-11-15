@@ -85,6 +85,9 @@ type Server struct {
 // protocol: detection history is a local administrator read.
 type wakewordSource interface {
 	RecentDetections(limit int) []wakeword.Detection
+	// DismissDetection drops one stored detection. A false result means the ID
+	// is unknown (already dismissed or never seen).
+	DismissDetection(id string) bool
 }
 
 type authInfo struct {

@@ -109,6 +109,7 @@ func TestLocateRuntimeRequiresMetadata(t *testing.T) {
 		t.Fatalf("missing metadata error = %v, want mention of %s", err, RuntimeMetadataFile)
 	}
 
+	// Legacy metadata still carrying the removed capability list must load.
 	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":2,"capabilities":["audio","events"],"library":"libcapsula.so.1"}`)
 	rt, err := LocateRuntime(dir)
 	if err != nil {
@@ -116,9 +117,6 @@ func TestLocateRuntimeRequiresMetadata(t *testing.T) {
 	}
 	if rt.ABIMajor != 1 || rt.ABIMinor != 2 || !rt.Metadata || rt.File != "libcapsula.so.1" {
 		t.Fatalf("runtime = %+v", rt)
-	}
-	if !rt.Capabilities["audio"] || !rt.Capabilities["events"] {
-		t.Fatalf("capabilities = %v", rt.Capabilities)
 	}
 }
 
@@ -158,7 +156,7 @@ func TestLocateRuntimeRejectsTraversalAndEscapingSymlinks(t *testing.T) {
 }
 
 func TestCheckRequirement(t *testing.T) {
-	rt := &Runtime{ABIMajor: 1, ABIMinor: 2, Capabilities: map[string]bool{"audio": true}}
+	rt := &Runtime{ABIMajor: 1, ABIMinor: 2}
 	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1}); err != nil {
 		t.Fatalf("same major: %v", err)
 	}
@@ -168,8 +166,8 @@ func TestCheckRequirement(t *testing.T) {
 	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1, MinMinor: 3}); err == nil || !strings.Contains(err.Error(), "1.3") {
 		t.Fatalf("minor mismatch error = %v", err)
 	}
-	if err := CheckRequirement(rt, manifest.NativeSDK{ABIMajor: 1, RequiredCapabilities: []string{"video"}}); err == nil || !strings.Contains(err.Error(), "video") {
-		t.Fatalf("capability mismatch error = %v", err)
+	if err := CheckRequirement(nil, manifest.NativeSDK{ABIMajor: 1}); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("absent runtime error = %v", err)
 	}
 }
 
@@ -260,9 +258,9 @@ func TestCommandRequiredRuntimeMissingOrIncompatible(t *testing.T) {
 func TestCommandCompatibleRuntimeSetsEnvironment(t *testing.T) {
 	l, m := nativeApp(t)
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":3,"capabilities":["audio"],"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":3,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
 	l.cfg.LibraryDir = dir
-	m.NativeSDK = &manifest.NativeSDK{ABIMajor: 1, MinMinor: 1, RequiredCapabilities: []string{"audio"}}
+	m.NativeSDK = &manifest.NativeSDK{ABIMajor: 1, MinMinor: 1}
 	cmd, err := l.Command(m, m.Dir, "run1", m.ID)
 	if err != nil {
 		t.Fatalf("compatible app: %v", err)

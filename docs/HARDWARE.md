@@ -309,8 +309,10 @@ errors while the IRQ shared CPU0 with the daemon and wakeword inference.
 
 HSP/HFP telephony is not implemented: only A2DP Sink plus AVRCP CT. Paired-device listing and unpair
 are Web-UI/CLI only — `ListPairedDevices` and `UnpairDevice` reject supervised app callers by run ID
-and sandbox UID, while the rest of the Bluetooth surface is app-facing. Unpair is exercised against
-the simulator manager only.
+and sandbox UID, while the rest of the Bluetooth surface is app-facing. The browser never receives a
+Bluetooth address: each paired device is identified by an opaque ID derived from the address, and
+unpair resolves that ID server-side before calling the framework. Unpair is exercised against the
+simulator manager only.
 
 Verified with a paired MacBook: after `Device1.ConnectProfile(0x110A)` and the AVRCP profile,
 `Device1.Connected=true`, `MediaControl1.Connected=true`, and `MediaPlayer1`/`MediaTransport1`

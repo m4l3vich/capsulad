@@ -428,6 +428,7 @@ export interface Command {
   createApiKey?: CreateApiKey;
   revokeApiKey?: RevokeApiKey;
   wifi?: WifiCommand;
+  falseDetection?: FalseDetection;
 }
 export declare const Command: {
   readonly type: string;
@@ -581,6 +582,15 @@ export declare const Event: {
   readonly type: string;
   encode(obj: Event): Uint8Array;
   decode(bytes: Uint8Array): Event;
+};
+
+export interface FalseDetection {
+  detectionId?: string;
+}
+export declare const FalseDetection: {
+  readonly type: string;
+  encode(obj: FalseDetection): Uint8Array;
+  decode(bytes: Uint8Array): FalseDetection;
 };
 
 export interface Hello {
@@ -811,10 +821,10 @@ export declare const OverviewView: {
 };
 
 export interface PairedDeviceView {
-  address?: string;
   name?: string;
   connected?: boolean;
   trusted?: boolean;
+  deviceId?: string;
 }
 export declare const PairedDeviceView: {
   readonly type: string;
@@ -1326,7 +1336,7 @@ export declare const TriggerAppAction: {
 };
 
 export interface UnpairDevice {
-  address?: string;
+  deviceId?: string;
 }
 export declare const UnpairDevice: {
   readonly type: string;
@@ -1373,6 +1383,7 @@ export interface WakewordDetectionView {
   modelId?: string;
   modelDisplayName?: string;
   detectedUnixMs?: number;
+  detectionId?: string;
 }
 export declare const WakewordDetectionView: {
   readonly type: string;

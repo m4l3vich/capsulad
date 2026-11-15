@@ -29,7 +29,7 @@ a field.
 | Script path not a regular file, or a symlink escaping the package | Store a regular file, not a link. |
 | Duplicate/empty setting key, select without choices, `min > max`, bad default | Fix the setting definition; defaults are validated against their own type and bounds. |
 | `[settings_ui]` missing, not `.html`, over 512 KiB, invalid UTF-8, or no settings declared | Fix the document and declare at least one `[[settings]]`. |
-| `[native_sdk]` on a non-native runtime, `abi_major < 1`, bad capability name | Fix the requirement block. |
+| `[native_sdk]` on a non-native runtime, `abi_major < 1`, negative `min_minor` | Fix the requirement block. |
 | Unknown key inside `[github_attestation]` or missing `subject`/`bundle`/`repository` | Complete or remove the block. |
 
 The same validation runs at packaging, install and launch. Fix the source tree; do not patch the
@@ -55,20 +55,17 @@ started or removed by the directory name.
 
 ## Native SDK requirement unmet
 
-**Symptom** — install or launch fails with `requires native SDK ABI …` or
-`installed native SDK runtime lacks required capabilities …`.
+**Symptom** — install or launch fails with `requires native SDK ABI …`.
 
 | Message | Cause | Fix |
 |---|---|---|
 | `native SDK runtime is not installed` | No `capsula-native.json` beside the runtime, or the runtime directory is wrong. | Install the shared runtime in `<data-dir>/lib` or `<daemon-dir>/lib`, or pass `-native-lib-dir`. |
 | `requires native SDK ABI major N but the installed runtime provides major M` | ABI major mismatch. | Ship a runtime and binding from the same major version. |
 | `requires native SDK ABI N.M or newer but the installed runtime provides …` | The runtime is older than declared. | Lower `min_minor` or install a newer runtime. |
-| `lacks required capabilities …` | A capability you declared is not in the runtime metadata. | Remove the capability or use a runtime that provides it. |
 | `app requires native SDK ABI … : no native SDK runtime directory is configured` | The CLI cannot find the runtime for its preflight. | Use `-native-lib-dir` or install the runtime in `<data-dir>/lib`. |
 
-Declare only what the app uses. The binding re-checks the library it loads, so a runtime that
-passes the install preflight can still fail at startup if its metadata and its exported ABI
-disagree.
+The binding re-checks the library it loads, so a runtime that passes the install preflight can
+still fail at startup if its metadata and its exported ABI disagree.
 
 ## Missing runtime
 

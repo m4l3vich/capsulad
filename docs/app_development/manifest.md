@@ -76,42 +76,15 @@ Optional requirement metadata for a native app that loads the shared SDK runtime
 |---|---|---|---|
 | `abi_major` | integer | — | At least 1. Must equal the installed runtime's major version. |
 | `min_minor` | integer | `0` | Not negative. The installed runtime's minor must be at least this value. |
-| `required_capabilities` | array of string | `[]` | Each entry matches `^[a-z][a-z0-9._-]{0,63}$`; duplicates are rejected. |
 
 - Valid only with `runtime = "native"`.
 - The requirement is preflighted at install and again at launch against the installed runtime's
   metadata; the binding independently re-checks the loaded library at startup. A failure names
-  the missing capability or the version mismatch.
+  the version mismatch.
 - This is a requirement, not a negotiation. Declaring it is what makes "the SDK is missing" a
   clear install-time error instead of a runtime crash.
-
-Capability names in the installed runtime:
-
-```text
-capsula.abi.v1                          capsula.transport.unix-grpc
-capsula.reflect.json-proto              capsula.messages.raw-proto
-capsula.transport.unary                 capsula.transport.server-streaming
-capsula.transport.client-streaming      capsula.transport.bidi
-capsula.bus.connect                     capsula.bus.events
-capsula.bus.notifications               capsula.bus.routed-calls
-capsula.audio.capture                   capsula.audio.playback
-capsula.audio.pcm-fast-path             capsula.descriptors.register
-capsula.deadlines                       capsula.cancel
-capsula.concurrent-handles              capsula.service.device
-capsula.service.settings                capsula.service.routing
-capsula.service.presentation            capsula.service.audio
-capsula.service.input                   capsula.service.assistant
-capsula.service.application             capsula.service.application-configuration
-capsula.service.app-interface           capsula.service.appbus
-capsula.service.sensor                  capsula.service.system
-capsula.service.diagnostics             capsula.service.asset
-capsula.service.bluetooth-media
-```
-
-An app that only publishes a presentation can require `capsula.service.presentation`; an app
-that also captures audio should require the audio service and the capture path. Requiring a
-capability the runtime does not have is a hard install failure, so declare what you use rather
-than everything.
+- Packages built before the capability requirement was removed still carry
+  `native_sdk.required_capabilities`; they load normally and that key is ignored.
 
 ## `[[settings]]`
 
@@ -263,8 +236,7 @@ Rejected at packaging, install and load:
 - an interface without a service name, or a descriptor/docs path that is absolute or escaping;
 - a `settings_ui` document that is missing, not `.html`, not a regular file, larger than
   512 KiB, invalid UTF-8, or declared without at least one setting;
-- `[native_sdk]` on a non-native runtime, `abi_major < 1`, `min_minor < 0`, a malformed or
-  duplicated capability name;
+- `[native_sdk]` on a non-native runtime, `abi_major < 1` or `min_minor < 0`;
 - an empty `provides` entry;
 - a `github_attestation` missing `subject`, `bundle` or `repository`.
 
@@ -291,12 +263,6 @@ sdk = "1.0"
 [native_sdk]
 abi_major = 1
 min_minor = 0
-required_capabilities = [
-  "capsula.service.device",
-  "capsula.service.presentation",
-  "capsula.service.application-configuration",
-  "capsula.bus.routed-calls",
-]
 
 [[settings]]
 key = "format"

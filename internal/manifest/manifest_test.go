@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func nativeBase() *Manifest {
 
 func TestNativeSDKManifestValidation(t *testing.T) {
 	m := nativeBase()
-	m.NativeSDK = &NativeSDK{ABIMajor: 1, MinMinor: 2, RequiredCapabilities: []string{"audio", "events"}}
+	m.NativeSDK = &NativeSDK{ABIMajor: 1, MinMinor: 2}
 	if err := m.Validate(); err != nil {
 		t.Fatalf("valid native_sdk: %v", err)
 	}
@@ -38,18 +39,6 @@ func TestNativeSDKManifestValidation(t *testing.T) {
 	m.NativeSDK = &NativeSDK{ABIMajor: 1, MinMinor: -1}
 	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "min_minor") {
 		t.Fatalf("negative min_minor error = %v", err)
-	}
-
-	m = nativeBase()
-	m.NativeSDK = &NativeSDK{ABIMajor: 1, RequiredCapabilities: []string{"Audio"}}
-	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "capability") {
-		t.Fatalf("malformed capability error = %v", err)
-	}
-
-	m = nativeBase()
-	m.NativeSDK = &NativeSDK{ABIMajor: 1, RequiredCapabilities: []string{"audio", "audio"}}
-	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("duplicate capability error = %v", err)
 	}
 
 	m = &Manifest{
@@ -77,7 +66,6 @@ abi = "linux-musl"
 [native_sdk]
 abi_major = 1
 min_minor = 3
-required_capabilities = ["audio", "events"]
 `
 	file := filepath.Join(dir, "manifest.toml")
 	if err := os.WriteFile(file, []byte(manifest), 0o644); err != nil {
@@ -93,8 +81,58 @@ required_capabilities = ["audio", "events"]
 	if m.NativeSDK.ABIMajor != 1 || m.NativeSDK.MinMinor != 3 {
 		t.Fatalf("native_sdk = %+v", m.NativeSDK)
 	}
-	if len(m.NativeSDK.RequiredCapabilities) != 2 {
-		t.Fatalf("capabilities = %v", m.NativeSDK.RequiredCapabilities)
+}
+
+func TestLegacyRequiredCapabilitiesKeyIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	source := `id = "org.example.sdkdemo"
+name = "SDK Demo"
+version = "0.1.0"
+
+[entrypoint]
+runtime = "native"
+path = "demo"
+architecture = "aarch64"
+abi = "linux-musl"
+
+[native_sdk]
+abi_major = 1
+min_minor = 0
+required_capabilities = ["media_player"]
+`
+	file := filepath.Join(dir, "manifest.toml")
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(dir, file)
+	if err != nil {
+		t.Fatalf("legacy key rejected: %v", err)
+	}
+	if m.NativeSDK == nil || m.NativeSDK.ABIMajor != 1 {
+		t.Fatalf("native_sdk = %+v, want the ABI requirement retained", m.NativeSDK)
+	}
+	// The removed capability surface is neither resurrected nor validated.
+	if strings.Contains(fmt.Sprintf("%+v", m), "media_player") {
+		t.Fatalf("manifest carries the legacy capability requirement: %+v", m)
+	}
+}
+
+func TestUnknownManifestKeyStillRejected(t *testing.T) {
+	dir := t.TempDir()
+	source := `id = "org.example.sdkdemo"
+name = "SDK Demo"
+version = "0.1.0"
+
+[native_sdk]
+abi_major = 1
+unexpected = true
+`
+	file := filepath.Join(dir, "manifest.toml")
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir, file); err == nil || !strings.Contains(err.Error(), "unknown manifest keys") {
+		t.Fatalf("unknown nested key error = %v", err)
 	}
 }
 
