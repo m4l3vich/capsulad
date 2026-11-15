@@ -223,6 +223,7 @@ export interface AppView {
   systemApp?: boolean;
   canStop?: boolean;
   canUninstall?: boolean;
+  actions?: ActionDefinitionView[];
 }
 export declare const AppView: {
   readonly type: string;

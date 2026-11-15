@@ -2440,6 +2440,10 @@ type AppView struct {
 	SystemApp        bool                  `protobuf:"varint,11,opt,name=system_app,json=systemApp,proto3" json:"system_app,omitempty"`
 	CanStop          bool                  `protobuf:"varint,12,opt,name=can_stop,json=canStop,proto3" json:"can_stop,omitempty"`
 	CanUninstall     bool                  `protobuf:"varint,13,opt,name=can_uninstall,json=canUninstall,proto3" json:"can_uninstall,omitempty"`
+	// Declared manifest actions, the same definitions DescribeAppConfiguration
+	// returns. Carrying them on the listing lets the SPA offer an app's actions
+	// without one configuration read per installed application.
+	Actions []*ActionDefinitionView `protobuf:"bytes,14,rep,name=actions,proto3" json:"actions,omitempty"`
 }
 
 func (x *AppView) Reset() {
@@ -2561,6 +2565,13 @@ func (x *AppView) GetCanUninstall() bool {
 		return x.CanUninstall
 	}
 	return false
+}
+
+func (x *AppView) GetActions() []*ActionDefinitionView {
+	if x != nil {
+		return x.Actions
+	}
+	return nil
 }
 
 type ResourceView struct {
@@ -9820,7 +9831,7 @@ var file_capsula_web_v1_web_proto_rawDesc = []byte{
 	0x62, 0x69, 0x12, 0x32, 0x0a, 0x15, 0x66, 0x72, 0x61, 0x6d, 0x65, 0x77, 0x6f, 0x72, 0x6b, 0x5f,
 	0x73, 0x64, 0x6b, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x05, 0x20, 0x01, 0x28,
 	0x09, 0x52, 0x13, 0x66, 0x72, 0x61, 0x6d, 0x65, 0x77, 0x6f, 0x72, 0x6b, 0x53, 0x64, 0x6b, 0x56,
-	0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x22, 0x82, 0x04, 0x0a, 0x07, 0x41, 0x70, 0x70, 0x56, 0x69,
+	0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x22, 0xc2, 0x04, 0x0a, 0x07, 0x41, 0x70, 0x70, 0x56, 0x69,
 	0x65, 0x77, 0x12, 0x15, 0x0a, 0x06, 0x61, 0x70, 0x70, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01,
 	0x28, 0x09, 0x52, 0x05, 0x61, 0x70, 0x70, 0x49, 0x64, 0x12, 0x21, 0x0a, 0x0c, 0x64, 0x69, 0x73,
 	0x70, 0x6c, 0x61, 0x79, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
@@ -9852,7 +9863,11 @@ var file_capsula_web_v1_web_proto_rawDesc = []byte{
 	0x61, 0x6e, 0x5f, 0x73, 0x74, 0x6f, 0x70, 0x18, 0x0c, 0x20, 0x01, 0x28, 0x08, 0x52, 0x07, 0x63,
 	0x61, 0x6e, 0x53, 0x74, 0x6f, 0x70, 0x12, 0x23, 0x0a, 0x0d, 0x63, 0x61, 0x6e, 0x5f, 0x75, 0x6e,
 	0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x08, 0x52, 0x0c, 0x63,
-	0x61, 0x6e, 0x55, 0x6e, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x22, 0xba, 0x01, 0x0a, 0x0c,
+	0x61, 0x6e, 0x55, 0x6e, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x12, 0x3e, 0x0a, 0x07, 0x61,
+	0x63, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x18, 0x0e, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x24, 0x2e, 0x63,
+	0x61, 0x70, 0x73, 0x75, 0x6c, 0x61, 0x2e, 0x77, 0x65, 0x62, 0x2e, 0x76, 0x31, 0x2e, 0x41, 0x63,
+	0x74, 0x69, 0x6f, 0x6e, 0x44, 0x65, 0x66, 0x69, 0x6e, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x56, 0x69,
+	0x65, 0x77, 0x52, 0x07, 0x61, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x22, 0xba, 0x01, 0x0a, 0x0c,
 	0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x56, 0x69, 0x65, 0x77, 0x12, 0x1f, 0x0a, 0x0b,
 	0x72, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
 	0x09, 0x52, 0x0a, 0x72, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x49, 0x64, 0x12, 0x12, 0x0a,
@@ -11284,130 +11299,131 @@ var file_capsula_web_v1_web_proto_depIdxs = []int32{
 	25,  // 38: capsula.web.v1.MediaProviderView.players:type_name -> capsula.web.v1.MediaPlayerView
 	28,  // 39: capsula.web.v1.AppView.launch_arguments:type_name -> capsula.web.v1.LaunchArgumentView
 	29,  // 40: capsula.web.v1.AppView.entrypoint:type_name -> capsula.web.v1.EntrypointView
-	120, // 41: capsula.web.v1.SettingsValues.default_app_by_resource:type_name -> capsula.web.v1.SettingsValues.DefaultAppByResourceEntry
-	121, // 42: capsula.web.v1.SettingsValues.display_brightness:type_name -> capsula.web.v1.SettingsValues.DisplayBrightnessEntry
-	35,  // 43: capsula.web.v1.SettingsValues.muted_microphone_indicator:type_name -> capsula.web.v1.MutedIndicatorView
-	122, // 44: capsula.web.v1.SettingsValues.brightness_mode:type_name -> capsula.web.v1.SettingsValues.BrightnessModeEntry
-	39,  // 45: capsula.web.v1.SettingDefinitionView.choices:type_name -> capsula.web.v1.SettingChoiceView
-	40,  // 46: capsula.web.v1.AppConfigSchemaView.settings:type_name -> capsula.web.v1.SettingDefinitionView
-	41,  // 47: capsula.web.v1.AppConfigSchemaView.actions:type_name -> capsula.web.v1.ActionDefinitionView
-	43,  // 48: capsula.web.v1.AppConfigSchemaView.settings_ui:type_name -> capsula.web.v1.SettingsUIView
-	47,  // 49: capsula.web.v1.InterfaceDescriptionView.methods:type_name -> capsula.web.v1.MethodDocumentationView
-	50,  // 50: capsula.web.v1.ClockView.stopwatch:type_name -> capsula.web.v1.StopwatchView
-	51,  // 51: capsula.web.v1.ClockView.timers:type_name -> capsula.web.v1.TimerView
-	52,  // 52: capsula.web.v1.ClockView.alarms:type_name -> capsula.web.v1.AlarmView
-	53,  // 53: capsula.web.v1.ClockView.active_alerts:type_name -> capsula.web.v1.ActiveAlertView
-	20,  // 54: capsula.web.v1.OverviewView.device:type_name -> capsula.web.v1.DeviceInfo
-	22,  // 55: capsula.web.v1.OverviewView.audio:type_name -> capsula.web.v1.AudioView
-	23,  // 56: capsula.web.v1.OverviewView.bluetooth:type_name -> capsula.web.v1.BluetoothView
-	24,  // 57: capsula.web.v1.OverviewView.paired_devices:type_name -> capsula.web.v1.PairedDeviceView
-	26,  // 58: capsula.web.v1.OverviewView.providers:type_name -> capsula.web.v1.MediaProviderView
-	30,  // 59: capsula.web.v1.OverviewView.apps:type_name -> capsula.web.v1.AppView
-	27,  // 60: capsula.web.v1.OverviewView.runs:type_name -> capsula.web.v1.RunView
-	123, // 61: capsula.web.v1.OverviewView.selected_providers:type_name -> capsula.web.v1.OverviewView.SelectedProvidersEntry
-	36,  // 62: capsula.web.v1.SettingsView.values:type_name -> capsula.web.v1.SettingsValues
-	31,  // 63: capsula.web.v1.SettingsView.display:type_name -> capsula.web.v1.ResourceView
-	31,  // 64: capsula.web.v1.SettingsView.ring:type_name -> capsula.web.v1.ResourceView
-	30,  // 65: capsula.web.v1.SettingsView.apps:type_name -> capsula.web.v1.AppView
-	37,  // 66: capsula.web.v1.SettingsView.models:type_name -> capsula.web.v1.WakewordModelView
-	34,  // 67: capsula.web.v1.SettingsView.discovery:type_name -> capsula.web.v1.DiscoveryView
-	23,  // 68: capsula.web.v1.SettingsView.bluetooth:type_name -> capsula.web.v1.BluetoothView
-	30,  // 69: capsula.web.v1.ApplicationView.app:type_name -> capsula.web.v1.AppView
-	42,  // 70: capsula.web.v1.ApplicationView.schema:type_name -> capsula.web.v1.AppConfigSchemaView
-	44,  // 71: capsula.web.v1.ApplicationView.values:type_name -> capsula.web.v1.SettingStateView
-	46,  // 72: capsula.web.v1.ApplicationView.interfaces:type_name -> capsula.web.v1.InterfaceView
-	48,  // 73: capsula.web.v1.ApplicationView.descriptions:type_name -> capsula.web.v1.InterfaceDescriptionView
-	27,  // 74: capsula.web.v1.ApplicationView.runs:type_name -> capsula.web.v1.RunView
-	49,  // 75: capsula.web.v1.ApplicationView.provenance:type_name -> capsula.web.v1.ProvenanceView
-	33,  // 76: capsula.web.v1.ApplicationView.logs:type_name -> capsula.web.v1.LogEntry
-	54,  // 77: capsula.web.v1.ApplicationView.clock:type_name -> capsula.web.v1.ClockView
-	55,  // 78: capsula.web.v1.ApplicationView.ring:type_name -> capsula.web.v1.RingView
-	20,  // 79: capsula.web.v1.DiagnosticsView.device:type_name -> capsula.web.v1.DeviceInfo
-	31,  // 80: capsula.web.v1.DiagnosticsView.resources:type_name -> capsula.web.v1.ResourceView
-	124, // 81: capsula.web.v1.DiagnosticsView.routing:type_name -> capsula.web.v1.DiagnosticsView.RoutingEntry
-	27,  // 82: capsula.web.v1.DiagnosticsView.runs:type_name -> capsula.web.v1.RunView
-	33,  // 83: capsula.web.v1.DiagnosticsView.logs:type_name -> capsula.web.v1.LogEntry
-	22,  // 84: capsula.web.v1.DiagnosticsView.audio:type_name -> capsula.web.v1.AudioView
-	125, // 85: capsula.web.v1.DiagnosticsView.selected_providers:type_name -> capsula.web.v1.DiagnosticsView.SelectedProvidersEntry
-	60,  // 86: capsula.web.v1.DiagnosticsView.metrics:type_name -> capsula.web.v1.SystemMetricsView
-	38,  // 87: capsula.web.v1.WakewordView.samples:type_name -> capsula.web.v1.WakewordSampleView
-	37,  // 88: capsula.web.v1.WakewordView.models:type_name -> capsula.web.v1.WakewordModelView
-	61,  // 89: capsula.web.v1.WakewordView.detections:type_name -> capsula.web.v1.WakewordDetectionView
-	63,  // 90: capsula.web.v1.AccessView.status:type_name -> capsula.web.v1.AccessStatusView
-	64,  // 91: capsula.web.v1.AccessView.keys:type_name -> capsula.web.v1.ApiKeyView
-	67,  // 92: capsula.web.v1.Command.settings:type_name -> capsula.web.v1.SettingsUpdate
-	77,  // 93: capsula.web.v1.Command.launch:type_name -> capsula.web.v1.LaunchApp
-	79,  // 94: capsula.web.v1.Command.stop:type_name -> capsula.web.v1.StopRun
-	81,  // 95: capsula.web.v1.Command.action:type_name -> capsula.web.v1.TriggerAppAction
-	83,  // 96: capsula.web.v1.Command.app_settings:type_name -> capsula.web.v1.AppSettingsUpdate
-	85,  // 97: capsula.web.v1.Command.media:type_name -> capsula.web.v1.MediaCommand
-	87,  // 98: capsula.web.v1.Command.bluetooth:type_name -> capsula.web.v1.BluetoothCommand
-	92,  // 99: capsula.web.v1.Command.record_sample:type_name -> capsula.web.v1.RecordSample
-	94,  // 100: capsula.web.v1.Command.delete_sample:type_name -> capsula.web.v1.DeleteSample
-	95,  // 101: capsula.web.v1.Command.train:type_name -> capsula.web.v1.TrainWakeword
-	97,  // 102: capsula.web.v1.Command.cancel_training:type_name -> capsula.web.v1.CancelTraining
-	104, // 103: capsula.web.v1.Command.clock:type_name -> capsula.web.v1.ClockCommand
-	106, // 104: capsula.web.v1.Command.create_api_key:type_name -> capsula.web.v1.CreateApiKey
-	108, // 105: capsula.web.v1.Command.revoke_api_key:type_name -> capsula.web.v1.RevokeApiKey
-	114, // 106: capsula.web.v1.Command.wifi:type_name -> capsula.web.v1.WifiCommand
-	68,  // 107: capsula.web.v1.SettingsUpdate.display:type_name -> capsula.web.v1.DisplaySettings
-	69,  // 108: capsula.web.v1.SettingsUpdate.assistant:type_name -> capsula.web.v1.AssistantSettings
-	70,  // 109: capsula.web.v1.SettingsUpdate.microphone:type_name -> capsula.web.v1.MicrophoneSettings
-	75,  // 110: capsula.web.v1.SettingsUpdate.volume:type_name -> capsula.web.v1.VolumeSettings
-	72,  // 111: capsula.web.v1.SettingsUpdate.startup_sound:type_name -> capsula.web.v1.StartupSoundSettings
-	73,  // 112: capsula.web.v1.SettingsUpdate.timezone:type_name -> capsula.web.v1.TimezoneSettings
-	74,  // 113: capsula.web.v1.SettingsUpdate.hostname:type_name -> capsula.web.v1.HostnameSettings
-	71,  // 114: capsula.web.v1.SettingsUpdate.muted_indicator:type_name -> capsula.web.v1.MutedIndicatorSettings
-	2,   // 115: capsula.web.v1.DisplaySettings.brightness_mode:type_name -> capsula.web.v1.BrightnessMode
-	3,   // 116: capsula.web.v1.AssistantSettings.touch_hold:type_name -> capsula.web.v1.TouchBehavior
-	4,   // 117: capsula.web.v1.MutedIndicatorSettings.mode:type_name -> capsula.web.v1.MutedIndicatorMode
-	28,  // 118: capsula.web.v1.LaunchApp.arguments:type_name -> capsula.web.v1.LaunchArgumentView
-	45,  // 119: capsula.web.v1.AppSettingsUpdate.changes:type_name -> capsula.web.v1.AppSettingChangeView
-	44,  // 120: capsula.web.v1.AppSettingsUpdateResult.values:type_name -> capsula.web.v1.SettingStateView
-	5,   // 121: capsula.web.v1.MediaCommand.action:type_name -> capsula.web.v1.MediaAction
-	88,  // 122: capsula.web.v1.BluetoothCommand.set_discoverable:type_name -> capsula.web.v1.SetDiscoverable
-	90,  // 123: capsula.web.v1.BluetoothCommand.unpair:type_name -> capsula.web.v1.UnpairDevice
-	89,  // 124: capsula.web.v1.BluetoothCommand.set_incoming_connections:type_name -> capsula.web.v1.SetIncomingConnections
-	23,  // 125: capsula.web.v1.BluetoothResult.status:type_name -> capsula.web.v1.BluetoothView
-	38,  // 126: capsula.web.v1.SampleResult.sample:type_name -> capsula.web.v1.WakewordSampleView
-	110, // 127: capsula.web.v1.ClockCommand.stopwatch_start:type_name -> capsula.web.v1.Empty
-	110, // 128: capsula.web.v1.ClockCommand.stopwatch_pause:type_name -> capsula.web.v1.Empty
-	110, // 129: capsula.web.v1.ClockCommand.stopwatch_resume:type_name -> capsula.web.v1.Empty
-	110, // 130: capsula.web.v1.ClockCommand.stopwatch_reset:type_name -> capsula.web.v1.Empty
-	98,  // 131: capsula.web.v1.ClockCommand.start_timer:type_name -> capsula.web.v1.StartTimer
-	99,  // 132: capsula.web.v1.ClockCommand.cancel_timer:type_name -> capsula.web.v1.CancelTimer
-	100, // 133: capsula.web.v1.ClockCommand.set_alarm:type_name -> capsula.web.v1.SetAlarm
-	101, // 134: capsula.web.v1.ClockCommand.set_alarm_enabled:type_name -> capsula.web.v1.SetAlarmEnabled
-	102, // 135: capsula.web.v1.ClockCommand.delete_alarm:type_name -> capsula.web.v1.DeleteAlarm
-	103, // 136: capsula.web.v1.ClockCommand.dismiss_alert:type_name -> capsula.web.v1.DismissAlert
-	54,  // 137: capsula.web.v1.ClockCommandResult.clock:type_name -> capsula.web.v1.ClockView
-	76,  // 138: capsula.web.v1.Result.settings:type_name -> capsula.web.v1.SettingsUpdateResult
-	78,  // 139: capsula.web.v1.Result.launch:type_name -> capsula.web.v1.LaunchResult
-	80,  // 140: capsula.web.v1.Result.stop:type_name -> capsula.web.v1.StopResult
-	82,  // 141: capsula.web.v1.Result.action:type_name -> capsula.web.v1.ActionResult
-	84,  // 142: capsula.web.v1.Result.app_settings:type_name -> capsula.web.v1.AppSettingsUpdateResult
-	86,  // 143: capsula.web.v1.Result.media:type_name -> capsula.web.v1.MediaResult
-	91,  // 144: capsula.web.v1.Result.bluetooth:type_name -> capsula.web.v1.BluetoothResult
-	93,  // 145: capsula.web.v1.Result.sample:type_name -> capsula.web.v1.SampleResult
-	110, // 146: capsula.web.v1.Result.deleted:type_name -> capsula.web.v1.Empty
-	96,  // 147: capsula.web.v1.Result.training:type_name -> capsula.web.v1.TrainingHandle
-	105, // 148: capsula.web.v1.Result.clock:type_name -> capsula.web.v1.ClockCommandResult
-	107, // 149: capsula.web.v1.Result.api_key:type_name -> capsula.web.v1.ApiKeyCreated
-	110, // 150: capsula.web.v1.Result.revoked:type_name -> capsula.web.v1.Empty
-	117, // 151: capsula.web.v1.Result.wifi:type_name -> capsula.web.v1.WifiResult
-	112, // 152: capsula.web.v1.WifiView.known_networks:type_name -> capsula.web.v1.WifiKnownNetwork
-	113, // 153: capsula.web.v1.WifiView.scan_results:type_name -> capsula.web.v1.WifiScanResult
-	110, // 154: capsula.web.v1.WifiCommand.scan:type_name -> capsula.web.v1.Empty
-	115, // 155: capsula.web.v1.WifiCommand.connect:type_name -> capsula.web.v1.WifiConnect
-	116, // 156: capsula.web.v1.WifiCommand.forget:type_name -> capsula.web.v1.WifiForget
-	111, // 157: capsula.web.v1.WifiResult.wifi:type_name -> capsula.web.v1.WifiView
-	118, // 158: capsula.web.v1.Progress.classifier:type_name -> capsula.web.v1.WakewordClassifierView
-	32,  // 159: capsula.web.v1.DiagnosticsView.RoutingEntry.value:type_name -> capsula.web.v1.RoutingView
-	160, // [160:160] is the sub-list for method output_type
-	160, // [160:160] is the sub-list for method input_type
-	160, // [160:160] is the sub-list for extension type_name
-	160, // [160:160] is the sub-list for extension extendee
-	0,   // [0:160] is the sub-list for field type_name
+	41,  // 41: capsula.web.v1.AppView.actions:type_name -> capsula.web.v1.ActionDefinitionView
+	120, // 42: capsula.web.v1.SettingsValues.default_app_by_resource:type_name -> capsula.web.v1.SettingsValues.DefaultAppByResourceEntry
+	121, // 43: capsula.web.v1.SettingsValues.display_brightness:type_name -> capsula.web.v1.SettingsValues.DisplayBrightnessEntry
+	35,  // 44: capsula.web.v1.SettingsValues.muted_microphone_indicator:type_name -> capsula.web.v1.MutedIndicatorView
+	122, // 45: capsula.web.v1.SettingsValues.brightness_mode:type_name -> capsula.web.v1.SettingsValues.BrightnessModeEntry
+	39,  // 46: capsula.web.v1.SettingDefinitionView.choices:type_name -> capsula.web.v1.SettingChoiceView
+	40,  // 47: capsula.web.v1.AppConfigSchemaView.settings:type_name -> capsula.web.v1.SettingDefinitionView
+	41,  // 48: capsula.web.v1.AppConfigSchemaView.actions:type_name -> capsula.web.v1.ActionDefinitionView
+	43,  // 49: capsula.web.v1.AppConfigSchemaView.settings_ui:type_name -> capsula.web.v1.SettingsUIView
+	47,  // 50: capsula.web.v1.InterfaceDescriptionView.methods:type_name -> capsula.web.v1.MethodDocumentationView
+	50,  // 51: capsula.web.v1.ClockView.stopwatch:type_name -> capsula.web.v1.StopwatchView
+	51,  // 52: capsula.web.v1.ClockView.timers:type_name -> capsula.web.v1.TimerView
+	52,  // 53: capsula.web.v1.ClockView.alarms:type_name -> capsula.web.v1.AlarmView
+	53,  // 54: capsula.web.v1.ClockView.active_alerts:type_name -> capsula.web.v1.ActiveAlertView
+	20,  // 55: capsula.web.v1.OverviewView.device:type_name -> capsula.web.v1.DeviceInfo
+	22,  // 56: capsula.web.v1.OverviewView.audio:type_name -> capsula.web.v1.AudioView
+	23,  // 57: capsula.web.v1.OverviewView.bluetooth:type_name -> capsula.web.v1.BluetoothView
+	24,  // 58: capsula.web.v1.OverviewView.paired_devices:type_name -> capsula.web.v1.PairedDeviceView
+	26,  // 59: capsula.web.v1.OverviewView.providers:type_name -> capsula.web.v1.MediaProviderView
+	30,  // 60: capsula.web.v1.OverviewView.apps:type_name -> capsula.web.v1.AppView
+	27,  // 61: capsula.web.v1.OverviewView.runs:type_name -> capsula.web.v1.RunView
+	123, // 62: capsula.web.v1.OverviewView.selected_providers:type_name -> capsula.web.v1.OverviewView.SelectedProvidersEntry
+	36,  // 63: capsula.web.v1.SettingsView.values:type_name -> capsula.web.v1.SettingsValues
+	31,  // 64: capsula.web.v1.SettingsView.display:type_name -> capsula.web.v1.ResourceView
+	31,  // 65: capsula.web.v1.SettingsView.ring:type_name -> capsula.web.v1.ResourceView
+	30,  // 66: capsula.web.v1.SettingsView.apps:type_name -> capsula.web.v1.AppView
+	37,  // 67: capsula.web.v1.SettingsView.models:type_name -> capsula.web.v1.WakewordModelView
+	34,  // 68: capsula.web.v1.SettingsView.discovery:type_name -> capsula.web.v1.DiscoveryView
+	23,  // 69: capsula.web.v1.SettingsView.bluetooth:type_name -> capsula.web.v1.BluetoothView
+	30,  // 70: capsula.web.v1.ApplicationView.app:type_name -> capsula.web.v1.AppView
+	42,  // 71: capsula.web.v1.ApplicationView.schema:type_name -> capsula.web.v1.AppConfigSchemaView
+	44,  // 72: capsula.web.v1.ApplicationView.values:type_name -> capsula.web.v1.SettingStateView
+	46,  // 73: capsula.web.v1.ApplicationView.interfaces:type_name -> capsula.web.v1.InterfaceView
+	48,  // 74: capsula.web.v1.ApplicationView.descriptions:type_name -> capsula.web.v1.InterfaceDescriptionView
+	27,  // 75: capsula.web.v1.ApplicationView.runs:type_name -> capsula.web.v1.RunView
+	49,  // 76: capsula.web.v1.ApplicationView.provenance:type_name -> capsula.web.v1.ProvenanceView
+	33,  // 77: capsula.web.v1.ApplicationView.logs:type_name -> capsula.web.v1.LogEntry
+	54,  // 78: capsula.web.v1.ApplicationView.clock:type_name -> capsula.web.v1.ClockView
+	55,  // 79: capsula.web.v1.ApplicationView.ring:type_name -> capsula.web.v1.RingView
+	20,  // 80: capsula.web.v1.DiagnosticsView.device:type_name -> capsula.web.v1.DeviceInfo
+	31,  // 81: capsula.web.v1.DiagnosticsView.resources:type_name -> capsula.web.v1.ResourceView
+	124, // 82: capsula.web.v1.DiagnosticsView.routing:type_name -> capsula.web.v1.DiagnosticsView.RoutingEntry
+	27,  // 83: capsula.web.v1.DiagnosticsView.runs:type_name -> capsula.web.v1.RunView
+	33,  // 84: capsula.web.v1.DiagnosticsView.logs:type_name -> capsula.web.v1.LogEntry
+	22,  // 85: capsula.web.v1.DiagnosticsView.audio:type_name -> capsula.web.v1.AudioView
+	125, // 86: capsula.web.v1.DiagnosticsView.selected_providers:type_name -> capsula.web.v1.DiagnosticsView.SelectedProvidersEntry
+	60,  // 87: capsula.web.v1.DiagnosticsView.metrics:type_name -> capsula.web.v1.SystemMetricsView
+	38,  // 88: capsula.web.v1.WakewordView.samples:type_name -> capsula.web.v1.WakewordSampleView
+	37,  // 89: capsula.web.v1.WakewordView.models:type_name -> capsula.web.v1.WakewordModelView
+	61,  // 90: capsula.web.v1.WakewordView.detections:type_name -> capsula.web.v1.WakewordDetectionView
+	63,  // 91: capsula.web.v1.AccessView.status:type_name -> capsula.web.v1.AccessStatusView
+	64,  // 92: capsula.web.v1.AccessView.keys:type_name -> capsula.web.v1.ApiKeyView
+	67,  // 93: capsula.web.v1.Command.settings:type_name -> capsula.web.v1.SettingsUpdate
+	77,  // 94: capsula.web.v1.Command.launch:type_name -> capsula.web.v1.LaunchApp
+	79,  // 95: capsula.web.v1.Command.stop:type_name -> capsula.web.v1.StopRun
+	81,  // 96: capsula.web.v1.Command.action:type_name -> capsula.web.v1.TriggerAppAction
+	83,  // 97: capsula.web.v1.Command.app_settings:type_name -> capsula.web.v1.AppSettingsUpdate
+	85,  // 98: capsula.web.v1.Command.media:type_name -> capsula.web.v1.MediaCommand
+	87,  // 99: capsula.web.v1.Command.bluetooth:type_name -> capsula.web.v1.BluetoothCommand
+	92,  // 100: capsula.web.v1.Command.record_sample:type_name -> capsula.web.v1.RecordSample
+	94,  // 101: capsula.web.v1.Command.delete_sample:type_name -> capsula.web.v1.DeleteSample
+	95,  // 102: capsula.web.v1.Command.train:type_name -> capsula.web.v1.TrainWakeword
+	97,  // 103: capsula.web.v1.Command.cancel_training:type_name -> capsula.web.v1.CancelTraining
+	104, // 104: capsula.web.v1.Command.clock:type_name -> capsula.web.v1.ClockCommand
+	106, // 105: capsula.web.v1.Command.create_api_key:type_name -> capsula.web.v1.CreateApiKey
+	108, // 106: capsula.web.v1.Command.revoke_api_key:type_name -> capsula.web.v1.RevokeApiKey
+	114, // 107: capsula.web.v1.Command.wifi:type_name -> capsula.web.v1.WifiCommand
+	68,  // 108: capsula.web.v1.SettingsUpdate.display:type_name -> capsula.web.v1.DisplaySettings
+	69,  // 109: capsula.web.v1.SettingsUpdate.assistant:type_name -> capsula.web.v1.AssistantSettings
+	70,  // 110: capsula.web.v1.SettingsUpdate.microphone:type_name -> capsula.web.v1.MicrophoneSettings
+	75,  // 111: capsula.web.v1.SettingsUpdate.volume:type_name -> capsula.web.v1.VolumeSettings
+	72,  // 112: capsula.web.v1.SettingsUpdate.startup_sound:type_name -> capsula.web.v1.StartupSoundSettings
+	73,  // 113: capsula.web.v1.SettingsUpdate.timezone:type_name -> capsula.web.v1.TimezoneSettings
+	74,  // 114: capsula.web.v1.SettingsUpdate.hostname:type_name -> capsula.web.v1.HostnameSettings
+	71,  // 115: capsula.web.v1.SettingsUpdate.muted_indicator:type_name -> capsula.web.v1.MutedIndicatorSettings
+	2,   // 116: capsula.web.v1.DisplaySettings.brightness_mode:type_name -> capsula.web.v1.BrightnessMode
+	3,   // 117: capsula.web.v1.AssistantSettings.touch_hold:type_name -> capsula.web.v1.TouchBehavior
+	4,   // 118: capsula.web.v1.MutedIndicatorSettings.mode:type_name -> capsula.web.v1.MutedIndicatorMode
+	28,  // 119: capsula.web.v1.LaunchApp.arguments:type_name -> capsula.web.v1.LaunchArgumentView
+	45,  // 120: capsula.web.v1.AppSettingsUpdate.changes:type_name -> capsula.web.v1.AppSettingChangeView
+	44,  // 121: capsula.web.v1.AppSettingsUpdateResult.values:type_name -> capsula.web.v1.SettingStateView
+	5,   // 122: capsula.web.v1.MediaCommand.action:type_name -> capsula.web.v1.MediaAction
+	88,  // 123: capsula.web.v1.BluetoothCommand.set_discoverable:type_name -> capsula.web.v1.SetDiscoverable
+	90,  // 124: capsula.web.v1.BluetoothCommand.unpair:type_name -> capsula.web.v1.UnpairDevice
+	89,  // 125: capsula.web.v1.BluetoothCommand.set_incoming_connections:type_name -> capsula.web.v1.SetIncomingConnections
+	23,  // 126: capsula.web.v1.BluetoothResult.status:type_name -> capsula.web.v1.BluetoothView
+	38,  // 127: capsula.web.v1.SampleResult.sample:type_name -> capsula.web.v1.WakewordSampleView
+	110, // 128: capsula.web.v1.ClockCommand.stopwatch_start:type_name -> capsula.web.v1.Empty
+	110, // 129: capsula.web.v1.ClockCommand.stopwatch_pause:type_name -> capsula.web.v1.Empty
+	110, // 130: capsula.web.v1.ClockCommand.stopwatch_resume:type_name -> capsula.web.v1.Empty
+	110, // 131: capsula.web.v1.ClockCommand.stopwatch_reset:type_name -> capsula.web.v1.Empty
+	98,  // 132: capsula.web.v1.ClockCommand.start_timer:type_name -> capsula.web.v1.StartTimer
+	99,  // 133: capsula.web.v1.ClockCommand.cancel_timer:type_name -> capsula.web.v1.CancelTimer
+	100, // 134: capsula.web.v1.ClockCommand.set_alarm:type_name -> capsula.web.v1.SetAlarm
+	101, // 135: capsula.web.v1.ClockCommand.set_alarm_enabled:type_name -> capsula.web.v1.SetAlarmEnabled
+	102, // 136: capsula.web.v1.ClockCommand.delete_alarm:type_name -> capsula.web.v1.DeleteAlarm
+	103, // 137: capsula.web.v1.ClockCommand.dismiss_alert:type_name -> capsula.web.v1.DismissAlert
+	54,  // 138: capsula.web.v1.ClockCommandResult.clock:type_name -> capsula.web.v1.ClockView
+	76,  // 139: capsula.web.v1.Result.settings:type_name -> capsula.web.v1.SettingsUpdateResult
+	78,  // 140: capsula.web.v1.Result.launch:type_name -> capsula.web.v1.LaunchResult
+	80,  // 141: capsula.web.v1.Result.stop:type_name -> capsula.web.v1.StopResult
+	82,  // 142: capsula.web.v1.Result.action:type_name -> capsula.web.v1.ActionResult
+	84,  // 143: capsula.web.v1.Result.app_settings:type_name -> capsula.web.v1.AppSettingsUpdateResult
+	86,  // 144: capsula.web.v1.Result.media:type_name -> capsula.web.v1.MediaResult
+	91,  // 145: capsula.web.v1.Result.bluetooth:type_name -> capsula.web.v1.BluetoothResult
+	93,  // 146: capsula.web.v1.Result.sample:type_name -> capsula.web.v1.SampleResult
+	110, // 147: capsula.web.v1.Result.deleted:type_name -> capsula.web.v1.Empty
+	96,  // 148: capsula.web.v1.Result.training:type_name -> capsula.web.v1.TrainingHandle
+	105, // 149: capsula.web.v1.Result.clock:type_name -> capsula.web.v1.ClockCommandResult
+	107, // 150: capsula.web.v1.Result.api_key:type_name -> capsula.web.v1.ApiKeyCreated
+	110, // 151: capsula.web.v1.Result.revoked:type_name -> capsula.web.v1.Empty
+	117, // 152: capsula.web.v1.Result.wifi:type_name -> capsula.web.v1.WifiResult
+	112, // 153: capsula.web.v1.WifiView.known_networks:type_name -> capsula.web.v1.WifiKnownNetwork
+	113, // 154: capsula.web.v1.WifiView.scan_results:type_name -> capsula.web.v1.WifiScanResult
+	110, // 155: capsula.web.v1.WifiCommand.scan:type_name -> capsula.web.v1.Empty
+	115, // 156: capsula.web.v1.WifiCommand.connect:type_name -> capsula.web.v1.WifiConnect
+	116, // 157: capsula.web.v1.WifiCommand.forget:type_name -> capsula.web.v1.WifiForget
+	111, // 158: capsula.web.v1.WifiResult.wifi:type_name -> capsula.web.v1.WifiView
+	118, // 159: capsula.web.v1.Progress.classifier:type_name -> capsula.web.v1.WakewordClassifierView
+	32,  // 160: capsula.web.v1.DiagnosticsView.RoutingEntry.value:type_name -> capsula.web.v1.RoutingView
+	161, // [161:161] is the sub-list for method output_type
+	161, // [161:161] is the sub-list for method input_type
+	161, // [161:161] is the sub-list for extension type_name
+	161, // [161:161] is the sub-list for extension extendee
+	0,   // [0:161] is the sub-list for field type_name
 }
 
 func init() { file_capsula_web_v1_web_proto_init() }

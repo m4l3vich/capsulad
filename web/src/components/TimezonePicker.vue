@@ -180,25 +180,24 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-3">
-    <div class="space-y-2 rounded-box bg-base-200 px-3 py-3">
-      <p class="text-xs uppercase tracking-wide opacity-60">Speaker time zone</p>
+    <div class="space-y-2 rounded-box bg-base-200/60 px-3 py-3">
       <template v-if="currentEntry">
         <p class="text-base font-medium">
           {{ currentEntry.city }}
-          <span v-if="currentEntry.region" class="text-sm font-normal opacity-60">{{ currentEntry.region }}</span>
+          <span v-if="currentEntry.region" class="text-sm font-normal text-base-content/60">{{ currentEntry.region }}</span>
         </p>
-        <p class="text-sm opacity-70">
-          Now: {{ timeIn(stored) }} <span class="opacity-60">·</span> {{ offsetIn(stored) }}
+        <p class="text-sm text-base-content/60">
+          Now: {{ timeIn(stored) }} <span class="text-base-content/60">·</span> {{ offsetIn(stored) }}
         </p>
       </template>
       <template v-else>
         <p class="text-base font-medium">Speaker default time zone</p>
-        <p class="text-sm opacity-70">
+        <p class="text-sm text-base-content/60">
           The speaker uses its own time zone. Choose one below to override it.
         </p>
       </template>
 
-      <details class="text-xs opacity-70">
+      <details class="text-xs text-base-content/60">
         <summary class="cursor-pointer">Technical details</summary>
         <p v-if="stored" class="mt-1">
           Zone identifier: <span class="font-mono">{{ stored }}</span>.
@@ -207,19 +206,18 @@ onUnmounted(() => {
       </details>
     </div>
 
-    <div v-if="suggestion" class="alert alert-info" role="status">
-      <span>
+    <div v-if="suggestion" class="flex flex-wrap items-center justify-between gap-2 rounded-box bg-base-200/60 p-3" role="status">
+      <span class="text-sm">
         Your phone or computer uses
         <strong>{{ suggestionEntry?.city || suggestion }}</strong>.
       </span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="useSuggestion">
+      <button type="button" class="btn btn-xs btn-outline" @click="useSuggestion">
         Use this phone or computer’s time zone
       </button>
     </div>
 
     <div class="flex flex-col gap-2 sm:flex-row">
       <label class="input input-bordered flex flex-1 items-center gap-2">
-        <span class="text-xs uppercase opacity-60">Search</span>
         <input
           v-model="query"
           type="search"
@@ -241,22 +239,22 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <div v-if="dirty" class="rounded-box border border-base-300 px-3 py-2 text-sm" role="status">
+    <div v-if="dirty" class="rounded-box bg-base-200/60 px-3 py-2 text-sm" role="status">
       <p>
         Will use
         <strong>{{ selected ? (selectedEntry?.city || selected) : 'Speaker default time zone' }}</strong>
-        <span v-if="selected && selectedEntry?.region" class="opacity-60">{{ selectedEntry.region }}</span>
-        <span v-if="selected" class="opacity-60"> · {{ offsetIn(selected) }} · {{ timeIn(selected) }}</span>
+        <span v-if="selected && selectedEntry?.region" class="text-base-content/60">{{ selectedEntry.region }}</span>
+        <span v-if="selected" class="text-base-content/60"> · {{ offsetIn(selected) }} · {{ timeIn(selected) }}</span>
       </p>
-      <p class="mt-1 text-xs opacity-60">Press Apply time zone to change the speaker.</p>
+      <p class="mt-1 text-xs text-base-content/60">Press Apply time zone to change the speaker.</p>
     </div>
 
-    <p v-if="!hasQuery" class="text-xs opacity-60">
+    <p v-if="!hasQuery" class="text-xs text-base-content/60">
       Type a city or region like “Berlin” or “Asia” to see matching time zones.
     </p>
 
     <div v-if="!hasQuery" class="rounded-box border border-base-300">
-      <p class="px-3 pt-2 text-xs uppercase tracking-wide opacity-60">Suggestions</p>
+      <p class="px-3 pt-2 text-xs font-medium text-base-content/60">Suggestions</p>
       <button
         type="button"
         :aria-pressed="selected === 'UTC' ? 'true' : 'false'"
@@ -266,11 +264,11 @@ onUnmounted(() => {
       >
         <span>
           <span class="text-sm font-medium">UTC</span>
-          <span class="ml-2 text-xs opacity-60">Coordinated Universal Time</span>
+          <span class="ml-2 text-xs text-base-content/60">Coordinated Universal Time</span>
         </span>
         <span class="shrink-0 text-right text-xs">
           <span class="font-mono">{{ offsetIn('UTC') }}</span>
-          <span class="ml-2 opacity-60">{{ timeIn('UTC') }}</span>
+          <span class="ml-2 text-base-content/60">{{ timeIn('UTC') }}</span>
         </span>
       </button>
       <button
@@ -283,7 +281,7 @@ onUnmounted(() => {
       >
         <span>
           <span class="text-sm font-medium">Speaker default time zone</span>
-          <span class="ml-2 text-xs opacity-60">stop overriding it</span>
+          <span class="ml-2 text-xs text-base-content/60">stop overriding it</span>
         </span>
       </button>
     </div>
@@ -300,24 +298,24 @@ onUnmounted(() => {
       >
         <span class="min-w-0">
           <span class="text-sm font-medium">{{ entry.city }}</span>
-          <span v-if="entry.region" class="ml-2 text-xs opacity-60">{{ entry.region }}</span>
+          <span v-if="entry.region" class="ml-2 text-xs text-base-content/60">{{ entry.region }}</span>
         </span>
         <span class="shrink-0 text-right text-xs">
           <span class="font-mono">{{ offsetIn(entry.zone) }}</span>
-          <span class="ml-2 opacity-60">{{ timeIn(entry.zone) }}</span>
+          <span class="ml-2 text-base-content/60">{{ timeIn(entry.zone) }}</span>
         </span>
       </button>
-      <p v-if="!filtered.length" class="px-3 py-4 text-sm opacity-70">
+      <p v-if="!filtered.length" class="px-3 py-4 text-sm text-base-content/60">
         No time zones match “{{ query }}”. Try a city like Berlin or a region like Asia.
       </p>
-      <p v-else-if="matchingTotal > filtered.length" class="border-t border-base-300 px-3 py-2 text-xs opacity-60">
+      <p v-else-if="matchingTotal > filtered.length" class="border-t border-base-300 px-3 py-2 text-xs text-base-content/60">
         Showing {{ filtered.length }} of {{ matchingTotal }} matches — keep typing to narrow the list.
       </p>
     </div>
 
     <div v-if="actionError" class="alert alert-error" role="alert">{{ actionError }}</div>
     <p v-else-if="note" class="text-sm text-success" role="status">{{ note }}</p>
-    <p class="text-xs opacity-60">
+    <p class="text-xs text-base-content/60">
       Changing the zone restarts clock-driven apps; running timers, the stopwatch and alarms keep their state.
     </p>
   </div>

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import ModalDialog from './ModalDialog.vue'
+import Icon from './Icon.vue'
 import { socket } from '../lib/ws.js'
 import { connectWifi, fetchWifi, forgetWifi, scanWifi, subscribeWifi } from '../lib/wifi.js'
 
@@ -216,26 +217,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section id="wifi" class="card scroll-mt-24 bg-base-100 shadow-sm">
-    <div class="card-body gap-4">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 class="card-title text-lg">Wi-Fi</h2>
-          <p class="text-sm opacity-70">
-            The speaker tries saved networks in priority order. Scans run only when you press Scan.
-          </p>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <span v-if="data" class="badge" :class="stateBadge(data.state)">{{ stateLabel(data.state) }}</span>
-          <button
-            type="button"
-            class="btn btn-sm btn-outline"
-            :disabled="!known.length"
-            @click="openManage"
-          >
-            Manage networks
-          </button>
-        </div>
+  <section id="wifi" class="card scroll-mt-24 rounded-box bg-base-100">
+    <div class="card-body gap-3 p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <Icon size="20px">wifi</Icon>
+        <h2 class="flex-grow text-base font-semibold">Wi-Fi</h2>
+        <span v-if="data" class="badge badge-sm" :class="stateBadge(data.state)">{{ stateLabel(data.state) }}</span>
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          :disabled="!known.length"
+          @click="openManage"
+        >
+          Manage networks
+        </button>
       </div>
 
       <div v-if="!data && !loadError" class="space-y-2">
@@ -243,69 +238,68 @@ onUnmounted(() => {
         <div class="skeleton h-16 w-full"></div>
       </div>
 
-      <div v-else-if="loadError && !data" class="alert alert-error" role="alert">
-        <span>Wi-Fi state unavailable: {{ loadError }}</span>
+      <div v-else-if="loadError && !data" class="alert alert-error py-2" role="alert">
+        <span class="text-sm">Wi-Fi state unavailable: {{ loadError }}</span>
         <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Try again</button>
       </div>
 
       <template v-else-if="data">
-        <div v-if="actionError" class="alert alert-error" role="alert">{{ actionError }}</div>
-
-        <div v-if="!data.available" class="alert alert-info" role="status">
-          <div class="space-y-1">
-            <p><strong>Wi-Fi is unavailable on this speaker.</strong></p>
-            <p class="text-sm">Check that Wi-Fi is enabled on the speaker, then try again.</p>
-            <details class="text-xs opacity-70">
-              <summary class="cursor-pointer">Technical details</summary>
-              <p class="mt-1">{{ data.detail || 'No usable Wi-Fi interface was reported.' }}</p>
-            </details>
-          </div>
+        <div v-if="actionError" class="alert alert-error py-2" role="alert">
+          <span class="text-sm">{{ actionError }}</span>
+          <button type="button" class="btn btn-sm btn-ghost" @click="actionError = ''">Dismiss</button>
         </div>
 
-        <div v-else-if="data.apActive" class="alert alert-warning" role="status">
-          <div class="space-y-1">
-            <p>
-              <strong>Setup access point active.</strong>
-              The speaker could not join a saved network, so it is broadcasting
-              <span class="font-mono">{{ data.apSsid || 'its device name' }}</span>
-              with password <code class="font-mono">{{ fallbackPassword }}</code>.
-            </p>
-            <p class="text-sm">
-              Join that network, then open
-              <a v-if="data.apPortalUrl" :href="data.apPortalUrl" target="_blank" rel="noopener" class="link">{{ data.apPortalUrl }}</a>
-              <span v-else>http://192.168.4.1</span>
-              to pick a network. The portal can only scan and connect.
-            </p>
-          </div>
+        <div v-if="!data.available" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3" role="status">
+          <p class="text-sm font-medium">Wi-Fi is unavailable on this speaker.</p>
+          <p class="text-xs text-base-content/60">Check that Wi-Fi is enabled on the speaker, then try again.</p>
+          <details class="text-xs text-base-content/60">
+            <summary class="cursor-pointer">Technical details</summary>
+            <p class="mt-1">{{ data.detail || 'No usable Wi-Fi interface was reported.' }}</p>
+          </details>
         </div>
 
-        <div class="grid gap-3 sm:grid-cols-2">
-          <div class="rounded-box bg-base-200 px-3 py-2">
-            <p class="text-xs uppercase tracking-wide opacity-60">Network</p>
+        <div v-else-if="data.apActive" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3" role="status">
+          <p class="text-sm font-medium">Setup access point active</p>
+          <p class="text-xs text-base-content/60">
+            No saved network could be joined, so the speaker is broadcasting
+            <span class="font-mono">{{ data.apSsid || 'its device name' }}</span>
+            with password <code class="font-mono">{{ fallbackPassword }}</code>.
+          </p>
+          <p class="text-xs text-base-content/60">
+            Join that network, then open
+            <a v-if="data.apPortalUrl" :href="data.apPortalUrl" target="_blank" rel="noopener" class="link">{{ data.apPortalUrl }}</a>
+            <span v-else>http://192.168.4.1</span>
+            to pick a network. The portal can only scan and connect.
+          </p>
+        </div>
+
+        <div v-if="data.available" class="grid gap-3 sm:grid-cols-2">
+          <div class="rounded-box bg-base-200/60 px-3 py-2">
+            <p class="text-xs font-medium text-base-content/60">Network</p>
             <p class="truncate font-medium">{{ data.ssid || '—' }}</p>
           </div>
-          <div class="rounded-box bg-base-200 px-3 py-2">
-            <p class="text-xs uppercase tracking-wide opacity-60">Address</p>
+          <div class="rounded-box bg-base-200/60 px-3 py-2">
+            <p class="text-xs font-medium text-base-content/60">Address</p>
             <p class="truncate font-mono text-sm">{{ data.ipAddress || '—' }}</p>
           </div>
         </div>
 
-        <details class="text-xs opacity-70">
-          <summary class="cursor-pointer">Technical details</summary>
-          <p class="mt-1">Interface: <span class="font-mono">{{ data.interface || '—' }}</span></p>
-          <p v-if="data.detail" class="mt-1">{{ data.detail }}</p>
-        </details>
+        <template v-if="data.available">
+          <details class="text-xs text-base-content/60">
+            <summary class="cursor-pointer">Technical details</summary>
+            <p class="mt-1">Interface: <span class="font-mono">{{ data.interface || '—' }}</span></p>
+            <p v-if="data.detail" class="mt-1">{{ data.detail }}</p>
+          </details>
 
-        <p v-if="data.lastError" class="text-sm text-error">Last attempt: {{ data.lastError }}</p>
-        <p class="text-xs opacity-60">
-          The connected network cannot be forgotten or disconnected from this console; the session runs over it.
-        </p>
-
-        <div class="divider my-0"></div>
+          <p v-if="data.lastError" class="text-xs text-error">Last attempt: {{ data.lastError }}</p>
+          <p class="text-xs text-base-content/60">
+            The connected network cannot be forgotten or disconnected from this console; the session runs over it.
+          </p>
+        </template>
 
         <div v-if="data.available">
           <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 class="font-medium">Nearby networks</h3>
+            <h3 class="text-sm font-semibold">Nearby networks</h3>
             <button
               type="button"
               class="btn btn-sm btn-primary"
@@ -318,13 +312,13 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <p v-if="!data.scanSupported" class="text-sm opacity-70">
+          <p v-if="!data.scanSupported" class="text-sm text-base-content/60">
             This adapter cannot scan; connect by typing the network name below.
           </p>
-          <p v-else-if="!scanned" class="text-sm opacity-70">
+          <p v-else-if="!scanned" class="text-sm text-base-content/60">
             No scan yet. Press Scan to list nearby networks.
           </p>
-          <p v-else-if="!scans.length" class="text-sm opacity-70">
+          <p v-else-if="!scans.length" class="text-sm text-base-content/60">
             No networks found. Move closer to the router, or type a hidden network's name below.
           </p>
 
@@ -332,14 +326,14 @@ onUnmounted(() => {
             <li
               v-for="network in scans"
               :key="network.ssid + network.security + network.frequencyMhz"
-              class="flex items-center justify-between gap-3 rounded-box border border-base-300 px-3 py-2"
+              class="flex items-center justify-between gap-3 rounded-box bg-base-200/60 px-3 py-2"
             >
               <div class="min-w-0">
                 <p class="truncate text-sm font-medium">
                   {{ network.ssid }}
                   <span v-if="network.ssid === currentSsid" class="badge badge-success badge-sm ml-1">current</span>
                 </p>
-                <p class="text-xs opacity-60">
+                <p class="text-xs text-base-content/60">
                   {{ securityLabel(network.security) }} · {{ signalLabel(network.signalDbm) }}
                   <span v-if="network.frequencyMhz"> · {{ network.frequencyMhz }} MHz</span>
                 </p>
@@ -349,24 +343,24 @@ onUnmounted(() => {
           </ul>
         </div>
 
-        <form v-if="data.available" class="space-y-3" novalidate @submit.prevent="submitConnect">
-          <h3 class="font-medium">Join a network</h3>
+        <form v-if="data.available" class="flex flex-col gap-3" novalidate @submit.prevent="submitConnect">
+          <h3 class="text-sm font-semibold">Join a network</h3>
           <div class="grid gap-3 sm:grid-cols-2">
-            <label class="form-control w-full">
-              <span class="label-text mb-1">Network name</span>
+            <label class="flex w-full flex-col gap-1 text-sm">
+              <span class="font-medium">Network name</span>
               <input
                 v-model="connect.ssid"
                 type="text"
-                class="input input-bordered w-full"
+                class="input input-bordered input-sm w-full"
                 maxlength="32"
                 autocomplete="off"
                 spellcheck="false"
                 placeholder="Type a name, including hidden networks"
               />
             </label>
-            <label class="form-control w-full">
-              <span class="label-text mb-1">Security</span>
-              <select v-model="connect.security" class="select select-bordered w-full">
+            <label class="flex w-full flex-col gap-1 text-sm">
+              <span class="font-medium">Security</span>
+              <select v-model="connect.security" class="select select-bordered select-sm w-full">
                 <option value="wpa2">WPA2</option>
                 <option value="wpa2_wpa3">WPA2/WPA3</option>
                 <option value="wpa3">WPA3</option>
@@ -374,12 +368,12 @@ onUnmounted(() => {
               </select>
             </label>
           </div>
-          <label v-if="connect.security !== 'open'" class="form-control w-full">
-            <span class="label-text mb-1">Password</span>
+          <label v-if="connect.security !== 'open'" class="flex w-full flex-col gap-1 text-sm">
+            <span class="font-medium">Password</span>
             <input
               v-model="connect.passphrase"
               type="password"
-              class="input input-bordered w-full"
+              class="input input-bordered input-sm w-full"
               autocomplete="new-password"
               maxlength="63"
               placeholder="8 to 63 characters"
@@ -395,29 +389,29 @@ onUnmounted(() => {
               <span v-if="busy === 'connect'" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
               {{ busy === 'connect' ? 'Connecting…' : 'Connect' }}
             </button>
-            <span class="text-xs opacity-60">The speaker leaves its current network only after the new one associates.</span>
+            <span class="text-xs text-base-content/60">The speaker leaves its current network only after the new one associates.</span>
           </div>
         </form>
       </template>
     </div>
 
     <ModalDialog v-if="manageOpen" title="Saved networks" @close="closeManage">
-      <p class="mb-3 text-sm opacity-70">
+      <p class="mb-3 text-sm text-base-content/60">
         The active network stays protected while the console is connected; forget other saved networks here.
       </p>
-      <p v-if="!known.length" class="text-sm opacity-70">No saved networks yet.</p>
+      <p v-if="!known.length" class="text-sm text-base-content/60">No saved networks yet.</p>
       <ul v-else class="max-h-72 space-y-1 overflow-y-auto">
         <li
           v-for="network in known"
           :key="network.ssid"
-          class="flex flex-wrap items-center justify-between gap-2 rounded-box border border-base-300 px-3 py-2"
+          class="flex flex-wrap items-center justify-between gap-2 rounded-box bg-base-200/60 px-3 py-2"
         >
           <div class="min-w-0">
             <p class="truncate text-sm font-medium">
               {{ network.ssid }}
               <span v-if="isProtected(network)" class="badge badge-success badge-sm ml-1">active</span>
             </p>
-            <p class="text-xs opacity-60">
+            <p class="text-xs text-base-content/60">
               {{ securityLabel(network.security) }}<span v-if="!network.hasPassword"> · password not stored</span>
             </p>
           </div>

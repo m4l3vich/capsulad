@@ -1,6 +1,6 @@
 import daisyui from 'daisyui'
 
-// One appliance console theme: light neutral surfaces, muted teal primary and
+// One appliance console theme: light neutral surfaces, a deep blue primary and
 // enough contrast for a kitchen/desk display. No external font or image
 // requests, because the daemon serves a restrictive CSP.
 export default {
@@ -18,12 +18,12 @@ export default {
     themes: [
       {
         capsula: {
-          primary: '#0f766e',
-          'primary-content': '#f0fdfa',
+          primary: '#1d4ed8',
+          'primary-content': '#eff6ff',
           secondary: '#475569',
           'secondary-content': '#f8fafc',
-          accent: '#0d9488',
-          'accent-content': '#f0fdfa',
+          accent: '#0284c7',
+          'accent-content': '#f0f9ff',
           neutral: '#1f2937',
           'neutral-content': '#f8fafc',
           'base-100': '#f8fafc',
