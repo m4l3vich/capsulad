@@ -17,6 +17,12 @@ Two kinds of caller exist:
 
 An app that tries an administrator operation receives `PERMISSION_DENIED`. Omitting identity
 never promotes a caller: a connection with a sandbox UID or a supervised PID is still an app.
+The one identity that is never derived from the socket peer is a compiled-in system app: it
+runs inside the daemon, so its run records the daemon's own PID — the same PID as every
+connection the daemon opens to its own socket, including the Web UI's. A virtual run is
+claimed only by its stable run ID together with the daemon's per-boot internal token, which
+only the daemon itself holds; a peer that merely shares the daemon PID (the Web UI,
+`capsulad-cli`, a framework cue) is an administrator, never `capsula.clock` or `capsula.ring`.
 
 | Service | App access |
 |---|---|
@@ -59,6 +65,14 @@ never promotes a caller: a connection with a sandbox UID or a supervised PID is 
 | `boot_id` | string | Boot identity; changes on restart. |
 | `target_platform` | enum | `CAPSULA_MINI_ROCKCHIP_STOCK`, `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE`, or `TARGET_PLATFORM_UNSPECIFIED` for the simulator. The Amlogic values are defined by the protocol but no Amlogic backend exists in this build; see [README.md](README.md). |
 | `subsystem_backends` | `BackendAvailability[]` | `{subsystem, backend_id, status, detail}`; status is `BACKEND_AVAILABLE`, `BACKEND_PARTIAL`, `BACKEND_UNAVAILABLE` or `BACKEND_UNVERIFIED`. |
+| `hardware_serial` | string | The SoC serial as the host kernel reports it (`/proc/cpuinfo` `Serial` on ARM), read once by the daemon at startup. Empty when the host cannot report it. It is not a secret and it is not the vendor-compatible `device_id`. |
+
+An app sandbox mounts `/proc` only when the daemon gives it a PID namespace, and the stock
+device does not, so `/proc/cpuinfo` is unreadable inside an app. `hardware_serial` is
+therefore the supported way for an app to obtain the SoC serial the framework can read;
+never parse `/proc` yourself, and never substitute `device_id` for a serial value. `hardware_serial`
+is authoritative in the protocol, but apps whose native runtime predates this field must use
+`CAPSULA_DEVICE_SERIAL`.
 
 `ResourceInfo`:
 
@@ -99,8 +113,8 @@ activation carries what a turn needs).
 |---|---|---|
 | `default_app_by_resource` | map<string,string> | Resource ID → provider app ID. |
 | `default_assistant_app_id` | string | Selected assistant. |
-| `wakeword_model_id` | string | Selected wakeword model. |
-| `wakeword_enabled` | bool | Framework wakeword detection. |
+| `wakewords` | `WakewordBinding[]` | Per-word configuration: `{model_id, app_id, enabled}`. Absent means the legacy state (every installed word is live under `wakeword_enabled` and targets the selected assistant); present means authoritative, one entry per installed word, and a word without an entry is disabled. `app_id` empty targets the selected assistant. |
+| `wakeword_enabled` | bool | Global framework wakeword detection switch. A word activates only when this switch, its own `enabled` and its availability all hold. |
 | `display_brightness` | map<string,float> | Per resource, `[0,1]`. |
 | `master_volume` | float | `[0,1]`. |
 | `microphone_muted` | bool | Global mute. |
@@ -114,9 +128,17 @@ activation carries what a turn needs).
 | `hostname` | string | Single DNS label for `<hostname>.local`. |
 
 `UpdateSettingsRequest` = `{expected_revision: uint64, values: UserSettings,
-update_fields: string[]}`. Only the listed paths change; map fields are replaced as a whole.
-A stale revision returns `ABORTED`. Validation failures (volume outside `[0,1]`, unknown
-timezone, invalid hostname, unknown field) return `INVALID_ARGUMENT`.
+update_fields: string[]}`. Only the listed paths change; map fields and `wakewords` are replaced as a
+whole. A repeated field cannot distinguish an absent list from an empty one on the wire, so an update
+that owns `wakewords` with no entries states the explicit "no word is live" list and leaves every
+installed word disabled; an update that does not own the field leaves the current state alone. A stale
+revision returns `ABORTED`. Validation failures (volume outside `[0,1]`, unknown timezone, invalid
+hostname, unknown field, more than eight wake words, a duplicate `model_id`) return
+`INVALID_ARGUMENT`.
+
+The retired `wakeword_model_id` field (tag 3) is reserved, not reused. It was a selector that never
+gated a detection, so it carried no behavior to preserve: per-word enablement and the app binding are
+`wakewords`, and a client that still writes the old field is ignored.
 
 ## RoutingService
 
@@ -230,9 +252,59 @@ Details, including the five panel keys and gesture names, are in
 | `RecordWakewordSample` | unary | administrator | Record a training take. |
 | `ListWakewordSamples` | unary | administrator | List takes. |
 | `DeleteWakewordSample` | unary | administrator | Delete a take. |
-| `TrainWakewordClassifier` | server stream `TrainWakewordEvent` | administrator | On-device training with quality gates. |
+| `TrainWakewordClassifier` | server stream `TrainWakewordEvent` | administrator | On-device training with quality gates, for a new word or one existing word in place. |
+| `DeleteWakewordClassifier` | unary | administrator | Remove one trained word's artifact and settings entry. Recordings are kept. |
 
-`WakewordModelInfo` = `{model_id, display_name, language, engine_id, available}`.
+`WakewordModelInfo` = `{model_id, display_name, language, engine_id, available, metrics[],
+threshold, enabled, app_id, detail}`. `metrics` is the gate certificate recorded when that model was
+trained and is empty for an artifact that predates it; `threshold` is the calibrated threshold, `0`
+when unknown. Both are read from the installed artifact and are never recomputed by a client.
+`enabled` is the **effective** state (global switch, the word's own setting and availability already
+combined by the daemon), `app_id` is the app that word activates (empty means the selected
+assistant) and `detail` explains why a listed word cannot be used. The list is readable by any local
+caller and is decorated by the daemon, so a client never joins the registry and the settings itself.
+`model_id` is the artifact id and the file name stem under `<data-dir>/wakeword/models`.
+
+`WakewordGateMetrics` = `{split, word_recordings, detected, recall, false_activations}`. `split` is
+`tune`, `final_test`, `auxiliary_tune` or `auxiliary_final_test`. The auxiliary splits are the
+external CNEG corpus: off-policy measurements that veto installation on a false activation but are
+not the processed-audio certificate.
+
+`TrainWakewordClassifierRequest` = `{display_name, language, seed, word_sample_ids,
+room_sample_ids, speech_sample_ids, false_sample_ids, model_id}`. Only the submitted IDs are
+trained; an omitted take is never pulled in implicitly. `model_id` empty creates a new word with a
+fresh id; an installed id replaces exactly that artifact and leaves every other word, its
+enablement, its binding and its gate untouched. A newly installed word is switched off until the
+word's own `enabled` is set. Training a new word when eight artifacts are already installed is
+refused before the fit starts (`configuration`, so `FAILED_PRECONDITION`): the settings layer accepts
+at most eight entries, so a ninth artifact could never be named by a binding.
+
+`DeleteWakewordClassifierRequest` = `{model_id}`. It removes the artifact and, when `wakewords` is
+present, the entry; it never deletes recordings, which are shared training data. Deleting the last
+word leaves the explicit empty list, so the next installed word starts switched off. It returns
+`FAILED_PRECONDITION` while a training run is active, `INVALID_ARGUMENT` for an id that cannot
+name an artifact and `INTERNAL` for a store fault. Installing or deleting any word restarts detection
+for all words, which costs about two seconds of warm-up before any word can score again.
+
+`TrainWakewordEvent` = `{stage, fraction, log, classifier, metrics[], failure}`. The final success
+event sets `classifier` (`WakewordClassifierInfo`) and `metrics`. A refused run emits one terminal
+`stage = "failed"` event with `failure` and then ends the stream with a gRPC error status, so a
+client that only waits for the stream result does not hang:
+
+`WakewordTrainingFailure` = `{causes[], takes[], splits[], threshold, detail}`.
+`causes` holds distinct stable strings, most significant first: `invalid_request`, `configuration`,
+`too_few_word_takes`, `too_few_room_takes`, `too_few_speech_takes`, `take_too_short`,
+`unusable_take`, `duplicate_takes`, `short_context`, `no_positive_windows`, `no_negative_windows`,
+`insufficient_heldout`, `tune_gate_failed`, `final_gate_failed`, `auxiliary_gate_failed`,
+`corpus_missing`, `corpus_unusable`, `fit_failed` or `internal`. `WakewordFailingTake` =
+`{partition, index, sample_id, cause, detail}`, where `partition` is `word`, `room`, `speech` or
+`false_activation` and `index` is the 1-based position in the submitted selection for that
+partition (`sample_id` is empty; the trainer reports positions).
+
+Error codes: `INVALID_ARGUMENT` for an unusable or insufficient selection, `FAILED_PRECONDITION`
+for gate, policy, corpus or configuration refusals, `INTERNAL` for a trainer or artifact fault,
+`CANCELED` when the request was cancelled before the atomic commit, and `DEADLINE_EXCEEDED` when the
+call exceeded its deadline. A refused run installs nothing and leaves the installed model untouched.
 
 `BeginConversationRequest` = `{activation_id}`. The daemon mints a new `conversation_id`,
 registers the conversation for the caller's identity (empty for a local administrator), replies
@@ -276,9 +348,16 @@ received an invocation instead of spawning.
 
 `AppRun` = `{run_id, app_id, pid, state, started_monotonic_ns, exit_code, status_detail,
 runtime}`; `state` is `APP_STARTING`, `APP_READY`, `APP_STOPPING`, `APP_EXITED` or
-`APP_FAILED`. `AppRunEvent` wraps one `AppRun`.
+`APP_FAILED`. `pid` is the supervised child process and is `0` for a compiled-in run, which has
+no child process of its own (`runtime = RUNTIME_BUILTIN`); never treat `pid` as an app identity.
+`AppRunEvent` wraps one `AppRun`.
 
-An app calling `ListRuns`/`WatchRuns` for another `app_id` gets `PERMISSION_DENIED`.
+An app calling `ListRuns`/`WatchRuns` for another `app_id` gets `PERMISSION_DENIED`. An
+administrator listing is the complete run table: every live run appears once under its own
+`app_id` with its real `state`, and the compiled-in `capsula.clock` and `capsula.ring` runs are
+ordinary entries with their stable `builtin:<app_id>` run IDs. A run whose state is not
+`APP_READY` (starting, stopping, exited, failed) is never "running the app": it cannot serve its
+declared interfaces, and a Web UI provider needs `APP_READY`.
 
 `BinaryProvenanceResult` = `{app_id, status, detail, subject_sha256_hex, verified_repository,
 verified_repository_id, verified_workflow, verified_commit_sha, verified_at_unix_ms,
@@ -385,8 +464,52 @@ Exposes the connected A2DP source's AVRCP state to apps.
 | `Command` | unary `BluetoothMediaState` | any local caller | `PLAY`, `PAUSE`, `TOGGLE`, `NEXT`, `PREVIOUS`. |
 
 `BluetoothMediaState` = `{present, playing, device_address, device_name, title, artist, album,
-duration_ms, position_ms, revision, detail}`. For a supervised app caller
-`device_address` and `device_name` are empty; metadata fields remain.
+duration_ms, position_ms, revision, detail, direction_known, direction_playing}`. For a supervised
+app caller `device_address` and `device_name` are empty; metadata fields remain.
+
+`playing` is the source-published AVRCP status. A source that exposes only `MediaControl1`, or
+whose player does not publish `Status`, reports `playing=false` even while audio is flowing, so it
+is not a reliable "is it playing" answer. The framework resolves that question itself, from the same
+evidence its own media key and toggle use — a command this daemon sent in the last two seconds, the
+owned A2DP transport's packet receipts, `MediaPlayer1.Status`, then the transport state — and
+publishes the result as `direction_playing`, with `direction_known` reporting whether a direction
+could be resolved at all (`false` when no source is connected, or for a backend that exposes only
+its exact state). A consumer that shows a Play/Pause choice should use `direction_playing` when
+`direction_known` is true and fall back to `playing` otherwise; that is what the daemon's Web UI
+does. Neither field changes the meaning of `Command`: explicit `PLAY`, `PAUSE`, `NEXT` and
+`PREVIOUS` are applied as sent, and only `TOGGLE` consults the resolved direction.
+
+
+`detail` is bounded display text, not playback state and not an error: it explains why a field is
+missing. A connected source without an A2DP transport reports `audio link is not A2DP`, and a source
+that does not expose AVRCP absolute volume reports `the source does not expose AVRCP absolute
+volume` (it cannot report a level, so its slider drives nothing; the speaker's master still applies).
+Clients must treat the string as opaque.
+
+This service exposes no volume control, and that is deliberate: listening level is the framework
+master. Volume is two-way for display only. A level the source reports is applied through the
+canonical master path, and a change made on the speaker is written back to the source's AVRCP
+register so the source's own level display can follow it — but that write is a best-effort mirror
+(BlueZ accepts it; whether the peer shows or applies it is the peer's decision), and the local
+attenuation stays the only gain stage: writing the register as an additional gain stage attenuated
+the same signal twice on this hardware. Because a source reports the level it just received, a report
+within one AVRCP step of what the daemon wrote in the last 900 ms is suppressed as an echo; a report
+further away is the user's slider and is adopted at once, even while a write is in flight, so a phone
+slider drag moves the speaker immediately rather than when the drag ends. The memory is bounded to
+the last four writes and is cleared on connect and disconnect. A source without a writable register
+changes nothing for the speaker: the refused write is logged once per session and the level stays
+local. An app that needs the current level reads `AudioService.GetAudioState`, and setting it is
+administrator-only.
+
+The daemon also publishes this source in the browser protocol (`capsula.web.v1`) as a media
+provider, and that provider is framework-owned rather than an app: `MediaProviderView.kind` is
+`MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA` with an empty `app_id`, one player `bluetooth`
+while a source is connected and none otherwise, and its commands are this service's `Command`.
+An installed or compiled-in app that declares `capsula.contracts.media.v1.MediaPlayerService`
+is listed as `MEDIA_PROVIDER_KIND_APP` with its `app_id`. The kind is additive: a client that
+predates it reads `MEDIA_PROVIDER_KIND_APP` and addresses providers by `app_id`. `BluetoothMediaService`
+itself is unchanged by that view — it has no app identity, no run and no declared interface, so an
+app calling it never sees a provider kind.
 
 Errors: an absent adapter is `UNAVAILABLE`; an unknown command value is `INVALID_ARGUMENT`;
 no connected source is `FAILED_PRECONDITION`.

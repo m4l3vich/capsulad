@@ -74,15 +74,17 @@ watch(() => data.value?.schema, syncSettingsState, { immediate: true })
 watch(() => data.value?.values, syncSettingsState, { immediate: true })
 watch(() => data.value?.configRevision, syncSettingsState, { immediate: true })
 
-// A refresh failure keeps the previous view; surface it as a toast once per
-// distinct failure instead of a banner.
+// A refused or failed snapshot stays an inline error on the page; it is also
+// announced once per distinct failure so the reason is not only visible after
+// scrolling. The transport is untouched: a per-request error never closes the
+// socket or starts a reconnect epoch.
 let lastLoadError = ''
 watch(loadError, (value) => {
   if (!value) {
     lastLoadError = ''
     return
   }
-  if (!data.value || value === lastLoadError) return
+  if (value === lastLoadError) return
   lastLoadError = value
   notify.warning(`The last refresh failed: ${value}`)
 })

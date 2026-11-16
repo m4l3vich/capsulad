@@ -30,6 +30,12 @@ export declare const MediaAction: Readonly<{
 }>;
 export type MediaActionValue = number;
 
+export declare const MediaProviderKind: Readonly<{
+  readonly MEDIA_PROVIDER_KIND_APP: 0;
+  readonly MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA: 1;
+}>;
+export type MediaProviderKindValue = number;
+
 export declare const MutedIndicatorMode: Readonly<{
   readonly MUTED_INDICATOR_MODE_UNSPECIFIED: 0;
   readonly MUTED_INDICATOR_MODE_IMMEDIATE: 1;
@@ -256,10 +262,10 @@ export declare const ApplicationView: {
 
 export interface AssistantSettings {
   defaultAssistantApp?: string;
-  wakewordModel?: string;
   wakewordEnabled?: boolean;
   touchHold?: number;
   updateFields?: string[];
+  wakewords?: WakewordBindingView[];
 }
 export declare const AssistantSettings: {
   readonly type: string;
@@ -429,6 +435,7 @@ export interface Command {
   revokeApiKey?: RevokeApiKey;
   wifi?: WifiCommand;
   falseDetection?: FalseDetection;
+  deleteWakeword?: DeleteWakeword;
 }
 export declare const Command: {
   readonly type: string;
@@ -461,6 +468,15 @@ export declare const DeleteSample: {
   readonly type: string;
   encode(obj: DeleteSample): Uint8Array;
   decode(bytes: Uint8Array): DeleteSample;
+};
+
+export interface DeleteWakeword {
+  modelId?: string;
+}
+export declare const DeleteWakeword: {
+  readonly type: string;
+  encode(obj: DeleteWakeword): Uint8Array;
+  decode(bytes: Uint8Array): DeleteWakeword;
 };
 
 export interface DeviceInfo {
@@ -707,6 +723,7 @@ export interface MediaCommand {
   appId?: string;
   playerId?: string;
   action?: number;
+  kind?: number;
 }
 export declare const MediaCommand: {
   readonly type: string;
@@ -739,6 +756,7 @@ export interface MediaProviderView {
   name?: string;
   players?: MediaPlayerView[];
   error?: string;
+  kind?: number;
 }
 export declare const MediaProviderView: {
   readonly type: string;
@@ -854,6 +872,8 @@ export interface Progress {
   fraction?: number;
   log?: string;
   classifier?: WakewordClassifierView;
+  failure?: WakewordTrainingFailureView;
+  metrics?: WakewordGateMetricsView[];
 }
 export declare const Progress: {
   readonly type: string;
@@ -1126,7 +1146,6 @@ export declare const SettingsUpdateResult: {
 export interface SettingsValues {
   defaultAppByResource?: { [key: string]: string };
   defaultAssistantAppId?: string;
-  wakewordModelId?: string;
   wakewordEnabled?: boolean;
   displayBrightness?: { [key: string]: number };
   masterVolume?: number;
@@ -1139,6 +1158,7 @@ export interface SettingsValues {
   hostname?: string;
   bluetoothIncomingConnections?: boolean;
   bluetoothDiscoverable?: boolean;
+  wakewords?: WakewordBindingView[];
 }
 export declare const SettingsValues: {
   readonly type: string;
@@ -1309,6 +1329,7 @@ export interface TrainWakeword {
   roomSampleIds?: string[];
   speechSampleIds?: string[];
   falseSampleIds?: string[];
+  modelId?: string;
 }
 export declare const TrainWakeword: {
   readonly type: string;
@@ -1363,6 +1384,17 @@ export declare const VolumeSettings: {
   decode(bytes: Uint8Array): VolumeSettings;
 };
 
+export interface WakewordBindingView {
+  modelId?: string;
+  appId?: string;
+  enabled?: boolean;
+}
+export declare const WakewordBindingView: {
+  readonly type: string;
+  encode(obj: WakewordBindingView): Uint8Array;
+  decode(bytes: Uint8Array): WakewordBindingView;
+};
+
 export interface WakewordClassifierView {
   modelId?: string;
   displayName?: string;
@@ -1391,12 +1423,43 @@ export declare const WakewordDetectionView: {
   decode(bytes: Uint8Array): WakewordDetectionView;
 };
 
+export interface WakewordFailingTakeView {
+  partition?: string;
+  index?: number;
+  sampleId?: string;
+  cause?: string;
+  detail?: string;
+}
+export declare const WakewordFailingTakeView: {
+  readonly type: string;
+  encode(obj: WakewordFailingTakeView): Uint8Array;
+  decode(bytes: Uint8Array): WakewordFailingTakeView;
+};
+
+export interface WakewordGateMetricsView {
+  split?: string;
+  wordRecordings?: number;
+  detected?: number;
+  recall?: number;
+  falseActivations?: number;
+}
+export declare const WakewordGateMetricsView: {
+  readonly type: string;
+  encode(obj: WakewordGateMetricsView): Uint8Array;
+  decode(bytes: Uint8Array): WakewordGateMetricsView;
+};
+
 export interface WakewordModelView {
   modelId?: string;
   displayName?: string;
   language?: string;
   engineId?: string;
   available?: boolean;
+  metrics?: WakewordGateMetricsView[];
+  threshold?: number;
+  enabled?: boolean;
+  appId?: string;
+  detail?: string;
 }
 export declare const WakewordModelView: {
   readonly type: string;
@@ -1414,6 +1477,19 @@ export declare const WakewordSampleView: {
   readonly type: string;
   encode(obj: WakewordSampleView): Uint8Array;
   decode(bytes: Uint8Array): WakewordSampleView;
+};
+
+export interface WakewordTrainingFailureView {
+  causes?: string[];
+  takes?: WakewordFailingTakeView[];
+  splits?: WakewordGateMetricsView[];
+  threshold?: number;
+  detail?: string;
+}
+export declare const WakewordTrainingFailureView: {
+  readonly type: string;
+  encode(obj: WakewordTrainingFailureView): Uint8Array;
+  decode(bytes: Uint8Array): WakewordTrainingFailureView;
 };
 
 export interface WakewordView {

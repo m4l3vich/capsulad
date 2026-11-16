@@ -39,6 +39,13 @@ type fakeBackend struct {
 	// runsErr fails ListRuns so a test can prove the overview falls back to no
 	// providers rather than offering apps whose run state is unknown.
 	runsErr error
+	// watchRunsErr fails the run watch, so a test can prove a refused live
+	// stream stays an inline error instead of closing the browser socket.
+	watchRunsErr error
+	// stopCalls records the run IDs the browser asked to stop, so a test can
+	// prove a foreign or built-in run ID is rejected before it reaches the
+	// daemon.
+	stopCalls []string
 	// unpaired records the addresses the framework was asked to remove, so a
 	// test can prove the opaque ID resolved to the real device.
 	unpaired []string
@@ -50,6 +57,11 @@ type fakeBackend struct {
 	// signals that the snapshot read has started.
 	overviewGate    chan struct{}
 	overviewEntered chan struct{}
+	// btMedia is the connected Bluetooth source the framework media surface
+	// reports. Nil means no source is connected.
+	btMedia *frameworkv1.BluetoothMediaState
+	// btCommands records the Bluetooth media commands the browser issued.
+	btCommands []frameworkv1.BluetoothMediaCommand
 }
 
 func newFakeBackend() *fakeBackend {
@@ -110,6 +122,7 @@ func startFakeGRPC(t *testing.T, b *fakeBackend) *grpc.ClientConn {
 	frameworkv1.RegisterAssistantServiceServer(srv, &fakeAssistant{b: b})
 	frameworkv1.RegisterRoutingServiceServer(srv, &fakeRouting{b: b})
 	frameworkv1.RegisterAppBusServiceServer(srv, &fakeBus{b: b})
+	frameworkv1.RegisterBluetoothMediaServiceServer(srv, &fakeBluetoothMedia{b: b})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -258,6 +271,11 @@ func (f *fakeApps) ListRuns(_ context.Context, req *frameworkv1.ListRunsRequest)
 }
 func (f *fakeApps) WatchRuns(req *frameworkv1.WatchRunsRequest, stream grpc.ServerStreamingServer[frameworkv1.AppRunEvent]) error {
 	f.b.mu.Lock()
+	if f.b.watchRunsErr != nil {
+		err := f.b.watchRunsErr
+		f.b.mu.Unlock()
+		return err
+	}
 	runs := append([]*frameworkv1.AppRun(nil), f.b.runs...)
 	f.b.mu.Unlock()
 	for _, run := range runs {
@@ -277,7 +295,10 @@ func (f *fakeApps) GetBinaryProvenance(context.Context, *frameworkv1.GetBinaryPr
 func (f *fakeApps) Launch(context.Context, *frameworkv1.LaunchRequest) (*frameworkv1.LaunchResult, error) {
 	return &frameworkv1.LaunchResult{RunId: "run-2", InvocationId: "inv-1", SpawnedNewProcess: true}, nil
 }
-func (f *fakeApps) Stop(context.Context, *frameworkv1.StopRequest) (*frameworkv1.StopResponse, error) {
+func (f *fakeApps) Stop(_ context.Context, req *frameworkv1.StopRequest) (*frameworkv1.StopResponse, error) {
+	f.b.mu.Lock()
+	f.b.stopCalls = append(f.b.stopCalls, req.GetRunId())
+	f.b.mu.Unlock()
 	return &frameworkv1.StopResponse{Requested: true}, nil
 }
 
@@ -531,6 +552,50 @@ func (f *fakeWakeword) DismissDetection(id string) bool {
 		}
 	}
 	return false
+}
+
+// fakeBluetoothMedia is the framework's own Bluetooth media surface: the
+// source of the Web UI's Bluetooth provider and the target of its commands.
+type fakeBluetoothMedia struct {
+	frameworkv1.UnimplementedBluetoothMediaServiceServer
+	b *fakeBackend
+}
+
+func (f *fakeBluetoothMedia) GetState(context.Context, *frameworkv1.GetBluetoothMediaStateRequest) (*frameworkv1.BluetoothMediaState, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	if f.b.btMedia == nil {
+		return &frameworkv1.BluetoothMediaState{}, nil
+	}
+	return proto.Clone(f.b.btMedia).(*frameworkv1.BluetoothMediaState), nil
+}
+
+func (f *fakeBluetoothMedia) WatchState(_ *frameworkv1.WatchBluetoothMediaStateRequest, stream grpc.ServerStreamingServer[frameworkv1.BluetoothMediaState]) error {
+	state, err := f.GetState(stream.Context(), &frameworkv1.GetBluetoothMediaStateRequest{})
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(state); err != nil {
+		return err
+	}
+	<-stream.Context().Done()
+	return nil
+}
+
+func (f *fakeBluetoothMedia) Command(_ context.Context, req *frameworkv1.BluetoothMediaCommandRequest) (*frameworkv1.BluetoothMediaState, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	f.b.btCommands = append(f.b.btCommands, req.GetCommand())
+	if f.b.btMedia == nil || !f.b.btMedia.GetPresent() {
+		return nil, status.Error(codes.FailedPrecondition, "no Bluetooth source is connected")
+	}
+	switch req.GetCommand() {
+	case frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_PLAY:
+		f.b.btMedia.Playing, f.b.btMedia.DirectionPlaying = true, true
+	case frameworkv1.BluetoothMediaCommand_BLUETOOTH_MEDIA_PAUSE:
+		f.b.btMedia.Playing, f.b.btMedia.DirectionPlaying = false, false
+	}
+	return proto.Clone(f.b.btMedia).(*frameworkv1.BluetoothMediaState), nil
 }
 
 // compile-time assertion that the fake covers every registered service.

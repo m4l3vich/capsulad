@@ -13,7 +13,11 @@
 // It proves the wire target (interface, method and object path) for a source
 // that exposes only the deprecated MediaControl1, that an ambiguous toggle
 // direction comes from the sink's receipt evidence, and that another device's
-// active transport never changes the displayed source's direction.
+// active transport never changes the displayed source's direction. It also
+// proves the toggle-direction fix end to end: a MediaPlayer1 whose Status stays
+// "playing" after this daemon's own Pause makes the next toggle call Play (from
+// the bounded command memory, then from the owned transport's receipts once that
+// memory expires).
 package bluetooth
 
 import (
@@ -144,6 +148,11 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 	}
 
 	b := &BlueZ{conn: conn, connected: map[string]string{}, subs: map[int]chan Event{}}
+	// A controllable wall clock: each phase starts with any earlier commanded
+	// direction expired, so the phase asserts its own evidence and not the
+	// previous phase's command memory.
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b.now = func() time.Time { return now }
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -182,6 +191,7 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 	// A second connected device with an active transport must not flip the
 	// displayed source's direction: the displayed device is still the first
 	// deterministic MediaControl1 source.
+	now = now.Add(commandMemoryWindow + time.Second)
 	other := dbus.ObjectPath("/org/bluez/hci0/dev_BB_CC_DD_EE_FF_00")
 	updated := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{}
 	for path, ifaces := range objs {
@@ -199,5 +209,84 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 	}
 	if got := control.snapshot(); len(got) != 5 || got[4] != string(fixtureDevice)+".Play" {
 		t.Fatalf("cross-device transport changed direction: %v", got)
+	}
+
+	// A MediaPlayer1 whose Status never changes while we command it: exactly a
+	// peer that does not notify on a command it did not originate. Status says
+	// "playing" forever, so the old evidence order resolved every toggle to
+	// Pause ("pause works, play does not").
+	player := fixtureDevice + "/player0"
+	updated = map[dbus.ObjectPath]map[string]map[string]dbus.Variant{}
+	for path, ifaces := range objs {
+		updated[path] = ifaces
+	}
+	updated[other+"/sep1/fd0"] = map[string]map[string]dbus.Variant{
+		"org.bluez.MediaTransport1": {
+			"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(other),
+		},
+	}
+	updated[player] = map[string]map[string]dbus.Variant{
+		"org.bluez.MediaPlayer1": {
+			"Status": dbus.MakeVariant("playing"),
+			"Device": dbus.MakeVariant(fixtureDevice),
+		},
+	}
+	objects.set(updated)
+	if err := conn.Export(&exportedControl{ctl: control, path: player}, player, "org.bluez.MediaPlayer1"); err != nil {
+		t.Fatalf("export media player: %v", err)
+	}
+	// Expire whatever the control-only phases commanded above.
+	now = now.Add(commandMemoryWindow + time.Second)
+
+	// Baseline: with only the stale status left, a toggle pauses.
+	if err := b.Command(ctx, CommandToggle); err != nil {
+		t.Fatalf("toggle with stale playing status: %v", err)
+	}
+	// Our own Pause makes the next toggle, inside the peer's notification
+	// latency, play even though Status still says "playing".
+	if err := b.Command(ctx, CommandToggle); err != nil {
+		t.Fatalf("toggle after our pause: %v", err)
+	}
+	got := control.snapshot()
+	if len(got) != 7 || got[5] != string(player)+".Pause" || got[6] != string(player)+".Play" {
+		t.Fatalf("stale-status toggles = %v, want Pause then Play on %s", got[len(got)-2:], player)
+	}
+
+	// Past the memory window only the lagging status is left; this documents
+	// the residual risk and that the memory really is bounded.
+	now = now.Add(commandMemoryWindow + time.Second)
+	if err := b.Command(ctx, CommandToggle); err != nil {
+		t.Fatalf("toggle after the memory window: %v", err)
+	}
+	if got = control.snapshot(); got[len(got)-1] != string(player)+".Pause" {
+		t.Fatalf("toggle past the window = %q, want the stale status to decide Pause", got[len(got)-1])
+	}
+
+	// While this sink owns the acquired transport, its own receipts decide: no
+	// receipt means paused, so a toggle plays despite the stale status.
+	transport := fixtureDevice + "/sep2/fd0"
+	updated[transport] = map[string]map[string]dbus.Variant{
+		"org.bluez.MediaTransport1": {
+			"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+			"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(fixtureDevice),
+		},
+	}
+	objects.set(updated)
+	b.transport = transport // what AcquireA2DP records in production
+	now = now.Add(commandMemoryWindow + time.Second)
+	b.SetAudioStreamProbe(func(string) bool { return false })
+	if err := b.Command(ctx, CommandToggle); err != nil {
+		t.Fatalf("toggle with an owned silent transport: %v", err)
+	}
+	if got = control.snapshot(); got[len(got)-1] != string(player)+".Play" {
+		t.Fatalf("owned silent transport toggle = %q, want Play from receipt evidence", got[len(got)-1])
+	}
+	b.SetAudioStreamProbe(func(string) bool { return true })
+	now = now.Add(commandMemoryWindow + time.Second)
+	if err := b.Command(ctx, CommandToggle); err != nil {
+		t.Fatalf("toggle with an owned streaming transport: %v", err)
+	}
+	if got = control.snapshot(); got[len(got)-1] != string(player)+".Pause" {
+		t.Fatalf("owned streaming transport toggle = %q, want Pause from receipt evidence", got[len(got)-1])
 	}
 }

@@ -1,0 +1,13 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafc7b0. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.client;
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/client;clientpb";
+
+enum MediaState {
+  MEDIA_STATE_UNSPECIFIED = 0;
+  MEDIA_STATE_STOP = 1;
+  MEDIA_STATE_PLAY = 2;
+}

@@ -133,6 +133,9 @@ type AudioDevice interface {
 	CaptureFormat() AudioFormat
 	OpenOutput() (Sink, error)
 	OpenInput() (Source, error)
+	// SetMasterVolume pins the hardware/sink gain; the framework mixer owns the
+	// only software master gain. It must be bounded or non-blocking and is
+	// called at startup and on every volume change.
 	SetMasterVolume(v float64) error
 	// SetHardwareMute is best-effort. It returns false when the backend cannot
 	// mute in hardware and the framework must only suppress streams.

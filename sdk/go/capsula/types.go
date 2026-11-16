@@ -10,13 +10,15 @@ import (
 //
 // Library is CAPSULA_LIBRARY when the launcher injected an absolute shared
 // library path; empty means load the platform SONAME (libcapsula.so.1 on
-// Linux, libcapsula.1.dylib on Darwin).
+// Linux, libcapsula.1.dylib on Darwin). DeviceSerial is the host SoC serial
+// from CAPSULA_DEVICE_SERIAL, and is empty when the daemon could not read it.
 type Env struct {
-	Library string
-	Socket  string
-	RunID   string
-	AppID   string
-	SDK     string
+	Library      string
+	Socket       string
+	RunID        string
+	AppID        string
+	SDK          string
+	DeviceSerial string
 }
 
 // Enums are plain uint8 values. Their JSON encoding uses the canonical

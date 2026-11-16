@@ -145,9 +145,14 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 	d.audio.SetMasterVolume(v.MasterVolume)
 	d.audio.SetMuted(v.MicrophoneMuted)
 	d.applyBluetoothSettings(v)
-	d.applyBluetoothVolume(v.MasterVolume)
+	d.forgetBluetoothGain()
+	d.applyBluetoothGain(v.MasterVolume)
 	d.wake.SetEnabled(v.WakewordEnabled)
 	d.wake.SetMuted(v.MicrophoneMuted)
+	// Per-word enablement and binding are settings, not engine state: applying
+	// them refreshes the advertised models only, so a toggle takes effect on the
+	// next activation without a re-subscribe or a warm-up.
+	d.refreshWakewordModels()
 
 	// The muted indication mirrors the current mute state and its configured
 	// lifetime. Changing the mode or delay while the microphone stays muted
@@ -184,12 +189,36 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 		// timezone only takes effect on the next launch.
 		d.restartBootAppsForTimezone()
 	}
-	if prev == nil || !sameStringMap(prev.DefaultAppByResource, v.DefaultAppByResource) || prev.DefaultAssistantAppID != v.DefaultAssistantAppID {
+	if prev == nil || !sameStringMap(prev.DefaultAppByResource, v.DefaultAppByResource) ||
+		prev.DefaultAssistantAppID != v.DefaultAssistantAppID || !sameBindings(prev.Wakewords, v.Wakewords) {
 		for _, appID := range v.DefaultAppByResource {
 			d.ensureRunning(appID)
 		}
 		d.ensureRunning(v.DefaultAssistantAppID)
+		// A newly bound app has to be running to receive its word.
+		for _, entry := range v.Wakewords {
+			if entry.AppID != "" {
+				d.ensureRunning(entry.AppID)
+			}
+		}
 	}
+}
+
+// sameBindings compares the per-word list, distinguishing the legacy nil state
+// from an explicit empty list.
+func sameBindings(a, b []settings.WakewordBinding) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // restartBootAppsForTimezone stops every running external app and starts the

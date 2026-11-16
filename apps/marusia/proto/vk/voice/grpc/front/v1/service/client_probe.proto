@@ -1,0 +1,32 @@
+// HAND-RECONSTRUCTED service definition.
+//
+// No FileDescriptorProto for this file is embedded in the vendor binary; the
+// service is recovered from:
+//
+//   * the method path string "/vk.voice.grpc.front.v1.service.ClientProbe/AuthReady"
+//     @0xa0cd20 (see PROTOCOL.md §1 for the exact offsets of the .rodata copy)
+//   * the unary-stub symbol family
+//       voice::GrpcClientUnari<vk::voice::grpc::front::v1::service::ClientProbe::Stub,
+//                              grpc::ClientAsyncResponseReader<
+//                                vk::voice::grpc::front::v1::api::client_probe::AuthReadyResponse>, ...>
+//       grpc::ClientAsyncResponseReader<...::AuthReadyResponse>
+//     -> AuthReady is unary
+//
+// AuthReadyRequest and AuthReadyResponse are *empty* messages in the shipped
+// descriptors (verified: 218-byte descriptor blob, both messages have no
+// fields). AuthReady is therefore a liveness/authorization probe: the only
+// input is the request metadata (authorization + x-* headers) and the only
+// output is the gRPC status.
+
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.service;
+
+import "vk/voice/grpc/front/v1/api/client_probe/auth_ready.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/service;servicepb";
+
+service ClientProbe {
+  rpc AuthReady(vk.voice.grpc.front.v1.api.client_probe.AuthReadyRequest)
+      returns (vk.voice.grpc.front.v1.api.client_probe.AuthReadyResponse);
+}

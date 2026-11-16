@@ -10,6 +10,10 @@ type networkScratch struct {
 	proj      [ContextFrames * ProjectionWidth]float64
 	hiddenPre [HiddenWidth]float64
 	hidden    [HiddenWidth]float64
+	// widened is the float32 window a Score/forward caller hands over, converted
+	// once for the float64 kernel. It exists so the two entry points share one
+	// implementation instead of two copies of the same arithmetic.
+	widened [ContextFrames * EmbeddingDim]float64
 
 	dProj   [ContextFrames * ProjectionWidth]float64
 	dHidden [HiddenWidth]float64
@@ -28,17 +32,31 @@ func (m *Classifier) Score(window []float32) float64 {
 	return m.forward(window, &s)
 }
 
-// forward is the shared offline/runtime implementation. It accumulates in
-// float64 like the trainer so Score is identical on the device and in offline
-// evaluation, then rounds only the sigmoid result.
+// forward is the offline/runtime entry point for a float32 window. Widening to
+// float64 is exact, so this is the same arithmetic as forward64 and the two
+// produce identical scores for the same embeddings.
 func (m *Classifier) forward(x []float32, s *networkScratch) float64 {
+	if len(x) != len(s.widened) {
+		return math.NaN()
+	}
+	for i, v := range x {
+		s.widened[i] = float64(v)
+	}
+	return m.forward64(s.widened[:], s)
+}
+
+// forward64 is the shared ensemble kernel: it scores a float64 context view so
+// N detectors can read one embedding ring without converting or copying a
+// window per model. It accumulates in float64 like the trainer, then rounds only
+// the sigmoid result, exactly as the float32 entry point does.
+func (m *Classifier) forward64(x []float64, s *networkScratch) float64 {
 	for t := range ContextFrames {
 		base := t * EmbeddingDim
 		for c := range ProjectionWidth {
 			row := m.W1[c*EmbeddingDim : (c+1)*EmbeddingDim]
 			z := float64(m.B1[c])
 			for i := range EmbeddingDim {
-				z += float64(row[i]) * float64(x[base+i])
+				z += float64(row[i]) * x[base+i]
 			}
 			if z < 0 {
 				z = 0

@@ -431,3 +431,59 @@ func TestAppSettingsErrorClassification(t *testing.T) {
 		t.Fatalf("unknown app WatchApp error = %v, want NotFoundError", err)
 	}
 }
+
+// An explicit empty per-word list is a state of its own, not the legacy state:
+// it must survive a clone, a JSON round trip and a reload, otherwise "no word is
+// live" silently turns back into "every installed word is live".
+func TestExplicitEmptyWakewordsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	store, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := store.Update(0, UserSettings{Wakewords: []WakewordBinding{}}, []string{"wakewords"})
+	if err != nil {
+		t.Fatalf("update with an explicit empty list: %v", err)
+	}
+	if snap.Values.Wakewords == nil || len(snap.Values.Wakewords) != 0 {
+		t.Fatalf("snapshot collapsed the explicit empty list: %#v", snap.Values.Wakewords)
+	}
+	// Every read path clones the list; the copy must stay non-nil too.
+	if got := store.Get().Values.Wakewords; got == nil || len(got) != 0 {
+		t.Fatalf("clone collapsed the explicit empty list: %#v", got)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"wakewords": []`) {
+		t.Fatalf("document does not encode the explicit empty list: %s", raw)
+	}
+	reopened, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Get().Values.Wakewords; got == nil || len(got) != 0 {
+		t.Fatalf("reload turned the explicit empty list into %#v", got)
+	}
+}
+
+// The legacy state stays nil across every path, so an upgrade does not disable
+// the word a device is already running.
+func TestLegacyWakewordsStayNilAcrossRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	store, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(0, UserSettings{MasterVolume: 0.4}, []string{"master_volume"}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenUser(path, testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Get().Values.Wakewords; got != nil {
+		t.Fatalf("legacy state became %#v", got)
+	}
+}

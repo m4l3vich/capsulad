@@ -2,6 +2,7 @@ package wakeword
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -259,15 +260,15 @@ func TestCalibrateThreshold(t *testing.T) {
 
 	second := evalSignal{scores: []float64{0.85, 0.85, 0.85},
 		wordStart: word.wordStart - 100, wordEnd: word.wordEnd - 100}
-	threshold, metrics, err := calibrateThreshold([]evalSignal{word, second}, []evalSignal{quiet})
+	tuning, err := calibrateThreshold([]evalSignal{word, second}, []evalSignal{quiet})
 	if err != nil {
 		t.Fatalf("calibrate: %v", err)
 	}
-	if threshold <= 0.1 || threshold > 0.85+1e-9 {
-		t.Fatalf("threshold = %v, want inside (0.1, 0.85]", threshold)
+	if tuning.threshold <= 0.1 || tuning.threshold > 0.85+1e-9 {
+		t.Fatalf("threshold = %v, want inside (0.1, 0.85]", tuning.threshold)
 	}
-	if metrics.Detected != 2 || metrics.FalseActivations != 0 {
-		t.Fatalf("metrics = %+v", metrics)
+	if tuning.chosen.Detected != 2 || tuning.chosen.FalseActivations != 0 {
+		t.Fatalf("metrics = %+v", tuning.chosen)
 	}
 
 	loud := evalSignal{scores: []float64{0.9, 0.9, 0.9, 0.9}, wordStart: -1}
@@ -276,7 +277,7 @@ func TestCalibrateThreshold(t *testing.T) {
 		wordStart: oww.EmbeddingEnd(ContextFrames),
 		wordEnd:   oww.EmbeddingEnd(ContextFrames) + 10,
 	}
-	if _, _, err := calibrateThreshold([]evalSignal{weak, second}, []evalSignal{loud}); err == nil || !strings.Contains(err.Error(), "no threshold") {
+	if _, err := calibrateThreshold([]evalSignal{weak, second}, []evalSignal{loud}); err == nil || !strings.Contains(err.Error(), "no threshold") {
 		t.Fatalf("unreachable quality gate error = %v", err)
 	}
 }
@@ -558,5 +559,191 @@ func TestTrainOptionsRequireDeclaredProcessing(t *testing.T) {
 	opts.InputProcessing = audio.CaptureProcessingTap
 	if err := opts.check(); err != nil {
 		t.Fatalf("declared processed policy rejected: %v", err)
+	}
+}
+
+// TestTrainFailureCollectsEveryUnusableTake pins the structured validation
+// refusal: one run reports every unusable take and every missing partition,
+// not just the first problem it meets.
+func TestTrainFailureCollectsEveryUnusableTake(t *testing.T) {
+	opts := TrainOptions{ID: "test.word", NegativesPath: filepath.Join(t.TempDir(), "negatives.bin"), InputProcessing: audio.CaptureProcessingTap}
+	silent := make([][]int16, minWordRecordings)
+	for i := range silent {
+		silent[i] = make([]int16, enrollmentSampleRate)
+	}
+	rooms := [][]int16{toneTake(0, 17600, 0, 500)} // one take, too few and too long to matter
+	speech := make([][]int16, minSpeechRecordings)
+	for i := range speech {
+		speech[i] = toneTake(0, 16000, 0, float64(6000+i*100))
+	}
+	_, err := Train(context.Background(), Enrollment{Takes: silent, Ambient: rooms, Speech: speech}, opts)
+	var failure *TrainingFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("error %v is not a *TrainingFailure", err)
+	}
+	if !failure.HasCause(CauseTooFewRoomTakes) {
+		t.Fatalf("missing room minimum not reported: %v", failure.Causes)
+	}
+	if !failure.HasCause(CauseUnusableTake) {
+		t.Fatalf("unusable word takes not reported: %v", failure.Causes)
+	}
+	if len(failure.Takes) != minWordRecordings {
+		t.Fatalf("reported %d failing takes, want %d: %+v", len(failure.Takes), minWordRecordings, failure.Takes)
+	}
+	for _, take := range failure.Takes {
+		if take.Partition != "word" || take.Cause != CauseUnusableTake {
+			t.Fatalf("unexpected failing take %+v", take)
+		}
+	}
+	if failure.Causes[0] != CauseTooFewRoomTakes && failure.Causes[0] != CauseUnusableTake {
+		t.Fatalf("primary cause %q is not a recorded cause: %v", failure.Cause(), failure.Causes)
+	}
+	if failure.Detail == "" {
+		t.Fatal("structured failure has no detail text")
+	}
+}
+
+// TestTuneGateFailureCarriesMeasuredSplit pins the actionable tune refusal: the
+// cause, the measured numbers and the threshold they were measured at.
+func TestTuneGateFailureCarriesMeasuredSplit(t *testing.T) {
+	loud := evalSignal{scores: []float64{0.9, 0.9, 0.9, 0.9}, wordStart: -1}
+	weak := evalSignal{
+		scores:    []float64{0.1, 0.1, 0.1},
+		wordStart: oww.EmbeddingEnd(ContextFrames),
+		wordEnd:   oww.EmbeddingEnd(ContextFrames) + 10,
+	}
+	second := evalSignal{scores: []float64{0.85, 0.85, 0.85},
+		wordStart: weak.wordStart - 100, wordEnd: weak.wordEnd - 100}
+	_, err := calibrateThreshold([]evalSignal{weak, second}, []evalSignal{loud})
+	var failure *TrainingFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("error %v is not a *TrainingFailure", err)
+	}
+	if !failure.HasCause(CauseTuneGateFailed) {
+		t.Fatalf("causes = %v, want %q", failure.Causes, CauseTuneGateFailed)
+	}
+	if failure.Threshold <= 0 {
+		t.Fatalf("threshold = %v, want the measured candidate", failure.Threshold)
+	}
+	if len(failure.Splits) != 1 || failure.Splits[0].Split != SplitTune {
+		t.Fatalf("splits = %+v, want one tune split", failure.Splits)
+	}
+	if failure.Splits[0].WordRecordings != 2 || failure.Splits[0].FalseActivations == 0 {
+		t.Fatalf("tune metrics = %+v, want two word takes and the loud false fire", failure.Splits[0])
+	}
+	if failure.Splits[0].Recall != float64(failure.Splits[0].Detected)/2 {
+		t.Fatalf("recall %v does not match detected %d of 2", failure.Splits[0].Recall, failure.Splits[0].Detected)
+	}
+}
+
+// TestFinalGateFailureKeepsDistinctCauses pins that a local final-test failure
+// and an auxiliary corpus veto are reported together with their own causes and
+// numbers instead of one replacing the other.
+func TestFinalGateFailureKeepsDistinctCauses(t *testing.T) {
+	localFail := gateMetrics{WordRecordings: 5, Detected: 3, FalseActivations: 0}
+	err := finalGateError(localFail, gateMetrics{FalseActivations: 1}, gateMetrics{}, 0.59)
+	var failure *TrainingFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("error %v is not a *TrainingFailure", err)
+	}
+	if !failure.HasCause(CauseFinalGateFailed) || !failure.HasCause(CauseAuxiliaryGateFailed) {
+		t.Fatalf("causes = %v, want both the local gate and the auxiliary veto", failure.Causes)
+	}
+	if failure.Threshold != 0.59 {
+		t.Fatalf("threshold = %v, want 0.59", failure.Threshold)
+	}
+	bySplit := make(map[string]SplitMetrics, len(failure.Splits))
+	for _, split := range failure.Splits {
+		bySplit[split.Split] = split
+	}
+	if got := bySplit[SplitFinalTest]; got.Detected != 3 || got.WordRecordings != 5 {
+		t.Fatalf("final-test metrics = %+v", got)
+	}
+	if got := bySplit[SplitAuxTune]; got.FalseActivations != 1 {
+		t.Fatalf("auxiliary tune metrics = %+v", got)
+	}
+	if _, ok := bySplit[SplitAuxFinalTest]; !ok {
+		t.Fatalf("auxiliary final-test split missing: %+v", failure.Splits)
+	}
+}
+
+// TestGateReportReadsTrainedMetrics pins the success-side surface: the metrics
+// block already stored in Classifier.Trained is exposed as-is, in a stable
+// split order, and a legacy artifact reports nothing rather than zeros.
+func TestGateReportReadsTrainedMetrics(t *testing.T) {
+	clf := newTestClassifier(t, 201)
+	clf.Trained = provenance(trainingProvenance{
+		opts:           TrainOptions{ID: "test.word", Display: "Test", Language: "en", NegativesPath: "negatives.bin"},
+		neg:            &Negatives{FeatureExtractor: "x", EmbeddingDim: EmbeddingDim},
+		threshold:      0.59,
+		tuneMetrics:    gateMetrics{WordRecordings: 2, Detected: 2},
+		finalMetrics:   gateMetrics{WordRecordings: 2, Detected: 2},
+		auxTuneMetrics: gateMetrics{WordRecordings: 0, Detected: 0, FalseActivations: 0},
+		auxTestMetrics: gateMetrics{WordRecordings: 0, Detected: 0, FalseActivations: 1},
+	})
+	report, ok := clf.GateReport()
+	if !ok {
+		t.Fatal("GateReport reported no metrics for a provenance artifact")
+	}
+	if report.Threshold != 0.59 {
+		t.Fatalf("threshold = %v", report.Threshold)
+	}
+	if len(report.Splits) != 4 {
+		t.Fatalf("splits = %+v, want tune, final_test and both auxiliary splits", report.Splits)
+	}
+	for i, want := range []string{SplitTune, SplitFinalTest, SplitAuxTune, SplitAuxFinalTest} {
+		if report.Splits[i].Split != want {
+			t.Fatalf("split %d = %q, want %q", i, report.Splits[i].Split, want)
+		}
+	}
+	if report.Splits[0].Recall != 1 || report.Splits[0].Detected != 2 || report.Splits[0].WordRecordings != 2 {
+		t.Fatalf("tune split = %+v", report.Splits[0])
+	}
+	if report.Splits[3].FalseActivations != 1 {
+		t.Fatalf("auxiliary final-test split = %+v", report.Splits[3])
+	}
+	if _, ok := newTestClassifier(t, 202).GateReport(); ok {
+		t.Fatal("a model without provenance reported metrics")
+	}
+}
+
+// TestGateTakeFailuresNameMissedAndFalseFiredTakes pins the actionable part of
+// a gate refusal: only the word takes the policy missed and the held-out
+// negatives that false fired are listed, numbered as submitted.
+func TestGateTakeFailuresNameMissedAndFalseFiredTakes(t *testing.T) {
+	detected := evalSignal{
+		scores:    []float64{0.9, 0.9, 0.9},
+		wordStart: oww.EmbeddingEnd(ContextFrames-1) - 8000,
+		wordEnd:   oww.EmbeddingEnd(ContextFrames - 1),
+	}
+	missed := evalSignal{
+		scores:    []float64{0.1, 0.1, 0.1},
+		wordStart: detected.wordStart - 100,
+		wordEnd:   detected.wordEnd - 100,
+	}
+	quiet := evalSignal{scores: []float64{0.1, 0.1, 0.1}, wordStart: -1}
+	firing := evalSignal{scores: []float64{0.9, 0.9, 0.9}, wordStart: -1}
+
+	failure := &TrainingFailure{Causes: []FailureCause{CauseFinalGateFailed}}
+	addGateTakeFailures(failure, CauseFinalGateFailed, 0.5,
+		[]evalSignal{detected, missed}, []int{4, 1},
+		[]evalSignal{quiet, firing}, []int{2}, []int{0}, []int{3},
+		"missed", "false fired")
+
+	if len(failure.Takes) != 2 {
+		t.Fatalf("takes = %+v, want the missed word take and the false-firing take", failure.Takes)
+	}
+	word := failure.Takes[0]
+	if word.Partition != "word" || word.Index != 2 || word.Cause != CauseFinalGateFailed || word.Detail != "missed" {
+		t.Fatalf("word take = %+v", word)
+	}
+	// The negative refs follow the evaluator order rooms, speech, false; the
+	// second held-out negative is the first speech take, submitted as #1.
+	negative := failure.Takes[1]
+	if negative.Partition != "speech" || negative.Index != 1 || negative.Detail != "false fired" {
+		t.Fatalf("negative take = %+v", negative)
+	}
+	if !failure.HasCause(CauseFinalGateFailed) {
+		t.Fatalf("causes = %v", failure.Causes)
 	}
 }

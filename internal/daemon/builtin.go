@@ -32,6 +32,7 @@ const (
 )
 
 type builtinProviders struct {
+	d     *Daemon
 	clock *builtinClock
 	ring  *builtinRing
 }
@@ -41,7 +42,7 @@ type builtinProviders struct {
 // discovery, default-provider seeding and routed calls before the output loop
 // starts. Content is applied when the run lifecycle calls start().
 func newBuiltins(d *Daemon) *builtinProviders {
-	out := &builtinProviders{}
+	out := &builtinProviders{d: d}
 	for _, info := range d.resources {
 		switch info.Kind {
 		case frameworkv1.ResourceKind_RESOURCE_SEGMENT_DISPLAY:
@@ -58,12 +59,13 @@ func newBuiltins(d *Daemon) *builtinProviders {
 		d.RegisterAppSettingsValidator(clockAppID, validateClockSettings)
 		app := out.clock
 		if err := d.RegisterSystemApp(SystemApp{
-			Manifest:   clockManifest(),
-			Interfaces: []registry.Interface{clockInterface()},
-			Start:      app.start,
-			Stop:       app.stop,
-			HandleCall: app.handleCall,
-			Action:     app.action,
+			Manifest:       clockManifest(),
+			FrameworkOwned: true,
+			Interfaces:     []registry.Interface{clockInterface()},
+			Start:          app.start,
+			Stop:           app.stop,
+			HandleCall:     app.handleCall,
+			Action:         app.action,
 		}); err != nil {
 			d.logs.Errorf(clockAppID, "", "register system app: %v", err)
 		}
@@ -84,18 +86,13 @@ func newBuiltins(d *Daemon) *builtinProviders {
 	return out
 }
 
-// start is idempotent. Run starts apps through their SystemApp.Start hooks, so
-// this helper exists for callers that own both runtimes explicitly.
+// start starts every registered built-in the boot policy requires, through the
+// same selection-aware path Run uses. It is idempotent.
 func (b *builtinProviders) start() {
-	if b == nil {
+	if b == nil || b.d == nil {
 		return
 	}
-	if b.clock != nil {
-		b.clock.start()
-	}
-	if b.ring != nil {
-		b.ring.start()
-	}
+	b.d.startSystemApps()
 }
 
 // --- system app packaging ---------------------------------------------------

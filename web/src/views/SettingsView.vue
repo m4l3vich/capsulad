@@ -303,7 +303,6 @@ function applyAssistant(fields) {
     defaultAssistantApp: fields.includes('default_assistant_app')
       ? ui.assistant.app
       : (v.defaultAssistantAppId || ''),
-    wakewordModel: v.wakewordModelId || '',
     wakewordEnabled: !!v.wakewordEnabled,
     touchHold: fields.includes('touch_hold_mode')
       ? (ui.assistant.touch === 'talk' ? 2 : 1)

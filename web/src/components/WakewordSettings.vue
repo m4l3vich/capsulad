@@ -11,10 +11,14 @@ const { data: wakewordData, error: wakewordError, refresh } = useTopic(topicName
 const { data: settingsData, error: settingsError, pending: settingsPending, update } = useSettings()
 
 const trainingOpen = ref(false)
+const trainingTarget = ref(null)
+const modelDeleteBusy = ref('')
+const confirmModelDeleteId = ref('')
 const deleteBusy = ref('')
 const detectionBusy = ref('')
 const confirmDeleteId = ref('')
 let confirmTimer = null
+let confirmModelTimer = null
 
 const models = computed(() => wakewordData.value?.models || [])
 const samples = computed(() => wakewordData.value?.samples || [])
@@ -22,8 +26,6 @@ const detections = computed(() => [...(wakewordData.value?.detections || [])]
   .sort((a, b) => Number(b.detectedUnixMs || 0) - Number(a.detectedUnixMs || 0)))
 
 const values = computed(() => settingsData.value?.values || {})
-const selectedModelId = computed(() => values.value.wakewordModelId || '')
-const selectedModel = computed(() => models.value.find((model) => model.modelId === selectedModelId.value) || null)
 const enabled = computed(() => Boolean(values.value.wakewordEnabled))
 const assistantSelected = computed(() => Boolean(values.value.defaultAssistantAppId))
 const settingsReady = computed(() => Boolean(settingsData.value))
@@ -39,13 +41,155 @@ const micReason = computed(() => {
 
 const applying = computed(() => Boolean(settingsPending.value))
 const samplesLoaded = computed(() => wakewordData.value !== null)
-const canToggle = computed(() => enabled.value || Boolean(selectedModel.value?.available))
 const installedAvailable = computed(() => models.value.some((model) => model.available))
 const savedTakes = computed(() => [...samples.value].sort((a, b) => Number(b.recordedUnixMs || 0) - Number(a.recordedUnixMs || 0)))
 
-const statusText = computed(() => {
+// Installed applications the browser may bind a word to. The settings snapshot
+// already carries the installed list, so binding needs no second request.
+const appOptions = computed(() => {
+  const apps = settingsData.value?.apps || []
+  return apps
+    .filter((app) => app.appId)
+    .map((app) => ({ id: app.appId, label: app.displayName || app.appId }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
+function appLabel(appId) {
+  if (!appId) return 'Selected assistant'
+  const found = appOptions.value.find((app) => app.id === appId)
+  return found ? found.label : `${appId} (not installed)`
+}
+
+/**
+ * The per-word draft the browser edits. The device decorates every model with
+ * its effective enablement and binding, but that is the combined result; the
+ * draft needs each word's own switch so toggling the global one cannot rewrite
+ * the per-word intent. A stored list wins; without one the device is in the
+ * legacy state, where every installed word is live under the global switch.
+ */
+function bindingsFrom(values) {
+  const stored = values?.wakewords
+  // A repeated protobuf field decodes as [] both when it was absent and when it
+  // was empty, so the browser cannot tell the legacy state from an explicit
+  // "no word is live" list. The empty case is equivalent here: it only exists
+  // when no word is installed (deleting the last word), and then the legacy
+  // draft below is empty too. Every installed word is switched off through its
+  // own entry, which is present.
+  if (Array.isArray(stored) && stored.length) {
+    return stored.map((entry) => ({
+      modelId: entry.modelId,
+      appId: entry.appId || '',
+      enabled: Boolean(entry.enabled)
+    }))
+  }
+  return null
+}
+
+function legacyBindings() {
+  return models.value
+    .filter((model) => model.available)
+    .map((model) => ({ modelId: model.modelId, appId: '', enabled: true }))
+}
+
+const draft = ref([])
+
+function syncDraft() {
+  draft.value = bindingsFrom(values.value) || legacyBindings()
+}
+
+// Resync only when the authoritative settings values change identity, so an
+// optimistic edit is not wiped by our own revision bump, and when the set of
+// installed words changes, so the draft always covers every installed word.
+watch(() => settingsData.value?.values, syncDraft, { immediate: true })
+watch(() => models.value.map((model) => model.modelId).join(','), syncDraft)
+
+function bindingFor(modelId) {
+  return draft.value.find((entry) => entry.modelId === modelId) || null
+}
+
+// One whole-list patch: the device replaces the whole per-word list, so adding,
+// removing, enabling and rebinding are the same operation.
+function commitBindings(next, previous) {
+  draft.value = next
+  return apply({ wakewords: next.map((entry) => ({
+    modelId: entry.modelId,
+    appId: entry.appId,
+    enabled: Boolean(entry.enabled)
+  })), updateFields: ['wakewords'] }).then((ok) => {
+    if (ok === false) draft.value = previous
+    return ok
+  })
+}
+
+function toggleModel(model, next) {
+  if (!model.available || applying.value) return
+  const previous = draft.value.map((entry) => ({ ...entry }))
+  let list = previous.map((entry) => entry.modelId === model.modelId
+    ? { ...entry, enabled: Boolean(next) }
+    : entry)
+  if (!list.some((entry) => entry.modelId === model.modelId)) {
+    list = [...list, { modelId: model.modelId, appId: '', enabled: Boolean(next) }]
+  }
+  commitBindings(list, previous)
+}
+
+function setBinding(model, appId) {
+  if (applying.value) return
+  const previous = draft.value.map((entry) => ({ ...entry }))
+  let list = previous.map((entry) => entry.modelId === model.modelId
+    ? { ...entry, appId }
+    : entry)
+  if (!list.some((entry) => entry.modelId === model.modelId)) {
+    // Binding an app is not enabling: adding the missing entry keeps the word's
+    // current state instead of switching it on behind the operator's back.
+    list = [...list, { modelId: model.modelId, appId, enabled: Boolean(model.enabled) }]
+  }
+  commitBindings(list, previous)
+}
+
+function wordLive(model) {
+  return Boolean(model.available && enabled.value && (bindingFor(model.modelId)?.enabled ?? false))
+}
+
+const SPLIT_LABELS = {
+  tune: 'Tuning check',
+  final_test: 'Final check',
+  auxiliary_tune: 'External speech check · tuning',
+  auxiliary_final_test: 'External speech check · final'
+}
+
+// The certificate recorded when a model was trained. Values come straight from
+// the device; nothing here recomputes a metric.
+function metricsFor(model) {
+  const splits = Array.isArray(model?.metrics) ? model.metrics : []
+  return splits.map((split, index) => {
+    const words = Number(split.wordRecordings) || 0
+    return {
+      key: `${split.split || 'split'}-${index}`,
+      label: SPLIT_LABELS[split.split] || String(split.split || 'Check'),
+      words,
+      detected: Number(split.detected) || 0,
+      recall: words > 0 && typeof split.recall === 'number' ? `${Math.round(split.recall * 100)}%` : '—',
+      falseActivations: Number(split.falseActivations) || 0
+    }
+  })
+}
+
+function thresholdFor(model) {
+  const value = Number(model?.threshold)
+  return Number.isFinite(value) && value > 0 ? value.toFixed(2) : ''
+}
+
+function statusText(model) {
+  if (!model.available) return 'Needs attention'
+  if (!enabled.value) return 'Detection off'
+  if (!wordLive(model)) return 'Paused'
+  return 'Listening'
+}
+
+const overallStatus = computed(() => {
   if (!settingsReady.value) return 'Checking'
-  if (enabled.value && selectedModel.value?.available) return 'Detection on'
+  if (enabled.value && installedAvailable.value) return 'Detection on'
   if (enabled.value) return 'Model needed'
   return 'Detection off'
 })
@@ -100,27 +244,49 @@ async function apply(payload) {
   try {
     const ok = await update('assistant', payload)
     if (ok === false) notify.error('Capsula did not accept that change.')
+    return ok
   } catch (err) {
     notify.error(err?.message || 'The change could not be sent to Capsula.')
+    return false
   }
 }
 
 function toggleEnabled(next) {
-  if (!canToggle.value) return
   apply({
-    wakewordModel: selectedModelId.value,
     wakewordEnabled: Boolean(next),
     updateFields: ['wakeword_enabled']
   })
 }
 
-function selectModel(model) {
-  if (!model.available || model.modelId === selectedModelId.value) return
-  apply({
-    wakewordModel: model.modelId,
-    wakewordEnabled: enabled.value,
-    updateFields: ['wakeword_model']
-  })
+function openTraining(model = null) {
+  trainingTarget.value = model ? { modelId: model.modelId, displayName: model.displayName } : null
+  trainingOpen.value = true
+}
+
+function askDeleteModel(model) {
+  if (modelDeleteBusy.value) return
+  if (confirmModelDeleteId.value === model.modelId) {
+    removeModel(model)
+    return
+  }
+  confirmModelDeleteId.value = model.modelId
+  clearTimeout(confirmModelTimer)
+  confirmModelTimer = setTimeout(() => { confirmModelDeleteId.value = '' }, 5000)
+}
+
+async function removeModel(model) {
+  clearTimeout(confirmModelTimer)
+  modelDeleteBusy.value = model.modelId
+  try {
+    await socket.request({ deleteWakeword: { modelId: model.modelId } }, { timeout: 25000 })
+    confirmModelDeleteId.value = ''
+    await refresh()
+    notify.success('Wakeword deleted. Its recordings were kept.')
+  } catch (err) {
+    notify.error(`Could not delete the wakeword: ${err.message}`)
+  } finally {
+    modelDeleteBusy.value = ''
+  }
 }
 
 function askDelete(sample) {
@@ -150,11 +316,13 @@ async function removeTake(sample) {
 
 function closeTraining() {
   trainingOpen.value = false
+  trainingTarget.value = null
   refresh().catch(() => { })
 }
 
 onUnmounted(() => {
   clearTimeout(confirmTimer)
+  clearTimeout(confirmModelTimer)
 })
 </script>
 
@@ -164,6 +332,7 @@ onUnmounted(() => {
     <div class="flex flex-wrap items-center gap-2">
       <Icon size="20px">record_voice_over</Icon>
       <h2 id="wakeword-settings-title" class="flex-grow text-lg font-semibold">Wakeword</h2>
+      <span class="badge badge-ghost badge-sm">{{ overallStatus }}</span>
     </div>
     <p class="text-xs text-base-content/60">
       Capsula listens and learns on the device. Your browser never records audio.
@@ -177,13 +346,13 @@ onUnmounted(() => {
           <label class="flex cursor-pointer items-start justify-between gap-4">
             <span class="min-w-0">
               <span class="block font-medium">Wakeword detection</span>
-              <span class="mt-0.5 block text-sm text-base-content/60">Say your wakeword to start Capsula without pressing anything.</span>
+              <span class="mt-0.5 block text-sm text-base-content/60">Say a wakeword to start Capsula without pressing anything.</span>
             </span>
             <input
               type="checkbox"
               class="toggle toggle-primary mt-1"
               :checked="enabled"
-              :disabled="!canToggle || applying"
+              :disabled="!installedAvailable || applying"
               @change="toggleEnabled($event.target.checked)"
             />
           </label>
@@ -198,19 +367,10 @@ onUnmounted(() => {
           <div v-else-if="!installedAvailable" role="status">
             <p class="text-sm font-medium">Capsula does not have a wakeword yet.</p>
             <p class="mt-1 text-xs text-base-content/60">
-              Use “Create a wakeword” in the next block to get started. Until then, detection stays unavailable.
+              Use “Create a wakeword” below to get started. Until then, detection stays unavailable.
             </p>
           </div>
-          <p v-else-if="!selectedModel?.available" class="text-sm text-warning" role="status">
-            Detection starts once you choose a ready wakeword.
-          </p>
-          <div v-else-if="enabled && settingsReady && !assistantSelected" role="status">
-            <p class="text-sm font-medium text-warning">No assistant is chosen yet.</p>
-            <p class="mt-1 text-xs text-base-content/60">
-              Capsula hears the wakeword but will not answer until you choose an assistant above.
-            </p>
-          </div>
-          <p v-if="enabled && micMuted" class="text-sm text-base-content/60">
+          <p v-else-if="enabled && micMuted" class="text-sm text-base-content/60">
             The microphone is muted, so detection is suspended until it is unmuted.
           </p>
           <p v-if="settingsError && !settingsReady" class="text-sm text-base-content/60">
@@ -222,13 +382,17 @@ onUnmounted(() => {
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-base font-semibold">Your wakeword</h3>
+            <h3 class="text-base font-semibold">Your wakewords</h3>
             <button
               type="button"
               class="btn btn-primary btn-sm"
-              @click="trainingOpen = true"
-            >{{ installedAvailable ? 'Record a new wakeword' : 'Create a wakeword' }}</button>
+              :disabled="applying"
+              @click="openTraining()"
+            >Create a wakeword</button>
           </div>
+          <p class="text-xs text-base-content/60">
+            Each wakeword can start its own app. A word bound to an app activates only that app; “Selected assistant” uses the assistant chosen above. A wakeword that starts an app does not reroute when that app is not running.
+          </p>
 
           <div v-if="!wakewordData && !wakewordError" class="space-y-2" aria-hidden="true">
             <div class="skeleton h-12 w-full"></div>
@@ -239,22 +403,98 @@ onUnmounted(() => {
             <li
               v-for="model in models"
               :key="model.modelId"
-              class="flex items-start gap-3 rounded-box bg-base-100 p-3"
-              :class="model.available ? '' : 'text-base-content/60'"
+              class="rounded-box bg-base-100 p-3"
             >
-              <input
-                type="radio"
-                class="radio radio-primary radio-sm mt-1"
-                name="wakeword-model"
-                :value="model.modelId"
-                :checked="selectedModelId === model.modelId"
-                :disabled="!model.available || applying"
-                :aria-label="`Use ${model.displayName || model.modelId}`"
-                @change="selectModel(model)"
-              />
-              <div class="min-w-0 flex-1">
-                <span class="font-medium">{{ model.displayName || 'Personal wakeword' }}</span>
+              <div class="flex flex-wrap items-start gap-x-3 gap-y-2">
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="font-medium">{{ model.displayName || model.modelId }}</span>
+                    <span
+                      class="badge badge-sm"
+                      :class="wordLive(model) ? 'badge-success' : (model.available ? 'badge-ghost' : 'badge-warning')"
+                    >{{ statusText(model) }}</span>
+                  </div>
+                  <p v-if="model.detail" class="mt-1 text-xs text-warning">{{ model.detail }}</p>
+                  <p v-else class="mt-1 text-xs text-base-content/60">
+                    Activates {{ appLabel(bindingFor(model.modelId)?.appId || model.appId) }}
+                    <span v-if="thresholdFor(model)"> · threshold {{ thresholdFor(model) }}</span>
+                  </p>
+                </div>
+
+                <label class="flex items-center gap-2 text-sm">
+                  <span class="text-base-content/60">Enabled</span>
+                  <input
+                    type="checkbox"
+                    class="toggle toggle-sm"
+                    :checked="bindingFor(model.modelId)?.enabled ?? false"
+                    :disabled="!model.available || applying"
+                    :aria-label="`Enable ${model.displayName || model.modelId}`"
+                    @change="toggleModel(model, $event.target.checked)"
+                  />
+                </label>
               </div>
+
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <label class="flex min-w-0 flex-1 items-center gap-2 text-sm">
+                  <span class="shrink-0 text-base-content/60">Starts</span>
+                  <select
+                    class="select select-bordered select-sm min-w-0 flex-1"
+                    :value="bindingFor(model.modelId)?.appId || model.appId || ''"
+                    :disabled="!model.available || applying"
+                    :aria-label="`App started by ${model.displayName || model.modelId}`"
+                    @change="setBinding(model, $event.target.value)"
+                  >
+                    <option value="">Selected assistant</option>
+                    <option v-for="app in appOptions" :key="app.id" :value="app.id">{{ app.label }}</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="!model.available || applying"
+                  @click="openTraining(model)"
+                >Retrain</button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :class="confirmModelDeleteId === model.modelId ? 'text-error' : ''"
+                  :disabled="Boolean(modelDeleteBusy)"
+                  @click="askDeleteModel(model)"
+                >
+                  <span v-if="modelDeleteBusy === model.modelId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+                  {{ confirmModelDeleteId === model.modelId ? 'Confirm delete' : 'Delete' }}
+                </button>
+              </div>
+
+              <details v-if="metricsFor(model).length" class="mt-2 rounded-box bg-base-200/60">
+                <summary class="cursor-pointer px-3 py-2 text-sm font-medium">
+                  Measured quality
+                  <span v-if="thresholdFor(model)" class="badge badge-ghost badge-sm ml-1">threshold {{ thresholdFor(model) }}</span>
+                </summary>
+                <div class="overflow-x-auto px-2 pb-2">
+                  <table class="table table-xs">
+                    <thead>
+                      <tr>
+                        <th>Check</th>
+                        <th>Words found</th>
+                        <th>Recall</th>
+                        <th>False activations</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in metricsFor(model)" :key="row.key">
+                        <td class="whitespace-nowrap">{{ row.label }}</td>
+                        <td>{{ row.words ? `${row.detected} / ${row.words}` : '—' }}</td>
+                        <td>{{ row.recall }}</td>
+                        <td>{{ row.falseActivations }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="px-3 py-2 text-xs text-base-content/60">
+                  Measured once when this wakeword was trained, on recordings held back from fitting. The external speech check uses a separate licensed corpus and is not the final certificate.
+                </p>
+              </details>
             </li>
           </ul>
           <div v-else-if="wakewordError" class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
@@ -263,34 +503,6 @@ onUnmounted(() => {
           <div v-else class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
             No wakeword has been set up yet. Use “Create a wakeword” to get started.
           </div>
-
-          <details v-if="samples.length" class="rounded-box bg-base-100">
-            <summary class="cursor-pointer px-4 py-3 text-sm font-medium">
-              Recordings on Capsula
-              <span class="badge badge-ghost badge-sm ml-1">{{ samples.length }}</span>
-            </summary>
-            <ul class="divide-y divide-base-300 border-t border-base-300">
-              <li v-for="sample in savedTakes" :key="sample.sampleId" class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-sm">
-                <span class="min-w-0 flex-1">
-                  <span class="block">{{ labelFor(sample) }}</span>
-                  <span class="block text-xs text-base-content/60">{{ dateTime(sample.recordedUnixMs) }} · {{ durationMs(sample.durationMs) }}</span>
-                </span>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-sm"
-                  :class="confirmDeleteId === sample.sampleId ? 'text-error' : ''"
-                  :disabled="Boolean(deleteBusy)"
-                  @click="askDelete(sample)"
-                >
-                  <span v-if="deleteBusy === sample.sampleId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                  {{ confirmDeleteId === sample.sampleId ? 'Confirm delete' : 'Delete' }}
-                </button>
-              </li>
-            </ul>
-            <p class="border-t border-base-300 px-4 py-2 text-xs text-base-content/60">
-              Deleting a recording does not change the wakeword Capsula is using. Only recordings chosen in a new setup are used for training.
-            </p>
-          </details>
         </div>
       </div>
 
@@ -331,6 +543,40 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <div class="rounded-box bg-base-200/60">
+        <div class="flex flex-col gap-3 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h3 class="text-base font-semibold">Recordings on Capsula</h3>
+            <span class="badge badge-ghost badge-sm">{{ samples.length }}</span>
+          </div>
+          <div v-if="!samplesLoaded" class="skeleton h-12 w-full" aria-hidden="true"></div>
+          <ul v-else-if="samples.length" class="divide-y divide-base-300 rounded-box bg-base-100">
+            <li v-for="sample in savedTakes" :key="sample.sampleId" class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-sm">
+              <span class="min-w-0 flex-1">
+                <span class="block">{{ labelFor(sample) }}</span>
+                <span class="block text-xs text-base-content/60">{{ dateTime(sample.recordedUnixMs) }} · {{ durationMs(sample.durationMs) }}</span>
+              </span>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                :class="confirmDeleteId === sample.sampleId ? 'text-error' : ''"
+                :disabled="Boolean(deleteBusy)"
+                @click="askDelete(sample)"
+              >
+                <span v-if="deleteBusy === sample.sampleId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+                {{ confirmDeleteId === sample.sampleId ? 'Confirm delete' : 'Delete' }}
+              </button>
+            </li>
+          </ul>
+          <p v-else class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
+            No recordings yet. A new wakeword setup records its own takes.
+          </p>
+          <p class="text-xs text-base-content/60">
+            Recordings belong to the device, not to one wakeword: deleting a wakeword keeps them, and only recordings chosen in a new setup are used for training.
+          </p>
+        </div>
+      </div>
     </div>
 
     <WakewordTrainingDialog
@@ -339,6 +585,7 @@ onUnmounted(() => {
       :samples-loaded="samplesLoaded"
       :mic-live="micLive"
       :mic-reason="micReason"
+      :target="trainingTarget"
       @close="closeTraining"
       @refresh="refresh"
     />

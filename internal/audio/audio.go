@@ -16,6 +16,7 @@ package audio
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -40,7 +41,25 @@ const (
 	progressPeriod  = 250 * time.Millisecond
 	prerollMS       = 1000
 	maxPlaybackItem = 1 << 20
+
+	// maxPlaybackStreamsPerApp bounds one app's concurrent playback width.
+	// Together with the per-app ceiling it makes the master volume a structural
+	// limit on what a single app can contribute, and it bounds mixer cost per
+	// tick on the A35.
+	maxPlaybackStreamsPerApp = 4
+
+	// Soft limiter on the master bus. The threshold leaves a little headroom
+	// before full scale; the attack window holds the detected peak, and the
+	// release is an envelope time constant.
+	limiterThreshold = 0.95
+	limiterAttackMS  = 5
+	limiterReleaseMS = 150
 )
+
+// ErrPlaybackLimit reports that the app already holds
+// maxPlaybackStreamsPerApp concurrent playback streams. The media service maps
+// it to RESOURCE_EXHAUSTED; other open errors remain precondition failures.
+var ErrPlaybackLimit = errors.New("concurrent playback stream limit reached")
 
 type Options struct {
 	// IndicationActive reports whether an app currently shows a qualifying
@@ -239,6 +258,15 @@ func (m *Manager) Start() error {
 	muted := m.muted
 	m.mu.Unlock()
 
+	// The mixer owns the only software master gain. Pin the backend/sink gain
+	// at unity on every start so a vendor agent or an external mixer change
+	// cannot rescale framework output behind the master ceiling. Backends
+	// implement this asynchronously and boundedly; a missing mixer client
+	// degrades to the previous state instead of failing startup.
+	if err := m.dev.SetMasterVolume(1); err != nil {
+		m.logs.Warnf("audio", "", "startup sink gain pin incomplete: %v", err)
+	}
+
 	// Reconcile the hardware gate on every start: the previous owner (vendor
 	// agent or an earlier daemon) may have left it in the opposite state, and
 	// SetMuted would skip a matching transition.
@@ -287,7 +315,9 @@ func (m *Manager) SetMasterVolume(v float64) {
 	m.mu.Lock()
 	m.volume = v
 	m.mu.Unlock()
-	_ = m.dev.SetMasterVolume(1)
+	if err := m.dev.SetMasterVolume(1); err != nil {
+		m.logs.Warnf("audio", "", "sink gain pin incomplete: %v", err)
+	}
 }
 
 // BeginIndicationCue makes playback id the exclusive mixer source for the
@@ -494,6 +524,16 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 		conv: newResampler(format, outFmt()), gain: 1, trim: 1, mgr: m,
 	}
 	m.mu.Lock()
+	open := 0
+	for _, existing := range m.playbacks {
+		if existing.appID == appID {
+			open++
+		}
+	}
+	if open >= maxPlaybackStreamsPerApp {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("%w (%d per app)", ErrPlaybackLimit, maxPlaybackStreamsPerApp)
+	}
 	m.playbacks[p.id] = p
 	m.mu.Unlock()
 	p.emit(PlaybackEvent{Started: &Started{StreamID: p.id, Format: outFmt()}})
@@ -517,13 +557,82 @@ func outFmt() backend.AudioFormat {
 	return backend.AudioFormat{Format: backend.S16LE, RateHz: outRate, Channels: outChannels}
 }
 
+// masterLimiter is the soft limiter on the master bus. It is one small value
+// state machine rather than inline locals so its contract is testable without a
+// live mixer: a rising peak is caught immediately and held for the attack
+// window, and the gain releases at the release rate in both directions.
+//
+// The gain never exceeds limiterThreshold/heldPeak, which is the largest gain
+// whose product with the held peak stays at the threshold, so releasing upward
+// cannot push the bus above the threshold. A lower gain latched by an earlier
+// transient is therefore released toward the current target instead of sticking
+// until the signal falls below the threshold entirely.
+type masterLimiter struct {
+	gain     float32
+	holdPeak float32
+	holdLeft int
+	attack   int
+	release  float32
+}
+
+func newMasterLimiter(rate int) masterLimiter {
+	return masterLimiter{
+		gain:    1,
+		attack:  limiterAttackMS * rate / 1000,
+		release: float32(1 - math.Exp(-math.Ln10/(float64(limiterReleaseMS)*float64(rate)/1000))),
+	}
+}
+
+// next advances one output frame by its peak magnitude and returns the gain to
+// apply to both channels of that frame. Allocation-free and O(1).
+func (l *masterLimiter) next(peak float32) float32 {
+	if peak >= l.holdPeak {
+		l.holdPeak = peak
+		l.holdLeft = l.attack
+	} else if l.holdLeft > 0 {
+		l.holdLeft--
+	} else {
+		l.holdPeak = peak
+	}
+	if l.holdPeak > limiterThreshold {
+		target := float32(limiterThreshold) / l.holdPeak
+		switch {
+		case target < l.gain:
+			// An immediate catch cannot overshoot: the held peak keeps the
+			// reduced gain engaged for the whole attack window.
+			l.gain = target
+		case l.gain < target:
+			l.gain += (target - l.gain) * l.release
+			if target-l.gain < 1e-3 {
+				l.gain = target
+			}
+		}
+	} else if l.gain < 1 {
+		l.gain += (1 - l.gain) * l.release
+		if 1-l.gain < 1e-3 {
+			l.gain = 1
+		}
+	}
+	return l.gain
+}
+
 func (m *Manager) mixLoop() {
 	frames := outRate * mixFrameMS / 1000
 	ticker := time.NewTicker(time.Duration(mixFrameMS) * time.Millisecond)
 	defer ticker.Stop()
 	pcm := make([]byte, frames*outChannels*2)
 	mix := make([]float32, frames*outChannels)
+	// Per-app accumulation scratch: each app's streams are summed here and the
+	// sum is clamped before it reaches the master mix, so the master volume is
+	// a ceiling on every app's contribution rather than a gain applied after
+	// all apps have already added themselves into one buffer.
+	appMix := make([]float32, frames*outChannels)
 	fadeStep := float64(mixFrameMS) / float64(m.opts.DuckFadeMS)
+	lim := newMasterLimiter(outRate)
+	// Reused across ticks: the steady-state mixer path allocates nothing.
+	playbacks := make([]*Playback, 0, 16)
+	apps := make([]string, 0, 8)
+	convs := make([]string, 0, 4)
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -534,80 +643,143 @@ func (m *Manager) mixLoop() {
 			mix[i] = 0
 		}
 		m.mu.Lock()
-		playbacks := make([]*Playback, 0, len(m.playbacks))
+		playbacks = playbacks[:0]
 		for _, p := range m.playbacks {
 			playbacks = append(playbacks, p)
 		}
 		volume := m.volume
 		cueID := m.cueID
 		anyConversation := len(m.conversations) > 0
-		convs := make(map[string]struct{}, len(m.conversations))
+		convs = convs[:0]
 		for id := range m.conversations {
-			convs[id] = struct{}{}
+			convs = append(convs, id)
 		}
 		sink := m.sink
 		m.mu.Unlock()
 
-		for _, p := range playbacks {
-			p.drainControl()
-			isCue := cueID != "" && p.id == cueID
-			if cueID != "" && !isCue {
-				// The microphone indication owns the mixer. Freeze application
-				// playbacks instead of mixing them under the cue; they resume
-				// when the cue ends, so a flood cannot mask it.
-				continue
+		apps = apps[:0]
+		if cueID != "" {
+			// The microphone indication owns the mixer. Only the cue stream's
+			// app is grouped, so every other playback is frozen without being
+			// fed and cannot mask or delay the cue.
+			for _, p := range playbacks {
+				if p.id == cueID {
+					apps = append(apps, p.appID)
+					break
+				}
 			}
-			p.feed()
-			p.mu.Lock()
-			if p.closed {
-				p.mu.Unlock()
-				continue
-			}
-			paused := p.paused
-			closedInput := p.inputClosed
-			queued := p.queuedBytes
-			_, isActiveConv := convs[p.conversationID]
-			p.mu.Unlock()
-
-			target := 1.0
-			if !isCue && anyConversation && (p.conversationID == "" || !isActiveConv) {
-				target = m.opts.DuckGain
-			}
-			p.mu.Lock()
-			if p.gain < target {
-				p.gain = math.Min(target, p.gain+fadeStep)
-			} else if p.gain > target {
-				p.gain = math.Max(target, p.gain-fadeStep)
-			}
-			gain := p.gain
-			trim := p.trim
-			p.mu.Unlock()
-
-			starved := queued == 0 && closedInput
-			if starved && p.conv.srcFrames() == 0 {
-				m.closePlayback(p.id)
-				continue
-			}
-			if paused {
-				continue
-			}
-			out := p.conv.pull(frames)
-			p.mu.Lock()
-			p.framesPlayed += uint64(frames)
-			p.mu.Unlock()
-			for i := range mix {
-				mix[i] += out[i] * float32(gain*trim)
+		} else {
+			for _, p := range playbacks {
+				if indexOf(apps, p.appID) < 0 {
+					apps = append(apps, p.appID)
+				}
 			}
 		}
 
-		for i, v := range mix {
-			v *= float32(volume)
-			if v > 1 {
-				v = 1
-			} else if v < -1 {
-				v = -1
+		for _, appID := range apps {
+			for i := range appMix {
+				appMix[i] = 0
 			}
-			binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(v*32767)))
+			mixed := false
+			for _, p := range playbacks {
+				if p.appID != appID {
+					continue
+				}
+				isCue := cueID != "" && p.id == cueID
+				if cueID != "" && !isCue {
+					continue
+				}
+				p.drainControl()
+				p.feed()
+				p.mu.Lock()
+				if p.closed {
+					p.mu.Unlock()
+					continue
+				}
+				paused := p.paused
+				closedInput := p.inputClosed
+				queued := p.queuedBytes
+				isActiveConv := indexOf(convs, p.conversationID) >= 0
+				p.mu.Unlock()
+
+				target := 1.0
+				if !isCue && anyConversation && (p.conversationID == "" || !isActiveConv) {
+					target = m.opts.DuckGain
+				}
+				p.mu.Lock()
+				if p.gain < target {
+					p.gain = math.Min(target, p.gain+fadeStep)
+				} else if p.gain > target {
+					p.gain = math.Max(target, p.gain-fadeStep)
+				}
+				gain := p.gain
+				trim := p.trim
+				p.mu.Unlock()
+
+				starved := queued == 0 && closedInput
+				if starved && p.conv.srcFrames() == 0 {
+					m.closePlayback(p.id)
+					continue
+				}
+				if paused {
+					continue
+				}
+				out := p.conv.pull(frames)
+				p.mu.Lock()
+				p.framesPlayed += uint64(frames)
+				p.mu.Unlock()
+				scale := float32(gain * trim)
+				for i := range appMix {
+					appMix[i] += out[i] * scale
+				}
+				mixed = true
+			}
+			if !mixed {
+				continue
+			}
+			for i, v := range appMix {
+				// One app cannot exceed full scale no matter how many streams
+				// it opened; non-finite values cannot leave the app bus.
+				switch {
+				case v != v:
+					v = 0
+				case v > 1:
+					v = 1
+				case v < -1:
+					v = -1
+				}
+				mix[i] += v
+			}
+		}
+
+		vol := float32(volume)
+		for i := 0; i < len(mix); i += 2 {
+			l := finite32(mix[i] * vol)
+			r := finite32(mix[i+1] * vol)
+			// The master volume is applied once, here, after every app has
+			// contributed at most its ceiling.
+			peak := abs32(l)
+			if a := abs32(r); a > peak {
+				peak = a
+			}
+			gain := lim.next(peak)
+			l *= gain
+			r *= gain
+			// Existing full-scale hard clamp, retained as the final safety net.
+			// The limiter holds the bus at its threshold, so it should be a
+			// no-op; non-finite samples were already replaced with silence.
+			if l > 1 {
+				l = 1
+			} else if l < -1 {
+				l = -1
+			}
+			if r > 1 {
+				r = 1
+			} else if r < -1 {
+				r = -1
+			}
+			binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(l*32767)))
+			binary.LittleEndian.PutUint16(pcm[(i+1)*2:], uint16(int16(r*32767)))
 		}
 		if sink != nil {
 			if err := sink.WritePCM(pcm); err != nil {
@@ -626,6 +798,35 @@ func (m *Manager) mixLoop() {
 			}
 		}
 	}
+}
+
+// indexOf reports the position of want in list, or -1. The lists it serves are
+// the per-tick app and conversation snapshots: a handful of short strings, so a
+// linear scan avoids a per-tick map allocation.
+func indexOf(list []string, want string) int {
+	for i, v := range list {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// finite32 maps NaN and infinities to silence. A non-finite sample must not
+// reach the int16 conversion, where the result is implementation-defined and
+// audible as a click at any volume.
+func finite32(v float32) float32 {
+	if v != v || math.IsInf(float64(v), 0) {
+		return 0
+	}
+	return v
 }
 
 func (p *Playback) drainControl() {

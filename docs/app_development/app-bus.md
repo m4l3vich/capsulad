@@ -65,7 +65,7 @@ one `end`.
 | `AppLaunchInvocation` | `invocation_id`, `arguments` (`[{name, value}]`) | Launch or singleton invocation with typed arguments. |
 | `AppSettingsChanged` | `revision` (uint64), `values` (`[{key, value_json}]`) | Own settings only; carries unmasked `text_masked` values. |
 | `AppActionInvoked` | `action_invocation_id`, `action_id` | A declared action was triggered. |
-| `AssistantActivation` | `activation_id`, `origin` (enum), `matched_model_id`, `monotonic_time_ns`, `expires_monotonic_ns`, `hold_to_talk` (bool) | One assistant turn for the selected assistant. |
+| `AssistantActivation` | `activation_id`, `origin` (enum), `matched_model_id`, `monotonic_time_ns`, `expires_monotonic_ns`, `hold_to_talk` (bool) | One assistant turn for the selected assistant. A manual (touch/key) activation is `ACTIVATION_TOUCH` with an empty `matched_model_id`; only `ACTIVATION_WAKEWORD` is keyword evidence. |
 | `AssistantInputReleased` | `activation_id` | Hold-to-talk release correlated with that activation. |
 
 `deadline_monotonic_ns` is reserved for a per-call deadline; the relay does not populate it, so

@@ -31,6 +31,11 @@ var (
 	// ErrNoTransport means the A2DP endpoint is registered but no transport is
 	// configured yet; callers should retry while the profile comes up.
 	ErrNoTransport = errors.New("no A2DP transport is configured")
+	// ErrNoAbsoluteVolume means the source is connected but does not expose
+	// AVRCP absolute volume: BlueZ creates MediaTransport1.Volume only after the
+	// peer reports a level, and a write cannot create it. The framework level
+	// then stays local; there is no relative-volume fallback on purpose.
+	ErrNoAbsoluteVolume = errors.New("the source does not expose AVRCP absolute volume")
 	// ErrIncomingDisabled means the user disabled incoming Bluetooth
 	// connections. The adapter stays powered for BLE work, but no inbound link
 	// is accepted, including from already-paired devices.
@@ -83,6 +88,60 @@ type A2DPSink interface {
 // registration as ready.
 type A2DPRegistrar interface {
 	SinkRegistered() bool
+}
+
+// A2DPSession is optionally implemented by a manager that can assert what audio
+// link a connected source actually got, and ask for the missing profile once. A
+// successful ConnectProfile is not evidence of an A2DP transport; Session is.
+type A2DPSession interface {
+	// Session reports the source's observed audio link. A source that is
+	// connected but has no A2DP transport reports an empty A2DPState.
+	Session(ctx context.Context, address string) (AudioLink, error)
+	// RequestA2DPProfile asks a connected source to bring its A2DP source
+	// profile up. It never disconnects the source; the caller bounds it and
+	// decides how often it may run.
+	RequestA2DPProfile(ctx context.Context, address string) error
+}
+
+// CommandObservation is one resolved AVRCP command, for diagnostics only.
+// Evidence names the fact the direction came from (EvidenceStatus,
+// EvidenceTransport, EvidenceReceipt or EvidenceMemory). It is empty for
+// commands that need no direction.
+type CommandObservation struct {
+	Device   string
+	Command  Command
+	Method   string
+	Evidence string
+	Err      error
+}
+
+// Direction is the playback direction of the displayed source, with the fact it
+// was derived from. Present is false when no source is connected.
+type Direction struct {
+	Present  bool
+	Playing  bool
+	Evidence string
+}
+
+// DirectionResolver is optionally implemented by a manager that can resolve the
+// playback direction of the displayed source from the same evidence its own
+// toggle uses. It is the single authority for that question: a consumer that
+// publishes a playback state from it (the compiled-in media provider, and
+// therefore the system media controller that reads that state) can never invert
+// a direction the manager's next toggle would repeat, which is the whole point
+// of the direction memory.
+//
+// A manager that does not implement it publishes its own exact state instead
+// (the simulator), so there is nothing to invert there.
+type DirectionResolver interface {
+	PlaybackDirection(ctx context.Context) (Direction, error)
+}
+
+// CommandObserver is optionally implemented by a manager that can report how it
+// resolved a transport command. Installations are read-only: an observer can
+// log a decision but cannot change it.
+type CommandObserver interface {
+	SetCommandObserver(func(CommandObservation))
 }
 
 // Status is the adapter state a UI can show.
@@ -182,12 +241,22 @@ const (
 	// discoverability, connectability or advertised name). It carries no media
 	// state; consumers refresh the status they display.
 	EventAdapter
+	// EventVolumeUnavailable reports, once per source session, that the source
+	// has no writable AVRCP absolute volume: BlueZ has no MediaTransport1.Volume
+	// and refuses to create one, so the framework level stays local. It is only
+	// published after the grace window, never for a source that simply has not
+	// reported a level yet. It is a diagnostic transition, not playback state;
+	// Detail carries the address and the reason for the log, and Media carries
+	// the current snapshot so a watcher that only sees this event (under queue
+	// overflow) cannot read it as "no source".
+	EventVolumeUnavailable
 )
 
-// Event carries the state after a change. Media is set for EventMedia and on
-// connect/disconnect when a state is available. DeviceAddress/DeviceName
-// identify the source for connect, disconnect and volume events; a volume event
-// always belongs to the displayed source, never a background phone.
+// Event carries the state after a change. Media is set for EventMedia, on
+// connect/disconnect when a state is available, and on a volume or diagnostic
+// event for the displayed source. DeviceAddress/DeviceName identify the source
+// for connect, disconnect and volume events; a volume event always belongs to
+// the displayed source, never a background phone.
 type Event struct {
 	Kind          EventKind
 	DeviceAddress string
@@ -195,6 +264,9 @@ type Event struct {
 	Media         MediaState
 	// Volume is the AVRCP absolute volume (0..127) for EventVolume.
 	Volume uint16
+	// Detail is a short explanation for a diagnostic event
+	// (EventVolumeUnavailable). It is never playback state.
+	Detail string
 }
 
 // watchEventBuffer is the per-subscriber queue depth. A watcher can fall behind
@@ -268,8 +340,10 @@ type Manager interface {
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
 	Media(ctx context.Context) (MediaState, error)
-	// SetTransportVolume writes the AVRCP transport volume; it is the single
-	// Bluetooth listening gain, mirrored by the framework master.
+	// SetTransportVolume writes the AVRCP transport volume. The daemon uses it as
+	// a display mirror of the framework master only: the local attenuation stays
+	// the single gain stage, and the source's report of the write is filtered as
+	// an echo instead of being adopted as a source-side change.
 	SetTransportVolume(ctx context.Context, level float64) error
 	// TransportVolume reads the current AVRCP transport volume (0..127).
 	TransportVolume(ctx context.Context) (uint16, error)
@@ -286,16 +360,18 @@ type Manager interface {
 // Memory is a scriptable manager. It stores state and broadcasts events exactly
 // like the real facade, so app and RPC paths can be tested without a bus.
 type Memory struct {
-	mu        sync.Mutex
-	status    Status
-	devices   []Device
-	media     MediaState
-	volume    uint16
-	hasVolume bool
-	revision  uint64
-	subs      map[int]chan Event
-	nextID    int
-	closed    bool
+	mu            sync.Mutex
+	status        Status
+	devices       []Device
+	media         MediaState
+	volume        uint16
+	hasVolume     bool
+	writtenVolume uint16
+	wroteVolume   bool
+	revision      uint64
+	subs          map[int]chan Event
+	nextID        int
+	closed        bool
 
 	// Simulator-only playlist. It is empty unless a test installs one, so
 	// Next/Previous keep their historical no-op behavior by default.
@@ -427,6 +503,7 @@ func (m *Memory) SetTransportVolume(_ context.Context, level float64) error {
 	}
 	m.volume = uint16(level*127 + 0.5)
 	m.hasVolume = true
+	m.writtenVolume, m.wroteVolume = m.volume, true
 	return nil
 }
 
@@ -445,6 +522,12 @@ func (m *Memory) Media(context.Context) (MediaState, error) {
 	return m.media, nil
 }
 
+// Command applies a transport command to the simulated source. The simulator
+// owns the playback state, so it applies the command directly (and a toggle
+// flips the state it holds); it must not emulate the real manager's direction
+// inference, whose whole point is that a BlueZ source's cached status is not
+// authoritative. A test that needs the stale-status case drives the real path
+// over a D-Bus fixture instead.
 func (m *Memory) Command(_ context.Context, cmd Command) error {
 	m.mu.Lock()
 	if !m.media.Present {
@@ -577,6 +660,15 @@ func (m *Memory) SimulateConnect(dev Device, media MediaState) {
 	event := Event{Kind: EventConnected, DeviceAddress: dev.Address, DeviceName: dev.Name, Media: media}
 	m.mu.Unlock()
 	m.broadcast(event)
+}
+
+// TransportVolumeWritten reports the register value the daemon last wrote to
+// the source, if any. It is the simulator's record of a write, not a state a
+// consumer reads.
+func (m *Memory) TransportVolumeWritten() (uint16, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.writtenVolume, m.wroteVolume
 }
 
 // SimulateVolume publishes an AVRCP absolute-volume change made on the source.

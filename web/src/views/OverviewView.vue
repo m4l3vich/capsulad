@@ -8,6 +8,7 @@ import MicrophoneControl from '../components/MicrophoneControl.vue'
 import ApplicationView from './ApplicationView.vue'
 import Icon from '../components/Icon.vue'
 import { notify } from '../lib/toast.js'
+import { connectedBadge } from '../stores/overviewBluetooth.js'
 
 const { data, error, loading, refresh } = useTopic('overview')
 // const data = ref(null)
@@ -22,6 +23,10 @@ const incoming = ref(false)
 const bluetooth = computed(() => data.value?.bluetooth || null)
 const bluetoothReady = computed(() =>
   !!bluetooth.value?.present && !!bluetooth.value?.powered && liveState.value === 'open')
+// Header status for this card: a green chip naming every paired device the
+// snapshot reports connected. Null (no chip at all) whenever none is linked or
+// the snapshot has not arrived, so the header never shows a stale "connected".
+const bluetoothConnected = computed(() => connectedBadge(data.value?.pairedDevices))
 const apps = computed(() => data.value?.apps || [])
 const runs = computed(() => data.value?.runs || [])
 const providers = computed(() => data.value?.providers || [])
@@ -162,20 +167,28 @@ async function runAction(app, action) {
   )
 }
 
+// A provider is either an application (addressed by app_id) or the framework's
+// own Bluetooth source, which has no app id and is addressed by its kind. The
+// selection is keyed on that identity so both shapes coexist.
+function providerKey(provider) {
+  return provider.appId ? `app:${provider.appId}` : `framework:${provider.kind}`
+}
+
 // One popover at a time: the media card shows its first provider, and the
 // badge menu switches which provider it renders. The selection falls back to
 // the first provider when the chosen one disappears.
-const activeProviderId = ref('')
+const activeProviderKey = ref('')
 const activeProvider = computed(() => {
   const list = providers.value
   if (!list.length) return null
-  return list.find((provider) => provider.appId === activeProviderId.value) || list[0]
+  return list.find((provider) => providerKey(provider) === activeProviderKey.value) || list[0]
 })
 const otherProviders = computed(() =>
-  providers.value.filter((provider) => provider.appId !== activeProvider.value?.appId))
+  providers.value.filter((provider) =>
+    !activeProvider.value || providerKey(provider) !== providerKey(activeProvider.value)))
 
 function selectProvider(provider) {
-  activeProviderId.value = provider.appId
+  activeProviderKey.value = providerKey(provider)
   closeMenu()
 }
 
@@ -265,8 +278,10 @@ function showPause(player) {
 }
 
 async function mediaAction(provider, player, action) {
-  const ok = await run(`media:${provider.appId}:${player.playerId}:${action}`, {
-    media: { appId: provider.appId, playerId: player.playerId, action: media[action] }
+  const ok = await run(`media:${providerKey(provider)}:${player.playerId}:${action}`, {
+    media: {
+      kind: provider.kind, appId: provider.appId, playerId: player.playerId, action: media[action]
+    }
   })
   // Media transitions are asynchronous on the provider; one explicit resync
   // shows the accepted state without polling.
@@ -343,14 +358,14 @@ function trackTime(ms) {
                 aria-label="Other media providers"
                 class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
               >
-                <li v-for="provider in otherProviders" :key="provider.appId" role="none">
+                <li v-for="provider in otherProviders" :key="providerKey(provider)" role="none">
                   <button
                     type="button"
                     role="menuitem"
                     class="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200"
                     @click="selectProvider(provider)"
                   >
-                    <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId }}</span>
+                    <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId || 'Media' }}</span>
                     <span class="text-[11px] text-base-content/60">
                       {{ provider.error || playerCount(provider) }}
                     </span>
@@ -432,6 +447,13 @@ function trackTime(ms) {
           <div class="flex items-center gap-2">
             <Icon size="16px">bluetooth</Icon>
             <span class="text-xs font-medium uppercase tracking-wide flex-grow">Bluetooth speaker</span>
+            <span
+              v-if="bluetoothConnected"
+              class="badge badge-success badge-sm shrink-0"
+              role="status"
+              :title="bluetoothConnected.title"
+              :aria-label="bluetoothConnected.title"
+            >{{ bluetoothConnected.label }}</span>
             <input
               type="checkbox"
               class="toggle toggle-primary toggle-sm"

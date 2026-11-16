@@ -40,7 +40,12 @@ type Config struct {
 	// LibraryDir is the host directory holding the shared native SDK runtime
 	// (libcapsula.so.1 and capsula-native.json). Empty means resolve beside
 	// the daemon binary: <exe-dir>/lib, then <exe-dir>/../lib.
-	LibraryDir   string
+	LibraryDir string
+	// DeviceSerial is the SoC serial the daemon read at startup. It is handed
+	// to every app as CAPSULA_DEVICE_SERIAL; an empty value omits the variable
+	// instead of exporting an empty one, so an app can tell "unknown" from a
+	// value the launcher assigned.
+	DeviceSerial string
 	UIDBase      int
 	PIDNamespace bool
 	Seccomp      bool
@@ -149,10 +154,16 @@ func (l *Launcher) env() []string {
 	if assets != "" && namespaceMode(l.Mode()) {
 		assets = "/assets"
 	}
-	if assets == "" {
-		return env
+	if assets != "" {
+		env = append(env, "CAPSULA_ASSETS="+assets)
 	}
-	return append(env, "CAPSULA_ASSETS="+assets)
+	// CAPSULA_DEVICE_SERIAL is the descriptor-free path to the SoC serial. A
+	// native runtime built before DeviceInfo.hardware_serial existed drops the
+	// field from JSON replies, so apps cannot rely on the protocol there.
+	if serial := strings.TrimSpace(l.cfg.DeviceSerial); serial != "" {
+		env = append(env, "CAPSULA_DEVICE_SERIAL="+serial)
+	}
+	return env
 }
 
 // Seccomp reports whether the kernel accepted the deny-list filter. It is only

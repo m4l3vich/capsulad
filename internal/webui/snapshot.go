@@ -126,6 +126,13 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 	running := map[string]bool{}
 	if runsErr == nil {
 		for _, run := range runs.GetRuns() {
+			// Only a READY run can serve its declared services. A run that is
+			// still starting, stopping or failed is listed with its real state,
+			// but it must not mark the app as running: the daemon cannot route
+			// to it, and the page would hide Launch behind a badge that lies.
+			if run.GetState() != frameworkv1.AppRunState_APP_READY {
+				continue
+			}
 			running[run.GetAppId()] = true
 		}
 	}
@@ -520,7 +527,7 @@ func settingsValues(v *frameworkv1.UserSettings) *webv1.SettingsValues {
 	out := &webv1.SettingsValues{
 		DefaultAppByResource:  map[string]string{},
 		DefaultAssistantAppId: v.GetDefaultAssistantAppId(),
-		WakewordModelId:       v.GetWakewordModelId(),
+		Wakewords:             bindingViews(v.GetWakewords()),
 		WakewordEnabled:       v.GetWakewordEnabled(),
 		DisplayBrightness:     map[string]float32{},
 		MasterVolume:          v.GetMasterVolume(),
@@ -549,11 +556,68 @@ func settingsValues(v *frameworkv1.UserSettings) *webv1.SettingsValues {
 	return out
 }
 
+// bindingViews copies the per-word configuration. A nil wire list stays nil (the
+// legacy state); an empty list stays an explicit empty list.
+func bindingViews(list []*frameworkv1.WakewordBinding) []*webv1.WakewordBindingView {
+	if list == nil {
+		return nil
+	}
+	out := make([]*webv1.WakewordBindingView, 0, len(list))
+	for _, entry := range list {
+		out = append(out, &webv1.WakewordBindingView{
+			ModelId: entry.GetModelId(), AppId: entry.GetAppId(), Enabled: entry.GetEnabled(),
+		})
+	}
+	return out
+}
+
 func modelView(m *frameworkv1.WakewordModelInfo) *webv1.WakewordModelView {
 	return &webv1.WakewordModelView{
 		ModelId: m.GetModelId(), DisplayName: m.GetDisplayName(), Language: m.GetLanguage(),
 		EngineId: m.GetEngineId(), Available: m.GetAvailable(),
+		Metrics: gateMetricsView(m.GetMetrics()), Threshold: m.GetThreshold(),
+		Enabled: m.GetEnabled(), AppId: m.GetAppId(), Detail: m.GetDetail(),
 	}
+}
+
+// gateMetricsView copies the trainer's measured splits for display. The browser
+// renders these numbers as they are; it never recomputes a metric.
+func gateMetricsView(splits []*frameworkv1.WakewordGateMetrics) []*webv1.WakewordGateMetricsView {
+	out := make([]*webv1.WakewordGateMetricsView, 0, len(splits))
+	for _, split := range splits {
+		out = append(out, &webv1.WakewordGateMetricsView{
+			Split:            split.GetSplit(),
+			WordRecordings:   split.GetWordRecordings(),
+			Detected:         split.GetDetected(),
+			Recall:           split.GetRecall(),
+			FalseActivations: split.GetFalseActivations(),
+		})
+	}
+	return out
+}
+
+// trainingFailureView copies a structured refusal for the browser.
+func trainingFailureView(failure *frameworkv1.WakewordTrainingFailure) *webv1.WakewordTrainingFailureView {
+	if failure == nil {
+		return nil
+	}
+	out := &webv1.WakewordTrainingFailureView{
+		Causes:    append([]string(nil), failure.GetCauses()...),
+		Threshold: failure.GetThreshold(),
+		Detail:    failure.GetDetail(),
+		Splits:    gateMetricsView(failure.GetSplits()),
+		Takes:     make([]*webv1.WakewordFailingTakeView, 0, len(failure.GetTakes())),
+	}
+	for _, take := range failure.GetTakes() {
+		out.Takes = append(out.Takes, &webv1.WakewordFailingTakeView{
+			Partition: take.GetPartition(),
+			Index:     take.GetIndex(),
+			SampleId:  take.GetSampleId(),
+			Cause:     take.GetCause(),
+			Detail:    take.GetDetail(),
+		})
+	}
+	return out
 }
 
 func sampleView(s *frameworkv1.WakewordSample) *webv1.WakewordSampleView {
@@ -657,6 +721,14 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 		out = append(out, provider)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].GetAppId() < out[j].GetAppId() })
+	// The connected Bluetooth source is a framework-owned provider, not an app:
+	// no manifest, no run, no app id. It comes from the public
+	// BluetoothMediaService on this socket and is appended after the application
+	// providers, so a running player stays the default view. With no connected
+	// source it is absent, and the browser shows no empty provider row.
+	if provider := s.frameworkMediaProvider(ctx); provider != nil {
+		out = append(out, provider)
+	}
 	return out, nil
 }
 

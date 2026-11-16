@@ -403,3 +403,65 @@ func TestDeselectDuringBlockedTerminationSuppressesManifestRestart(t *testing.T)
 		t.Fatalf("deselection during termination was overridden by the manifest: %d starts", got)
 	}
 }
+
+// A compiled-in app is one run in the table: listed once, under its own app ID,
+// with its real state, and with the same stable run ID after a stop/start
+// cycle. The run table is what the Web UI's "Running" badge and Launch button
+// are built from, so a duplicate or a stale entry changes a user-visible state.
+func TestBuiltinRunsAreListedOnceUnderTheirOwnApp(t *testing.T) {
+	logs, err := logbus.New(ids.NewClock(), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup := New(ctx, logs, ids.NewClock(), "", nil)
+
+	builtin := func(id string) *manifest.Manifest {
+		return &manifest.Manifest{ID: id, Name: id, Version: "1.0.0",
+			Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin}}
+	}
+	clockID, ringID := "builtin:capsula.clock", "builtin:capsula.ring"
+	if _, err := sup.RegisterBuiltin(builtin("capsula.clock"), clockID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sup.RegisterBuiltin(builtin("capsula.ring"), ringID); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(label string) {
+		t.Helper()
+		all := sup.List("")
+		seen := map[string]int{}
+		for _, run := range all {
+			seen[run.AppID]++
+			if !run.Virtual {
+				t.Fatalf("%s: %s is not a virtual run: %+v", label, run.AppID, run)
+			}
+			if run.State != Ready {
+				t.Fatalf("%s: %s state = %v, want READY", label, run.AppID, run.State)
+			}
+			if want := "builtin:" + run.AppID; run.RunID != want {
+				t.Fatalf("%s: %s run id = %q, want %q", label, run.AppID, run.RunID, want)
+			}
+		}
+		if len(all) != 2 || seen["capsula.clock"] != 1 || seen["capsula.ring"] != 1 {
+			t.Fatalf("%s: runs = %+v, want one entry per built-in app", label, all)
+		}
+		if got := sup.List("capsula.ring"); len(got) != 1 || got[0].AppID != "capsula.ring" {
+			t.Fatalf("%s: ring listing = %+v", label, got)
+		}
+	}
+	check("after registration")
+
+	if !sup.Stop(clockID) {
+		t.Fatal("stopping the clock run was refused")
+	}
+	if got := sup.List("capsula.clock"); len(got) != 0 {
+		t.Fatalf("stopped clock is still listed: %+v", got)
+	}
+	if _, err := sup.RegisterBuiltin(builtin("capsula.clock"), clockID); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	check("after stop and restart")
+}

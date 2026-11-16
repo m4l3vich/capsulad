@@ -22,7 +22,20 @@ else
   LINK_NAME := libcapsula.so
 endif
 
-.PHONY: all build stage metadata fmt test clean
+.PHONY: all build stage metadata descriptor fmt test clean
+
+# The framework descriptor is compiled into the library (include_bytes!), so a
+# regenerated file reaches apps only after rebuild and redeploy.
+PROTO_DIR := ../../proto
+DESCRIPTOR := descriptors/capsula-framework.protoset
+FRAMEWORK_PROTOS := capsula/framework/v1/framework.proto \
+	capsula/contracts/clock/v1/clock.proto \
+	capsula/contracts/media/v1/media.proto \
+	capsula/contracts/ring/v1/ring.proto
+
+descriptor:
+	protoc -I "$(PROTO_DIR)" --include_imports --descriptor_set_out="$(DESCRIPTOR)" \
+		$(FRAMEWORK_PROTOS)
 
 all: stage
 

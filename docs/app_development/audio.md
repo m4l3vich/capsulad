@@ -29,6 +29,10 @@ the advertised format as authoritative; the simulator and the device can differ.
   at 16 kHz mono S16LE). Read `started.actual_format` rather than assuming.
 - Playback accepts `PCM_S16LE` or `PCM_F32LE` at any rate and channel count and resamples to the
   48 kHz stereo mixer. `PlaybackStarted.actual_format` reports the **output** format.
+- Playback input is bounded at the mixer input. `PCM_F32LE` samples outside `[-1, 1]` are
+  **silently clamped** (not rejected, so benign overshoot still plays), and `NaN`/`±Inf` samples
+  are treated as silence. An amplitude above full scale cannot raise the output past the master
+  volume; scale inside `[-1, 1]` if you want a predictable level.
 - PCM is raw little-endian bytes. Do not send base64 or JSON audio.
 - One playback chunk must not exceed 1 MiB.
 
@@ -151,6 +155,14 @@ for ev := range mic.Chunks() {
 `AudioService.Playback` is bidirectional. The first message **must** be `OpenPlayback`; then the
 app sends chunks or control commands. The server streams started, progress and notice events.
 
+The master volume is applied **after** the per-app mix: each app's concurrent streams are summed,
+clamped to full scale, added to the master mix, and only then multiplied by `master_volume`. One
+app therefore cannot exceed the configured level by sending hot samples or opening more streams.
+A soft limiter follows the master gain (threshold 0.95, 5 ms attack window, 150 ms release) so
+overlapping apps or a framework cue stay below full scale instead of clipping. At most **4**
+concurrent playback streams may be open per app; the fifth open fails with
+`RESOURCE_EXHAUSTED` before any audio is accepted.
+
 | Request | Fields | Rules |
 |---|---|---|
 | `OpenPlayback` | `endpoint_id`, `format`, `target_latency_ms`, `conversation_id` | `endpoint_id` is `audio.output.speaker` or empty. A zero or incomplete `format` selects the backend playback format. `target_latency_ms` is accepted but currently ignored. |
@@ -231,19 +243,28 @@ longer than the actual turn.
 | `GetAudioState` | Readable. Returns `master_volume` (0–1), `microphone_muted`, `microphone_mute_is_hardware`. |
 | `SetMasterVolume`, `SetMicrophoneMuted` | Administrator only; a supervised app gets `PERMISSION_DENIED`. |
 
-`master_volume` multiplies the whole mixer. The mixer starts at `0.6` and follows the persisted
-device setting; physical volume keys and the microphone key use the same persisted settings as
-the administrator surfaces, so an app must tolerate volume and mute changing at any time.
+`master_volume` is a **ceiling per app**, not a post-sum gain shared by everyone. The mixer
+starts at `0.6` and follows the persisted device setting; physical volume keys and the microphone
+key use the same persisted settings as the administrator surfaces, so an app must tolerate volume
+and mute changing at any time.
+
+The gain stages, in order:
+
+| Stage | Value | App-reachable? |
+|---|---|---|
+| Per-stream trim | `Playback.SetTrim`, daemon-internal; framework cues use a fixed `0.4` authored-level trim | No: not exposed by the app API or the SDK |
+| Conversation ducking | `0.25` with a 150 ms fade while a conversation is active | Indirectly, through `conversation_id` |
+| Master volume | `master_volume` (0–1, linear), applied once after each app's streams are summed and clamped | Read from `GetAudioState`; setting it is administrator-only |
+| Soft limiter | threshold 0.95, 5 ms peak-hold attack window, 150 ms release, after the master gain | No |
 
 - Volume 0 or global mute denies a new microphone capture.
 - Turning global mute on ends existing app captures with `MICROPHONE_MUTED`.
 - A hardware mute is reported separately: `microphone_mute_is_hardware=true` means the physical
   gate is closed, not merely the software flag.
-- Playback at volume 0 is silent but still drains normally.
-
-The master volume is the only framework attenuation. There is no per-stream gain control on the
-`Playback` object; scale PCM samples yourself before writing if your product needs its own level,
-but the effective output is still subject to the framework master volume and conversation ducking.
+- Volume 0 is the only output silence; there is no separate output mute (the mute flag controls
+  capture). Playback at volume 0 is silent but still drains normally.
+- Scaling PCM yourself inside the app changes your own level, never the ceiling: the master
+  volume, the per-app clamp and the limiter still apply.
 
 ## Limits
 
@@ -255,6 +276,8 @@ but the effective output is still subject to the framework master volume and con
 | Global wakeword capture | Framework-owned; apps cannot subscribe to it or read its pre-roll. |
 | Pre-roll outside an activation | Not available. |
 | Playback chunk size | 1 MiB maximum. |
+| Playback sample amplitude | Clamped to full scale at the mixer input; out-of-range `PCM_F32LE` is not an error. |
+| Concurrent playback streams per app | 4; the fifth open fails with `RESOURCE_EXHAUSTED`. |
 | Playback queue | 32 chunks with backpressure; a paused writer blocks. |
 | Latency hint | `target_latency_ms` is accepted and ignored. |
 | Recording to disk | No framework recording service and no writable app data directory in the sandbox contract. Keep only bounded in-memory state, or persist small values as app settings. |

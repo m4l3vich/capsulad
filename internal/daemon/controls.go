@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"math"
 
 	"capsulad/internal/settings"
 )
@@ -27,8 +28,24 @@ func (d *Daemon) applyMasterVolume(v float64) error {
 		return err
 	}
 	d.audio.SetMasterVolume(v)
-	d.applyBluetoothVolume(v)
+	d.applyBluetoothGain(v)
 	return nil
+}
+
+// restoreVolumeAfterFullSwipe undoes the leading volume step of a full-panel
+// swipe through the same canonical master path as the step itself, so the
+// persisted value, the local mixer and the Bluetooth gain stay consistent. The
+// media command is dispatched separately; this only removes the audible step.
+func (d *Daemon) restoreVolumeAfterFullSwipe(level float64) {
+	if err := d.applyMasterVolume(level); err != nil {
+		d.logs.Warnf("daemon", "", "could not revert the full-panel swipe volume step: %v", err)
+		return
+	}
+	// The step being undone was never the user's level, so it does not deserve
+	// an overlay: a crossing must not flash the volume number on the display for
+	// a step it immediately takes back. A pending overlay is closed instead.
+	d.hideVolumeOSD()
+	d.logs.Infof("daemon", "", "full-panel swipe reverted the leading volume step to %d%%", int(math.Round(level*100)))
 }
 
 // applyMicrophoneMute persists the microphone mute state. The settings watcher

@@ -55,7 +55,7 @@ func TestVolumeOSDSupersededTimerKeepsOverlay(t *testing.T) {
 
 	d.showVolumeOSD(35)
 	d.osdMu.Lock()
-	firstTimer := d.osdTimer
+	firstTimer, firstGen := d.osdTimer, d.osdGen
 	captureID := d.osdCapture
 	overlay := d.osdPres
 	d.osdMu.Unlock()
@@ -68,7 +68,7 @@ func TestVolumeOSDSupersededTimerKeepsOverlay(t *testing.T) {
 
 	d.showVolumeOSD(60)
 	d.osdMu.Lock()
-	secondTimer := d.osdTimer
+	secondTimer, secondGen := d.osdTimer, d.osdGen
 	d.osdMu.Unlock()
 	if secondTimer == nil || secondTimer == firstTimer {
 		t.Fatal("a new volume step did not replace the overlay timer")
@@ -79,7 +79,7 @@ func TestVolumeOSDSupersededTimerKeepsOverlay(t *testing.T) {
 	secondTimer.Stop()
 
 	// The stale callback lost the race with the newer volume step.
-	d.expireVolumeOSD(firstTimer)
+	d.expireVolumeOSD(firstGen)
 	d.osdMu.Lock()
 	liveCapture, liveOverlay := d.osdCapture, d.osdPres
 	d.osdMu.Unlock()
@@ -94,8 +94,8 @@ func TestVolumeOSDSupersededTimerKeepsOverlay(t *testing.T) {
 		t.Fatalf("overlay shows %v/%v, want the newest percentage %v", cells, colon, volumeCells(60))
 	}
 
-	// Its own timer still releases the overlay and the capture.
-	d.expireVolumeOSD(secondTimer)
+	// Its own generation still releases the overlay and the capture.
+	d.expireVolumeOSD(secondGen)
 	d.osdMu.Lock()
 	releasedCapture, releasedOverlay, releasedTimer := d.osdCapture, d.osdPres, d.osdTimer
 	d.osdMu.Unlock()

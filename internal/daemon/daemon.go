@@ -68,7 +68,9 @@ type Config struct {
 	DeviceID        string
 	LogFile         string
 	DevAdminSocket  string
-	// WakewordModel is the trained classifier path; empty means
+	// WakewordModel is a legacy single-classifier path. It is imported once
+	// into <data-dir>/wakeword/models/<id>.json on the first scan and then
+	// ignored; the live store is always the models directory. Empty means
 	// <data-dir>/wakeword/model.json, and a missing file simply means no
 	// keyword is installed.
 	WakewordModel string
@@ -124,13 +126,14 @@ type Daemon struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clock   *ids.Clock
-	logs    *logbus.Bus
-	bootID  string
-	pidPath string
-	dev     backend.Backend
-	bt      bluetooth.Manager
-	wifiMgr wifi.Manager
+	clock          *ids.Clock
+	logs           *logbus.Bus
+	bootID         string
+	hardwareSerial string
+	pidPath        string
+	dev            backend.Backend
+	bt             bluetooth.Manager
+	wifiMgr        wifi.Manager
 
 	resources map[string]*frameworkv1.ResourceInfo
 	resOrder  []string
@@ -163,10 +166,13 @@ type Daemon struct {
 	wake       *wakeword.Manager
 	wd         *watchdogSupervisor
 	wakeCancel func()
-	wkSampleMu sync.Mutex
-	recording  bool
-	assets     *assets.Catalog
-	websec     *websecurity.Store
+	// wkArtifacts caches the scanned model directory: settings writes are
+	// frequent and only an install/delete changes the installed set.
+	wkArtifacts wakewordCache
+	wkSampleMu  sync.Mutex
+	recording   bool
+	assets      *assets.Catalog
+	websec      *websecurity.Store
 
 	provMu sync.Mutex
 	prov   map[string]provenance.Result
@@ -210,6 +216,7 @@ type Daemon struct {
 	osdPres      *presentations.Presentation
 	osdCapture   string
 	osdTimer     *time.Timer
+	osdGen       uint64
 	cueMu        sync.Mutex
 	lastCue      time.Time
 	micGen       uint64
@@ -223,15 +230,23 @@ type Daemon struct {
 	btDiscoverable bool
 	btApplyGen     uint64
 	btApplyMu      sync.Mutex
-	btVolume       float64
-	btVolSet       bool
 	btRouteMu      sync.Mutex
 	btRoutes       map[string]string
 	btNative       bool
-	btStreamMu     sync.Mutex
-	btStream       *a2dpStream
-	btStreamGen    uint64
-	btStreamStart  bool
+	btGain         float64
+	btGainSet      bool
+	// Volume mirror: the coalesced level still to write to the source, and the
+	// echo memory that keeps its report of that write from moving the master.
+	btMirrorLevel    float64
+	btMirrorGen      uint64
+	btMirrorBusy     bool
+	btEchoes         [bluetoothVolumeEchoMemory]bluetoothVolumeEcho
+	btEchoNext       int
+	btNoVolumeLogged bool
+	btStreamMu       sync.Mutex
+	btStream         *a2dpStream
+	btStreamGen      uint64
+	btStreamStart    bool
 
 	touchActivation string
 	touchAssistant  string
@@ -334,9 +349,10 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	}
 	d := &Daemon{
 		cfg: cfg, ctx: ctx, cancel: cancel, clock: clock, logs: logs, bootID: ids.New("boot"),
-		internalToken: internalToken,
-		prov:          map[string]provenance.Result{},
-		invocations:   map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
+		hardwareSerial: readHardwareSerial(),
+		internalToken:  internalToken,
+		prov:           map[string]provenance.Result{},
+		invocations:    map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
 		activations: map[string]activationGrant{},
 		lastSel:     map[string]string{},
 		runSubs:     map[int]chan supervisor.Run{},
@@ -348,7 +364,13 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	case "simulator", "":
 		d.dev = backend.NewSimulator(backend.SimulatorOptions{DeviceID: cfg.DeviceID, Model: cfg.DeviceModel})
 	case "rockchip-stock", "rockchip":
-		dev, err := rockchip.New(rockchip.DefaultConfig())
+		// Backend audio diagnostics must reach the same rotated log and Web UI
+		// as the rest of the daemon; the backend itself never writes to the
+		// process logger.
+		rcCfg := rockchip.DefaultConfig()
+		rcCfg.Warnf = func(format string, args ...any) { logs.Warnf("audio", "", format, args...) }
+		rcCfg.Infof = func(format string, args ...any) { logs.Infof("audio", "", format, args...) }
+		dev, err := rockchip.New(rcCfg)
 		if err != nil {
 			logs.Close()
 			cancel()
@@ -438,6 +460,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.launcher = sandbox.New(sandbox.Config{
 		Mode: cfg.SandboxMode, SocketPath: cfg.SocketPath, AssetsDir: cfg.AssetsDir,
 		UIDBase: cfg.SandboxUIDBase, Seccomp: true, LibraryDir: cfg.NativeLibDir,
+		DeviceSerial: d.hardwareSerial,
 	})
 	d.sup = supervisor.New(ctx, logs, clock, cfg.SocketPath, d.launcher)
 	d.bus = bus.New(logs, func(runID string) (string, int, bool) {
@@ -474,6 +497,8 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.input = input.NewManager(ctx, clock, logs, touchCaps(d.dev.Touch()), d.touchState, input.Handlers{
 		VolumeUp:         func() bool { return d.adjustVolume(5) },
 		VolumeDown:       func() bool { return d.adjustVolume(-5) },
+		VolumeLevel:      func() float64 { return d.user.Get().Values.MasterVolume },
+		VolumeRestore:    d.restoreVolumeAfterFullSwipe,
 		MicToggle:        func() { d.setMuted(!d.user.Get().Values.MicrophoneMuted) },
 		Activation:       func(origin string) { d.triggerWakeword(origin, "") },
 		Release:          d.sendTouchRelease,
@@ -520,8 +545,8 @@ func (d *Daemon) dismissFrameworkAlerts() bool {
 // always consumed even when the app does not implement the action, so the same
 // press cannot start a second turn on top of it.
 func (d *Daemon) dismissAssistantTurn() bool {
-	appID := d.assistantAppID()
-	if appID == "" || !d.assistantTurnOwned(appID) {
+	appID := d.voiceTurnOwner()
+	if appID == "" {
 		return false
 	}
 	if _, err := d.TriggerAction(appID, "dismiss"); err != nil {
@@ -532,6 +557,29 @@ func (d *Daemon) dismissAssistantTurn() bool {
 	}
 	d.logs.Infof("input", appID, "assistant turn dismissed by the circle key")
 	return true
+}
+
+// voiceTurnOwner names the app that currently owns a turn: the one holding a
+// capture or playback stream, else the one holding a ring/segment presentation.
+// Candidates are the selected assistant and every app a wake word is bound to,
+// because a bound word can start a turn the selected assistant never sees.
+func (d *Daemon) voiceTurnOwner() string {
+	candidates := d.voiceAppIDs()
+	if d.audio != nil {
+		for _, st := range d.audio.ActiveStreams() {
+			for _, appID := range candidates {
+				if st.AppID == appID {
+					return appID
+				}
+			}
+		}
+	}
+	for _, appID := range candidates {
+		if d.assistantTurnOwned(appID) {
+			return appID
+		}
+	}
+	return ""
 }
 
 // assistantTurnOwned reports whether the assistant currently owns a visible or
@@ -590,7 +638,7 @@ func (d *Daemon) wakeModels() []wakeword.Model {
 	if d.dev.Platform() == backend.PlatformSimulator {
 		return []wakeword.Model{{
 			ID: "sim.wakeword.manual", DisplayName: "Manual trigger (simulator)",
-			Language: "any", EngineID: "sim.manual", Available: true,
+			Language: "any", EngineID: "sim.manual", Available: true, Enabled: true,
 		}}
 	}
 	return []wakeword.Model{{
@@ -801,15 +849,30 @@ func (d *Daemon) authorizeInternalBusCall(ctx context.Context, targetAppID, serv
 // Compiled-in runs share the daemon's PID and are therefore never matched;
 // their callers prove identity with the internal token instead.
 func (d *Daemon) isSupervisedPID(pid int) bool {
+	_, ok := d.runForPID(pid)
+	return ok
+}
+
+// runForPID resolves a process ID to the external supervised run that owns it.
+// It is the single PID rule behind both caller identity and the app guards, so
+// they can never disagree about which processes are applications.
+//
+// A compiled-in system app executes inside this process: its virtual run
+// records the daemon's own PID, and so does every connection the daemon opens
+// to its own socket. Matching a virtual run here would attribute the Web UI's
+// administrator reads to whichever built-in was registered first, so only a
+// non-virtual run can be found by PID. Built-in identities are explicit (run ID
+// plus the per-boot internal token) and are resolved before this fallback.
+func (d *Daemon) runForPID(pid int) (supervisor.Run, bool) {
 	if pid <= 0 || pid == os.Getpid() || d.sup == nil {
-		return false
+		return supervisor.Run{}, false
 	}
 	for _, run := range d.sup.List("") {
 		if !run.Virtual && run.PID == pid {
-			return true
+			return run, true
 		}
 	}
-	return false
+	return supervisor.Run{}, false
 }
 
 func (d *Daemon) shutdown() {
@@ -982,6 +1045,7 @@ func (d *Daemon) deviceInfo(bootID string) *frameworkv1.DeviceInfo {
 		DeviceId: info.DeviceID, Model: info.Model, BoardRevision: info.BoardRevision,
 		Soc: info.SoC, Kernel: info.Kernel, Firmware: info.Firmware,
 		DaemonVersion: version.Version, BootId: bootID, TargetPlatform: d.platformProto(),
+		HardwareSerial: d.hardwareSerial,
 	}
 	for _, cap := range d.dev.Capabilities() {
 		out.SubsystemBackends = append(out.SubsystemBackends, &frameworkv1.BackendAvailability{
@@ -1081,10 +1145,18 @@ func (d *Daemon) wakeModelsProto() []*frameworkv1.WakewordModelInfo {
 	models := d.wake.Models()
 	out := make([]*frameworkv1.WakewordModelInfo, 0, len(models))
 	for _, m := range models {
-		out = append(out, &frameworkv1.WakewordModelInfo{
+		info := &frameworkv1.WakewordModelInfo{
 			ModelId: m.ID, DisplayName: m.DisplayName, Language: m.Language,
 			EngineId: m.EngineID, Available: m.Available,
-		})
+			Enabled: m.Enabled, AppId: m.AppID, Detail: m.Detail,
+		}
+		// The recorded gate certificate, when the artifact has one. The browser
+		// displays these numbers; it never recomputes them.
+		if m.Gate != nil {
+			info.Metrics = gateMetricsProto(m.Gate.Splits)
+			info.Threshold = float32(m.Gate.Threshold)
+		}
+		out = append(out, info)
 	}
 	return out
 }

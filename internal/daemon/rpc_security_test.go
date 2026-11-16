@@ -59,7 +59,10 @@ func TestAdministrativeRPCsRejectApplicationIdentity(t *testing.T) {
 
 func TestInternalBusAuthorizerAllowsOnlyDeclaredInterfaces(t *testing.T) {
 	d, _, _ := newTestDaemon(t)
-	d.internalToken = "per-boot-secret"
+	// Read the token the daemon generated: writing it here raced the daemon's
+	// own goroutines, which is a test defect the race detector caught. The
+	// per-boot value is immutable after construction in production.
+	token := d.internalToken
 	target := clockAppID
 	service := clockServiceName
 
@@ -77,7 +80,7 @@ func TestInternalBusAuthorizerAllowsOnlyDeclaredInterfaces(t *testing.T) {
 	if err := d.authorizeInternalBusCall(wrong, "no.such.app", service); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unknown target code = %v, want PermissionDenied", status.Code(err))
 	}
-	right := metadata.NewIncomingContext(context.Background(), metadata.Pairs(internalTokenKey, "per-boot-secret"))
+	right := metadata.NewIncomingContext(context.Background(), metadata.Pairs(internalTokenKey, token))
 	if err := d.authorizeInternalBusCall(right, "no.such.app", "anything"); err != nil {
 		t.Fatalf("daemon-internal token rejected: %v", err)
 	}

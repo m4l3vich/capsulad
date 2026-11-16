@@ -3,8 +3,13 @@
 // On Capsula Mini the panel is five discrete keys: microphone mute (north),
 // volume up (east), play/pause (south), volume down (west) and an unmarked
 // neutral centre. The play/pause circle is the talk key. There are no raw
-// coordinates; swipe and circle gestures are inferred from ordered press
-// sequences of those keys, never from invented positions.
+// coordinates and the measured hardware emits exactly one key per swipe, so
+// gestures are inferred only from ordered press sequences, never from invented
+// positions. The centre key is the usual evidence; a bare crossing of the whole
+// panel is inferred from two opposite volume edges pressed close together.
+// Every key acts on its own edge: no contact is ever deferred. A full-panel
+// crossing is recognized only after both edges have acted, so its leading step
+// is reverted instead of prevented.
 //
 // The framework owns gesture interpretation. Partial capture forwards the
 // circle/play-pause and centre keys plus semantic gestures to the capturing
@@ -53,10 +58,20 @@ type Handlers struct {
 	// when the volume hits a bound instead of ticking at the limit.
 	VolumeUp   func() bool
 	VolumeDown func() bool
-	MicToggle  func()
-	Activation func(origin string)
-	Release    func()
-	HoldToTalk func() bool
+	// VolumeLevel reports the current master level and VolumeRestore restores
+	// a level captured immediately before a volume step. The panel uses them
+	// to undo the leading edge of a full-panel swipe: the pair is recognized
+	// only after both bare edges have already acted, so the step that played
+	// must be reverted instead of prevented. VolumeRestore goes through the
+	// same canonical master-volume path as the step. A nil handler, or a step
+	// that did not apply (a bound), leaves the gesture dispatched without a
+	// revert.
+	VolumeLevel   func() float64
+	VolumeRestore func(level float64)
+	MicToggle     func()
+	Activation    func(origin string)
+	Release       func()
+	HoldToTalk    func() bool
 	// DismissAlert silences a sounding framework alert (a clock timer or
 	// alarm) and reports whether one was showing. A true result consumes the
 	// physical control that asked for it, so the same press cannot also summon
@@ -77,11 +92,12 @@ type Handlers struct {
 	// the framework and no assistant activation is produced.
 	PrimaryGesture func(kind string) bool
 	// MediaToggle, MediaPrevious and MediaNext drive the current standard
-	// media provider. A short circle tap toggles playback; inferred left and
-	// right swipes select the previous and next item. They are never called
-	// during a full capture or from a gesture whose constituent key effects
-	// were deferred.
+	// media provider. A short circle tap toggles playback; a centre-gated
+	// left/right swipe selects the previous and next item. They are never
+	// called during a full capture, and a centre-gated swipe suppresses the
+	// edge that completed it.
 	MediaToggle   func()
+	MediaVoice    func()
 	MediaPrevious func()
 	MediaNext     func()
 }
@@ -109,6 +125,9 @@ type Manager struct {
 	volKey string
 
 	actTimer *time.Timer
+	// actKey is the key that armed actTimer, so a release can tell the unmarked
+	// centre key (the provider's voice key) from the circle (play/pause/toggle).
+	actKey   string
 	actFired bool
 	// actConsumed is set when a talk-key press dismissed an alert; the
 	// matching release is swallowed so one press cannot both dismiss and
@@ -130,25 +149,21 @@ type Manager struct {
 	gestureHeld     bool
 	gestureConsumed bool
 
-	// panelMu owns the discrete-panel sequence recognizer. It is separate from
-	// mu so sequence resolution can call the existing key helpers without
-	// lock inversion.
+	// panelMu owns the discrete-panel contact shadow. It is separate from mu so
+	// resolution can call the existing key helpers without lock inversion.
 	// panelExecMu serializes a panel state transition with the effects it
-	// produces. A timeout and the matching release must not interleave between
-	// "state changed" and "press action applied", or the release could be
-	// processed before the press it belongs to.
+	// produces, so a capture takeover cannot split a press from its action.
 	panelExecMu  sync.Mutex
 	panelMu      sync.Mutex
-	panelSeq     *panelSequence
+	panelSeq     panelSequence
 	panelDown    map[string]bool
 	panelSwallow map[string]bool
 	panelForward map[string]string
 	panelHandled map[string]bool
-	fullSeq      []string
-	fullOverlap  []bool
-	fullDown     map[string]bool
-	fullStartNS  uint64
-	fullLastNS   uint64
+	// fullSeq is the shadow recognizer used while full capture already
+	// forwards every key, so it only adds gesture events.
+	fullSeq  panelSequence
+	fullDown map[string]bool
 }
 
 type sequence struct {
@@ -266,15 +281,16 @@ func (m *Manager) primaryActive() bool {
 // primaryGesture routes a framework-owned tap, double tap or hold. The result
 // only affects diagnostics: the press was already consumed at press time, so
 // an unhandled gesture still must not summon the assistant.
-func (m *Manager) primaryGesture(kind string) {
+func (m *Manager) primaryGesture(kind string) bool {
 	if m.h.PrimaryGesture == nil {
-		return
+		return false
 	}
 	if m.h.PrimaryGesture(kind) {
 		m.logs.Infof("input", "", "framework primary gesture %s handled", kind)
-		return
+		return true
 	}
 	m.logs.Debugf("input", "", "framework primary gesture %s had no effect", kind)
+	return false
 }
 
 // pressTalkKey reports whether a talk-key press was consumed, either as a
@@ -437,6 +453,7 @@ func (m *Manager) endKeyActivation() {
 	fired := m.actFired
 	m.actTimer = nil
 	m.actFired = false
+	m.actKey = ""
 	m.mu.Unlock()
 	if timer == nil {
 		// No press is armed: a stray or duplicate release must not release a
@@ -447,6 +464,10 @@ func (m *Manager) endKeyActivation() {
 	timer.Stop()
 	holdToTalk := m.h.HoldToTalk != nil && m.h.HoldToTalk()
 	if !fired {
+		// A short tap is not a hold: it is the media provider's own key. The
+		// unmarked centre key sends the provider's voice operation (AVRCP Voice
+		// Recognition on a Bluetooth source, which opens that source's own
+		// assistant); the circle keeps play/pause.
 		// A circle tap is not a hold: it toggles the current media provider
 		// instead of summoning the assistant.
 		m.logs.Infof("input", "", "talk release: short tap toggles media")
@@ -470,20 +491,23 @@ func keyOrigin(string) string { return "play_pause_key" }
 
 // pressVolume applies one step and starts a ramp for key. A duplicate press of
 // the same key (backend repeat or a lost release) is ignored so the value does
-// not jump twice and the ramp does not restart.
-func (m *Manager) pressVolume(key string, step func() bool) {
+// not jump twice and the ramp does not restart. It reports whether the step
+// moved the value, so the panel can revert a leading step when the opposite
+// edge turns the pair into a full-panel swipe.
+func (m *Manager) pressVolume(key string, step func() bool) bool {
 	if step == nil {
-		return
+		return false
 	}
 	m.mu.Lock()
 	active := m.volKey == key
 	m.mu.Unlock()
 	if active {
 		m.logs.Debugf("input", "", "duplicate %s press ignored: ramp already running", key)
-		return
+		return false
 	}
-	step()
+	applied := step()
 	m.startVolumeRepeat(key, step)
+	return applied
 }
 
 // releaseVolume stops the ramp only when its own key is released. Releasing
@@ -928,8 +952,8 @@ func (e errString) Error() string { return string(e) }
 // would change, and closes subscriptions for captures that lost selection.
 // Any capture mode takes the circle/centre keys over, so a pending talk or
 // neutrally-armed centre press is dropped. Full capture also takes volume and
-// microphone, so their ramps and deferred panel sequences are dropped instead
-// of firing later against the new owner.
+// microphone, so their ramps and the contact shadow are dropped instead of
+// firing later against the new owner.
 func (m *Manager) OnRoutingChanged() {
 	captureID, _, mode := m.state()
 	m.cancelPanelForRouting(captureID, mode)

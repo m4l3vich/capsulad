@@ -1,0 +1,137 @@
+id = "org.capsula.marusia"
+name = "Marusia"
+version = "0.1.0"
+description = "VK Marusia voice assistant: streams microphone PCM to the recovered vendor gRPC service and plays the returned TTS URL."
+background = false
+start_on_boot = false
+restart_on_failure = true
+single_instance = true
+provides = ["voice_assistant"]
+
+[entrypoint]
+runtime = "native"
+path = "marusia"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app links only the Go SDK, which dlopens the shared Capsula engine. The
+# engine is injected by the launcher and is never bundled into this package.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[actions]]
+id = "dismiss"
+label = "Dismiss the current turn"
+description = "Aborts the in-flight phrase, stops playback and returns to idle without restarting the app."
+
+[[actions]]
+id = "reauth"
+label = "Re-run device attach"
+description = "Repeats the session attach handshake with the configured xtoken id and reports the result."
+
+[[settings]]
+key = "endpoint"
+label = "Service endpoint"
+description = "Vendor deployment the device talks to. Custom overrides it when non-empty."
+type = "select"
+default = "prod"
+[[settings.choices]]
+value = "prod"
+label = "Production (vc.go.mail.ru)"
+[[settings.choices]]
+value = "test1"
+label = "Test 1 (vc1.go.mail.ru)"
+[[settings.choices]]
+value = "test2"
+label = "Test 2 (voice-test2.ngx.openstack.go.devmail.ru)"
+[[settings.choices]]
+value = "stag1"
+label = "Staging (s1-vc.go.mail.ru)"
+[[settings.choices]]
+value = "dev"
+label = "Dev (vc1.go.devmail.ru)"
+
+[[settings]]
+key = "endpoint_custom"
+label = "Custom base URL"
+description = "Overrides endpoint when non-empty. Must be http:// or https:// with a host and no path, query or fragment."
+type = "text"
+default = ""
+
+[[settings]]
+key = "xtoken_id"
+label = "Provisioned xtoken id"
+description = "Manufacturing credential used only if no valid session is configured or found in the vendor session file."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "session_id"
+label = "Session id"
+description = "Optional vendor session id. Takes precedence over the vendor session file and is masked."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "session_secret"
+label = "Session secret"
+description = "Optional vendor bearer secret. Takes precedence over the vendor session file. Never include in logs."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "session_file"
+label = "Vendor session file"
+description = "Path to the vendor agent session.json. The matching device_settings.json is read beside it."
+type = "text"
+default = "/data/voice-agent/session.json"
+
+[[settings]]
+key = "serial"
+label = "Device serial override"
+description = "Sent as x-device-sn and as the attach serial. Optional: when empty CAPSULA_DEVICE_SERIAL, framework hardware_serial, then local /proc/cpuinfo supply the SoC serial in that order; this setting always wins."
+type = "text"
+default = ""
+
+[[settings]]
+key = "device_id"
+label = "Device id"
+description = "Sent as x-device-id. When empty, the framework device id (DeviceService.GetInfo) is used, then a per-process UUID. Masked because it is a stable device identifier."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "audio_format"
+label = "Upload audio format"
+description = "Framing of the microphone stream on the gRPC phrase upload."
+type = "select"
+default = "wave"
+[[settings.choices]]
+value = "wave"
+label = "PCM in WAV (AUDIO_FORMAT_WAVE)"
+[[settings.choices]]
+value = "ogg_opus"
+label = "Ogg Opus (AUDIO_FORMAT_OGG_OPUS)"
+
+[[settings]]
+key = "client_version"
+label = "Client version string"
+description = "Advertised firmware version in x-device-ver and DeviceInfo.version."
+type = "text"
+default = "44.91"
+
+[[settings]]
+key = "keyword"
+label = "Keyword name"
+description = "Keyword sent in keyword_options.kw_params."
+type = "text"
+default = "marusya"
+
+[[settings]]
+key = "hw_id"
+label = "Keyword hardware id"
+description = "Keyword id sent in keyword_options.kw_params."
+type = "text"
+default = "9F25725B"

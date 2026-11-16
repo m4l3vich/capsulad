@@ -133,6 +133,17 @@ func TestMemoryManagerEventsAndCommands(t *testing.T) {
 	}
 }
 
+// volumeVia resolves the displayed source's absolute-volume target through the
+// production path (volumeTarget, the same resolver SetTransportVolume and
+// TransportVolume use) and decodes the level the way they do.
+func volumeVia(b *BlueZ, objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) (uint16, bool) {
+	path, props, hasVolume := b.volumeTarget(objs, device)
+	if path == "" || !hasVolume {
+		return 0, false
+	}
+	return transportVolumeValue(props), true
+}
+
 func TestTransportVolumeAndUsableTransport(t *testing.T) {
 	const address = "AA:BB:CC:DD:EE:01"
 	device := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_01")
@@ -155,10 +166,11 @@ func TestTransportVolumeAndUsableTransport(t *testing.T) {
 			path: {"org.bluez.MediaTransport1": props},
 		}
 	}
-	if volume, ok := transportVolume(objects("pending", true), address); !ok || volume != 64 {
+	b := &BlueZ{}
+	if volume, ok := volumeVia(b, objects("pending", true), address); !ok || volume != 64 {
 		t.Fatalf("pending volume = %d, ok=%v", volume, ok)
 	}
-	if volume, ok := transportVolume(objects("pending", true), "AA:BB:CC:DD:EE:FF"); ok || volume != 0 {
+	if volume, ok := volumeVia(b, objects("pending", true), "AA:BB:CC:DD:EE:FF"); ok || volume != 0 {
 		t.Fatalf("foreign source volume = %d, ok=%v; want no transport", volume, ok)
 	}
 	if key := usableTransportKey(objects("pending", true)); key == "" {
@@ -171,7 +183,7 @@ func TestTransportVolumeAndUsableTransport(t *testing.T) {
 	if key := usableTransportKey(objects("idle", true)); key != "" {
 		t.Fatalf("idle transport reported usable: %q", key)
 	}
-	if _, ok := transportVolume(map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
+	if _, ok := volumeVia(b, map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
 		path: {"org.bluez.MediaTransport1": {"State": dbus.MakeVariant("active")}},
 	}, address); ok {
 		t.Fatal("transport without Volume reported a level")
@@ -206,11 +218,23 @@ func TestVolumeTransportTargetsDisplayedSource(t *testing.T) {
 	if path != displayedTransport || uint16PropOut(props) != 40 {
 		t.Fatalf("displayed volume transport = %q volume=%d", path, uint16PropOut(props))
 	}
-	if volume, ok := transportVolume(objs, "AA:BB:CC:DD:EE:01"); !ok || volume != 40 {
+	b := &BlueZ{}
+	if volume, ok := volumeVia(b, objs, "AA:BB:CC:DD:EE:01"); !ok || volume != 40 {
 		t.Fatalf("displayed volume = %d ok=%v", volume, ok)
 	}
-	if volume, ok := transportVolume(objs, "AA:BB:CC:DD:EE:02"); !ok || volume != 100 {
+	if volume, ok := volumeVia(b, objs, "AA:BB:CC:DD:EE:02"); !ok || volume != 100 {
 		t.Fatalf("background volume = %d ok=%v", volume, ok)
+	}
+	// The sink's acquired transport wins over the tree lookup, and a transport
+	// acquired for another source is never used.
+	b.transport = foreignTransport
+	if volume, ok := volumeVia(b, objs, "AA:BB:CC:DD:EE:01"); !ok || volume != 40 {
+		t.Fatalf("foreign acquired transport captured the displayed volume = %d ok=%v", volume, ok)
+	}
+	b.transport = displayedTransport
+	delete(objs[displayedTransport]["org.bluez.MediaTransport1"], "Volume")
+	if path, _, hasVolume := b.volumeTarget(objs, "AA:BB:CC:DD:EE:01"); path != displayedTransport || hasVolume {
+		t.Fatalf("acquired target = %q hasVolume=%v, want it without Volume", path, hasVolume)
 	}
 	if path, _ := findVolumeTransport(objs, ""); path != "" {
 		t.Fatalf("empty device selected %q", path)
@@ -892,9 +916,9 @@ func TestControlOnlySourceToggleUsesTransportState(t *testing.T) {
 	}
 }
 
-// When BlueZ publishes neither a player status nor a transport (the acquired
-// transport is absent from the object tree), the sink's own receipt evidence
-// decides the toggle. It is read-only and must be asked for the same device.
+// When BlueZ publishes neither a player status nor a transport, the sink's own
+// receipt evidence decides the toggle. It is read-only and must be asked for the
+// same device.
 func TestControlOnlySourceToggleUsesSinkReceiptEvidence(t *testing.T) {
 	const addr = "BC:D0:74:32:51:DC"
 	var asked []string
@@ -920,20 +944,138 @@ func TestControlOnlySourceToggleUsesSinkReceiptEvidence(t *testing.T) {
 	}
 }
 
-// A published MediaPlayer1.Status is authoritative: the receipt probe must not
-// turn a paused player into Pause or a playing player into Play.
-func TestPlayerStatusWinsOverSinkEvidence(t *testing.T) {
+// While this daemon does not own the source's transport, the peer's published
+// MediaPlayer1.Status is the strongest evidence available, so the receipt probe
+// must not turn a paused player into Pause or a playing player into Play.
+func TestPlayerStatusDecidesWithoutOwnedTransport(t *testing.T) {
 	const addr = "AA:BB:CC:DD:EE:FF"
 	b := &BlueZ{}
 	b.SetAudioStreamProbe(func(string) bool { return true })
 	objs := playerObjects(false) // Status=paused
-	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Play" {
-		t.Fatalf("paused player toggle = %+v, want Play", target)
+	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Play" || target.evidence != EvidenceStatus {
+		t.Fatalf("paused player toggle = %+v, want Play from status", target)
 	}
 	objs = playerObjects(true) // Status=playing
 	b.SetAudioStreamProbe(func(string) bool { return false })
-	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Pause" {
-		t.Fatalf("playing player toggle = %+v, want Pause", target)
+	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Pause" || target.evidence != EvidenceStatus {
+		t.Fatalf("playing player toggle = %+v, want Pause from status", target)
+	}
+}
+
+// Once this daemon owns the acquired transport, its own packet receipts are
+// authoritative: a source that pushed Status:"playing" and then stopped sending
+// audio - exactly the state after our own Pause - is paused, and a source that
+// is sending audio is playing even if its cached status says otherwise.
+func TestOwnedTransportReceiptsOutrankStaleStatus(t *testing.T) {
+	const addr = "AA:BB:CC:DD:EE:FF"
+	dev := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF")
+	transport := dev + "/sep1/fd0"
+	objs := playerObjects(true) // stale Status:"playing"
+	objs[transport] = obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+		"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+		"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(dev),
+	})
+	b := &BlueZ{}
+	b.transport = transport
+	b.SetAudioStreamProbe(func(string) bool { return false })
+	target := mediaTargetFor(t, b, objs, addr, CommandToggle)
+	if target.method != "Play" || target.evidence != EvidenceReceipt {
+		t.Fatalf("owned silent source toggle = %+v, want Play from receipt evidence", target)
+	}
+
+	// The same stale source, now sending audio, must receive Pause.
+	objs[dev+"/player0"] = obj("org.bluez.MediaPlayer1", map[string]dbus.Variant{
+		"Status": dbus.MakeVariant("paused"), "Device": dbus.MakeVariant(dev),
+	})
+	b.SetAudioStreamProbe(func(string) bool { return true })
+	target = mediaTargetFor(t, b, objs, addr, CommandToggle)
+	if target.method != "Pause" || target.evidence != EvidenceReceipt {
+		t.Fatalf("owned playing source toggle = %+v, want Pause from receipt evidence", target)
+	}
+
+	// A transport that belongs to another device must not answer for this one:
+	// the peer status decides again.
+	other := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_00")
+	objs[other+"/sep1/fd0"] = obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+		"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+		"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(other),
+	})
+	b.transport = other + "/sep1/fd0"
+	b.SetAudioStreamProbe(func(string) bool { return false })
+	if target = mediaTargetFor(t, b, objs, addr, CommandToggle); target.evidence != EvidenceStatus {
+		t.Fatalf("another device's transport answered for %s: %+v", addr, target)
+	}
+}
+
+// A toggle that follows a direction this daemon commanded inside the peer's
+// notification latency must invert that command instead of trusting the status
+// cache the peer has not updated yet. This is the "pause works, play does not"
+// asymmetry: the second tap used to resolve to Pause again.
+func TestToggleInvertsRecentCommandOverStaleStatus(t *testing.T) {
+	const addr = "AA:BB:CC:DD:EE:FF"
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b := &BlueZ{}
+	b.now = func() time.Time { return now }
+	objs := playerObjects(true) // Status:"playing" and it stays stale after our Pause
+
+	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Pause" || target.evidence != EvidenceStatus {
+		t.Fatalf("first toggle = %+v, want Pause from status", target)
+	}
+	b.rememberCommand(addr, "Pause")
+	now = now.Add(300 * time.Millisecond)
+	target := mediaTargetFor(t, b, objs, addr, CommandToggle)
+	if target.method != "Play" || target.evidence != EvidenceMemory {
+		t.Fatalf("toggle after our Pause = %+v, want Play from memory", target)
+	}
+	// The inverse holds too: after our Play the next toggle pauses.
+	b.rememberCommand(addr, "Play")
+	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Pause" || target.evidence != EvidenceMemory {
+		t.Fatalf("toggle after our Play = %+v, want Pause from memory", target)
+	}
+	// Explicit commands are unaffected by the memory.
+	if target := mediaTargetFor(t, b, objs, addr, CommandPlay); target.method != "Play" || target.evidence != "" {
+		t.Fatalf("explicit play = %+v, want MediaPlayer1.Play without direction evidence", target)
+	}
+	if target := mediaTargetFor(t, b, objs, addr, CommandNext); target.method != "Next" {
+		t.Fatalf("next = %+v", target)
+	}
+	// Past the window the peer's status is trusted again: this documents the
+	// residual risk, which only a prompt peer notification can settle.
+	now = now.Add(commandMemoryWindow + time.Second)
+	if target := mediaTargetFor(t, b, objs, addr, CommandToggle); target.method != "Pause" || target.evidence != EvidenceStatus {
+		t.Fatalf("toggle after the memory window = %+v, want Pause from status", target)
+	}
+}
+
+// The direction memory is per device, ignores skips, expires, and stays bounded.
+func TestCommandMemoryIsPerDeviceAndBounded(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b := &BlueZ{}
+	b.now = func() time.Time { return now }
+
+	b.rememberCommand("AA:BB:CC:DD:EE:01", "Pause")
+	if _, ok := b.rememberedCommand("AA:BB:CC:DD:EE:02"); ok {
+		t.Fatal("a command for one source answered for another")
+	}
+	if method, ok := b.rememberedCommand("aa:bb:cc:dd:ee:01"); !ok || method != "Pause" {
+		t.Fatalf("remembered %q ok=%v, want Pause for the same address", method, ok)
+	}
+	b.rememberCommand("AA:BB:CC:DD:EE:03", "Next")
+	if _, ok := b.rememberedCommand("AA:BB:CC:DD:EE:03"); ok {
+		t.Fatal("a skip was remembered as a playback direction")
+	}
+	now = now.Add(commandMemoryWindow + time.Millisecond)
+	if _, ok := b.rememberedCommand("AA:BB:CC:DD:EE:01"); ok {
+		t.Fatal("an expired direction stayed authoritative")
+	}
+	for i := range commandMemoryDevices * 2 {
+		b.rememberCommand(fmt.Sprintf("AA:BB:CC:DD:EE:%02X", i), "Play")
+	}
+	b.cmdMu.Lock()
+	size := len(b.cmdMemory)
+	b.cmdMu.Unlock()
+	if size > commandMemoryDevices {
+		t.Fatalf("direction memory holds %d devices, want at most %d", size, commandMemoryDevices)
 	}
 }
 
@@ -1009,5 +1151,257 @@ func TestMediaFromControlUsesControlObjectDevice(t *testing.T) {
 		if want := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_02"); path != want {
 			t.Fatalf("attempt %d control path = %q, want %q", i, path, want)
 		}
+	}
+}
+
+// The session assertion is what separates "ConnectProfile replied" from "the
+// source actually has an A2DP transport".
+func TestAudioLinkAssertsA2DPTransport(t *testing.T) {
+	addr := "AA:BB:CC:DD:EE:01"
+	dev := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_01")
+	objs := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
+		dev: obj("org.bluez.Device1", map[string]dbus.Variant{
+			"Address": dbus.MakeVariant(addr), "Alias": dbus.MakeVariant("Phone"),
+			"Connected": dbus.MakeVariant(true),
+			"UUIDs": dbus.MakeVariant([]string{
+				"0000110a-0000-1000-8000-00805f9b34fb", // Audio Source
+				"0000110e-0000-1000-8000-00805f9b34fb", // AVRCP Controller
+				"0000111e-0000-1000-8000-00805f9b34fb", // Handsfree
+			}),
+		}),
+	}
+	objs[dev]["org.bluez.MediaControl1"] = map[string]dbus.Variant{"Connected": dbus.MakeVariant(true)}
+	link := audioLinkFrom(objs, addr)
+	if !link.Connected || !link.AudioSource {
+		t.Fatalf("link = %+v, want a connected audio source", link)
+	}
+	if link.A2DP() {
+		t.Fatalf("a link without a transport reported A2DP: %+v", link)
+	}
+	if link.Detail() != "audio link is not A2DP" {
+		t.Fatalf("detail = %q, want the bounded non-A2DP sentence", link.Detail())
+	}
+	if got := strings.Join(link.ProfilesUp(), ","); got != "avrcp" {
+		t.Fatalf("profiles up = %q, want avrcp only", got)
+	}
+	if got := strings.Join(link.Advertised, ","); got != "a2dp-source,avrcp-controller,handsfree" {
+		t.Fatalf("advertised = %q", got)
+	}
+	if !strings.Contains(link.String(), "a2dp=none") {
+		t.Fatalf("diagnostic = %q, want a2dp=none", link.String())
+	}
+
+	// A transport carrying our UUID and the SBC codec is the assertion.
+	objs[dev+"/sep2/fd1"] = obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+		"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+		"State": dbus.MakeVariant("pending"), "Device": dbus.MakeVariant(dev),
+	})
+	link = audioLinkFrom(objs, addr)
+	if !link.A2DP() || link.A2DPState != "pending" || link.Detail() != "" {
+		t.Fatalf("link with an SBC transport = %+v", link)
+	}
+	if got := strings.Join(link.ProfilesUp(), ","); got != "a2dp,avrcp" {
+		t.Fatalf("profiles up = %q, want a2dp and avrcp", got)
+	}
+
+	// Another codec on the A2DP sink UUID is a different transport.
+	delete(objs, dev+"/sep2/fd1")
+	objs[dev+"/sep3/fd2"] = obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+		"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(2)),
+		"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(dev),
+	})
+	if link = audioLinkFrom(objs, addr); link.A2DP() {
+		t.Fatalf("a non-SBC transport reported A2DP: %+v", link)
+	}
+
+	// A connected peripheral that advertises no audio service is not judged.
+	pad := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_02")
+	objs[pad] = obj("org.bluez.Device1", map[string]dbus.Variant{
+		"Address": dbus.MakeVariant("AA:BB:CC:DD:EE:02"), "Alias": dbus.MakeVariant("Pad"),
+		"Connected": dbus.MakeVariant(true),
+		"UUIDs":     dbus.MakeVariant([]string{"00001124-0000-1000-8000-00805f9b34fb"}),
+	})
+	peripheral := audioLinkFrom(objs, "AA:BB:CC:DD:EE:02")
+	if peripheral.Detail() != "" || !peripheral.Connected {
+		t.Fatalf("peripheral link = %+v, want no audio verdict", peripheral)
+	}
+	if got := strings.Join(peripheral.ProfilesUp(), ","); got != "acl-only" {
+		t.Fatalf("peripheral profiles up = %q", got)
+	}
+}
+
+// The transport acquired by this sink is the first volume target, and a target
+// without the Volume property reports "no absolute volume" rather than "no
+// transport" - that distinction is the whole defect.
+func TestVolumeTargetPrefersAcquiredTransport(t *testing.T) {
+	const addr = "AA:BB:CC:DD:EE:01"
+	dev := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_01")
+	acquired := dev + "/sep1/fd0"
+	second := dev + "/sep1/fd1"
+	objs := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
+		dev: obj("org.bluez.Device1", map[string]dbus.Variant{
+			"Address": dbus.MakeVariant(addr), "Alias": dbus.MakeVariant("Phone"),
+			"Connected": dbus.MakeVariant(true),
+		}),
+		acquired: obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+			"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+			"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(dev),
+			"Volume": dbus.MakeVariant(uint16(64)),
+		}),
+		second: obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+			"UUID": dbus.MakeVariant(a2dpSinkUUID), "Codec": dbus.MakeVariant(byte(0)),
+			"State": dbus.MakeVariant("active"), "Device": dbus.MakeVariant(dev),
+			"Volume": dbus.MakeVariant(uint16(100)),
+		}),
+	}
+	b := &BlueZ{}
+	b.transport = acquired
+	path, props, hasVolume := b.volumeTarget(objs, addr)
+	if path != acquired || !hasVolume || transportVolumeValue(props) != 64 {
+		t.Fatalf("target = %q hasVolume=%v volume=%d, want the acquired transport with 64",
+			path, hasVolume, transportVolumeValue(props))
+	}
+
+	// BlueZ has not created Volume yet: the acquired transport is still the
+	// target, so the caller can tell "no absolute volume" from "no transport".
+	delete(objs[acquired]["org.bluez.MediaTransport1"], "Volume")
+	path, _, hasVolume = b.volumeTarget(objs, addr)
+	if path != acquired || hasVolume {
+		t.Fatalf("target = %q hasVolume=%v, want the acquired transport without Volume", path, hasVolume)
+	}
+
+	// An acquired transport of another source must not be used.
+	other := dbus.ObjectPath("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_09")
+	objs[other] = obj("org.bluez.Device1", map[string]dbus.Variant{
+		"Address": dbus.MakeVariant("AA:BB:CC:DD:EE:09"), "Connected": dbus.MakeVariant(true),
+	})
+	foreign := other + "/sep1/fd0"
+	objs[foreign] = obj("org.bluez.MediaTransport1", map[string]dbus.Variant{
+		"Device": dbus.MakeVariant(other), "State": dbus.MakeVariant("active"),
+		"Volume": dbus.MakeVariant(uint16(10)),
+	})
+	b.transport = foreign
+	if path, _, hasVolume = b.volumeTarget(objs, addr); path != second || !hasVolume {
+		t.Fatalf("target = %q hasVolume=%v, want the displayed source's volume transport", path, hasVolume)
+	}
+
+	// No transport at all is not an absolute-volume verdict.
+	if path, _, _ = b.volumeTarget(objs, "AA:BB:CC:DD:EE:77"); path != "" {
+		t.Fatalf("unknown device resolved transport %q", path)
+	}
+}
+
+// A source without absolute volume is reported once per session, is visible in
+// the media detail, and its requested level is remembered for the re-assert.
+func TestAbsoluteVolumeAbsenceIsReportedOncePerSession(t *testing.T) {
+	const addr = "AA:BB:CC:DD:EE:01"
+	events := make(chan Event, 8)
+	now := time.Unix(1000, 0)
+	b := &BlueZ{
+		subs: map[int]chan Event{1: events},
+		now:  func() time.Time { return now },
+		// The event carries the manager's displayed snapshot so a watcher that
+		// only sees it cannot mistake the source for absence.
+		media: MediaState{Present: true, Playing: true, DeviceAddress: addr, DeviceName: "Phone"},
+	}
+
+	// The first refusal inside the grace window is "not reported yet": the peer
+	// may still create the property, and the write is never left unrecorded.
+	if b.noteAbsoluteVolumeMissing(addr, 89) {
+		t.Fatal("a first refusal was reported as a verdict")
+	}
+	if len(events) != 0 {
+		t.Fatalf("published %d events inside the grace window, want 0", len(events))
+	}
+	b.mu.Lock()
+	notYet := b.volumeAbsentDetailLocked(addr, false)
+	b.mu.Unlock()
+	if notYet != "the source has not reported AVRCP absolute volume yet" {
+		t.Fatalf("detail inside the grace window = %q", notYet)
+	}
+
+	// One second later it is still not a verdict.
+	now = now.Add(volumeGraceWindow / 3)
+	if b.noteAbsoluteVolumeMissing(addr, 110) {
+		t.Fatal("the grace window did not absorb a second early refusal")
+	}
+	// Past the window the source is diagnosed, once.
+	now = now.Add(volumeGraceWindow)
+	if !b.noteAbsoluteVolumeMissing(addr, 110) {
+		t.Fatal("a refusal past the grace window was not diagnosed")
+	}
+	if !b.noteAbsoluteVolumeMissing(addr, 100) {
+		t.Fatal("a later refusal lost the diagnosis")
+	}
+	if len(events) != 1 {
+		t.Fatalf("published %d events for one session, want 1", len(events))
+	}
+	ev := <-events
+	if ev.Kind != EventVolumeUnavailable || ev.DeviceAddress != addr {
+		t.Fatalf("event = %+v, want EventVolumeUnavailable for %s", ev, addr)
+	}
+	if !strings.Contains(ev.Detail, addr) {
+		t.Fatalf("detail = %q, want the source address", ev.Detail)
+	}
+	if !ev.Media.Present || ev.Media.DeviceAddress != addr {
+		t.Fatalf("event media = %+v, want the displayed source's snapshot", ev.Media)
+	}
+
+	b.mu.Lock()
+	detail := b.volumeAbsentDetailLocked(addr, false)
+	cleared := b.volumeAbsentDetailLocked(addr, true)
+	level, ok := b.pendingVolumeLocked(addr, 40)
+	_, again := b.pendingVolumeLocked(addr, 40)
+	b.mu.Unlock()
+	if detail != "the source does not expose AVRCP absolute volume" {
+		t.Fatalf("detail = %q", detail)
+	}
+	if cleared != "" {
+		t.Fatalf("detail = %q while the property exists", cleared)
+	}
+	if !ok || level != 100 {
+		t.Fatalf("pending level = %d ok=%v, want the most recent request 100", level, ok)
+	}
+	if again {
+		t.Fatal("the pending level was consumed twice")
+	}
+
+	// A second source is its own session, with its own grace window.
+	if b.noteAbsoluteVolumeMissing("AA:BB:CC:DD:EE:02", 64) {
+		t.Fatal("a second source inherited the first one's verdict")
+	}
+	if len(events) != 0 {
+		t.Fatalf("a second source published before its own grace window")
+	}
+}
+
+// A refused write for an absent property must not be reported as "does not
+// expose" while the peer may still report a level: the write is attempted, the
+// request is remembered, and only the grace window turns it into a verdict.
+func TestAbsoluteVolumeGraceWindowKeepsTheRequest(t *testing.T) {
+	const addr = "AA:BB:CC:DD:EE:03"
+	now := time.Unix(2000, 0)
+	b := &BlueZ{now: func() time.Time { return now }}
+	if b.noteAbsoluteVolumeMissing(addr, 64) {
+		t.Fatal("the first refusal was diagnosed immediately")
+	}
+	b.mu.Lock()
+	pending, pendingDevice := b.volumePending, b.volumePendingDevice
+	absent := b.volumeAbsent
+	b.mu.Unlock()
+	if pending != 64 || pendingDevice != addr {
+		t.Fatalf("pending = %d for %q, want 64 for %s", pending, pendingDevice, addr)
+	}
+	if absent {
+		t.Fatal("the source was marked absent inside the grace window")
+	}
+	// The peer reports a level before the window expires: the pending request
+	// is still there to be re-asserted, and no verdict was ever published.
+	now = now.Add(volumeGraceWindow / 2)
+	b.mu.Lock()
+	level, ok := b.pendingVolumeLocked(addr, 40)
+	b.mu.Unlock()
+	if !ok || level != 64 {
+		t.Fatalf("pending level = %d ok=%v after an early peer report", level, ok)
 	}
 }

@@ -1,0 +1,78 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafd358. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.options;
+
+import "google/protobuf/wrappers.proto";
+import "vk/voice/grpc/front/v1/model/client/capabilities.proto";
+import "vk/voice/grpc/front/v1/model/client/client_data.proto";
+import "vk/voice/grpc/front/v1/model/client/device.proto";
+import "vk/voice/grpc/front/v1/model/client/geo.proto";
+import "vk/voice/grpc/front/v1/model/client/media_state.proto";
+import "vk/voice/grpc/front/v1/model/client/player_data.proto";
+import "vk/voice/grpc/front/v1/model/client/state.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/options;optionspb";
+
+message RequestClientOptions {
+  vk.voice.grpc.front.v1.model.client.ClientCapabilities capabilities = 1;
+  vk.voice.grpc.front.v1.model.client.ClientState state = 2;
+  bytes callback_data = 3;
+  string timezone = 4;
+  vk.voice.grpc.front.v1.model.client.ClientData client_data = 5;
+  vk.voice.grpc.front.v1.model.client.PlayerData player_data = 6;
+  vk.voice.grpc.front.v1.model.client.Coords coordinates = 7;
+  string activation_type = 8;
+  string idfa = 9;
+  string advertising_id = 10;
+  int32 safe_modes = 11;
+  vk.voice.grpc.front.v1.model.client.DeviceInfo device_info = 12;
+  google.protobuf.BoolValue refuse_tts = 13;
+}
+message RequestDialogOptions {
+  string dialog_mode = 1;
+  string chat_id = 2;
+}
+message RequestInfraOptions {
+  string skillserver_type = 1;
+  google.protobuf.BoolValue reset_state = 2;
+}
+message RequestMailOptions {
+  google.protobuf.BoolValue use_bound_mail = 1;
+  string selected_mail_id = 2;
+  string selected_mail_token = 3;
+}
+message RequestTelephonyOptions {
+  google.protobuf.BoolValue secret_request = 1;
+  google.protobuf.BoolValue secret_response = 2;
+}
+message RequestAudioOptions {
+  vk.voice.grpc.front.v1.model.options.RequestAudioOptions.AudioFormat format = 1;
+  enum AudioFormat {
+    AUDIO_FORMAT_UNSPECIFIED = 0;
+    AUDIO_FORMAT_WAVE = 1;
+    AUDIO_FORMAT_OGG_OPUS = 2;
+  }
+}
+message RequestKeywordOptions {
+  bytes kws_context = 3;
+  oneof kw_variant {
+    vk.voice.grpc.front.v1.model.options.RequestKeywordOptions.NoKeyword no_kw = 4;
+    vk.voice.grpc.front.v1.model.options.RequestKeywordOptions.StrictKeyword strict_kw = 5;
+    vk.voice.grpc.front.v1.model.options.RequestKeywordOptions.KeywordParams kw_params = 6;
+  }
+  reserved 1;
+  reserved 2;
+  message NoKeyword {
+  }
+  message StrictKeyword {
+    string keyword = 1;
+  }
+  message KeywordParams {
+    string keyword = 1;
+    string hw_id = 2;
+    vk.voice.grpc.front.v1.model.client.MediaState media_state = 3;
+    int32 model_ver = 4;
+  }
+}

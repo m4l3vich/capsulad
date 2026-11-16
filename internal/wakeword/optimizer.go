@@ -36,9 +36,15 @@ type FitOptions struct {
 	// HardNegativesPerEpoch adds a separate set of the currently highest-scoring
 	// negatives on top of the random draw; it never replaces random coverage.
 	// The set is refreshed every miningInterval epochs. Zero disables the add-on.
-	// The effective size is capped by the pool and by miningPoolCap.
+	// The effective size is capped by the number of distinct windows and by
+	// miningPoolCap.
 	HardNegativesPerEpoch int
-	PositiveWeight        float64
+	// NegativePool tells the miner which positions of negatives are distinct
+	// windows. The zero value treats every position as distinct. Enrollment
+	// repeats its local block to balance it against the corpus, so without the
+	// shape one local window would be addressable thousands of times.
+	NegativePool   NegativePoolShape
+	PositiveWeight float64
 	// Progress is called once per epoch with a 1-based epoch number and the
 	// weighted binary cross-entropy over that epoch.
 	Progress func(epoch int, loss float64)
@@ -58,12 +64,18 @@ const (
 	adamEpsilon = 1e-8
 
 	// Hard-negative mining re-evaluates the pool every miningInterval epochs
-	// and keeps a bounded amount of work: at most miningPoolCap windows are
-	// scored, on at most miningWorkerCap goroutines. Windows are views, so the
-	// extra memory is one score per candidate.
+	// and keeps a bounded amount of work: at most miningPoolCap distinct
+	// windows are scored, on at most miningWorkerCap goroutines. Windows are
+	// views, so the extra memory is one score per candidate plus one bit per
+	// canonical window when the sample is capped.
 	miningInterval  = 5
 	miningPoolCap   = 32768
 	miningWorkerCap = 4
+
+	// miningSeedSalt derives the per-round sampling stream from the training
+	// seed. Each mining round gets its own stream so the sampled slice of the
+	// pool changes, while the same seed still reproduces the whole run.
+	miningSeedSalt = 0xa0761d6478bd642f
 )
 
 // FitClassifier trains model in place with minibatch Adam over weighted binary
@@ -74,11 +86,12 @@ const (
 // Each epoch trains on every positive plus RandomNegativesPerEpoch negatives
 // drawn fresh and uniformly without replacement from the whole pool, so broad
 // negative coverage is renewed every epoch instead of persisting from a single
-// pre-selection. A separate hard set of HardNegativesPerEpoch negatives is
-// added on top (duplicates with the random draw are allowed, because the set is
+// pre-selection. A separate hard set of HardNegativesPerEpoch distinct windows
+// is added on top (overlap with the random draw is allowed, because the set is
 // extra exposure) and refreshed every miningInterval epochs from the currently
-// highest-scoring windows of a bounded pool-wide sample. Mining never replaces
-// the random draw.
+// highest-scoring windows of a seeded sample over the pool's canonical windows.
+// Mining never replaces the random draw, and a duplicated view of one window
+// can occupy at most one hard slot and one sampled position per round.
 func FitClassifier(ctx context.Context, model *Classifier, positives, negatives []TrainingExample, opts FitOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -128,8 +141,9 @@ func FitClassifier(ctx context.Context, model *Classifier, positives, negatives 
 	if hardPerEpoch < 0 {
 		hardPerEpoch = 0
 	}
-	if hardPerEpoch > len(negatives) {
-		hardPerEpoch = len(negatives)
+	poolWidth := opts.NegativePool.width(len(negatives))
+	if hardPerEpoch > poolWidth {
+		hardPerEpoch = poolWidth
 	}
 	if hardPerEpoch > miningPoolCap {
 		hardPerEpoch = miningPoolCap
@@ -146,13 +160,18 @@ func FitClassifier(ctx context.Context, model *Classifier, positives, negatives 
 	var hard []int
 	var scratch networkScratch
 	step := 0
+	miningRound := 0
 
 	for epoch := 1; epoch <= epochs; epoch++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if hardPerEpoch > 0 && (epoch == 1 || (epoch-1)%miningInterval == 0) {
-			hard = mineHardNegatives(ctx, trained, negatives, hardPerEpoch)
+			// A per-round stream keeps the sampled slice of the pool changing
+			// between rounds and stays reproducible from the training seed.
+			miningRNG := rand.New(rand.NewPCG(opts.Seed^miningSeedSalt, uint64(miningRound)))
+			miningRound++
+			hard = mineHardNegatives(ctx, trained, negatives, opts.NegativePool, miningRNG, hardPerEpoch)
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -297,34 +316,61 @@ func shuffleIndices(order []int, rng *rand.Rand) {
 	}
 }
 
-// mineHardNegatives scores a bounded sample of the negative pool with the
-// current weights and returns up to k highest-scoring indices from that sample.
-// The scored sample is at most miningPoolCap windows (strided across the whole
-// pool, so one long stream cannot crowd out others) and k is additionally
-// capped by the sample size. The hard set is additive: it is never mixed with
-// the fresh random draw and never replaces random coverage. Cancellation stops
-// scoring early and returns no selection.
-func mineHardNegatives(ctx context.Context, m *Classifier, negatives []TrainingExample, k int) []int {
+// NegativePoolShape describes how a negative-pool slice aliases canonical
+// windows. Enrollment balances the user's local room/speech/false windows
+// against the corpus by repeating the local block, so one local window can
+// occupy thousands of positions. Positions below Canonical are the distinct
+// windows themselves; every later position is a repeated view of the
+// Canonical-RepeatSpan .. Canonical-1 block. The shape carries identity only:
+// it adds no per-window storage and copies no features. The zero value means
+// every position is a distinct window.
+type NegativePoolShape struct {
+	Canonical  int
+	RepeatSpan int
+}
+
+// width returns the number of distinct windows in a pool of length n.
+func (s NegativePoolShape) width(n int) int {
+	if s.Canonical <= 0 || s.RepeatSpan <= 0 {
+		return n
+	}
+	return min(s.Canonical, n)
+}
+
+// mineHardNegatives scores a bounded sample of the pool's canonical windows
+// with the current weights and returns up to k distinct canonical indices,
+// highest score first. Repeated views of one window are addressable once, so
+// duplicates can neither take several hard slots nor consume the sampled
+// budget that other windows need; k is capped by the number of distinct
+// windows. The sample is drawn with the supplied seeded stream over canonical
+// indices, so the choice depends only on (pool shape, seed) and the same run
+// reproduces on every platform. It scores at most miningPoolCap windows on at
+// most miningWorkerCap goroutines, and the whole range when it is small enough
+// to fit. The hard set is additive: it is never mixed with the fresh random
+// draw and never replaces random coverage. Cancellation stops scoring early and
+// returns no selection.
+func mineHardNegatives(ctx context.Context, m *Classifier, negatives []TrainingExample, shape NegativePoolShape, rng *rand.Rand, k int) []int {
 	if k <= 0 || len(negatives) == 0 || ctx.Err() != nil {
 		return nil
 	}
-	if k > len(negatives) {
-		k = len(negatives)
+	canonical := shape.width(len(negatives))
+	if canonical <= 0 {
+		return nil
 	}
-	stride := 1
-	if len(negatives) > miningPoolCap {
-		stride = (len(negatives) + miningPoolCap - 1) / miningPoolCap
+	if k > canonical {
+		k = canonical
+	}
+	candidates := canonicalCandidates(canonical, miningPoolCap, rng)
+	if k > len(candidates) {
+		k = len(candidates)
 	}
 	type scoredNegative struct {
 		index int
 		score float64
 	}
-	pool := make([]scoredNegative, 0, len(negatives)/stride+1)
-	for i := 0; i < len(negatives); i += stride {
-		pool = append(pool, scoredNegative{index: i})
-	}
-	if k > len(pool) {
-		k = len(pool)
+	pool := make([]scoredNegative, len(candidates))
+	for i, index := range candidates {
+		pool[i].index = index
 	}
 
 	workers := runtime.GOMAXPROCS(0)
@@ -370,6 +416,37 @@ func mineHardNegatives(ctx context.Context, m *Classifier, negatives []TrainingE
 		selected[i] = pool[i].index
 	}
 	return selected
+}
+
+// canonicalCandidates chooses the canonical windows to score: the whole range
+// when it fits under the cap, otherwise a seeded uniform sample of distinct
+// indices. Sampling canonical indices instead of pool positions keeps every
+// source equally likely regardless of how many repeated views it has, and a
+// bitmap keeps the extra memory at one bit per canonical window. The draw is a
+// pure function of (canonical, rng), so it is reproducible across platforms.
+func canonicalCandidates(canonical, limit int, rng *rand.Rand) []int {
+	if canonical <= limit {
+		out := make([]int, canonical)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}
+	seen := make([]uint64, (canonical+63)/64)
+	out := make([]int, 0, limit)
+	for len(out) < limit {
+		index := rng.IntN(canonical)
+		word, bit := index/64, uint64(1)<<(index%64)
+		if seen[word]&bit != 0 {
+			continue
+		}
+		seen[word] |= bit
+		out = append(out, index)
+	}
+	// Ascending order makes the scored workload cache-friendly and the
+	// candidate order independent of the draw order; ranking is by score.
+	sort.Ints(out)
+	return out
 }
 
 func binaryCrossEntropy(p float64, positive bool) float64 {

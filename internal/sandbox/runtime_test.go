@@ -224,6 +224,81 @@ func nativeApp(t *testing.T) (*Launcher, *manifest.Manifest) {
 	return l, m
 }
 
+func TestCommandCarriesDeviceSerialInNamespaceAndHostModes(t *testing.T) {
+	for _, mode := range []string{"none", "uid", "namespaces"} {
+		t.Run(mode, func(t *testing.T) {
+			l, m := nativeApp(t)
+			l.cfg.DeviceSerial = "11bfcbc5d63d55fc"
+			l.cfg.SandboxRoot = t.TempDir()
+			if mode != "none" {
+				l.cfg.Executable = "/capsulad-test-helper"
+				l.setMode(mode, "test")
+			}
+			cmd, err := l.Command(m, m.Dir, "run1", m.ID)
+			if err != nil {
+				t.Fatalf("command: %v", err)
+			}
+			env := cmd.Env
+			for _, entry := range env {
+				if strings.HasPrefix(entry, specEnvVar+"=") {
+					var spec execSpec
+					if err := json.Unmarshal([]byte(strings.TrimPrefix(entry, specEnvVar+"=")), &spec); err != nil {
+						t.Fatalf("decode namespace helper spec: %v", err)
+					}
+					env = spec.Env
+					break
+				}
+			}
+			if !containsEnv(env, "CAPSULA_DEVICE_SERIAL=11bfcbc5d63d55fc") {
+				t.Fatalf("mode %s launch does not carry device serial: %v", mode, env)
+			}
+		})
+	}
+}
+
+// The in-namespace helper receives its environment through the spec payload,
+// not the helper's own process environment; verify the serial is in it so the
+// pid-1 exec inherits the same launch environment.
+func TestSpecJSONCarriesDeviceSerial(t *testing.T) {
+	l, m := nativeApp(t)
+	l.cfg.DeviceSerial = "11bfcbc5d63d55fc"
+	l.cfg.SandboxRoot = t.TempDir()
+	l.setMode("namespaces", "test")
+
+	raw, err := l.specJSON(m.Dir, "/app/app", nil, "run1", m.ID, "namespaces", l.env(), "")
+	if err != nil {
+		t.Fatalf("spec: %v", err)
+	}
+	var spec execSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatalf("decode spec: %v", err)
+	}
+	if !containsEnv(spec.Env, "CAPSULA_DEVICE_SERIAL=11bfcbc5d63d55fc") {
+		t.Fatalf("helper spec env lacks the device serial: %v", spec.Env)
+	}
+}
+
+func TestCommandOmitsUnknownDeviceSerial(t *testing.T) {
+	l, m := nativeApp(t)
+	l.cfg.DeviceSerial = " \t "
+	cmd, err := l.Command(m, m.Dir, "run1", m.ID)
+	if err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	if containsEnv(cmd.Env, "CAPSULA_DEVICE_SERIAL=") {
+		t.Fatalf("unknown device serial must be omitted: %v", cmd.Env)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCommandStaticAppWithoutRuntime(t *testing.T) {
 	l, m := nativeApp(t)
 	l.cfg.LibraryDir = t.TempDir() // empty trusted dir, no runtime

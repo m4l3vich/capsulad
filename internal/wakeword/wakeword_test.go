@@ -35,7 +35,7 @@ func TestManualOriginBypassesModelAvailability(t *testing.T) {
 func TestRecentDetectionsRecordOnlyEngineOrigin(t *testing.T) {
 	logs, _ := logbus.New(ids.NewClock(), 100, "")
 	m := NewManager(context.Background(), ids.NewClock(), logs, []Model{
-		{ID: "word.personal", DisplayName: "Hey Capsula", EngineID: "framework.embedding-mlp", Available: true},
+		{ID: "word.personal", DisplayName: "Hey Capsula", EngineID: "framework.embedding-mlp", Available: true, Enabled: true},
 	})
 	defer m.Close()
 	m.SetEnabled(true)
@@ -73,7 +73,7 @@ func TestRecentDetectionsRecordOnlyEngineOrigin(t *testing.T) {
 func TestDismissDetection(t *testing.T) {
 	logs, _ := logbus.New(ids.NewClock(), 100, "")
 	m := NewManager(context.Background(), ids.NewClock(), logs, []Model{
-		{ID: "word.personal", DisplayName: "Hey Capsula", EngineID: "framework.embedding-mlp", Available: true},
+		{ID: "word.personal", DisplayName: "Hey Capsula", EngineID: "framework.embedding-mlp", Available: true, Enabled: true},
 	})
 	defer m.Close()
 	m.SetEnabled(true)

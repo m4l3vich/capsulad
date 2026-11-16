@@ -8,33 +8,130 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-func TestSelectSBCConfigPrefersBoardProfile(t *testing.T) {
-	caps := []byte{0xF0, 0x0F, 0xF0, 0x0C, 0x03, 0x02, 0x35}
-	got := selectSBCConfig(caps)
-	want := []byte{0x21, 0x15, 0x02, 0x35}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("config = %x, want %x", got, want)
+// The advertised capability IE must use the spec's four-octet SBC layout. BlueZ
+// copies it verbatim into the local SEP, so a malformed blob is a SEP a strict
+// source rejects (and then it has only SCO to fall back on).
+func TestA2DPSinkCapabilitiesAreConformant(t *testing.T) {
+	caps := sbcSinkCapabilities()
+	if len(caps) != 4 {
+		t.Fatalf("capability IE = %x (%d octets), want the spec's 4 octets", caps, len(caps))
+	}
+	freq, mode := caps[0]&0xF0, caps[0]&0x0F
+	for bit, name := range map[byte]string{
+		sbcFreq44k: "44.1 kHz", sbcFreq48k: "48 kHz", sbcFreq32k: "32 kHz", sbcFreq16k: "16 kHz",
+	} {
+		if freq&bit == 0 {
+			t.Fatalf("frequency mask %#02x does not advertise %s", freq, name)
+		}
+	}
+	if mode&sbcModeJoint == 0 || mode&sbcModeStereo == 0 {
+		t.Fatalf("channel-mode mask %#02x does not advertise joint stereo and stereo", mode)
+	}
+	block, sub, alloc := caps[1]&0xF0, caps[1]&0x0C, caps[1]&0x03
+	if block&sbcBlock16 == 0 || block&sbcBlock12 == 0 || block&sbcBlock8 == 0 {
+		t.Fatalf("block mask %#02x does not advertise 16/12/8 blocks", block)
+	}
+	if sub&sbcSub8 == 0 || sub&sbcSub4 == 0 {
+		t.Fatalf("subband mask %#02x does not advertise 8/4 subbands", sub)
+	}
+	if alloc&sbcAllocLoud == 0 || alloc&sbcAllocSNR == 0 {
+		t.Fatalf("allocation mask %#02x does not advertise loudness and SNR", alloc)
+	}
+	if caps[2] != 2 {
+		t.Fatalf("minimum bitpool = %d, want 2", caps[2])
+	}
+	if caps[2] > caps[3] {
+		t.Fatalf("minimum bitpool %d exceeds maximum %d", caps[2], caps[3])
+	}
+	if caps[3] < 53 {
+		t.Fatalf("maximum bitpool = %d, want at least the A2DP high-quality 53", caps[3])
+	}
+	// The endpoint properties must carry exactly that blob.
+	props := a2dpEndpointProps()
+	if got := variantBytes(props["Capabilities"]); !bytes.Equal(got, caps) {
+		t.Fatalf("endpoint capabilities = %x, want %x", got, caps)
 	}
 }
 
-func TestSelectSBCConfigBlueZRemoteCapabilities(t *testing.T) {
-	// The Mac's SBC SEP as BlueZ 5.65 passes it: 44.1 kHz joint stereo,
-	// 16 blocks / 8 subbands, loudness, bitpool 2..250.
-	caps := []byte{0x21, 0x15, 0x02, 0xfa}
-	got := selectSBCConfig(caps)
-	want := []byte{0x21, 0x15, 0x02, 0x35}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("config = %x, want %x", got, want)
+// Our own advertised capabilities must also be negotiable by our own selection
+// rule: the local SEP and the local answer cannot contradict each other.
+func TestSelectSBCConfigAcceptsOwnCapabilities(t *testing.T) {
+	config := selectSBCConfig(sbcSinkCapabilities())
+	advertised := sbcSinkCapabilities()
+	if config[0]&advertised[0] != config[0] {
+		t.Fatalf("config %x selects bits the sink does not advertise (%x)", config[0], advertised[0])
+	}
+	if config[1]&advertised[1] != config[1] {
+		t.Fatalf("config %x selects bits the sink does not advertise (%x)", config[1], advertised[1])
+	}
+	if config[2] < advertised[2] || config[3] > advertised[3] {
+		t.Fatalf("config bitpool %d..%d outside advertised %d..%d",
+			config[2], config[3], advertised[2], advertised[3])
 	}
 }
 
-func TestSelectSBCConfigFallsBackToAdvertised(t *testing.T) {
-	// 48 kHz mono, 4 blocks / 4 subbands, SNR, bitpool 2..32.
-	caps := []byte{0x10, 0x08, 0x80, 0x08, 0x02, 0x02, 0x20}
-	got := selectSBCConfig(caps)
-	want := []byte{0x18, 0x8A, 0x02, 0x20}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("config = %x, want %x", got, want)
+// Real four-octet SBC capabilities as sources actually advertise them. Every
+// answer must be a configuration that source offered, with the highest usable
+// bitpool it allows (bounded by the sink's high-quality ceiling).
+func TestSelectSBCConfigVendorCapabilities(t *testing.T) {
+	cases := []struct {
+		name string
+		caps []byte
+		want []byte
+	}{
+		{
+			// macOS: 44.1 kHz joint stereo, 16 blocks / 8 subbands, loudness,
+			// bitpool 2..250. The ceiling is clamped to 53.
+			name: "apple", caps: []byte{0x21, 0x15, 0x02, 0xfa},
+			want: []byte{0x21, 0x15, 0x02, 0x35},
+		},
+		{
+			// Android/Qualcomm: 44.1+48 kHz, every channel mode, every block
+			// length and subband count, both allocation methods, 2..53.
+			name: "android", caps: []byte{0x3f, 0xff, 0x02, 0x35},
+			want: []byte{0x21, 0x15, 0x02, 0x35},
+		},
+		{
+			// Older Android: joint+dual mode, 16/8 blocks, 8 subbands,
+			// loudness, 2..53.
+			name: "android-legacy", caps: []byte{0x35, 0x55, 0x02, 0x35},
+			want: []byte{0x21, 0x15, 0x02, 0x35},
+		},
+		{
+			// Windows: 44.1/32/16 kHz, stereo only, 16/8 blocks, 8 subbands,
+			// SNR, bitpool 2..45.
+			name: "windows", caps: []byte{0xe2, 0x56, 0x02, 0x2d},
+			want: []byte{0x22, 0x16, 0x02, 0x2d},
+		},
+		{
+			// A conservative phone: 48 kHz stereo, 4 blocks / 4 subbands, SNR,
+			// bitpool 2..32.
+			name: "conservative", caps: []byte{0x12, 0x8a, 0x02, 0x20},
+			want: []byte{0x12, 0x8a, 0x02, 0x20},
+		},
+		{
+			// 32 kHz mono, 8 blocks / 4 subbands, loudness, 2..35.
+			name: "32k-mono", caps: []byte{0x48, 0x49, 0x02, 0x23},
+			want: []byte{0x48, 0x49, 0x02, 0x23},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := selectSBCConfig(tc.caps)
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("config = %x, want %x", got, tc.want)
+			}
+			// Whatever we choose has to be offered by the remote SEP.
+			if got[0]&tc.caps[0] != got[0] {
+				t.Fatalf("config %x selects frequency/mode bits the source did not offer (%x)", got[0], tc.caps[0])
+			}
+			if got[1]&tc.caps[1] != got[1] {
+				t.Fatalf("config %x selects frame bits the source did not offer (%x)", got[1], tc.caps[1])
+			}
+			if got[2] < tc.caps[2] || got[3] > tc.caps[3] || got[2] > got[3] {
+				t.Fatalf("config bitpool %d..%d outside the source's %d..%d", got[2], got[3], tc.caps[2], tc.caps[3])
+			}
+		})
 	}
 }
 

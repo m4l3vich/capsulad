@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +14,28 @@ import (
 	"capsulad/internal/settings"
 	"capsulad/internal/version"
 )
+
+// hardwareSerialPath is replaceable in tests; the daemon reads it only at startup.
+var hardwareSerialPath = "/proc/cpuinfo"
+
+func readHardwareSerial() string {
+	serial, _ := parseHardwareSerial(hardwareSerialPath)
+	return serial
+}
+
+func parseHardwareSerial(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if ok && (strings.TrimSpace(key) == "Serial" || strings.TrimSpace(key) == "Serial Number") {
+			return strings.TrimSpace(value), nil
+		}
+	}
+	return "", nil
+}
 
 type deviceService struct {
 	frameworkv1.UnimplementedDeviceServiceServer
@@ -42,6 +65,19 @@ type settingsService struct {
 	d *Daemon
 }
 
+// ownsUpdateField reports whether an update's field mask names path. A mask-less
+// whole-object replacement is deliberately not reported: a repeated proto field
+// cannot distinguish "absent" from "empty" on the wire, so only an explicit mask
+// can carry the empty-list intent.
+func ownsUpdateField(fields []string, path string) bool {
+	for _, field := range fields {
+		if field == path {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *settingsService) GetSettings(ctx context.Context, _ *frameworkv1.GetSettingsRequest) (*frameworkv1.SettingsSnapshot, error) {
 	if err := s.d.requireAdministrativeCaller(ctx, "device settings are a local administrator operation"); err != nil {
 		return nil, err
@@ -57,6 +93,13 @@ func (s *settingsService) UpdateSettings(ctx context.Context, req *frameworkv1.U
 		return nil, status.Error(codes.InvalidArgument, "values are required")
 	}
 	patch := userSettingsFromProto(req.Values)
+	if ownsUpdateField(req.UpdateFields, "wakewords") && patch.Wakewords == nil {
+		// A repeated proto field cannot distinguish an absent list from an empty
+		// one: both arrive as nil. An update that owns `wakewords` and lists
+		// nothing means "no word is live", not "return to legacy", so the
+		// explicit state is built here rather than lost at the wire.
+		patch.Wakewords = []settings.WakewordBinding{}
+	}
 	snap, err := s.d.user.Update(req.ExpectedRevision, patch, req.UpdateFields)
 	if err != nil {
 		if strings.Contains(err.Error(), "stale") {

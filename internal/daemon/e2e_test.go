@@ -187,6 +187,14 @@ func newTestDaemon(t *testing.T) (*Daemon, context.CancelFunc, <-chan error) {
 
 func newTestDaemonWith(t *testing.T, extras ...appInstall) (*Daemon, context.CancelFunc, <-chan error) {
 	t.Helper()
+	return newTestDaemonPrepared(t, nil, extras...)
+}
+
+// newTestDaemonPrepared prepares the daemon before Run starts, which is the only
+// safe moment to replace a collaborator the run goroutines read (the Bluetooth
+// manager, for example). Swapping one later races the watcher.
+func newTestDaemonPrepared(t *testing.T, prepare func(*Daemon), extras ...appInstall) (*Daemon, context.CancelFunc, <-chan error) {
+	t.Helper()
 	bin := buildProbe(t)
 	// The Unix socket path must fit in sun_path (104 bytes on macOS), so the
 	// test root cannot include the long test name that t.TempDir() adds.
@@ -239,6 +247,9 @@ func newTestDaemonWith(t *testing.T, extras ...appInstall) (*Daemon, context.Can
 	if err != nil {
 		cancel()
 		t.Fatal(err)
+	}
+	if prepare != nil {
+		prepare(d)
 	}
 	done := make(chan error, 1)
 	go func() { done <- d.Run() }()

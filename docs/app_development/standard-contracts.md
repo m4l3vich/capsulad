@@ -6,7 +6,7 @@ Three public contracts are shared vocabulary between apps:
 |---|---|---|
 | Clock | `capsula.contracts.clock.v1.ClockService` | built-in app `capsula.clock` |
 | Ring | `capsula.contracts.ring.v1.RingService` | built-in app `capsula.ring` |
-| Media | `capsula.contracts.media.v1.MediaPlayerService` | any app that declares it; no provider is bundled |
+| Media | `capsula.contracts.media.v1.MediaPlayerService` | any app that declares it; the daemon's Web UI also lists the connected Bluetooth source, which is framework-owned and has no app id |
 
 They are ordinary app interfaces. There is no private path, no special token and no second
 socket: a caller targets the app ID through `AppBusService.Call`, with the same deadlines,
@@ -254,8 +254,18 @@ device-level service, not another app's private configuration.
 ## Media
 
 `capsula.contracts.media.v1.MediaPlayerService`. This is an app-provided contract: the provider
-implements it and declares it, and consumers call it through the provider's app ID. No provider
-is bundled — the framework only exposes Bluetooth AVRCP state separately.
+implements it and declares it, and consumers call it through the provider's app ID. No
+application is bundled with the daemon and no app id is reserved for media: a speaker with a
+connected phone has no media app at all.
+
+The connected Bluetooth source is still visible and controllable without one. The framework's
+own `BluetoothMediaService` (see [services.md](services.md#bluetoothmediaservice)) is the data
+and command path: the Web UI "Now playing" panel lists the source as a framework-owned provider
+(one player `bluetooth` while a source is connected, none otherwise) and its
+PLAY/PAUSE/SKIP_NEXT/SKIP_PREVIOUS buttons call that service, while the physical circle key and
+swipes use it directly whenever no standard player is playing or paused. Framework and
+application providers coexist; consumers discover every running application provider through
+`AppInterfaceService` and choose among the players they expose.
 
 | RPC | Request | Response | Behaviour |
 |---|---|---|---|

@@ -19,6 +19,7 @@ import (
 	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	webv1 "capsulad/gen/go/capsula/web/v1"
+	"capsulad/internal/settings"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
 )
@@ -45,7 +46,7 @@ var browserOperationVocabulary = []string{
 	"settings", "launch", "stop", "action", "app_settings", "media",
 	"bluetooth", "record_sample", "delete_sample", "train",
 	"cancel_training", "clock", "create_api_key", "revoke_api_key", "wifi",
-	"false_detection",
+	"false_detection", "delete_wakeword",
 }
 
 // dispatch is an explicit allowlist: each typed command maps to one fixed
@@ -89,6 +90,8 @@ func (s *Server) dispatch(c *wsConn, reqID uint64, cmd *webv1.Command, ctx conte
 		s.opWifi(c, reqID, op.Wifi)
 	case *webv1.Command_FalseDetection:
 		s.opFalseDetection(c, reqID, op.FalseDetection)
+	case *webv1.Command_DeleteWakeword:
+		s.opDeleteWakeword(c, reqID, op.DeleteWakeword)
 	default:
 		c.sendError(reqID, webv1.ErrorCode_ERROR_CODE_FORBIDDEN, "operation is not in the browser allowlist")
 	}
@@ -184,16 +187,17 @@ func (s *Server) opSettings(c *wsConn, reqID uint64, upd *webv1.SettingsUpdate) 
 			patch.DefaultAssistantAppId = app
 			fields = append(fields, "default_assistant_app_id")
 		}
-		if ownsField(mask, "wakeword_model") {
-			model := strings.TrimSpace(group.Assistant.GetWakewordModel())
-			if model != "" {
-				if err := s.validModel(ctx, model); err != nil {
-					c.sendError(reqID, classifyError(err), rpcMessage(err))
-					return
-				}
+		if ownsField(mask, "wakewords") {
+			list, err := s.wakewordBindings(ctx, group.Assistant.GetWakewords())
+			if err != nil {
+				c.sendError(reqID, classifyError(err), rpcMessage(err))
+				return
 			}
-			patch.WakewordModelId = model
-			fields = append(fields, "wakeword_model_id")
+			// Whole-list replacement: the browser sends every entry it shows, so
+			// one patch enables, disables or rebinds any number of words without
+			// a per-entry merge whose ordering would be ambiguous.
+			patch.Wakewords = list
+			fields = append(fields, "wakewords")
 		}
 		if ownsField(mask, "wakeword_enabled") {
 			patch.WakewordEnabled = group.Assistant.GetWakewordEnabled()
@@ -338,6 +342,27 @@ func (s *Server) opStop(c *wsConn, reqID uint64, stop *webv1.StopRun) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	// The page sends the app and run id together. Resolve the run through that
+	// app's own listing so a stale, foreign or built-in run id can never be
+	// stopped from another app's row: stopping a built-in provider has to
+	// address exactly that provider's stable run.
+	runs, err := frameworkv1.NewApplicationServiceClient(s.Conn).ListRuns(ctx,
+		&frameworkv1.ListRunsRequest{AppId: appID})
+	if err != nil {
+		c.sendError(reqID, classifyError(err), rpcMessage(err))
+		return
+	}
+	owned := false
+	for _, run := range runs.GetRuns() {
+		if run.GetRunId() == runID {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		c.sendError(reqID, errConflict, "that run does not belong to this application; refresh the page and try again")
+		return
+	}
 	selected := false
 	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
 		selected = isSelectedProvider(settings.GetValues(), appID)
@@ -446,6 +471,12 @@ func (s *Server) opAppSettings(c *wsConn, reqID uint64, upd *webv1.AppSettingsUp
 }
 
 func (s *Server) opMedia(c *wsConn, reqID uint64, media *webv1.MediaCommand) {
+	// The framework provider has no app identity: its commands go straight to
+	// the public BluetoothMediaService, the same surface the physical key uses.
+	if media.GetKind() == webv1.MediaProviderKind_MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA {
+		s.opFrameworkMedia(c, reqID, media)
+		return
+	}
 	appID, playerID := strings.TrimSpace(media.GetAppId()), strings.TrimSpace(media.GetPlayerId())
 	if appID == "" || playerID == "" {
 		c.sendError(reqID, errInvalid, "app id and player id are required")
@@ -656,6 +687,27 @@ func (s *Server) opFalseDetection(c *wsConn, reqID uint64, cmd *webv1.FalseDetec
 	s.publish(uichanges.Wakeword)
 }
 
+// opDeleteWakeword removes one trained word. Recordings are kept: they are
+// shared training data, not owned by a single artifact.
+func (s *Server) opDeleteWakeword(c *wsConn, reqID uint64, del *webv1.DeleteWakeword) {
+	id := strings.TrimSpace(del.GetModelId())
+	if id == "" {
+		c.sendError(reqID, errInvalid, "model id is required")
+		return
+	}
+	// Deleting also restarts detection, so the whole ensemble re-subscribes and
+	// warms up again; the bound keeps that inside one operation.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := frameworkv1.NewAssistantServiceClient(s.Conn).DeleteWakewordClassifier(ctx,
+		&frameworkv1.DeleteWakewordClassifierRequest{ModelId: id}); err != nil {
+		c.sendError(reqID, classifyError(err), rpcMessage(err))
+		return
+	}
+	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Deleted{Deleted: &webv1.Empty{}}})
+	s.publish(uichanges.Wakeword)
+}
+
 func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 	word := strings.TrimSpace(train.GetDisplayName())
 	if word == "" {
@@ -687,7 +739,7 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 			c.trainingMu.Unlock()
 		}()
 		stream, err := frameworkv1.NewAssistantServiceClient(c.srv.Conn).TrainWakewordClassifier(ctx, &frameworkv1.TrainWakewordClassifierRequest{
-			DisplayName: word, Language: language, Seed: train.GetSeed(),
+			ModelId: train.GetModelId(), DisplayName: word, Language: language, Seed: train.GetSeed(),
 			WordSampleIds: train.GetWordSampleIds(), RoomSampleIds: train.GetRoomSampleIds(),
 			SpeechSampleIds: train.GetSpeechSampleIds(), FalseSampleIds: train.GetFalseSampleIds(),
 		})
@@ -696,6 +748,9 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 			return
 		}
 		lastStage := ""
+		// The daemon sends one terminal failure event before its error status;
+		// keep it so the closing error frame still carries the actionable detail.
+		var failureView *webv1.WakewordTrainingFailureView
 		for {
 			ev, err := stream.Recv()
 			if err != nil {
@@ -728,7 +783,7 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 					// failing after a committed install.
 					c.sendProgress(reqID, &webv1.Progress{TrainingId: trainingID, Stage: "error", Log: msgTrainingResultUnknown})
 				default:
-					c.sendProgress(reqID, &webv1.Progress{TrainingId: trainingID, Stage: "error", Log: trainErrorMessage(err)})
+					c.sendProgress(reqID, &webv1.Progress{TrainingId: trainingID, Stage: "error", Log: trainErrorMessage(err), Failure: failureView})
 				}
 				return
 			}
@@ -740,6 +795,13 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 					Threshold: cl.GetThreshold(), ContextFrames: cl.GetContextFrames(), EmbeddingDim: cl.GetEmbeddingDim(),
 					ProjectionWidth: cl.GetProjectionWidth(), HiddenWidth: cl.GetHiddenWidth(),
 				}
+			}
+			if metrics := ev.GetMetrics(); len(metrics) > 0 {
+				p.Metrics = gateMetricsView(metrics)
+			}
+			if failure := ev.GetFailure(); failure != nil {
+				failureView = trainingFailureView(failure)
+				p.Failure = failureView
 			}
 			c.sendProgress(reqID, p)
 		}
@@ -984,6 +1046,44 @@ func (s *Server) appByID(ctx context.Context, appID string) (*frameworkv1.Instal
 func (s *Server) validApp(ctx context.Context, appID string) error {
 	_, err := s.appByID(ctx, appID)
 	return err
+}
+
+// wakewordBindings validates the submitted per-word list and converts it onto
+// the framework settings type. Model ids are checked against the installed set
+// so a stale browser cannot persist an entry that can never fire; app ids are
+// checked against installed applications.
+func (s *Server) wakewordBindings(ctx context.Context, in []*webv1.WakewordBindingView) ([]*frameworkv1.WakewordBinding, error) {
+	if len(in) > settings.MaxWakewordBindings {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"at most %d wakewords are supported", settings.MaxWakewordBindings)
+	}
+	out := make([]*frameworkv1.WakewordBinding, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	apps := make(map[string]bool, len(in))
+	for _, entry := range in {
+		modelID := strings.TrimSpace(entry.GetModelId())
+		if modelID == "" {
+			return nil, status.Error(codes.InvalidArgument, "each wakeword entry needs a model id")
+		}
+		if seen[modelID] {
+			return nil, status.Errorf(codes.InvalidArgument, "wakeword %q is listed twice", modelID)
+		}
+		seen[modelID] = true
+		if err := s.validModel(ctx, modelID); err != nil {
+			return nil, err
+		}
+		appID := strings.TrimSpace(entry.GetAppId())
+		if appID != "" && !apps[appID] {
+			if err := s.validApp(ctx, appID); err != nil {
+				return nil, err
+			}
+			apps[appID] = true
+		}
+		out = append(out, &frameworkv1.WakewordBinding{
+			ModelId: modelID, AppId: appID, Enabled: entry.GetEnabled(),
+		})
+	}
+	return out, nil
 }
 
 func (s *Server) validModel(ctx context.Context, modelID string) error {

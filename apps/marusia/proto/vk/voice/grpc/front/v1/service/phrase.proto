@@ -1,0 +1,43 @@
+// HAND-RECONSTRUCTED service definition.
+//
+// The vendor binary does NOT embed a FileDescriptorProto for this file: its
+// .rodata descriptor table stops at the api/model files (verified — see
+// PROTOCOL.md §1). This file is recovered from three independent artifacts in
+// /private/tmp/speaker/voice-agent:
+//
+//   * gRPC method path strings (full service/method names):
+//       "/vk.voice.grpc.front.v1.service.Phrase/Speech"      @0xa068f0
+//       "/vk.voice.grpc.front.v1.service.Phrase/GetResult"   @0xa06920
+//   * generated-stub C++ symbol names (RPC shapes and message types):
+//       grpc::ClientAsyncReaderWriter<vk::voice::grpc::front::v1::api::phrase::SpeechRequest,
+//                                     vk::voice::grpc::front::v1::api::phrase::SpeechResponse>
+//           -> Speech is bidirectional streaming
+//       grpc::ClientAsyncReader<...::GetResultResponse>,
+//       grpc::internal::CallOpSendMessage::SendMessagePtr<...::GetResultRequest>
+//           -> GetResult is server streaming (one request, streamed responses)
+//   * services are implemented as vk::voice::grpc::front::v1::service::Phrase::Stub
+//     (symbols N2vk5voice4grpc5front2v17service6Phrase4StubE).
+//
+// Message packages are as declared in the recovered descriptors.
+
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.service;
+
+import "vk/voice/grpc/front/v1/api/phrase/speech.proto";
+import "vk/voice/grpc/front/v1/api/phrase/result.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/service;servicepb";
+
+service Phrase {
+  // Bidirectional stream: client sends init -> chunk* -> eos, server sends
+  // init -> status* / text_so_far* / commands* -> finish / eos.
+  rpc Speech(stream vk.voice.grpc.front.v1.api.phrase.SpeechRequest)
+      returns (stream vk.voice.grpc.front.v1.api.phrase.SpeechResponse);
+
+  // Server-streaming recovery/result channel for one phrase. Both messages are
+  // empty in the shipped descriptors, so a phrase is identified out-of-band
+  // (metadata) — see PROTOCOL.md §6.
+  rpc GetResult(vk.voice.grpc.front.v1.api.phrase.GetResultRequest)
+      returns (stream vk.voice.grpc.front.v1.api.phrase.GetResultResponse);
+}

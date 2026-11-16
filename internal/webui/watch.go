@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
 	webv1 "capsulad/gen/go/capsula/web/v1"
 	"capsulad/internal/uichanges"
@@ -48,6 +51,44 @@ func (s *Server) topicSignals(topic webv1.Topic) (<-chan uichanges.Topic, func()
 // reconnect. This is deliberate teardown, not a retry loop.
 func (c *wsConn) closeForUpstreamLoss() {
 	c.closeWith(closeInternal, "live updates stopped")
+}
+
+// policyRefusal reports whether err is a per-read refusal — the caller may not
+// see this data, or the target no longer exists — rather than a broken
+// transport.
+//
+// A refusal must not tear down the browser socket. Closing it would turn one
+// denied read into a "disconnected" banner and a reconnect loop for a device
+// that is answering fine, and the reconnected socket would issue the same
+// refused read again. The initial snapshot already delivered the error to the
+// page, which shows it inline; the refused watcher simply ends because a
+// denied read cannot become allowed inside this connection epoch.
+func policyRefusal(err error) bool {
+	switch status.Code(err) {
+	case codes.PermissionDenied, codes.Unauthenticated, codes.NotFound,
+		codes.InvalidArgument, codes.FailedPrecondition:
+		return true
+	}
+	return false
+}
+
+// stopRefusedWatcher ends one watcher whose upstream read was refused, keeping
+// the socket and every other subscription alive.
+func (c *wsConn) stopRefusedWatcher(topic webv1.Topic, appID string, err error) {
+	if c.srv.Logs != nil {
+		c.srv.Logs.Warnf("webui", appID, "subscription %d stopped: %v", topic, err)
+	}
+}
+
+// upstreamLost applies the teardown rule to a failed subscription read: a
+// per-read refusal stops only that watcher, any transport failure closes the
+// socket so the browser reconnects and re-subscribes.
+func (c *wsConn) upstreamLost(topic webv1.Topic, appID string, err error) {
+	if policyRefusal(err) {
+		c.stopRefusedWatcher(topic, appID, err)
+		return
+	}
+	c.closeForUpstreamLoss()
 }
 
 func (s *Server) watchTopic(ctx context.Context, c *wsConn, topic webv1.Topic, appID string) {
@@ -392,7 +433,7 @@ func (s *Server) watchRuns(ctx context.Context, c *wsConn, appID string, topic w
 	stream, err := frameworkv1.NewApplicationServiceClient(s.Conn).WatchRuns(ctx, &frameworkv1.WatchRunsRequest{AppId: appID})
 	if err != nil {
 		if ctx.Err() == nil {
-			c.closeForUpstreamLoss()
+			c.upstreamLost(topic, appID, err)
 		}
 		return
 	}
@@ -427,7 +468,7 @@ func (s *Server) watchRuns(ctx context.Context, c *wsConn, appID string, topic w
 		case err := <-events:
 			if err != nil {
 				if ctx.Err() == nil {
-					c.closeForUpstreamLoss()
+					c.upstreamLost(topic, appID, err)
 				}
 				return
 			}
@@ -551,13 +592,13 @@ func (s *Server) watchLogs(ctx context.Context, c *wsConn, appID string, logBoun
 	stream, err := frameworkv1.NewDiagnosticsServiceClient(s.Conn).WatchLogs(ctx, &frameworkv1.WatchLogsRequest{AppId: appID})
 	if err != nil {
 		if ctx.Err() == nil {
-			c.closeForUpstreamLoss()
+			c.upstreamLost(topic, appID, err)
 		}
 		return
 	}
 	type recv struct {
 		entry *webv1.LogEntry
-		err   bool
+		err   error
 	}
 	ch := make(chan recv, 64)
 	go func() {
@@ -565,7 +606,7 @@ func (s *Server) watchLogs(ctx context.Context, c *wsConn, appID string, logBoun
 			record, err := stream.Recv()
 			if err != nil {
 				select {
-				case ch <- recv{err: true}:
+				case ch <- recv{err: err}:
 				case <-ctx.Done():
 				}
 				return
@@ -599,10 +640,10 @@ func (s *Server) watchLogs(ctx context.Context, c *wsConn, appID string, logBoun
 		case <-tick.C:
 			flush()
 		case r := <-ch:
-			if r.err {
+			if r.err != nil {
 				flush()
 				if ctx.Err() == nil {
-					c.closeForUpstreamLoss()
+					c.upstreamLost(topic, appID, r.err)
 				}
 				return
 			}

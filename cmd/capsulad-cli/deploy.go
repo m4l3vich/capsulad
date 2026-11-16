@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -530,7 +532,14 @@ func (d *deployment) checkNativeRequirements() error {
 		if nativeDir == "" {
 			return fmt.Errorf("app %s requires native SDK ABI %d.%d but the bundle has no lib/ and no runtime is installed", pkg.Manifest.ID, req.ABIMajor, req.MinMinor)
 		}
-		rt, err := sandbox.LocateRuntime(nativeDir)
+		locate := sandbox.LocateRuntime
+		if d.libSrc != "" {
+			// A bundle carries the library as one regular file and gains its
+			// ABI links during installation, so the installed layout that
+			// LocateRuntime resolves does not exist yet.
+			locate = bundleRuntime
+		}
+		rt, err := locate(nativeDir)
 		if err != nil {
 			return fmt.Errorf("app %s requires native SDK ABI %d.%d: %w", pkg.Manifest.ID, req.ABIMajor, req.MinMinor, err)
 		}
@@ -1215,14 +1224,24 @@ func (d *deployment) rollback(activated []activation, cause error) error {
 	return fmt.Errorf("deployment failed; %s: %w", state, cause)
 }
 
-// syncLib replaces the managed runtime files, leaving unrelated operator files
-// in place. Each file is written to a temporary name and renamed so the
-// loader never observes a partial shared library.
+// syncLib installs the managed runtime files, leaving unrelated operator files
+// in place. Two rules keep a redeploy affordable on the 78.5 MiB data
+// partition, which cannot hold a second copy of the runtime:
+//
+//   - a regular file whose installed copy is byte-identical is not rewritten,
+//     so an unchanged 4 MiB library costs no free space at all;
+//   - the loader's ABI layout is rebuilt as relative links from the metadata
+//     that was just installed, because the bundle carries the library as one
+//     regular file. libcapsula.so -> libcapsula.so.1 -> libcapsula.so.1.0.0
+//     therefore survives a redeploy instead of becoming three copies of it.
+//
+// Each file is written to a temporary name and renamed so the loader never
+// observes a partial shared library.
 func syncLib(src, dst string) error {
 	if err := prepareRuntimeDir(dst); err != nil {
 		return err
 	}
-	return filepath.WalkDir(src, func(p string, entry fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(src, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1251,11 +1270,280 @@ func syncLib(src, dst string) error {
 		if info.Mode()&0o111 != 0 {
 			mode = 0o755
 		}
+		same, err := sameRuntimeFile(p, target)
+		if err != nil {
+			return fmt.Errorf("native runtime file %s: %w", filepath.ToSlash(rel), err)
+		}
+		if same {
+			return nil
+		}
 		if err := copyFileAtomic(p, target, mode); err != nil {
 			return fmt.Errorf("native runtime file %s: %w", filepath.ToSlash(rel), err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return syncRuntimeLayout(src, dst)
+}
+
+// sameRuntimeFile reports whether dst already holds src's bytes. Only a
+// regular installed file can match: a symlink or a directory at the managed
+// path is replaced through the temp-and-rename path, never written through.
+func sameRuntimeFile(src, dst string) (bool, error) {
+	installed, err := os.Lstat(dst)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !installed.Mode().IsRegular() {
+		return false, nil
+	}
+	bundled, err := os.Lstat(src)
+	if err != nil {
+		return false, err
+	}
+	if !bundled.Mode().IsRegular() || bundled.Size() != installed.Size() {
+		return false, nil
+	}
+	return sameContents(src, dst)
+}
+
+// sameContents compares two files in fixed 32 KiB chunks, so a 4 MiB library
+// costs two buffers instead of two full copies in memory.
+func sameContents(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	bufA := make([]byte, 32<<10)
+	bufB := make([]byte, 32<<10)
+	for {
+		na, errA := io.ReadFull(fa, bufA)
+		nb, errB := io.ReadFull(fb, bufB)
+		if errA != nil && !errors.Is(errA, io.EOF) && !errors.Is(errA, io.ErrUnexpectedEOF) {
+			return false, errA
+		}
+		if errB != nil && !errors.Is(errB, io.EOF) && !errors.Is(errB, io.ErrUnexpectedEOF) {
+			return false, errB
+		}
+		if na != nb || !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false, nil
+		}
+		if na < len(bufA) {
+			return true, nil
+		}
+	}
+}
+
+// syncRuntimeLayout recreates the loader's ABI layout for the runtime that was
+// just installed: the metadata names the library (libcapsula.so.1, or
+// libcapsula.1.dylib on macOS), the installed regular files name the real one,
+// and the two link names the loader and the linker expect are created beside
+// them as relative links. A runtime without metadata, or one whose metadata
+// names a library nothing installed, is left alone: a partial runtime is the
+// launcher's business, not the deployer's.
+func syncRuntimeLayout(src, dst string) error {
+	md, err := readRuntimeMetadata(dst)
+	if err != nil || md == nil || md.Library == "" {
+		return err
+	}
+	library := md.Library
+	if err := runtimeName(library); err != nil {
+		return fmt.Errorf("native runtime metadata %s: %w", filepath.Join(dst, sandbox.RuntimeMetadataFile), err)
+	}
+	real, err := runtimeLibraryName(src, library)
+	if err != nil || real == "" {
+		return err
+	}
+	if real != library {
+		if err := placeRuntimeLink(dst, library, real); err != nil {
+			return fmt.Errorf("native runtime link %s: %w", library, err)
+		}
+	}
+	if short := runtimeShortName(library); short != "" && short != library {
+		if err := placeRuntimeLink(dst, short, library); err != nil {
+			return fmt.Errorf("native runtime link %s: %w", short, err)
+		}
+	}
+	return nil
+}
+
+// bundleRuntime describes the native runtime a bundle's lib/ provides once it
+// is installed: the metadata names the library and the versioned regular file
+// beside it is the real one, while the loader's ABI links are only created by
+// syncLib.
+func bundleRuntime(dir string) (*sandbox.Runtime, error) {
+	md, err := readRuntimeMetadata(dir)
+	if err != nil {
+		return nil, err
+	}
+	if md == nil || md.Library == "" {
+		return nil, fmt.Errorf("native SDK metadata %s is missing; install a native build that emits %s", filepath.Join(dir, sandbox.RuntimeMetadataFile), sandbox.RuntimeMetadataFile)
+	}
+	if err := runtimeName(md.Library); err != nil {
+		return nil, fmt.Errorf("native SDK metadata %s: %w", filepath.Join(dir, sandbox.RuntimeMetadataFile), err)
+	}
+	if md.ABIMajor < 1 || md.ABIMinor < 0 {
+		return nil, fmt.Errorf("native SDK metadata %s declares ABI %d.%d; rebuild the native SDK", filepath.Join(dir, sandbox.RuntimeMetadataFile), md.ABIMajor, md.ABIMinor)
+	}
+	real, err := runtimeLibraryName(dir, md.Library)
+	if err != nil {
+		return nil, err
+	}
+	if real == "" {
+		return nil, fmt.Errorf("native SDK runtime library is missing from %s (expected the file %s names); install the native SDK runtime there", dir, md.Library)
+	}
+	return &sandbox.Runtime{Dir: dir, File: real, ABIMajor: md.ABIMajor, ABIMinor: md.ABIMinor, Metadata: true}, nil
+}
+
+// readRuntimeMetadata parses the metadata beside a bundled or installed
+// library. A missing file returns nil: the deployment leaves such a partial
+// runtime to the launcher to report.
+func readRuntimeMetadata(dir string) (*sandbox.RuntimeInfo, error) {
+	path := filepath.Join(dir, sandbox.RuntimeMetadataFile)
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("native runtime metadata %s is a symlink; refusing to read it", path)
+	}
+	body, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var md sandbox.RuntimeInfo
+	if err := json.Unmarshal(body, &md); err != nil {
+		return nil, fmt.Errorf("native SDK metadata %s is malformed: %w; rebuild the native SDK", path, err)
+	}
+	return &md, nil
+}
+
+// runtimeLibraryName returns the regular file in the bundle that the
+// metadata's library name stands for: the versioned file beside it
+// (libcapsula.so.1.0.0 for libcapsula.so.1), or the name itself when the
+// platform keeps the real file under it (libcapsula.1.dylib). Only the bundle
+// is consulted, so a stale installed library cannot make an incomplete bundle
+// synthesize links to the wrong runtime. An empty result means the bundle has
+// no matching regular library, which leaves the links alone.
+func runtimeLibraryName(dir, library string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	prefix := library + "."
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) && entry.Type().IsRegular() {
+			return entry.Name(), nil
+		}
+	}
+	info, err := os.Lstat(filepath.Join(dir, library))
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		return library, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return "", err
+	}
+	return "", nil
+}
+
+// runtimeShortName returns the linker name beside a versioned library:
+// libcapsula.so.1 -> libcapsula.so, libcapsula.1.dylib -> libcapsula.dylib.
+// A name without a numeric version has no second link.
+func runtimeShortName(library string) string {
+	if i := strings.Index(library, ".so."); i > 0 && isVersion(library[i+len(".so."):]) {
+		return library[:i+len(".so")]
+	}
+	if stem, ok := strings.CutSuffix(library, ".dylib"); ok {
+		if dot := strings.LastIndexByte(stem, '.'); dot > 0 && isVersion(stem[dot+1:]) {
+			return stem[:dot] + ".dylib"
+		}
+	}
+	return ""
+}
+
+// isVersion reports whether s is a bare version such as "1" or "1.0.0".
+func isVersion(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// runtimeName rejects a name that is not a plain file name in the lib
+// directory. Library names come from bundle metadata, so an absolute name or
+// one that climbs out through ".." must never become a link target.
+func runtimeName(name string) error {
+	if name == "" || name != filepath.Base(name) || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fmt.Errorf("library %q is not a plain file name inside the lib directory", name)
+	}
+	return nil
+}
+
+// placeRuntimeLink points link at target, both plain names in dir: the target
+// stays inside the managed lib directory and is relative, so the link resolves
+// the same way wherever the data directory is mounted. An identical link is
+// left untouched. A regular file at that name is swapped for the link only
+// when it is a byte-for-byte copy of the real library, which is how a tree that
+// an older bundle stuffed with dereferenced copies heals back into one file
+// plus links and gives the duplicate back to the data partition; anything else
+// there is the operator's own layout and wins. A new link is created under a
+// temporary name and renamed, so the loader never resolves a half-created link.
+func placeRuntimeLink(dir, link, target string) error {
+	if err := runtimeName(link); err != nil {
+		return err
+	}
+	if err := runtimeName(target); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, link)
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && info.Mode()&os.ModeSymlink != 0:
+		current, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		if current == target {
+			return nil
+		}
+	case err == nil && info.Mode().IsRegular():
+		same, err := sameContents(path, filepath.Join(dir, target))
+		if err != nil {
+			return err
+		}
+		if !same {
+			fmt.Fprintf(os.Stderr, "deploy: warning: %s is a regular file, not the link to %s; leaving it in place\n", path, target)
+			return nil
+		}
+	case err == nil:
+		fmt.Fprintf(os.Stderr, "deploy: warning: %s is not a regular file or symlink; leaving the installed layout alone\n", path)
+		return nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	tmp := filepath.Join(dir, fmt.Sprintf(".deploy-link-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // prepareRuntimeDir creates dir when missing and otherwise requires a real

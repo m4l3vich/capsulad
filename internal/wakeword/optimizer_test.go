@@ -206,7 +206,7 @@ func TestMineHardNegatives(t *testing.T) {
 		features[0] = float32(i) / 50
 		negatives[i] = TrainingExample{Features: features}
 	}
-	selected := mineHardNegatives(context.Background(), model, negatives, 8)
+	selected := mineHardNegatives(context.Background(), model, negatives, NegativePoolShape{}, rand.New(rand.NewPCG(11, 12)), 8)
 	if len(selected) != 8 {
 		t.Fatalf("selected %d negatives, want 8", len(selected))
 	}
@@ -230,14 +230,14 @@ func TestMineHardNegativesCancellation(t *testing.T) {
 	negatives := featureExamples(100, -1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if selected := mineHardNegatives(ctx, model, negatives, 4); len(selected) != 0 {
+	if selected := mineHardNegatives(ctx, model, negatives, NegativePoolShape{}, rand.New(rand.NewPCG(13, 14)), 4); len(selected) != 0 {
 		t.Fatalf("canceled mining selected %d negatives, want none", len(selected))
 	}
 }
 
 // TestMineHardNegativesBudgetAndCoverage pins the pool-size fix: even when the
 // scored pool is capped, mining must return the full requested hard budget,
-// unique indices, and only windows from the bounded pool-wide sample.
+// unique indices, and only windows from the bounded canonical sample.
 func TestMineHardNegativesBudgetAndCoverage(t *testing.T) {
 	model := newTestClassifier(t, 91)
 	// One shared feature view keeps the test's memory flat; selection logic only
@@ -257,7 +257,7 @@ func TestMineHardNegativesBudgetAndCoverage(t *testing.T) {
 			for i := range negatives {
 				negatives[i] = TrainingExample{Features: features}
 			}
-			selected := mineHardNegatives(context.Background(), model, negatives, tc.k)
+			selected := mineHardNegatives(context.Background(), model, negatives, NegativePoolShape{}, rand.New(rand.NewPCG(15, 16)), tc.k)
 			if len(selected) != tc.k {
 				t.Fatalf("selected %d negatives, want %d", len(selected), tc.k)
 			}
@@ -547,4 +547,185 @@ func TestAdamFirstStep(t *testing.T) {
 	check("b2[3]", grads.b2[3], model.B2[3], before.B2[3])
 	check("w3[2]", grads.w3[2], model.W3[2], before.W3[2])
 	check("b3", grads.b3, model.B3, before.B3)
+}
+
+// repeatedLocalPool builds a pool shaped exactly like enrollment: the canonical
+// corpus windows, then the canonical local block, then the local block repeated
+// the way enrollment balances a small local set against a much larger corpus.
+func repeatedLocalPool(corpus, local, repeat int, features func(canonical int) []float32) ([]TrainingExample, NegativePoolShape) {
+	canonical := corpus + local
+	negatives := make([]TrainingExample, 0, canonical+local*repeat)
+	for i := range canonical {
+		negatives = append(negatives, TrainingExample{Features: features(i)})
+	}
+	block := append([]TrainingExample(nil), negatives[corpus:canonical]...)
+	for range repeat {
+		negatives = append(negatives, block...)
+	}
+	return negatives, NegativePoolShape{Canonical: canonical, RepeatSpan: local}
+}
+
+// scoreByFirstFeature builds a model whose score increases sharply with the
+// first embedding component, so a test can make chosen windows the hardest
+// without depending on trained weights.
+func scoreByFirstFeature(t *testing.T) *Classifier {
+	t.Helper()
+	model := newTestClassifier(t, 101)
+	zeroWeights(model)
+	model.W1[0] = 1  // leaves the first embedding component after ReLU
+	model.W2[0] = 1  // hidden unit 0 sees step 0's projection unit 0
+	model.W3[0] = 10 // sharply increasing score
+	model.B3 = -5
+	return model
+}
+
+// TestMineHardNegativesDeduplicatesRepeatedLocalWindows is the regression for
+// the pool built by the real enrollment path: a small local set repeated N
+// times must yield k DISTINCT windows, not k copies of the hardest one.
+func TestMineHardNegativesDeduplicatesRepeatedLocalWindows(t *testing.T) {
+	model := scoreByFirstFeature(t)
+	// Canonical window 30 is the first local window and by far the hardest, so
+	// every repeated view of it scores identically; the old index-based miner
+	// filled most hard slots with its copies.
+	features := func(canonical int) []float32 {
+		values := make([]float32, ContextFrames*EmbeddingDim)
+		if canonical == 30 {
+			values[0] = 1
+		}
+		return values
+	}
+	negatives, shape := repeatedLocalPool(30, 10, 200, features)
+	selected := mineHardNegatives(context.Background(), model, negatives, shape, rand.New(rand.NewPCG(17, 18)), 10)
+	if len(selected) != 10 {
+		t.Fatalf("selected %d windows, want 10: %v", len(selected), selected)
+	}
+	seen := make(map[int]bool, len(selected))
+	for _, index := range selected {
+		if index >= shape.Canonical {
+			t.Fatalf("selected repeated view %d; only canonical windows are addressable", index)
+		}
+		if seen[index] {
+			t.Fatalf("duplicate canonical window %d in %v", index, selected)
+		}
+		seen[index] = true
+	}
+	if !seen[30] {
+		t.Fatalf("the hardest window was not selected: %v", selected)
+	}
+}
+
+// TestMineHardNegativesKeepsCorpusUnderRepeatedLocalBalance pins the real
+// corpus shape: 872 streams, ~96k canonical windows, a 900-window local block
+// repeated ~107 times to a 1:1 slice balance. The hard budget must still be
+// spent on corpus windows, not consumed by copies of a few local windows.
+func TestMineHardNegativesKeepsCorpusUnderRepeatedLocalBalance(t *testing.T) {
+	model := scoreByFirstFeature(t)
+	const streams, windowsPerStream = 872, 110
+	const local = 900
+	corpus := streams * windowsPerStream
+	repeat := (corpus + local - 1) / local
+	hard := make([]float32, ContextFrames*EmbeddingDim)
+	hard[0] = 1
+	easy := make([]float32, ContextFrames*EmbeddingDim)
+	easy[0] = 0.2
+	negatives, shape := repeatedLocalPool(corpus, local, repeat, func(canonical int) []float32 {
+		if canonical >= corpus {
+			return hard
+		}
+		return easy
+	})
+	selected := mineHardNegatives(context.Background(), model, negatives, shape, rand.New(rand.NewPCG(19, 20)), 1000)
+	if len(selected) != 1000 {
+		t.Fatalf("selected %d windows, want 1000", len(selected))
+	}
+	seen := make(map[int]bool, len(selected))
+	locals := 0
+	for _, index := range selected {
+		if index >= shape.Canonical {
+			t.Fatalf("selected repeated view %d; only canonical windows are addressable", index)
+		}
+		if seen[index] {
+			t.Fatalf("duplicate canonical window %d", index)
+		}
+		seen[index] = true
+		if index >= corpus {
+			locals++
+		}
+	}
+	if locals == 0 {
+		t.Fatal("no local window was selected even though every local window is the hardest")
+	}
+	if corpus := len(selected) - locals; corpus <= 400 {
+		t.Fatalf("hard set collapsed to local windows: only %d corpus windows of %d", corpus, len(selected))
+	}
+}
+
+// TestCanonicalCandidatesSeededAndDistinct pins the sampling contract: the
+// candidate set depends only on (canonical count, seed), is reproducible,
+// distinct, in range, and the whole range when it fits.
+func TestCanonicalCandidatesSeededAndDistinct(t *testing.T) {
+	const n, limit = 100000, 5000
+	first := canonicalCandidates(n, limit, rand.New(rand.NewPCG(5, 6)))
+	again := canonicalCandidates(n, limit, rand.New(rand.NewPCG(5, 6)))
+	other := canonicalCandidates(n, limit, rand.New(rand.NewPCG(7, 8)))
+	if !reflect.DeepEqual(first, again) {
+		t.Fatal("same seed produced a different candidate sample")
+	}
+	if reflect.DeepEqual(first, other) {
+		t.Fatal("a different seed produced an identical candidate sample")
+	}
+	if len(first) != limit {
+		t.Fatalf("sampled %d candidates, want %d", len(first), limit)
+	}
+	seen := make(map[int]bool, limit)
+	for _, index := range first {
+		if index < 0 || index >= n {
+			t.Fatalf("candidate %d out of range", index)
+		}
+		if seen[index] {
+			t.Fatalf("duplicate candidate %d", index)
+		}
+		seen[index] = true
+	}
+	whole := canonicalCandidates(10, 100, rand.New(rand.NewPCG(1, 2)))
+	if !reflect.DeepEqual(whole, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+		t.Fatalf("small range sampled instead of fully enumerated: %v", whole)
+	}
+}
+
+// TestFitClassifierDeterministicWithHardNegatives covers the seeded mining path
+// end to end: a repeated-local pool with hard negatives enabled must produce
+// byte-identical weights and losses on every run.
+func TestFitClassifierDeterministicWithHardNegatives(t *testing.T) {
+	positives := featureExamples(8, 1)
+	negatives, shape := repeatedLocalPool(20, 6, 40, func(canonical int) []float32 {
+		values := make([]float32, ContextFrames*EmbeddingDim)
+		values[0] = -float32(canonical%5+1) / 8
+		return values
+	})
+	run := func() (*Classifier, []float64) {
+		model := newTestClassifier(t, 111)
+		var losses []float64
+		if err := FitClassifier(context.Background(), model, positives, negatives, FitOptions{
+			Seed: 4242, Epochs: 7, BatchSize: 8, LearningRate: 0.02,
+			RandomNegativesPerEpoch: 12, HardNegativesPerEpoch: 10, NegativePool: shape,
+			Progress: func(_ int, loss float64) { losses = append(losses, loss) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return model, losses
+	}
+	a, aLosses := run()
+	b, bLosses := run()
+	if !reflect.DeepEqual(a.W1, b.W1) || !reflect.DeepEqual(a.B1, b.B1) ||
+		!reflect.DeepEqual(a.W2, b.W2) || !reflect.DeepEqual(a.B2, b.B2) ||
+		!reflect.DeepEqual(a.W3, b.W3) || a.B3 != b.B3 {
+		t.Fatal("same seed with hard negatives produced different weights")
+	}
+	if !reflect.DeepEqual(aLosses, bLosses) {
+		t.Fatalf("loss trace differs:\n%v\n%v", aLosses, bLosses)
+	}
+	if len(aLosses) != 7 {
+		t.Fatalf("got %d epoch losses, want 7", len(aLosses))
+	}
 }

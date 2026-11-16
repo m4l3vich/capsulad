@@ -1,0 +1,60 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafc130. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.client;
+
+import "google/protobuf/wrappers.proto";
+import "vk/voice/grpc/front/v1/model/client/media_state.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/client;clientpb";
+
+message PlayerTrackMeta {
+  string artist = 1;
+  string album = 2;
+  string title = 3;
+  string genre = 4;
+  google.protobuf.DoubleValue duration = 5;
+}
+message PlayerSkillMeta {
+  string album_uid = 1;
+  string audio_hash = 2;
+  string cpp_hash = 3;
+  string media_type = 4;
+  string name = 5;
+  string phrase_id = 6;
+  string skill_name = 7;
+  bytes stat_flags = 8;
+  string type = 9;
+  string uid = 10;
+  string url = 11;
+  google.protobuf.Int32Value position = 12;
+  google.protobuf.Int32Value audiocontent_item_id = 13;
+  string audiocontent_item_type = 14;
+}
+message PlayerRunnerPhrasePlaylist {
+  vk.voice.grpc.front.v1.model.client.PlayerSkillMeta skill_meta = 1;
+}
+message PlayerRunnerBluetooth {
+}
+message PlayerRunnerSpotify {
+}
+message PlayerSeekableTrackState {
+  double elapsed = 1;
+  google.protobuf.DoubleValue duration = 2;
+}
+message PlayerPlaybackInfo {
+  vk.voice.grpc.front.v1.model.client.MediaState media_state = 1;
+  vk.voice.grpc.front.v1.model.client.PlayerTrackMeta track_meta = 2;
+  vk.voice.grpc.front.v1.model.client.PlayerSeekableTrackState seekable_track_state = 3;
+  double playback_duration = 4;
+  oneof runner {
+    vk.voice.grpc.front.v1.model.client.PlayerRunnerPhrasePlaylist phrase_playlist = 5;
+    vk.voice.grpc.front.v1.model.client.PlayerRunnerBluetooth bluetooth = 6;
+    vk.voice.grpc.front.v1.model.client.PlayerRunnerSpotify spotify = 7;
+  }
+}
+message PlayerData {
+  google.protobuf.Int32Value volume = 1;
+  vk.voice.grpc.front.v1.model.client.PlayerPlaybackInfo playback_info = 2;
+}

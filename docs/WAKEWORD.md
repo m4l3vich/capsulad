@@ -77,13 +77,30 @@ error rather than reinterpreted.
   trailing members/bytes and declared expansion past the bound fail the load instead of producing a
   partial corpus. `CNEG0001`, header `version: 1` and missing or invalid warm-up metadata are
   rejected with a regeneration instruction; embeddings are never relabelled as warm.
-- **Runtime.** Two consecutive scores at the threshold, then a 2.9-second cooldown. A reset needs
-  approximately two seconds of fresh audio before a full context is available. Activations keep the
-  selected-assistant, readiness, bounded pre-roll and microphone-mute semantics; manual talk-button
-  activation needs no trained keyword model.
-- **Loading.** The model is read from `<data-dir>/wakeword/model.json` (or `-wakeword-model`). A
-  missing or invalid model is unavailable, not a functioning fallback; detection begins only after a
-  valid model is installed, selected and enabled in Settings.
+- **Ensemble.** Every installed word shares **one** frontend and **one** 16×96 embedding ring; each
+  word adds only its weights, scratch and last score. That sharing is mandatory on this device: a
+  complete frontend emits an embedding in 37.9 ms against an 80 ms hop, so N frontends cannot keep
+  up, while N heads over the one embedding stream cost a fraction of a millisecond each. Per-hop
+  scoring of N heads allocates nothing; only the frontend keeps its pre-existing per-embedding
+  allocation, which does not grow with N.
+- **Runtime policy.** Each word has its own consecutive-window streak and its own calibrated
+  threshold. The first hop on which several words complete is an arbitration point, not a double
+  activation: the winner is the largest normalized margin `(score − threshold) / (1 − threshold)`,
+  tie-broken by higher raw score and then by model id, so the outcome is deterministic. Losers'
+  streaks reset without consuming anything. One **global** 2.9-second cooldown then applies on the
+  runner, so one utterance cannot fire twice — not even as two different words. Firing resets every
+  context. A reset needs approximately two seconds of fresh audio before a full context exists again.
+- **Runtime gates.** Detection runs only on the declared processed tap, and pauses while the
+  microphone is muted, while a training take is recording, and while any app an activation could
+  address (the selected assistant **or** a bound app) holds capture or playback, including its
+  1.2-second tail. Activations keep the readiness, bounded pre-roll and mute semantics; manual
+  talk-button activation needs no trained keyword model.
+- **Storage.** Words live under `<data-dir>/wakeword/models/<id>.json`, one version-3 artifact per
+  word. The file name stem is the identity used by the settings binding, the activation's
+  `matched_model_id` and the Web UI, so renaming a display label never rebinds a word. Ids are
+  validated against `^[a-z0-9][a-z0-9._-]{0,63}$`. A corrupt or mismatched artifact is **reported and
+  skipped**, never silently replaced or deleted. A missing or invalid artifact is unavailable, not a
+  functioning fallback.
 
 ## Numerical and device evidence
 
@@ -139,7 +156,8 @@ ERROR-level lines and kept wakeword enabled with the microphone unmuted.
    setup are submitted — saved recordings from other setups are never mixed in. The selection
    survives a reload in the tab; a new setup clears the selection, not the saved WAV files.
 3. The browser starts training with the typed `train` command on the authenticated, same-origin
-   `capsula.web.v1` binary WebSocket and displays streamed stage/fraction/log frames. Audio,
+   `capsula.web.v1` binary WebSocket and displays streamed stage/fraction/log frames, the terminal
+   refusal or the installed certificate. Audio,
    embeddings, augmentation, fitting and quality checks stay on the device. Dismissing or cancelling
    sends `CancelTraining`; dismissing during a take aborts the in-flight record through
    `CancelOperation`. A lost session also cancels active recording and training on the device. After
@@ -155,7 +173,8 @@ ERROR-level lines and kept wakeword enabled with the microphone unmuted.
    contexts are negatives. Local room/speech/false-trigger clips receive real-room preroll from their
    own partition. Every valid 80 ms negative context stays eligible as a view, without feature copies.
    Each epoch draws at least 6,000 fresh random negatives from the whole pool plus a separate hard set
-   of at least 1,000, refreshed periodically by bounded mining; mining never replaces the random draw.
+   of at least 1,000, refreshed periodically by bounded mining; mining never replaces the random draw
+   and addresses each distinct window once (see [Negative mining](#negative-mining-refusals-and-measured-quality)).
    Adam uses a 0.001 learning rate, 64-example batches and 40 epochs.
 6. Threshold tuning replays the actual 80 ms, two-score, 2.9-second-cooldown policy. The emitted
    decision's window must contain the complete labelled word and arrive within one second after it; a
@@ -167,25 +186,178 @@ ERROR-level lines and kept wakeword enabled with the microphone unmuted.
    and the pass/fail certificate use **only** local held-out takes already processed by the daemon;
    external `CNEG` streams are precomputed off-policy examples, recorded under
    `metrics.auxiliary_offpolicy`, and never decide the certificate. A false activation on the broad
-   `CNEG` corpus remains a hard veto.
-7. On success the daemon validates the typed version-3 artifact, constructs its engine, atomically
-   replaces `model.json`, stops the previous runner and starts the replacement. The dialog does not
-   change model selection or the detection switch: select `word.personal` and enable detection in
-   the same section if they are not already active.
+   `CNEG` corpus remains a hard veto. A refusal is a typed result, not a sentence: the stream first
+   carries every distinct cause, every failing take and the measured splits, then ends with an error
+   status that names them (see [Refusals](#negative-mining-refusals-and-measured-quality)).
+7. On success the daemon validates the typed version-3 artifact, proves the **new ensemble** builds
+   (the artifact plus every other installed word) and only then atomically writes
+   `models/<id>.json`. It resubscribes one runner over one shared frontend, so detection restarts for
+   **all** words — a warm-up of about two seconds. The final event and the Wakeword section carry the
+   measured certificate (threshold, tune and final-test recall and false activations, auxiliary
+   corpus result) read from the artifact. The dialog does not change the detection switch or any
+   binding: a **new** word installs switched off, and retraining an existing word keeps that word's
+   enabled state and app binding.
 
-The Wakeword section lists the single personal-model slot with its availability, the saved takes on
-the device and recent hands-free detections newest first, capped at 20, engine-origin only (manual
-talk-key activations are not detections). Each detection carries an opaque runtime ID: marking one a
-false detection removes it from that list and changes nothing else — no audio, sample or classifier
-state is affected, and the entry is gone from the next snapshot. Training replaces `word.personal`
-atomically only after the checks pass; there is no separate delete-model action, and closing the
-dialog while idle changes nothing. Training is serialized, cancellable and bounded to 30 minutes by
-the Web UI.
+A setup trains either a new word or one existing word in place. The dialog's target decides: "Create
+a wakeword" sends no `model_id` (the device derives a fresh `word.<hex>` id) and "Retrain" sends that
+word's id. An in-place retrain replaces only that artifact: every other artifact stays
+byte-identical, its gate is not re-run and its enablement and binding are untouched. A new setup
+clears the take selection; switching the dialog between a new word and a retrain starts a fresh
+selection too.
+
+The Wakeword section lists every installed word with its effective state (listening, paused,
+detection off, or needing attention with the reason), its own enable switch, the app it starts
+("Selected assistant" or an installed app) and its measured certificate. It also lists the saved
+takes on the device and recent hands-free detections newest first, capped at 20, engine-origin only
+(manual talk-key activations are not detections). Each detection carries an opaque runtime ID:
+marking one a false detection removes it from that list and changes nothing else — no audio, sample
+or classifier state is affected, and the entry is gone from the next snapshot. Deleting a word
+removes its artifact and its settings entry in one confirmed action; the saved takes are shared
+training data and are kept. Training is serialized (one run at a time, also blocking deletion),
+cancellable and bounded to 30 minutes by the Web UI.
 
 A warm `CNEG0002` corpus must already exist at `<data-dir>/wakeword/negatives.bin` (or at
 `-wakeword-negatives`); it is not an inference dependency, and a cold corpus is refused rather than
 retrained without warm-up. The browser neither receives features nor uploads classifier JSON: there
 are no feature-read or classifier-install RPCs.
+
+## Multiple wakewords and app binding
+
+**Installing and migrating.** The previous build kept one artifact at
+`<data-dir>/wakeword/model.json`. On the first scan the daemon moves it to
+`models/<its-id>.json` with a rename: no settings write, no retrain and no byte change
+(the fallback copy path preserves bytes too, and is used only when the file is on another
+filesystem). `-wakeword-model` is an import source for that one migration; the live store is always
+the models directory. A file whose name is not a valid id, whose internal `id` disagrees with its file
+name, or whose JSON does not load is left on disk, reported in the log with its reason and listed in
+the Wakeword section as **needing attention** — it is never a functioning fallback and never
+overwritten by a training run that happens to use the same id until the operator does so explicitly.
+
+**Settings.** `wakewords` is the durable per-word list (`{model_id, app_id, enabled}`), replaced as a
+whole by one patch, the same shape as `default_app_by_resource`. Its semantics are deliberately
+backwards compatible:
+
+- Absent (`nil`) is the legacy state: every installed word is live under the global
+  `wakeword_enabled` switch and bound to the selected assistant. That is exactly the previous
+  single-model behavior.
+- Present is authoritative and materialized to contain every installed word. A word with no entry is
+  **disabled**; a word is live only when the global switch, its own `enabled` and its availability
+  all hold. At most eight entries are accepted and a duplicate `model_id` is refused.
+- An explicit empty list means **no word is live**. The JSON document always carries the key, so
+  `null` is the legacy state and `[]` is the explicit one; a client states the explicit state over
+  the RPC by owning the `wakewords` mask with no entries, because a repeated field cannot otherwise
+  distinguish "absent" from "empty". Deleting the last word leaves `[]` behind rather than falling
+  back to legacy.
+- `app_id` empty means the selected assistant. Deleting a word drops its entry; installing one
+  appends a disabled entry.
+
+The retired `wakeword_model_id` setting is gone, together with its settings key and its protobuf tags
+(both reserved). It is not replaced by a new alias: **the old selector never gated anything.** The
+engine never consulted it, so the documented "installed model, selected and enabled" gate did not
+exist; this change implements the real per-word gate instead of preserving a cosmetic one.
+
+**Selection and delivery.** A word bound to an app delivers to that app only. If the app is not ready
+the activation is logged and dropped with an explicit reason, and is **not** rerouted to the selected
+assistant or to another word: a wrong-app turn is worse than a dropped one. The delivery target is
+always reported in `AssistantActivation.app_id`. Unbound words and physical keys target the selected
+assistant; an API activation for a bound word is delivered to that same app, exactly like a detection,
+and an API activation for an unbound word targets the selected assistant. The assistant-audio
+detection gate and the dismissal path use the same widened set (selected assistant ∪ bound apps), so
+a bound word's reply does not re-trigger detection and the circle key dismisses whichever of those
+apps actually owns the turn. A bound app is part of the provider selection: it is recovered after a
+crash and stops when it is both unselected and unbound.
+
+**Cost of a change.** A per-word enable toggle or a rebinding is a settings change: it takes effect on
+the next activation, with no re-subscribe and no warm-up. Installing or deleting an artifact rebuilds
+the ensemble and resubscribes one runner, which costs about two seconds of warm-up for **all** words.
+Memory is not the constraint: the in-memory classifier head is about 53 KB per word, while the
+persisted artifact on `/data` is about 130 KB per word (JSON encoding); one 1.15 MB frontend and
+1.3 MB of shared assets exist once.
+
+**Rollback.** Restore the previous artifact file and the previous `wakewords` value (or delete the
+`wakewords` key to return to the legacy state) and restart the daemon. Removing `models/` and putting
+the old single file back at `wakeword/model.json` is also honored: the next scan migrates it again.
+Taking the word out of the list (or clearing the global switch) suspends it immediately without
+touching the artifact, which is the safe way to silence a word that misbehaves in the field.
+
+**Honest limits.** Arbitration prevents a **double activation** on one hop; it does not prevent a
+**wrong** activation, because every word's acoustic acceptance is still the per-word threshold and
+gate certificate. Two words that sound alike can each pass their own threshold; only one fires per
+utterance, and which one wins is the normalized margin. Per-word acoustic acceptance remains a device
+gate: the host tests prove the policy, the storage and the engine parity, not recognition quality.
+Warm-up, gain changes and a changed room still affect all words together through the shared frontend.
+The host benchmark below measures the marginal cost of extra heads, not the on-device cadence.
+
+| Measurement (host, Apple arm64) | N=1 | N=2 | N=3 | N=4 | N=5 |
+|---|---|---|---|---|---|
+| `Ensemble.Process` per 80 ms hop | 2.14 ms | 2.04 ms | 2.07 ms | 2.12 ms | 2.16 ms |
+| Allocations per hop | 14 | 14 | 14 | 14 | 14 |
+
+Re-run with `go test ./internal/wakeword -run '^$' -bench BenchmarkEnsembleProcess`. The per-hop
+allocation count is constant because only the shared frontend allocates; scoring every head allocates
+nothing (`TestEnsembleScoringDoesNotAllocate`). The frontend itself is unchanged, and
+`TestEnsembleMatchesSingleModelEngine` proves the ensemble returns exactly the score the single-model
+engine returned for the same artifact and audio, so this is not a new detector.
+
+## Negative mining, refusals and measured quality
+
+**Mining design.** The negative pool is a structural view, not a flattened list: the canonical
+corpus windows come first, then the canonical local block (rooms, unrelated speech, false
+activations, word partials and clean pre-word contexts), then that local block repeated to balance
+it against the corpus (at most 1024 repetitions). Two integers describe that shape
+(`Canonical`, `RepeatSpan`), so threading identity from enrollment into the optimizer adds no
+per-window storage and copies no features.
+
+Hard-negative mining addresses canonical windows only. Every mining round scores at most 32,768
+distinct windows on at most four goroutines and returns at most the requested budget of distinct
+canonical indices, so a duplicated view of one local window can occupy at most one hard slot.
+Without this, a 1:1 repeated local block filled half of every hard set and half of the sampled
+budget with copies of a few windows, and genuine corpus windows were never sampled. When the
+canonical pool is larger than the cap, the sample is drawn with a seeded uniform rejection sampler
+over canonical indices (one bitmap bit per canonical window), not with a fixed stride. The draw for
+each round is a pure function of the pool shape, the training seed and the round, which keeps the
+sample reproducible on every platform and keeps a long stream or a duplicated local block from
+excluding whole sources. The additive fresh random draw, its floor, the hard budget floor, one
+scoring pass per round and 30-minute RPC bound are unchanged. A seeded run remains byte-identical;
+`TestFitClassifierDeterministic` and its hard-negative variant cover that contract.
+
+**Refusals.** A refused run is a `*wakeword.TrainingFailure`: distinct machine causes (for example
+`too_few_word_takes`, `duplicate_takes`, `short_context`, `no_positive_windows`,
+`insufficient_heldout`, `tune_gate_failed`, `final_gate_failed`, `auxiliary_gate_failed`,
+`corpus_missing`, `fit_failed`, `internal`), every failing take with its partition and 1-based
+position in the submitted selection, every measured split and the threshold they were measured at.
+Validation collects all problems instead of stopping at the first, and a tune or final-test refusal
+lists the takes that were missed or that false-fired at the measured threshold. Distinct causes are
+never collapsed: a local gate failure and an auxiliary corpus veto appear together.
+
+The stream still ends with a gRPC error, so existing clients do not hang, but the daemon emits one
+terminal `failed` event first with the structured refusal. Codes are meaningful:
+`INVALID_ARGUMENT` for an unusable or insufficient selection, `FAILED_PRECONDITION` for gate,
+policy, corpus or configuration failures, `INTERNAL` for a trainer or artifact fault, and the
+existing `CANCELED`/`DEADLINE_EXCEEDED` for cancellation. The status text names the causes and the
+takes (`... [cause: final_gate_failed]; takes to fix: word #3, room #2`). A failed run installs
+nothing and leaves the previous model in place; explicit selection still means only the submitted
+take IDs are used, and no retrain starts on its own. The dialog turns the causes into instructions
+and lists the takes to re-record; a consumed final test still requires a fresh setup, and dismissal
+still cancels.
+
+**Measured quality.** The success event and the Wakeword section show the certificate already stored
+in `Classifier.Trained`: the calibrated threshold and, for the tune split, the final test and the
+auxiliary off-policy corpus, word recordings, detected recordings, recall and false activations. The
+values are copied from the artifact; the browser neither recomputes a metric nor invents one. An
+artifact trained before the record existed shows no table instead of zeros.
+
+**Upstream applicability.** The ideas in `tanggenx/station-wakeword` PR #5 were reviewed without
+copying its code or data (it has no source license). Adopted, reimplemented idiomatically here:
+hard-negative deduplication/diversity, structured training-failure diagnostics and exposing gate
+metrics to the operator. Rejected with reason: taking playback to the browser would break the
+privacy contract in this document and [SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md) — the browser
+receives samples and status only, never PCM or stored takes; Alice/cloud TTS augmentation sends
+text to a third party with no license or terms, a hardcoded endpoint and no benefit for a
+single-speaker model; its seeded 5/1 split with "recall below 0.8 is only a note" is weaker than
+this project's whole-recording content split and ≥80% recall with zero false activations on both
+tune and final test; and its evaluator's synthetic-silence warm-up and pre-completion hit counting
+would misreport the daemon's actual two-window, cooldown and post-word policy.
 
 ## Quality evidence and limits
 
@@ -209,7 +381,8 @@ The candidates below are development evidence on already-consumed audio, not a c
   clip scores zero false activations (peak 0.0124), and the nine-clip error-timing regression
   scores zero (peak 0.1269). Both are regressions on consumed audio.
 
-The installed `model.json` is 132,984 bytes, SHA-256
+The installed artifact (formerly `model.json`, now `models/word.personal.json`) is 132,984 bytes,
+SHA-256
 `5f92202fddc38629db4d9a6db3c965a57ffcb812ad09d41b634e27428fc267e3`: version 3, id `word.personal`,
 display `Маруся`, language `ru`, threshold 0.59, context 16, projection 24, hidden 24. It is the
 native compact serialization of the host candidate `64ba9f43…` (192,372 bytes pretty-printed); both
@@ -362,6 +535,8 @@ than a background shell's exit status (see [HARDWARE.md](HARDWARE.md)).
 
 Persistent space is the other hard limit: the daemon log rotates at 512 KiB with one copy, and new
 recordings or training are refused below 2 MiB free, because a full `/data` breaks logging and the
-upgrade path rather than failing one write. `-wakeword-trace` logs score peaks and detection
-heartbeats and stays off in production. Relevant checks live in `internal/wakeword`,
+upgrade path rather than failing one write. Each installed word is one artifact of roughly 130 KB, so
+the eight-word bound is about 1 MB of `/data`; the shared frontend is compiled in, not stored per
+word. `-wakeword-trace` logs per-word score peaks, the arbitration winner and detection heartbeats
+and stays off in production. Relevant checks live in `internal/wakeword`,
 `internal/wakeword/oww`, `internal/audio`, `internal/daemon` and `internal/webui`.

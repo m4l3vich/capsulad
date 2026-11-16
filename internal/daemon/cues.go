@@ -267,18 +267,44 @@ func (d *Daemon) showVolumeOSD(pct int) {
 	if d.osdTimer != nil {
 		d.osdTimer.Stop()
 	}
-	var timer *time.Timer
-	timer = time.AfterFunc(volumeOSDTimeout, func() { d.expireVolumeOSD(timer) })
-	d.osdTimer = timer
+	// Ownership is a generation, not the timer pointer: the callback must never
+	// read the variable the caller is still assigning to (a data race the race
+	// detector caught through the full-panel swipe revert), and a stale callback
+	// must not blank a newer percentage.
+	d.osdGen++
+	gen := d.osdGen
+	d.osdTimer = time.AfterFunc(volumeOSDTimeout, func() { d.expireVolumeOSD(gen) })
 }
 
-// expireVolumeOSD releases the overlay only while timer still owns it: the
-// callback may already have been running when the next volume step replaced
-// the timer, and it must not blank the fresh percentage.
-func (d *Daemon) expireVolumeOSD(timer *time.Timer) {
+// hideVolumeOSD closes a volume overlay without showing a level. It is used when
+// the step that opened it was taken back, so the display returns to its selected
+// baseline instead of flashing a number the user never chose.
+func (d *Daemon) hideVolumeOSD() {
 	d.osdMu.Lock()
 	defer d.osdMu.Unlock()
-	if d.osdTimer != timer {
+	d.osdGen++
+	if d.osdTimer != nil {
+		d.osdTimer.Stop()
+		d.osdTimer = nil
+	}
+	if d.osdCapture != "" {
+		d.releaseAppCapture(routing.SystemAppID, "", d.osdCapture)
+		d.osdCapture = ""
+	}
+	if d.osdPres != nil {
+		_ = d.updateAppPresentation(routing.SystemAppID, "", d.osdPres, presentations.Blank())
+		d.closeAppPresentation(routing.SystemAppID, "", d.osdPres)
+		d.osdPres = nil
+	}
+}
+
+// expireVolumeOSD releases the overlay only while gen still owns it: the
+// callback may already have been running when the next volume step replaced the
+// timer, and it must not blank the fresh percentage.
+func (d *Daemon) expireVolumeOSD(gen uint64) {
+	d.osdMu.Lock()
+	defer d.osdMu.Unlock()
+	if d.osdGen != gen {
 		return
 	}
 	d.osdTimer = nil

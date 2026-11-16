@@ -47,6 +47,41 @@ func (s *bluetoothMediaService) mediaView(ctx context.Context, state *frameworkv
 	return state
 }
 
+// bluetoothPlaybackDirection resolves the displayed source's playback direction
+// from the manager that owns the evidence. It is the single authority for that
+// question: the manager's own toggle resolves the direction the same way, so a
+// consumer that shows this value (the Web UI's now-playing transport buttons)
+// can never disagree with the direction the next physical key press takes.
+// A manager that cannot resolve one publishes its exact state instead (the
+// simulator), which is not an inference that could be inverted.
+func (d *Daemon) bluetoothPlaybackDirection(ctx context.Context, state bluetooth.MediaState) bluetooth.Direction {
+	if d.bt == nil || !state.Present {
+		return bluetooth.Direction{}
+	}
+	if resolver, ok := d.bt.(bluetooth.DirectionResolver); ok {
+		direction, err := resolver.PlaybackDirection(ctx)
+		if err == nil && direction.Present {
+			return direction
+		}
+		if err != nil {
+			d.logs.Debugf("bluetooth", "", "playback direction: %v", err)
+		}
+	}
+	return bluetooth.Direction{Present: true, Playing: state.Playing, Evidence: bluetooth.EvidenceStatus}
+}
+
+// stateProto renders one manager state for a caller, including the resolved
+// playback direction. `playing` stays the source-published AVRCP status; a
+// source exposing only MediaControl1 publishes none, which is why the direction
+// travels separately.
+func (s *bluetoothMediaService) stateProto(ctx context.Context, state bluetooth.MediaState) *frameworkv1.BluetoothMediaState {
+	out := bluetoothMediaProto(state)
+	if direction := s.d.bluetoothPlaybackDirection(ctx, state); direction.Present {
+		out.DirectionKnown, out.DirectionPlaying = true, direction.Playing
+	}
+	return out
+}
+
 func bluetoothStatusError(err error) error {
 	switch {
 	case errors.Is(err, bluetooth.ErrNoSource), errors.Is(err, bluetooth.ErrUnsupported):
@@ -66,7 +101,7 @@ func (s *bluetoothMediaService) GetState(ctx context.Context, _ *frameworkv1.Get
 	if err != nil {
 		return nil, bluetoothStatusError(err)
 	}
-	return s.mediaView(ctx, bluetoothMediaProto(state)), nil
+	return s.mediaView(ctx, s.stateProto(ctx, state)), nil
 }
 
 // WatchState sends the current state, then one message per change. Connect and
@@ -95,7 +130,7 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 		}
 		return stream.Send(state)
 	}
-	if err := sendState(bluetoothMediaProto(initial)); err != nil {
+	if err := sendState(s.stateProto(ctx, initial)); err != nil {
 		return err
 	}
 	last := initial.Revision
@@ -115,7 +150,7 @@ func (s *bluetoothMediaService) WatchState(_ *frameworkv1.WatchBluetoothMediaSta
 				continue
 			}
 			last = ev.Media.Revision
-			if err := sendState(bluetoothMediaProto(ev.Media)); err != nil {
+			if err := sendState(s.stateProto(ctx, ev.Media)); err != nil {
 				return err
 			}
 		}
@@ -148,5 +183,5 @@ func (s *bluetoothMediaService) Command(ctx context.Context, req *frameworkv1.Bl
 	if err != nil {
 		return nil, bluetoothStatusError(err)
 	}
-	return s.mediaView(ctx, bluetoothMediaProto(state)), nil
+	return s.mediaView(ctx, s.stateProto(ctx, state)), nil
 }

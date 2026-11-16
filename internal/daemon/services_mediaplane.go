@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -21,14 +24,18 @@ import (
 	"capsulad/internal/presentations"
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
+	"capsulad/internal/supervisor"
 	"capsulad/internal/uichanges"
+	"capsulad/internal/wakeword"
 )
 
 // callerIdentity resolves an app connection to a supervised run.
 //
 // The run ID is carried in gRPC metadata by the SDK; when local peer
-// credentials are available, the PID must match the supervisor's run. This is
-// identity bookkeeping, not a per-app permission model.
+// credentials are available, the PID must match the supervisor's run. A
+// compiled-in system app is never resolved from the peer PID: see
+// supervisedRunForPID. This is identity bookkeeping, not a per-app permission
+// model.
 func (d *Daemon) callerIdentity(ctx context.Context) (appID, runID string, ok bool) {
 	if d.sup == nil {
 		return "", "", false
@@ -55,14 +62,28 @@ func (d *Daemon) callerIdentity(ctx context.Context) (appID, runID string, ok bo
 			return run.AppID, runID, true
 		}
 	}
-	if creds := grpcpeer.FromContext(ctx); creds.OK {
-		for _, run := range d.sup.List("") {
-			if run.PID == creds.PID {
-				return run.AppID, run.RunID, true
-			}
-		}
+	if run, found := d.supervisedRunForPID(ctx); found {
+		return run.AppID, run.RunID, true
 	}
 	return "", "", false
+}
+
+// supervisedRunForPID resolves a socket peer to an external supervised run.
+//
+// A compiled-in system app executes inside this process, so every virtual run
+// records the daemon's own PID — and so does every connection the daemon opens
+// to its own socket (the Web UI, framework cues and built-in app clients). A
+// PID match therefore proves nothing about a built-in and must never select
+// one: whichever virtual run was registered first would win and the Web UI's
+// own administrator reads would be attributed to that app. Built-in identities
+// are explicit instead (the stable run ID plus the per-boot internal token),
+// checked by the caller above. Only a real child process is resolved by PID.
+func (d *Daemon) supervisedRunForPID(ctx context.Context) (supervisor.Run, bool) {
+	creds := grpcpeer.FromContext(ctx)
+	if !creds.OK {
+		return supervisor.Run{}, false
+	}
+	return d.runForPID(creds.PID)
 }
 
 func (d *Daemon) requireCaller(ctx context.Context) (string, string, error) {
@@ -651,6 +672,11 @@ func (s *audioService) Playback(stream frameworkv1.AudioService_PlaybackServer) 
 	}
 	pb, err := s.d.openAppPlayback(appID, runID, open.EndpointId, formatFromProto(open.Format), open.ConversationId)
 	if err != nil {
+		// One app may hold at most the documented number of concurrent
+		// playback streams; that is a quota, not a malformed request.
+		if errors.Is(err, audio.ErrPlaybackLimit) {
+			return status.Error(codes.ResourceExhausted, err.Error())
+		}
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	defer pb.Close()
@@ -812,6 +838,7 @@ func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewor
 		return err
 	}
 	sel := trainSelection{
+		ModelID:  req.GetModelId(),
 		Display:  req.DisplayName,
 		Language: req.Language,
 		Seed:     req.Seed,
@@ -823,9 +850,15 @@ func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewor
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
 	var sendMu sync.Mutex
+	// The last fraction the browser saw, so the terminal failure frame reports
+	// real progress instead of resetting the bar.
+	var sentFraction atomic.Uint32
 	send := func(ev *frameworkv1.TrainWakewordEvent) error {
 		sendMu.Lock()
 		defer sendMu.Unlock()
+		if ev.Fraction > 0 {
+			sentFraction.Store(math.Float32bits(ev.Fraction))
+		}
 		return stream.Send(ev)
 	}
 	var lastStage string
@@ -846,10 +879,66 @@ func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewor
 	}
 	clf, err := s.d.TrainWakeword(ctx, sel, progress)
 	if err != nil {
+		// A typed refusal carries the cause, the failing takes and the measured
+		// gates. Emit them before the stream ends with its error status, so
+		// existing clients still see a terminating status but the operator gets
+		// actionable detail instead of one flattened sentence.
+		var failure *wakeword.TrainingFailure
+		if errors.As(err, &failure) && stream.Context().Err() == nil {
+			sendTrainingFailure(send, failure, math.Float32frombits(sentFraction.Load()))
+		}
 		return trainRPCStatus(err)
 	}
 	s.d.publishUI(uichanges.Wakeword)
-	return send(&frameworkv1.TrainWakewordEvent{
+	return send(installedEvent(clf))
+}
+
+// DeleteWakewordClassifier removes one trained word. It is an administrator
+// operation, refused while a training run is active, and never removes the
+// recordings: takes are shared training data.
+func (s *assistantService) DeleteWakewordClassifier(ctx context.Context, req *frameworkv1.DeleteWakewordClassifierRequest) (*frameworkv1.DeleteWakewordClassifierResponse, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "deleting a wakeword is a local administrator operation"); err != nil {
+		return nil, err
+	}
+	if err := s.d.DeleteWakewordClassifier(req.GetModelId()); err != nil {
+		return nil, deleteWakewordRPCStatus(err)
+	}
+	s.d.publishUI(uichanges.Wakeword)
+	return &frameworkv1.DeleteWakewordClassifierResponse{}, nil
+}
+
+// deleteWakewordRPCStatus maps a delete failure to the code the caller can act
+// on, the same way trainRPCStatus does: an id that cannot name an artifact is
+// the caller's mistake, a running fit is a device precondition, and anything
+// else (an unreadable or unwritable store) is a local fault.
+func deleteWakewordRPCStatus(err error) error {
+	var bad wakeword.ErrBadModel
+	switch {
+	case errors.As(err, &bad):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, errWakeTrainingBusy):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Internal, err.Error())
+	}
+}
+
+// sendTrainingFailure emits the structured refusal frame that precedes the
+// stream's terminating status. The stream still ends with an error, so existing
+// clients do not hang; the frame only makes the refusal actionable.
+func sendTrainingFailure(send func(*frameworkv1.TrainWakewordEvent) error, failure *wakeword.TrainingFailure, fraction float32) {
+	_ = send(&frameworkv1.TrainWakewordEvent{
+		Stage:    "failed",
+		Fraction: fraction,
+		Log:      failure.Detail,
+		Failure:  trainingFailureProto(failure),
+	})
+}
+
+// installedEvent is the final success frame: the installed classifier plus the
+// gate certificate read from the artifact, which the browser displays as-is.
+func installedEvent(clf *wakeword.Classifier) *frameworkv1.TrainWakewordEvent {
+	event := &frameworkv1.TrainWakewordEvent{
 		Stage: "installed", Fraction: 1,
 		Log: fmt.Sprintf("installed %s (threshold %.2f); select it in Settings and enable wakeword detection", clf.ID, clf.Threshold),
 		Classifier: &frameworkv1.WakewordClassifierInfo{
@@ -862,14 +951,60 @@ func (s *assistantService) TrainWakewordClassifier(req *frameworkv1.TrainWakewor
 			ProjectionWidth: uint32(clf.Projection),
 			HiddenWidth:     uint32(clf.Hidden),
 		},
-	})
+	}
+	if report, ok := clf.GateReport(); ok {
+		event.Metrics = gateMetricsProto(report.Splits)
+	}
+	return event
+}
+
+// gateMetricsProto copies measured splits into their wire form.
+func gateMetricsProto(splits []wakeword.SplitMetrics) []*frameworkv1.WakewordGateMetrics {
+	out := make([]*frameworkv1.WakewordGateMetrics, 0, len(splits))
+	for _, split := range splits {
+		out = append(out, &frameworkv1.WakewordGateMetrics{
+			Split:            split.Split,
+			WordRecordings:   uint32(max(split.WordRecordings, 0)),
+			Detected:         uint32(max(split.Detected, 0)),
+			Recall:           float32(split.Recall),
+			FalseActivations: uint32(max(split.FalseActivations, 0)),
+		})
+	}
+	return out
+}
+
+// trainingFailureProto copies a structured refusal into its wire form.
+func trainingFailureProto(failure *wakeword.TrainingFailure) *frameworkv1.WakewordTrainingFailure {
+	out := &frameworkv1.WakewordTrainingFailure{
+		Causes:    make([]string, 0, len(failure.Causes)),
+		Takes:     make([]*frameworkv1.WakewordFailingTake, 0, len(failure.Takes)),
+		Splits:    gateMetricsProto(failure.Splits),
+		Threshold: float32(failure.Threshold),
+		Detail:    failure.Detail,
+	}
+	for _, cause := range failure.Causes {
+		out.Causes = append(out.Causes, string(cause))
+	}
+	for _, take := range failure.Takes {
+		out.Takes = append(out.Takes, &frameworkv1.WakewordFailingTake{
+			Partition: take.Partition,
+			Index:     uint32(max(take.Index, 0)),
+			SampleId:  take.SampleID,
+			Cause:     string(take.Cause),
+			Detail:    take.Detail,
+		})
+	}
+	return out
 }
 
 // trainRPCStatus maps a training failure to the code the browser can act on.
-// Selection mistakes are the caller's; everything else means the takes did not
-// pass a quality gate and the installed model was left untouched.
+// Selection mistakes are the caller's; gate and policy refusals are a
+// precondition of the device and the takes; a fault in the trainer is internal.
+// Cancellation keeps its own code because the Web UI distinguishes a proven
+// pre-commit cancellation from a result it cannot confirm.
 func trainRPCStatus(err error) error {
 	var bad badSelectionError
+	var failure *wakeword.TrainingFailure
 	switch {
 	case errors.As(err, &bad):
 		return status.Error(codes.InvalidArgument, err.Error())
@@ -877,9 +1012,61 @@ func trainRPCStatus(err error) error {
 		return status.Error(codes.Canceled, "training cancelled")
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, "training timed out")
+	case errors.As(err, &failure):
+		return status.Error(trainingFailureCode(failure), trainingFailureText(failure))
 	default:
-		return status.Error(codes.FailedPrecondition, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
+}
+
+// trainingFailureCode maps the primary cause to the gRPC code. A take the
+// caller must fix is INVALID_ARGUMENT; a gate, policy or device input problem
+// is FAILED_PRECONDITION; a trainer or artifact fault is INTERNAL.
+func trainingFailureCode(failure *wakeword.TrainingFailure) codes.Code {
+	switch failure.Cause() {
+	case wakeword.CauseInvalidRequest,
+		wakeword.CauseTooFewWordTakes,
+		wakeword.CauseTooFewRoomTakes,
+		wakeword.CauseTooFewSpeechTakes,
+		wakeword.CauseTakeTooShort,
+		wakeword.CauseUnusableTake,
+		wakeword.CauseDuplicateTakes,
+		wakeword.CauseShortContext,
+		wakeword.CauseNoPositiveWindows,
+		wakeword.CauseNoNegativeWindows,
+		wakeword.CauseInsufficientHeldout:
+		return codes.InvalidArgument
+	case wakeword.CauseFitFailed, wakeword.CauseInternal:
+		return codes.Internal
+	default:
+		return codes.FailedPrecondition
+	}
+}
+
+// trainingFailureText names every cause and every take that must change, so a
+// client that only prints the status message still gives actionable advice.
+func trainingFailureText(failure *wakeword.TrainingFailure) string {
+	var text strings.Builder
+	text.WriteString(failure.Error())
+	if len(failure.Causes) > 0 {
+		causes := make([]string, 0, len(failure.Causes))
+		for _, cause := range failure.Causes {
+			causes = append(causes, string(cause))
+		}
+		label := "cause"
+		if len(causes) > 1 {
+			label = "causes"
+		}
+		text.WriteString(" [" + label + ": " + strings.Join(causes, ", ") + "]")
+	}
+	if len(failure.Takes) > 0 {
+		takes := make([]string, 0, len(failure.Takes))
+		for _, take := range failure.Takes {
+			takes = append(takes, fmt.Sprintf("%s #%d", take.Partition, take.Index))
+		}
+		text.WriteString("; takes to fix: " + strings.Join(takes, ", "))
+	}
+	return text.String()
 }
 
 func sampleProto(sam sample) *frameworkv1.WakewordSample {

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -272,6 +271,10 @@ func (d *Daemon) deleteSample(id string) error {
 // explicitly selected takes, never "all recordings": a setup must not pick up
 // an older word or background take that the user did not choose.
 type trainSelection struct {
+	// ModelID is the target artifact id: empty creates a new word, an existing
+	// id replaces exactly that file. It is never derived from the display name,
+	// so renaming a word cannot rebind it.
+	ModelID  string
 	Display  string
 	Language string
 	Seed     uint64
@@ -464,69 +467,4 @@ func (d *Daemon) loadSelection(sel trainSelection) (wakeword.Enrollment, selecti
 		return wakeword.Enrollment{}, selectionInputs{}, err
 	}
 	return en, selectionInputs{Tap: tap, RawTakesConverted: rawConverted}, nil
-}
-
-// InstallClassifier validates a fully trained classifier and atomically
-// replaces the installed model. Callers must only pass a classifier that came
-// out of a successful Train, whose quality gates ran on held-out recordings.
-//
-// ctx is the training request's lifetime, not an installation budget: it is
-// checked after the expensive validation/engine-build work and again by
-// writeClassifier immediately before the atomic rename. A cancellation that
-// wins either check leaves the previous model and the running engine untouched.
-// Once the rename commits, the install is complete and the engine is restarted
-// even if the request has gone away in the meantime; the persisted model and
-// the runner must never disagree.
-func (d *Daemon) InstallClassifier(ctx context.Context, clf *wakeword.Classifier) error {
-	if clf == nil {
-		return fmt.Errorf("no classifier to install")
-	}
-	if err := clf.Validate(); err != nil {
-		return err
-	}
-	// Building the engine here proves the artifact runs on this device before
-	// the old model file is touched.
-	if _, err := wakeword.NewEngine(clf); err != nil {
-		return fmt.Errorf("classifier is not runnable on this device: %w", err)
-	}
-	// The validation and engine build above are the costly preparation; a
-	// browser cancellation that arrived while they ran must not install.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(clf)
-	if err != nil {
-		return fmt.Errorf("encode classifier: %w", err)
-	}
-	if err := d.writeClassifier(ctx, raw); err != nil {
-		return err
-	}
-	d.restartWakewordEngine()
-	return nil
-}
-
-// writeClassifier atomically replaces the model file. The previous model stays
-// readable until the fully written temporary file is renamed over it, so a
-// failed write or a crash mid-write cannot leave a half model installed.
-// Cancellation is checked after the temporary file exists but before the
-// rename, so a cancel that lands during preparation removes the temporary file
-// and keeps the previous model installed.
-func (d *Daemon) writeClassifier(ctx context.Context, raw []byte) error {
-	path := d.classifierPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
 }

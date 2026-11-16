@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"capsulad/internal/artifact"
+	"capsulad/internal/manifest"
 )
 
 const cliTestManifest = `
@@ -382,6 +383,281 @@ func TestDeployRejectsSymlinkedBundleEntries(t *testing.T) {
 				t.Fatalf("error = %v, want a symlink rejection", err)
 			}
 		})
+	}
+}
+
+func TestDeployNativeRequirementAcceptsSingleFileRuntime(t *testing.T) {
+	lib := t.TempDir()
+	writeTestFile(t, lib, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, lib, "libcapsula.so.1.0.0", "runtime", 0o644)
+	d := &deployment{
+		libSrc: lib,
+		packages: []*artifact.Package{{
+			Manifest: &manifest.Manifest{ID: "org.example.native", NativeSDK: &manifest.NativeSDK{ABIMajor: 1}},
+		}},
+	}
+	if err := d.checkNativeRequirements(); err != nil {
+		t.Fatalf("bundle runtime without ABI links rejected: %v", err)
+	}
+	d.packages[0].Manifest.NativeSDK.ABIMajor = 2
+	if err := d.checkNativeRequirements(); err == nil || !strings.Contains(err.Error(), "major 2") {
+		t.Fatalf("incompatible requirement error = %v, want an ABI major mismatch", err)
+	}
+}
+
+func TestSyncLibSkipsUnchangedAndReplacesChangedFiles(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "first runtime", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	target := filepath.Join(dst, "libcapsula.so.1.0.0")
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("unchanged runtime was rewritten: before=%v after=%v", before, after)
+	}
+
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "changed runtime", 0o644)
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync changed runtime: %v", err)
+	}
+	replaced, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(after, replaced) {
+		t.Fatal("changed runtime retained the old inode")
+	}
+	if body, err := os.ReadFile(target); err != nil || string(body) != "changed runtime" {
+		t.Fatalf("changed runtime contents = %q, %v", body, err)
+	}
+}
+
+func TestSyncLibCreatesAndPreservesRuntimeLayout(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	for name, want := range map[string]string{
+		"libcapsula.so":   "libcapsula.so.1",
+		"libcapsula.so.1": "libcapsula.so.1.0.0",
+	} {
+		got, err := os.Readlink(filepath.Join(dst, name))
+		if err != nil || got != want {
+			t.Errorf("link %s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	links := []string{"libcapsula.so", "libcapsula.so.1"}
+	before := make([]os.FileInfo, len(links))
+	for i, name := range links {
+		info, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[i] = info
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	for i, name := range links {
+		after, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before[i], after) {
+			t.Errorf("identical link %s was replaced", name)
+		}
+	}
+}
+
+func TestSyncLibRejectsUnsafeRuntimeLinkTargets(t *testing.T) {
+	for _, library := range []string{"/outside/libcapsula.so.1", "../outside/libcapsula.so.1"} {
+		t.Run(library, func(t *testing.T) {
+			src := t.TempDir()
+			writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"`+library+`"}`, 0o644)
+			writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+			if err := syncLib(src, filepath.Join(t.TempDir(), "lib")); err == nil || !strings.Contains(err.Error(), "plain file name") {
+				t.Fatalf("unsafe metadata library error = %v, want path rejection", err)
+			}
+		})
+	}
+}
+
+func TestSyncLibReplacesAbsoluteAndEscapingInstalledLinks(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/lib/libcapsula.so.1", filepath.Join(dst, "libcapsula.so")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../elsewhere/libcapsula.so.1.0.0", filepath.Join(dst, "libcapsula.so.1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	for name, want := range map[string]string{
+		"libcapsula.so":   "libcapsula.so.1",
+		"libcapsula.so.1": "libcapsula.so.1.0.0",
+	} {
+		got, err := os.Readlink(filepath.Join(dst, name))
+		if err != nil || got != want {
+			t.Errorf("link %s = %q, %v; want the relative %q", name, got, err, want)
+		}
+	}
+}
+
+func TestSyncLibReplacesDereferencedABIFileCopiesWithLinks(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dst, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, dst, "libcapsula.so.1", "runtime", 0o644)
+	writeTestFile(t, dst, "libcapsula.so", "runtime", 0o644)
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	for name, want := range map[string]string{
+		"libcapsula.so":   "libcapsula.so.1",
+		"libcapsula.so.1": "libcapsula.so.1.0.0",
+	} {
+		got, err := os.Readlink(filepath.Join(dst, name))
+		if err != nil || got != want {
+			t.Errorf("link %s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+}
+
+func TestSyncLibLeavesCorrectPreexistingLayoutUntouched(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dst, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, dst, "libcapsula.so.1.0.0", "runtime", 0o644)
+	for name, target := range map[string]string{
+		"libcapsula.so":   "libcapsula.so.1",
+		"libcapsula.so.1": "libcapsula.so.1.0.0",
+	} {
+		if err := os.Symlink(target, filepath.Join(dst, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := []string{"libcapsula.so", "libcapsula.so.1"}
+	before := make([]os.FileInfo, len(links))
+	for i, name := range links {
+		info, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[i] = info
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync existing layout: %v", err)
+	}
+	for i, name := range links {
+		after, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before[i], after) {
+			t.Errorf("pre-existing link %s was replaced", name)
+		}
+	}
+}
+
+func TestSyncLibDoesNotWriteThroughManagedFileSymlinkToDirectory(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{}`, 0o644)
+	writeTestFile(t, src, "managed", "bundle", 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	link := filepath.Join(dst, "managed")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync through managed symlink path: %v", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("wrote through managed symlink: %v", entries)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("managed symlink was not replaced by a regular file: mode %v", info.Mode())
+	}
+}
+
+func TestSyncLibLeavesLinksAloneWithoutMatchingRuntimeFile(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	dst := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("libcapsula.so.1", filepath.Join(dst, "libcapsula.so")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing.so", filepath.Join(dst, "libcapsula.so.1")); err != nil {
+		t.Fatal(err)
+	}
+	before := make([]os.FileInfo, 2)
+	for i, name := range []string{"libcapsula.so", "libcapsula.so.1"} {
+		info, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[i] = info
+	}
+	if err := syncLib(src, dst); err != nil {
+		t.Fatalf("sync partial runtime: %v", err)
+	}
+	for i, name := range []string{"libcapsula.so", "libcapsula.so.1"} {
+		after, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before[i], after) {
+			t.Errorf("link %s changed without a matching library", name)
+		}
 	}
 }
 

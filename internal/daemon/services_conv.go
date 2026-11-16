@@ -15,7 +15,7 @@ func (d *Daemon) settingsSnapshot(s settings.UserSnapshot) *frameworkv1.Settings
 	out := &frameworkv1.UserSettings{
 		DefaultAppByResource:         map[string]string{},
 		DefaultAssistantAppId:        v.DefaultAssistantAppID,
-		WakewordModelId:              v.WakewordModelID,
+		Wakewords:                    wakewordsProto(v.Wakewords),
 		WakewordEnabled:              v.WakewordEnabled,
 		DisplayBrightness:            map[string]float32{},
 		MasterVolume:                 float32(v.MasterVolume),
@@ -50,7 +50,7 @@ func userSettingsFromProto(v *frameworkv1.UserSettings) settings.UserSettings {
 	out := settings.UserSettings{
 		DefaultAppByResource:         map[string]string{},
 		DefaultAssistantAppID:        v.DefaultAssistantAppId,
-		WakewordModelID:              v.WakewordModelId,
+		Wakewords:                    wakewordsFromProto(v.Wakewords),
 		WakewordEnabled:              v.WakewordEnabled,
 		DisplayBrightness:            map[string]float64{},
 		MasterVolume:                 float64(v.MasterVolume),
@@ -148,8 +148,16 @@ func runProto(run supervisor.Run) *frameworkv1.AppRun {
 	if run.Sandbox != "" {
 		detail = "sandbox=" + run.Sandbox + " " + detail
 	}
+	pid := run.PID
+	if run.Virtual {
+		// A compiled-in run has no child process. Its recorded PID is the
+		// daemon's own, shared with every in-process client, so publishing it
+		// would suggest an app-owned process that can be signalled or matched
+		// on. The runtime field already identifies it as built-in.
+		pid = 0
+	}
 	return &frameworkv1.AppRun{
-		RunId: run.RunID, AppId: run.AppID, Pid: uint32(run.PID), State: state,
+		RunId: run.RunID, AppId: run.AppID, Pid: uint32(pid), State: state,
 		StartedMonotonicNs: run.StartedNS, ExitCode: int32(run.ExitCode),
 		StatusDetail: detail, Runtime: runtimeProto(run.Runtime),
 	}

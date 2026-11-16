@@ -24,6 +24,10 @@ type SystemApp struct {
 	// Manifest declares identity, provides hints, settings and actions exactly
 	// like an installed manifest. Entrypoint.Runtime must be RuntimeBuiltin.
 	Manifest *manifest.Manifest
+	// FrameworkOwned marks a built-in runtime the framework needs independently
+	// of provider selection (for example, the clock's timer and alarm service).
+	// It must be set explicitly; Provides does not imply framework ownership.
+	FrameworkOwned bool
 	// Interfaces is the discovery metadata (descriptor protoset, docs and
 	// method list) published through AppInterfaceService. Manifest.Interfaces
 	// must declare the same service names.
@@ -99,8 +103,9 @@ func (d *Daemon) systemApp(appID string) (*SystemApp, bool) {
 	return app, ok
 }
 
-// startSystemApps launches every registered system app. It runs once in Run
-// before external boot apps, so discovery and routing have a real provider.
+// startSystemApps launches registered built-ins needed independently of
+// provider selection, plus built-in providers selected in persisted settings.
+// It runs once in Run before external boot apps.
 func (d *Daemon) startSystemApps() {
 	d.systemMu.Lock()
 	list := make([]string, 0, len(d.systemApps))
@@ -110,10 +115,29 @@ func (d *Daemon) startSystemApps() {
 	d.systemMu.Unlock()
 	sort.Strings(list)
 	for _, id := range list {
+		if !d.builtinNeededAtBoot(id) {
+			d.logs.Infof("daemon", id, "not selected and not framework-owned; leaving it stopped")
+			continue
+		}
 		if _, err := d.startSystemApp(id); err != nil {
 			d.logs.Warnf("daemon", id, "could not start system app: %v", err)
 		}
 	}
+}
+
+// builtinNeededAtBoot reports whether a built-in is required for the booted
+// settings: framework-owned helpers always run, while provider built-ins run
+// only when selected. Manifest boot/background flags do not override this.
+func (d *Daemon) builtinNeededAtBoot(appID string) bool {
+	app, ok := d.reg.Get(appID)
+	if !ok || app.Manifest.Entrypoint.Runtime != manifest.RuntimeBuiltin {
+		return false
+	}
+	systemApp, ok := d.systemApp(appID)
+	if !ok {
+		return false
+	}
+	return systemApp.FrameworkOwned || d.isSelectedDefault(appID)
 }
 
 // startSystemApp starts a system app if it is not already running and returns

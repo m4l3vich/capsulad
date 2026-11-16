@@ -3,8 +3,10 @@ package wakeword
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"io/fs"
 	"math"
 	"math/rand/v2"
 	"path/filepath"
@@ -137,41 +139,48 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	}
 
 	// Stage: validate. Find the word in every take; a take that does not
-	// contain recognisable speech is rejected instead of trained on.
+	// contain recognisable speech is rejected instead of trained on. Every
+	// problem found here is collected: a refusal names all unusable takes and
+	// all partition minima, so the operator does not fix one take only to be
+	// refused by the next check.
 	progress("validate", 0)
+	var invalid failureCollector
 	if len(en.Takes) < minWordRecordings {
-		return nil, enrollmentErrorf("need at least %d word recordings (*_word.wav), got %d", minWordRecordings, len(en.Takes))
+		invalid.cause(CauseTooFewWordTakes, fmt.Sprintf(
+			"need at least %d word recordings (*_word.wav), got %d", minWordRecordings, len(en.Takes)))
 	}
 	words := make([]wordTake, len(en.Takes))
+	wordOK := make([]bool, len(en.Takes))
 	for i, pcm := range en.Takes {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("wakeword training cancelled: %w", err)
 		}
 		start, end, err := trimWord(pcm)
 		if err != nil {
-			return nil, enrollmentErrorf("word recording %d: %v", i+1, err)
+			invalid.take(FailingTake{Partition: "word", Index: i + 1, Cause: CauseUnusableTake, Detail: err.Error()})
+			continue
 		}
 		words[i] = wordTake{pcm: pcm, start: start, end: end}
+		wordOK[i] = true
 		progress("validate", float64(i+1)/float64(len(words)))
 	}
 	seenWord := make(map[uint64]int, len(words))
 	for i := range words {
+		if !wordOK[i] {
+			continue
+		}
 		fp := takeFingerprint(words[i].pcm)
 		if j, ok := seenWord[fp]; ok && slices.Equal(words[j].pcm, words[i].pcm) {
-			return nil, enrollmentErrorf("word recording %d duplicates word recording %d; record independent takes", i+1, j+1)
+			invalid.take(FailingTake{Partition: "word", Index: i + 1, Cause: CauseDuplicateTakes,
+				Detail: fmt.Sprintf("duplicates word recording %d; record independent takes", j+1)})
+			continue
 		}
 		seenWord[fp] = i
 	}
-	rooms, err := checkAudioSet("room/ambient", en.Ambient, minRoomRecordings, minRoomTakeSamples)
-	if err != nil {
-		return nil, err
-	}
-	speech, err := checkAudioSet("speech", en.Speech, minSpeechRecordings, minSpeechTakeSamples)
-	if err != nil {
-		return nil, err
-	}
-	falseTakes, err := checkAudioSet("false-activation", en.False, 0, minFalseTakeSamples)
-	if err != nil {
+	rooms := invalid.audioSet("room/ambient", "room", en.Ambient, minRoomRecordings, minRoomTakeSamples, CauseTooFewRoomTakes)
+	speech := invalid.audioSet("speech", "speech", en.Speech, minSpeechRecordings, minSpeechTakeSamples, CauseTooFewSpeechTakes)
+	falseTakes := invalid.audioSet("false-activation", "false_activation", en.False, 0, minFalseTakeSamples, CauseTakeTooShort)
+	if err := invalid.err(); err != nil {
 		return nil, err
 	}
 
@@ -186,15 +195,15 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	}
 	wordSplit, err := splitByContent(wordPCM, 2, 2)
 	if err != nil {
-		return nil, err
+		return nil, splitFailure("word", err)
 	}
 	roomSplit, err := splitByContent(rooms, 1, 1)
 	if err != nil {
-		return nil, err
+		return nil, splitFailure("room", err)
 	}
 	speechSplit, err := splitByContent(speech, 1, 1)
 	if err != nil {
-		return nil, err
+		return nil, splitFailure("speech", err)
 	}
 	falseMinTune, falseMinTest := 0, 0
 	if len(falseTakes) >= 3 {
@@ -202,13 +211,17 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	}
 	falseSplit, err := splitByContent(falseTakes, falseMinTune, falseMinTest)
 	if err != nil {
-		return nil, err
+		return nil, splitFailure("false_activation", err)
 	}
 	progress("prepare", 0.4)
 
 	neg, err := LoadNegatives(opts.NegativesPath)
 	if err != nil {
-		return nil, fmt.Errorf("wakeword training: %w", err)
+		cause := CauseCorpusUnusable
+		if errors.Is(err, fs.ErrNotExist) {
+			cause = CauseCorpusMissing
+		}
+		return nil, &TrainingFailure{Causes: []FailureCause{cause}, Detail: err.Error()}
 	}
 	if err := requireNegativesSplits(neg); err != nil {
 		return nil, err
@@ -253,7 +266,11 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 				))
 				pcm, ws, we, err := augmentWordTake(rng, wt.pcm, wt.start, wt.end, trainRooms, trainSpeech)
 				if err != nil {
-					return nil, 0, 0, enrollmentErrorf("augmenting word recording %d: %v", wi+1, err)
+					return nil, 0, 0, &TrainingFailure{
+						Causes: []FailureCause{CauseUnusableTake},
+						Takes:  []FailingTake{{Partition: "word", Index: wi + 1, Cause: CauseUnusableTake, Detail: err.Error()}},
+						Detail: fmt.Sprintf("augmenting word recording %d: %v", wi+1, err),
+					}
 				}
 				return pcm, ws, we, nil
 			})
@@ -346,58 +363,76 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		return nil, err
 	}
 
+	// Each train take contributes one original signal followed by perTake
+	// augmented variants, in that order. Map a signal back to the submitted word
+	// take so a refusal names a take the operator actually recorded.
+	signalsPerTake := perTake + 1
+	wordTakeForSignal := func(i int) int {
+		position := min((i-trainStart)/signalsPerTake, len(wordSplit.Train)-1)
+		return wordSplit.Train[position] + 1
+	}
+
+	// Validate every signal's context before sampling windows from any of them,
+	// so a refusal reports all short signals instead of the first.
+	var trainingSamples int64
+	var contextFailures failureCollector
+	for i := trainStart; i < trainStart+trainCount; i++ {
+		sig := &embedded[i]
+		trainingSamples += int64(sig.samples)
+		if sig.wordStart < minPrecontext {
+			contextFailures.take(FailingTake{Partition: "word", Index: wordTakeForSignal(i), Cause: CauseShortContext,
+				Detail: fmt.Sprintf("training signal %d has only %d ms of pre-word context, need %d ms",
+					i-trainStart+1, sig.wordStart*1000/enrollmentSampleRate, minPrecontext*1000/enrollmentSampleRate)})
+			continue
+		}
+		if post := sig.samples - sig.wordEnd; post < minPostSlack {
+			contextFailures.take(FailingTake{Partition: "word", Index: wordTakeForSignal(i), Cause: CauseShortContext,
+				Detail: fmt.Sprintf("training signal %d has only %d ms of post-word audio, need %d ms",
+					i-trainStart+1, post*1000/enrollmentSampleRate, minPostSlack*1000/enrollmentSampleRate)})
+		}
+	}
+	if err := contextFailures.err(); err != nil {
+		return nil, err
+	}
+	augmented := trainCount - len(wordSplit.Train)
+
 	// Positives: every complete-word context window ending between the word end
 	// and 400 ms after it. The daemon fires only after two consecutive windows,
 	// so a single labelled frame would not teach the streak the runtime expects.
 	// The same streams also yield clean pre-word windows (ending by
 	// minPrecontext), which teach ordinary speech, breath and room context
-	// before the keyword instead of leaving that phase unseen.
+	// before the keyword instead of leaving that phase unseen. Windows ending
+	// before the word end are not complete keyword examples: they teach
+	// near-boundary partials as negatives so two partial scores cannot fire
+	// prematurely and consume the cooldown before the complete word.
 	positives := make([]TrainingExample, 0, trainCount*6)
 	cleanPrefixCount := max(0, (minPrecontext-oww.FirstEmbeddingSamples)/oww.StepSamples-ContextFrames+2)
 	prefixNegatives := make([]TrainingExample, 0, trainCount*cleanPrefixCount)
-	var trainingSamples int64
+	var partialNegatives []TrainingExample
+	var windowFailures failureCollector
 	for i := trainStart; i < trainStart+trainCount; i++ {
 		sig := &embedded[i]
-		trainingSamples += int64(sig.samples)
-		if sig.wordStart < minPrecontext {
-			return nil, enrollmentErrorf("training signal %d has only %d ms of pre-word context, need %d ms",
-				i-trainStart+1, sig.wordStart*1000/enrollmentSampleRate, minPrecontext*1000/enrollmentSampleRate)
-		}
-		if post := sig.samples - sig.wordEnd; post < minPostSlack {
-			return nil, enrollmentErrorf("training signal %d has only %d ms of post-word audio, need %d ms",
-				i-trainStart+1, post*1000/enrollmentSampleRate, minPostSlack*1000/enrollmentSampleRate)
-		}
 		prefixNegatives = appendPrefixNegativeWindows(prefixNegatives, sig)
 		first, last, err := positiveWindowRange(sig.count, sig.wordStart, sig.wordEnd)
 		if err != nil {
-			return nil, enrollmentErrorf("training signal %d: %v", i-trainStart+1, err)
+			windowFailures.take(FailingTake{Partition: "word", Index: wordTakeForSignal(i), Cause: CauseNoPositiveWindows,
+				Detail: fmt.Sprintf("training signal %d: %v", i-trainStart+1, err)})
+			continue
 		}
 		for e := first; e <= last; e++ {
 			positives = append(positives, TrainingExample{Features: sig.window(e), Positive: true})
 		}
-	}
-	if len(positives) == 0 {
-		return nil, enrollmentErrorf("no positive training windows were produced")
-	}
-	augmented := trainCount - len(wordSplit.Train)
-
-	// Windows ending before the word end are not complete keyword examples.
-	// Teach near-boundary partials as negatives so two partial scores cannot
-	// fire prematurely and consume the cooldown before the complete word.
-	var partialNegatives []TrainingExample
-	for i := trainStart; i < trainStart+trainCount; i++ {
-		sig := &embedded[i]
-		first, _, err := positiveWindowRange(sig.count, sig.wordStart, sig.wordEnd)
-		if err != nil {
-			return nil, enrollmentErrorf("training signal %d: %v", i-trainStart+1, err)
-		}
-		start := first - 4
-		if start < ContextFrames-1 {
-			start = ContextFrames - 1
-		}
+		start := max(first-4, ContextFrames-1)
 		for e := start; e < first; e++ {
 			partialNegatives = append(partialNegatives, TrainingExample{Features: sig.window(e), Positive: false})
 		}
+	}
+	if err := windowFailures.err(); err != nil {
+		return nil, err
+	}
+	if len(positives) == 0 {
+		return nil, &TrainingFailure{Causes: []FailureCause{CauseNoPositiveWindows},
+			Detail: "no positive training windows were produced"}
 	}
 
 	// Stage: negatives. CNEG train streams are already embeddings; local room,
@@ -435,7 +470,16 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		negatives = append(negatives, localNegatives...)
 	}
 	if len(negatives) == 0 {
-		return nil, enrollmentErrorf("negatives corpus and local room/speech/false recordings produced no training windows")
+		return nil, &TrainingFailure{Causes: []FailureCause{CauseNoNegativeWindows},
+			Detail: "negatives corpus and local room/speech/false recordings produced no training windows"}
+	}
+	// The pool is a structural view: the local block is repeated to balance it
+	// against the corpus, but mining addresses each canonical window once, so a
+	// duplicated view cannot consume several hard slots or a share of the
+	// sampled budget. The shape costs two integers, not a copy per window.
+	poolShape := NegativePoolShape{
+		Canonical:  len(corpusNegatives) + len(localNegatives),
+		RepeatSpan: len(localNegatives),
 	}
 	progress("negatives", 1)
 
@@ -446,7 +490,7 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	fitLosses := make([]float64, 0, trainingEpochs)
 	// Fresh random coverage every epoch, with a separate additive hard set.
 	// FitClassifier clamps both requests: random to the pool size, hard to the
-	// pool and miningPoolCap.
+	// number of distinct windows and miningPoolCap.
 	randomPerEpoch := max(trainingNegativesPerPos*len(positives), minRandomNegativesPerEpoch)
 	hardPerEpoch := max(len(positives), minHardNegativesPerEpoch)
 	fitErr := FitClassifier(ctx, clf, positives, negatives, FitOptions{
@@ -456,6 +500,7 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		LearningRate:            trainingLearningRate,
 		RandomNegativesPerEpoch: randomPerEpoch,
 		HardNegativesPerEpoch:   hardPerEpoch,
+		NegativePool:            poolShape,
 		PositiveWeight:          trainingPositiveWeight,
 		Progress: func(epoch int, loss float64) {
 			if math.IsNaN(loss) || math.IsInf(loss, 0) {
@@ -468,7 +513,11 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		},
 	})
 	if fitErr != nil {
-		return nil, fmt.Errorf("wakeword training: fit: %w", fitErr)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fitErr
+		}
+		return nil, &TrainingFailure{Causes: []FailureCause{CauseFitFailed},
+			Detail: fmt.Sprintf("fitting the classifier failed: %v", fitErr)}
 	}
 
 	// Stage: calibrate. The threshold is chosen on the tune split only. The
@@ -477,19 +526,29 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	progress("calibrate", 0)
 	tuneWordEvals, err := evalFromEmbedded(ctx, clf, embedded[tuneWordStart:tuneWordStart+tuneWordCount], false)
 	if err != nil {
-		return nil, err
+		return nil, heldoutWordFailure(err, embedded[tuneWordStart:tuneWordStart+tuneWordCount], wordSplit.Tune)
 	}
 	tuneNegEvals, tuneAuxEvals, err := evalNegativeSignals(ctx, clf, neg, "tune", embedded[tuneNegStart:tuneNegStart+tuneNegCount])
 	if err != nil {
-		return nil, err
+		return nil, evalFailure(err)
 	}
 	if countScoreWindows(tuneNegEvals) == 0 {
-		return nil, enrollmentErrorf("held-out tune room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames)
+		return nil, failureWithTakes(CauseInsufficientHeldout,
+			fmt.Sprintf("held-out tune room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames),
+			shortNegativeTakes(embedded[tuneNegStart:tuneNegStart+tuneNegCount], roomSplit.Tune, speechSplit.Tune, falseSplit.Tune))
 	}
-	threshold, tuneMetrics, err := calibrateThreshold(tuneWordEvals, tuneNegEvals)
+	tuning, err := calibrateThreshold(tuneWordEvals, tuneNegEvals)
 	if err != nil {
+		var failure *TrainingFailure
+		if errors.As(err, &failure) {
+			addGateTakeFailures(failure, CauseTuneGateFailed, tuning.bestAt,
+				tuneWordEvals, wordSplit.Tune, tuneNegEvals, roomSplit.Tune, speechSplit.Tune, falseSplit.Tune,
+				"the tune split never detected this recording at a feasible threshold", "this recording false-fired on the tune split")
+		}
 		return nil, err
 	}
+	threshold := tuning.threshold
+	tuneMetrics := tuning.chosen
 	auxTuneMetrics := measurePolicy(nil, tuneAuxEvals, threshold)
 	progress("calibrate", 1)
 
@@ -499,18 +558,26 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 	progress("finaltest", 0)
 	testWordEvals, err := evalFromEmbedded(ctx, clf, embedded[testWordStart:testWordStart+testWordCount], false)
 	if err != nil {
-		return nil, err
+		return nil, heldoutWordFailure(err, embedded[testWordStart:testWordStart+testWordCount], wordSplit.Test)
 	}
 	testNegEvals, testAuxEvals, err := evalNegativeSignals(ctx, clf, neg, "test", embedded[testNegStart:testNegStart+testNegCount])
 	if err != nil {
-		return nil, err
+		return nil, evalFailure(err)
 	}
 	if countScoreWindows(testNegEvals) == 0 {
-		return nil, enrollmentErrorf("held-out final-test room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames)
+		return nil, failureWithTakes(CauseInsufficientHeldout,
+			fmt.Sprintf("held-out final-test room/speech takes are too short for a %d-embedding window; record longer independent takes", ContextFrames),
+			shortNegativeTakes(embedded[testNegStart:testNegStart+testNegCount], roomSplit.Test, speechSplit.Test, falseSplit.Test))
 	}
 	testMetrics := measurePolicy(testWordEvals, testNegEvals, threshold)
 	auxTestMetrics := measurePolicy(nil, testAuxEvals, threshold)
 	if err := finalGateError(testMetrics, auxTuneMetrics, auxTestMetrics, threshold); err != nil {
+		var failure *TrainingFailure
+		if errors.As(err, &failure) {
+			addGateTakeFailures(failure, CauseFinalGateFailed, threshold,
+				testWordEvals, wordSplit.Test, testNegEvals, roomSplit.Test, speechSplit.Test, falseSplit.Test,
+				"the final test did not detect this recording at the installed threshold", "this recording false-fired on the final test")
+		}
 		return nil, err
 	}
 	progress("finaltest", 1)
@@ -545,7 +612,8 @@ func Train(ctx context.Context, en Enrollment, opts TrainOptions) (*Classifier, 
 		threshold:       threshold,
 	})
 	if err := clf.Validate(); err != nil {
-		return nil, fmt.Errorf("wakeword training: trained classifier is invalid: %w", err)
+		return nil, &TrainingFailure{Causes: []FailureCause{CauseInternal},
+			Detail: fmt.Sprintf("trained classifier is invalid: %v", err)}
 	}
 	return clf, nil
 }
@@ -558,13 +626,110 @@ type wordTake struct {
 	end   int
 }
 
-// enrollmentError is an actionable training error, not a model-format error.
-type enrollmentError struct{ reason string }
+// failureWithTakes builds a refusal with its failing takes attached.
+func failureWithTakes(cause FailureCause, detail string, takes []FailingTake) *TrainingFailure {
+	return &TrainingFailure{Causes: []FailureCause{cause}, Takes: takes, Detail: detail}
+}
 
-func (e enrollmentError) Error() string { return "wakeword training: " + e.reason }
+// evalFailure keeps cancellation intact and reports any other evaluation fault
+// as an internal training fault.
+func evalFailure(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var failure *TrainingFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	return &TrainingFailure{Causes: []FailureCause{CauseInternal}, Detail: err.Error()}
+}
 
-func enrollmentErrorf(format string, args ...any) error {
-	return enrollmentError{reason: fmt.Sprintf(format, args...)}
+// heldoutWordFailure reports every held-out word take too short to be scored.
+// An already-typed fault (a non-finite score, cancellation) passes through.
+func heldoutWordFailure(err error, sigs []embeddedSignal, indices []int) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var failure *TrainingFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	takes := make([]FailingTake, 0, len(indices))
+	for i := range sigs {
+		if i >= len(indices) || sigs[i].count >= ContextFrames {
+			continue
+		}
+		takes = append(takes, FailingTake{Partition: "word", Index: indices[i] + 1, Cause: CauseTakeTooShort,
+			Detail: fmt.Sprintf("held-out recording is too short for a %d-embedding window", ContextFrames)})
+	}
+	return failureWithTakes(CauseInsufficientHeldout, err.Error(), takes)
+}
+
+// negativeTakeRef identifies one local held-out negative take.
+type negativeTakeRef struct {
+	partition string
+	index     int
+}
+
+// negativeRefs lists the partition and 1-based submitted index of each local
+// held-out negative, in the order evalNegativeSignals builds them: rooms,
+// unrelated speech, then explicit false activations.
+func negativeRefs(rooms, speech, falses []int) []negativeTakeRef {
+	refs := make([]negativeTakeRef, 0, len(rooms)+len(speech)+len(falses))
+	for _, index := range rooms {
+		refs = append(refs, negativeTakeRef{partition: "room", index: index + 1})
+	}
+	for _, index := range speech {
+		refs = append(refs, negativeTakeRef{partition: "speech", index: index + 1})
+	}
+	for _, index := range falses {
+		refs = append(refs, negativeTakeRef{partition: "false_activation", index: index + 1})
+	}
+	return refs
+}
+
+// shortNegativeTakes reports the local held-out negatives whose embedding
+// stream cannot hold one classifier window.
+func shortNegativeTakes(sigs []embeddedSignal, rooms, speech, falses []int) []FailingTake {
+	refs := negativeRefs(rooms, speech, falses)
+	takes := make([]FailingTake, 0, len(refs))
+	for i := range sigs {
+		if i >= len(refs) || sigs[i].count >= ContextFrames {
+			continue
+		}
+		takes = append(takes, FailingTake{Partition: refs[i].partition, Index: refs[i].index, Cause: CauseTakeTooShort,
+			Detail: fmt.Sprintf("held-out take is too short for a %d-embedding window; record a longer independent take", ContextFrames)})
+	}
+	return takes
+}
+
+// addGateTakeFailures appends every held-out take that explains a gate
+// refusal: word takes the policy missed and local negatives that false fired at
+// the measured threshold.
+func addGateTakeFailures(failure *TrainingFailure, cause FailureCause, threshold float64,
+	words []evalSignal, wordIndices []int, negatives []evalSignal, rooms, speech, falses []int,
+	wordDetail, negativeDetail string) {
+	for i, word := range words {
+		if evaluatePolicy(word, threshold).detected {
+			continue
+		}
+		index := i + 1
+		if i < len(wordIndices) {
+			index = wordIndices[i] + 1
+		}
+		failure.Takes = append(failure.Takes, FailingTake{Partition: "word", Index: index, Cause: cause, Detail: wordDetail})
+	}
+	refs := negativeRefs(rooms, speech, falses)
+	for i, negative := range negatives {
+		if evaluatePolicy(negative, threshold).falseActivations == 0 {
+			continue
+		}
+		ref := negativeTakeRef{partition: "negative", index: i + 1}
+		if i < len(refs) {
+			ref = refs[i]
+		}
+		failure.Takes = append(failure.Takes, FailingTake{Partition: ref.partition, Index: ref.index, Cause: cause, Detail: negativeDetail})
+	}
 }
 
 func (o TrainOptions) withDefaults() TrainOptions {
@@ -579,31 +744,48 @@ func (o TrainOptions) withDefaults() TrainOptions {
 
 func (o TrainOptions) check() error {
 	if strings.TrimSpace(o.ID) == "" {
-		return enrollmentErrorf("model id is required")
+		return &TrainingFailure{Causes: []FailureCause{CauseInvalidRequest}, Detail: "model id is required"}
 	}
 	if strings.TrimSpace(o.NegativesPath) == "" {
-		return enrollmentErrorf("negatives corpus path is required (build CNEG0002 with tools/build_wakeword_negatives.py); inference and training do not embed a bundled negative set")
+		return &TrainingFailure{Causes: []FailureCause{CauseConfiguration},
+			Detail: "negatives corpus path is required (build CNEG0002 with tools/build_wakeword_negatives.py); inference and training do not embed a bundled negative set"}
 	}
 	if strings.TrimSpace(o.InputProcessing) == "" {
-		return enrollmentErrorf("input processing policy is required; declare the capture tap already applied to the takes (for example %q)", audio.CaptureProcessingTap)
+		return &TrainingFailure{Causes: []FailureCause{CauseConfiguration},
+			Detail: fmt.Sprintf("input processing policy is required; declare the capture tap already applied to the takes (for example %q)", audio.CaptureProcessingTap)}
 	}
 	if o.InputProcessing != audio.CaptureProcessingTap {
-		return enrollmentErrorf("unsupported input processing %q; this build trains and runs only %q — convert legacy raw takes before training", o.InputProcessing, audio.CaptureProcessingTap)
+		return &TrainingFailure{Causes: []FailureCause{CauseConfiguration},
+			Detail: fmt.Sprintf("unsupported input processing %q; this build trains and runs only %q — convert legacy raw takes before training", o.InputProcessing, audio.CaptureProcessingTap)}
 	}
 	return nil
 }
 
-func checkAudioSet(name string, takes [][]int16, minCount, minSamples int) ([][]int16, error) {
+// audioSet records every count and length problem of one partition, so a
+// refusal names all of them at once.
+func (f *failureCollector) audioSet(name, partition string, takes [][]int16, minCount, minSamples int, tooFew FailureCause) [][]int16 {
 	if len(takes) < minCount {
-		return nil, enrollmentErrorf("need at least %d %s recordings, got %d", minCount, name, len(takes))
+		f.cause(tooFew, fmt.Sprintf("need at least %d %s recordings, got %d", minCount, name, len(takes)))
 	}
 	for i, pcm := range takes {
 		if len(pcm) < minSamples {
-			return nil, enrollmentErrorf("%s recording %d is %d ms; need at least %d ms",
-				name, i+1, len(pcm)*1000/enrollmentSampleRate, minSamples*1000/enrollmentSampleRate)
+			f.take(FailingTake{Partition: partition, Index: i + 1, Cause: CauseTakeTooShort,
+				Detail: fmt.Sprintf("%s recording is %d ms; need at least %d ms",
+					name, len(pcm)*1000/enrollmentSampleRate, minSamples*1000/enrollmentSampleRate)})
 		}
 	}
-	return takes, nil
+	return takes
+}
+
+// splitFailure reports a partition that cannot be split into train, tune and
+// final test: the submitted takes are too few for an honest certificate.
+func splitFailure(partition string, err error) error {
+	var failure *TrainingFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	return &TrainingFailure{Causes: []FailureCause{CauseInsufficientHeldout},
+		Detail: fmt.Sprintf("%s takes: %v", partition, err)}
 }
 
 // --- deterministic splitting ------------------------------------------------
@@ -678,7 +860,7 @@ func splitCounts(n, minTune, minTest int) (testCount, tuneCount int, err error) 
 		trainCount++
 	}
 	if trainCount < 1 {
-		return 0, 0, enrollmentErrorf("need at least %d recordings to split into train/tune/final-test sets", 1+minTune+minTest)
+		return 0, 0, fmt.Errorf("need at least %d recordings to split into train/tune/final-test sets", 1+minTune+minTest)
 	}
 	return testCount, tuneCount, nil
 }
@@ -931,7 +1113,8 @@ func appendPrefixNegativeWindows(out []TrainingExample, sig *embeddedSignal) []T
 func requireNegativesSplits(neg *Negatives) error {
 	for _, split := range []string{"train", "tune", "test"} {
 		if len(neg.StreamsForSplit(split)) == 0 {
-			return enrollmentErrorf("negatives corpus has no %q streams; rebuild it with independent train/tune/test recordings", split)
+			return &TrainingFailure{Causes: []FailureCause{CauseCorpusUnusable},
+				Detail: fmt.Sprintf("negatives corpus has no %q streams; rebuild it with independent train/tune/test recordings", split)}
 		}
 	}
 	return nil
@@ -953,7 +1136,7 @@ func scoreStream(clf *Classifier, sig *embeddedSignal) ([]float64, error) {
 	for i := range scores {
 		v := clf.Score(sig.window(i + ContextFrames - 1))
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, enrollmentErrorf("classifier produced a non-finite score")
+			return nil, &TrainingFailure{Causes: []FailureCause{CauseInternal}, Detail: "classifier produced a non-finite score"}
 		}
 		scores[i] = v
 	}
@@ -971,7 +1154,9 @@ func evalFromEmbedded(ctx context.Context, clf *Classifier, sigs []embeddedSigna
 			if skipShort {
 				continue
 			}
-			return nil, enrollmentErrorf("held-out recording %d is too short for a %d-embedding window", i+1, ContextFrames)
+			// The caller maps this to a structured refusal with the submitted
+			// take indices; this layer only knows the evaluation position.
+			return nil, fmt.Errorf("held-out recording %d is too short for a %d-embedding window", i+1, ContextFrames)
 		}
 		scores, err := scoreStream(clf, sig)
 		if err != nil {
@@ -1104,33 +1289,56 @@ func measurePolicy(words, negatives []evalSignal, threshold float64) gateMetrics
 // certificate is the local held-out result; the external CNEG tune and
 // final-test results are auxiliary off-policy guards that can still block
 // installation if they false fire. Neither is relabelled as the other, and
-// neither auxiliary split participates in choosing the threshold.
+// neither auxiliary split participates in choosing the threshold. Every failed
+// check is reported: a refusal never hides one cause behind another.
 func finalGateError(test, auxTune, auxTest gateMetrics, threshold float64) error {
+	var failed failureCollector
+	failed.threshold = threshold
 	if auxTune.FalseActivations > 0 {
-		return enrollmentErrorf("auxiliary off-policy corpus guard failed: %d false activations on CNEG tune streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
-			auxTune.FalseActivations)
+		failed.cause(CauseAuxiliaryGateFailed, fmt.Sprintf("auxiliary off-policy corpus guard failed: %d false activations on CNEG tune streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
+			auxTune.FalseActivations))
 	}
 	if auxTest.FalseActivations > 0 {
-		return enrollmentErrorf("auxiliary off-policy corpus guard failed: %d false activations on CNEG final-test streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
-			auxTest.FalseActivations)
+		failed.cause(CauseAuxiliaryGateFailed, fmt.Sprintf("auxiliary off-policy corpus guard failed: %d false activations on CNEG final-test streams; this is not a processed-audio certificate but blocks installation — inspect the selected takes and retrain",
+			auxTest.FalseActivations))
 	}
 	if !test.passes() {
-		return enrollmentErrorf("final test failed at threshold %.3f: detected %s with %d false activations on held-out processed takes; need at least 80%% of independent word recordings and zero false activations — add more independent recordings and retrain",
-			threshold, test.wordSummary(), test.FalseActivations)
+		failed.cause(CauseFinalGateFailed, fmt.Sprintf("final test failed at threshold %.3f: detected %s with %d false activations on held-out processed takes; need at least 80%% of independent word recordings and zero false activations — add more independent recordings and retrain",
+			threshold, test.wordSummary(), test.FalseActivations))
 	}
-	return nil
+	if !failed.failed() {
+		return nil
+	}
+	failed.split(metricsToSplit(SplitFinalTest, test))
+	failed.split(metricsToSplit(SplitAuxTune, auxTune))
+	failed.split(metricsToSplit(SplitAuxFinalTest, auxTest))
+	return failed.err()
+}
+
+// calibration is one tune-split search result. bestAt is the threshold that
+// produced the strongest candidate, so a refusal can report the numbers and the
+// takes it actually measured instead of an arbitrary point of the grid.
+type calibration struct {
+	threshold float64
+	chosen    gateMetrics
+	best      gateMetrics
+	bestAt    float64
 }
 
 // calibrateThreshold searches the tune split for a feasible operating point.
 // The feasible interval's midpoint is used so the choice keeps margin from
 // both the recall floor and false activations. The final test never takes part.
-func calibrateThreshold(words, negatives []evalSignal) (float64, gateMetrics, error) {
+// A refusal is a *TrainingFailure naming the tune gate and its best measured
+// candidate; calibration itself never chooses a failing threshold.
+func calibrateThreshold(words, negatives []evalSignal) (calibration, error) {
 	if len(words) == 0 {
-		return 0, gateMetrics{}, enrollmentErrorf("no held-out tune word recordings")
+		return calibration{}, &TrainingFailure{Causes: []FailureCause{CauseInsufficientHeldout},
+			Detail: "no held-out tune word recordings"}
 	}
 	steps := int(math.Round((thresholdMax - thresholdMin) / thresholdStep))
 	var feasible []float64
 	best := gateMetrics{}
+	bestAt := thresholdMin
 	for i := range steps + 1 {
 		t := thresholdMin + float64(i)*thresholdStep
 		m := measurePolicy(words, negatives, t)
@@ -1139,11 +1347,16 @@ func calibrateThreshold(words, negatives []evalSignal) (float64, gateMetrics, er
 		}
 		if m.Detected > best.Detected || (m.Detected == best.Detected && m.FalseActivations < best.FalseActivations) {
 			best = m
+			bestAt = t
 		}
 	}
 	if len(feasible) == 0 {
-		return 0, best, enrollmentErrorf("no threshold met the quality gate: best candidate detected %s with %d false activations on held-out audio (need a threshold with at least 80%% recall and zero false activations)",
-			best.wordSummary(), best.FalseActivations)
+		var failed failureCollector
+		failed.threshold = bestAt
+		failed.cause(CauseTuneGateFailed, fmt.Sprintf("no threshold met the quality gate: best candidate detected %s with %d false activations on held-out audio (need a threshold with at least 80%% recall and zero false activations)",
+			best.wordSummary(), best.FalseActivations))
+		failed.split(metricsToSplit(SplitTune, best))
+		return calibration{best: best, bestAt: bestAt, chosen: best}, failed.err()
 	}
 	target := (feasible[0] + feasible[len(feasible)-1]) / 2
 	chosen := feasible[0]
@@ -1152,7 +1365,12 @@ func calibrateThreshold(words, negatives []evalSignal) (float64, gateMetrics, er
 			chosen = t
 		}
 	}
-	return chosen, measurePolicy(words, negatives, chosen), nil
+	return calibration{
+		threshold: chosen,
+		chosen:    measurePolicy(words, negatives, chosen),
+		best:      best,
+		bestAt:    bestAt,
+	}, nil
 }
 
 // --- provenance -------------------------------------------------------------

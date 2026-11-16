@@ -255,10 +255,11 @@ func TestFromEnv(t *testing.T) {
 	t.Setenv("CAPSULA_RUN_ID", "run-1")
 	t.Setenv("CAPSULA_APP_ID", "app-1")
 	t.Setenv("CAPSULA_SDK", "0.5")
+	t.Setenv(DeviceSerialEnv, "11bfcbc5d63d55fc")
 	t.Setenv("CAPSULA_SOCKET", "")
 	env := FromEnv()
 	if env.Library != "/capsula/lib/libcapsula.so.1" || env.RunID != "run-1" ||
-		env.AppID != "app-1" || env.SDK != "0.5" ||
+		env.AppID != "app-1" || env.SDK != "0.5" || env.DeviceSerial != "11bfcbc5d63d55fc" ||
 		env.Socket != "/run/capsulad/hal.sock" {
 		t.Fatalf("env = %+v", env)
 	}

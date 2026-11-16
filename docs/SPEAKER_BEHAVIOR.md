@@ -39,8 +39,9 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   display to the clock baseline.
 - **Dismissal.** A primary-panel press, circle/talk-key press, neutral centre, or framework-owned
   tap/hold gesture dismisses sounding alerts, and that same interaction cannot also summon the
-  assistant or toggle media. While an assistant turn is in flight the same keys dismiss it through
-  its declared `dismiss` action; the press and its release are consumed, so a second turn cannot
+  assistant or toggle media. While a turn is in flight the same keys dismiss it through its declared
+  `dismiss` action, resolving the selected assistant or the bound app that owns the capture,
+  playback or ring resources; the press and its release are consumed, so a second turn cannot
   start on top of the first. Volume and microphone keys keep their safety/control functions. Full
   input capture belongs to the capturing app and no framework dismissal, volume, mute, media or
   summon action runs in that mode.
@@ -54,34 +55,117 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   In hold-to-talk mode a short primary-panel tap does not start an unpaired microphone turn either.
   The per-turn rule travels on the touch activation (`hold_to_talk`), so an assistant never reads
   administrator-only device settings, and a release is correlated with the activation and assistant
-  that received its press, never a later wakeword activation or a newly selected assistant.
+  that received its press, never a later wakeword activation or a newly selected assistant. A turn
+  that ends with no recognised text and no command is reported as a no-answer with the terminal
+  error indication, never as a completed turn; a turn whose session the service rejects says so,
+  drops the credential and re-resolves it from the app's own settings before the next turn.
+- **Wakewords and app binding.** A wake word can be bound to a specific app. Saying a bound word
+  starts that app's turn and, if the app is not ready, the activation is dropped with an explicit
+  reason and a log entry — the device does not reroute the turn to the selected assistant or to
+  another word, and saying a different word is the user's recovery path. Unbound words and the talk
+  key target the selected assistant; an API activation targets whatever app the named word is bound
+  to, exactly like a spoken detection, and an activation whose target app is not ready is dropped
+  with an explicit reason rather than rerouted. The microphone-muted switch and the global detection
+  switch still gate every word; a word's own switch pauses only that word. The
+  circle/play-pause dismissal resolves the app that currently owns the capture, playback or ring
+  resources among the selected assistant and the bound apps.
+  A newly created wakeword is installed switched off and becomes live only when the operator enables
+  it and (optionally) binds an app; retraining an existing word keeps its enabled state and binding.
+  Installing, retraining or deleting any word restarts detection for all words, so the device is
+  deaf to every wakeword for about two seconds — the setup dialog says so before it closes. At most
+  eight wake words can be installed: training a ninth is refused before the fit starts with an
+  actionable message, so the operator deletes a word first. Deleting a word never deletes the
+  recordings, which are shared training data.
 - **Panel keys and gestures.** Microphone mute (north), volume up (east), circle/play-pause (south),
-  volume down (west), neutral centre. A full swipe is opposite → centre → direction (W/C/E right,
-  E/C/W left, S/C/N up, N/C/S down) or the minimum two-contact opposite-edge pair without the centre
-  (W→E right, E→W left), where the first contact must still be down when the second is pressed.
-  Sequential opposite taps and circle-then-microphone stay deliberate key actions; the vertical
-  two-contact pair is full-capture only. An unambiguous centre-first half swipe is accepted; a
-  closed perimeter traversal from any corner is `circle_cw` (N→E→S→W→N) or `circle_ccw`. The user's
-  map is authoritative (east volume up, west volume down) and direction is never inverted from a
-  single passive trace. A crossing with zero or one reported contact is indistinguishable from a key
-  press and is not a gesture. Gesture windows and the 700 ms hold use the kernel event timestamp
+  volume down (west), neutral centre. The panel is one `gpio-keys` node advertising `EV_SYN|EV_KEY`
+  only (`EV=3`, no `EV_ABS`), so no coordinate ever exists and every gesture is inferred from
+  ordered key edges. Raw `/dev/input/event0` captures measured on the unit show that a finger swipe
+  over the whole panel emits **exactly one** press + SYN + release + SYN: full-panel up reports
+  `volume_down` (0x72), right `mic_toggle` (0xf8), down `mic_toggle` and left `volume_up` (0x73),
+  while a swipe anchored at the physical centre can report the centre key (0x2c0 or 0x246) instead.
+  A bare volume edge is therefore indistinguishable from a deliberate volume tap, so the **centre
+  key is the measured gesture evidence on a single contact**; a whole-pad crossing that reports only
+  its two end-stop edges is recognised from their order and timing.
+  **No contact is ever deferred.** Every press and release resolves its own action on its own edge,
+  so a lone volume tap has zero added latency and a release stops the volume ramp as before. Three
+  gesture forms are recognised:
+  - *centre gate*: a `center` press followed by a `volume_up`/`volume_down` press → `swipe_right` /
+    `swipe_left`. The panel reports one key at a time, so the usable form is a **centre tap followed
+    by an edge within 700 ms of the centre's release**; a centre that is still held when the edge is
+    pressed needs no press-gap allowance (only the 1500 ms total gesture budget applies). Only that
+    edge is suppressed; the centre keeps its own action, and the gate costs no volume latency because
+    nothing waits for it.
+  - *full-panel crossing*: `volume_down` then `volume_up`, or `volume_up` then `volume_down`, with
+    **no centre between them** and a press-to-press gap of at most 400 ms → `swipe_right` (west →
+    east, next) / `swipe_left` (east → west, previous). The first edge keeps its immediate action;
+    when the second edge resolves the gesture it is suppressed and the leading step is **reverted**
+    to the master level captured immediately before it, through the same canonical volume path. The
+    step is audible only for the length of the crossing, and a slow opposite pair (> 400 ms) or a
+    lone tap is unchanged: two deliberate steps or one step, with no deferral and no revert.
+    A crossing leaves **no volume side effect**: the volume overlay is closed rather than flashed for
+    a level the gesture takes back, and the source's mirrored level never carries the transient step,
+    because the mirror coalescer (450 ms) outlasts the 400 ms crossing window and only the restored
+    level is written. This is the field report "a full-panel swipe triggers the volume control on
+    both sides" turned into a rule.
+  - *chain*: opposite → centre → direction (`W,C,E` right; `E,C,W` left; `S,C,N` up; `N,C,S` down)
+    with each press gap at most 250 ms and at most 1500 ms in total. Only the direction contact is
+    suppressed — because nothing is deferred, the leading opposite edge has **already** produced
+    its own volume step or media toggle by the time the gesture resolves.
+  The panel reports one key at a time, so the measured centre-anchored form is a **centre tap
+  followed by an edge inside 700 ms of the centre's release**. A whole-panel swipe that reports one
+  end-stop key per contact is the full-panel crossing above: the pair is accepted only inside the
+  400 ms press window, and its leading step is reverted rather than held back. Everything else is
+  plain keys, immediately: a bare volume edge is one step, opposite edges more than 400 ms apart are
+  two steps, and a vertical pair or a perimeter traversal without the centre keeps its individual
+  actions (the transport key's 700 ms hold still applies). The retained device log contains a real
+  centre → edge contact pair — `center p+0ms r+115ms | gap 14ms volume_down p+130ms down`, a 130 ms
+  press-to-press distance well inside the centre window — and the same log's previous heuristic
+  scored a `volume_down … gap 123ms volume_up` pair as `swipe_right`: that 123 ms pair is now the
+  full-panel crossing, with the leading step reverted. The `swipe_half.hex` capture reports one
+  gesture as `mic_toggle` (`0xf8`) and the next as the centre key (`0x2c0`), and the `swipe_full.hex`
+  capture holds no centre contact at all — a whole-panel crossing that emits only one key per
+  gesture cannot be told from two quick opposite taps by its endpoints alone, which is why the
+  400 ms window is the contract and why a lone end-stop key stays a volume tap. Circles
+  (`circle_cw`/`circle_ccw`, one closed perimeter traversal
+  from any key with each contact beginning while the previous is still down) are recognised **in
+  full capture only**; a partial capture must keep its individual contacts, so the framework never
+  turns a perimeter press into a circle. Recognition is a bounded shadow of at most five contacts:
+  a press more than 250 ms after the previous one (400 ms for the opposite volume edge of a
+  full-panel crossing), or a sixth contact, abandons it and starts fresh — except a volume edge
+  that follows a centre tap, which has the 700 ms released window —
+  and nothing is ever replayed. The shadow also carries the pre-step level of a volume contact, so
+  the full-panel revert restores exactly one leading step and is cleared with the sequence.
+  The user's map is authoritative (east volume up, west volume down) and direction is never inverted
+  from a single passive trace. Gesture windows and the 700 ms hold use the kernel event timestamp
   converted to the daemon clock; only an invalid event older than 5 s falls back to receive time.
-  Contacts are deferred by up to 250 ms (1.5 s total budget) so a gesture cannot leak its constituent
-  mute, volume or summon action; a timed-out prefix resolves exactly one action without duplicating
-  a tap. A failed multi-contact sequence suppresses its prefix effects while a standalone volume tap
-  or held ramp still works. Partial capture receives circle/centre keys and gestures exclusively,
-  with volume and microphone framework-owned; full capture receives every key and gesture and all
-  system effects are suppressed. Raw coordinates are delivered only when the backend advertises them
-  (`coordinates_available=false` on the Mini, `full_panel_available=true`).
+  An abandoned sequence produces no gesture and suppresses nothing, while a recognised gesture
+  suppresses only its completing contact; a standalone volume tap or held ramp still works. Partial
+  capture receives `play_pause`/`center` keys and recognized swipes, with volume and microphone
+  framework-owned; full capture additionally shadow-recognizes circles while forwarding every key,
+  with all system effects suppressed. Raw coordinates are delivered only when the backend
+  advertises them (`coordinates_available=false` on the Mini, `full_panel_available=true`).
 - **Media control.** A short circle tap toggles current media and left/right swipes skip
   previous/next. Priority after alert/turn dismissal and the stopwatch contract: a standard provider
   that is playing, then one that is paused, then a connected Bluetooth source via the public
-  `BluetoothMediaService`, then another standard provider. Bluetooth uses only public BlueZ
-  interfaces and the advertised device; a source without `MediaPlayer1` is driven through its public
-  `MediaControl1`, and its missing status is substituted from `MediaPlayer1.Status`, then the A2DP
-  transport `active` state, then the sink's 500 ms packet-receipt freshness. That evidence is
-  read-only, per connection, reset on stop/error/new source; absent evidence sends Play rather than
-  inventing Pause. Works with no media app installed; commands are serialized; full capture
+  `BluetoothMediaService`, then another standard provider. No Bluetooth provider app is bundled and
+  no app id is reserved for one: when no media app is playing or paused — the normal case for a
+  connected phone — the circle key and swipes drive the source through that public service, and the
+  Web UI "Now playing" panel lists the same source from the same service as a framework-owned
+  provider with its PLAY/PAUSE/SKIP buttons mapped onto the same commands. Bluetooth uses
+  only public BlueZ interfaces and the advertised device; a source without `MediaPlayer1` is driven
+  through its public `MediaControl1`. A toggle's direction comes from the strongest available
+  evidence, in this order: a direction this daemon commanded in the last two seconds (the next
+  toggle inverts it, because the peer's notification has not arrived yet), then — while this daemon
+  owns the acquired A2DP transport — the sink's own 500 ms packet-receipt freshness (a fresh receipt
+  is playing, no receipt while the transport is owned is paused), then `MediaPlayer1.Status`, then
+  the A2DP transport `active` state, then receipts again. Explicit Play/Pause/Next/Previous never
+  consult that memory. The direction and the evidence (`memory|receipt|status|transport`) are logged
+  at Debug; a failed AVRCP call is logged at Warn. That evidence is read-only, per connection, reset
+  on stop/error/new source; absent evidence sends Play rather than inventing Pause. A recognised
+  swipe reaches the current media through that same standard media contract over the app bus — a
+  routed `MediaPlayerService.SkipNext`/`SkipPrevious` for an app provider, otherwise
+  `BluetoothMediaService.Command` for the framework-owned source — and there is no private
+  daemon→hardware path. Works with no media app installed; commands are serialized; full capture
   suppresses them.
 - **Listening.** Teal tracks the framework's processed application microphone tap; blue chase covers
   the post-speech delay and reply. Onset and end are measured in sample time against a learned
@@ -101,7 +185,12 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   plays distinct mute and unmute cues. The startup jingle plays once on installation, then only when
   `startup_sound_enabled` is on (off by default). Cues are framework playback streams under the
   master gain: they never block boot or input handling, and each toggle or step produces exactly one
-  cue.
+  cue. The master volume is a ceiling on every app's contribution, the mixer holds its output below
+  full scale with a soft limiter, and the PulseAudio **sink** is pinned at unity at startup and on
+  volume changes, so the sink stage cannot rescale framework output. That pin covers the sink
+  (device) volume only: `pacat`'s per-stream sink-input volume is a separate PulseAudio stage that
+  the pin neither sets nor reads back, so a stream volume restored by PulseAudio's stream-restore
+  module could still rescale the framework's output, and it is not part of this guarantee.
 - **Wi-Fi fallback and captive portal.** When no saved network connects within the bounded startup
   attempt (or none is saved), the daemon raises the setup AP instead of leaving the speaker
   unreachable: SSID from the live Bluetooth adapter alias, WPA2 password `capsulad`, address
@@ -121,8 +210,11 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   submitted or overwritten by a neighbouring control or an incoming push. A stored non-default value
   is shown as a labelled current setting; provider dropdowns keep the explicit none choice and never
   rewrite a saved-but-ineligible app. Logs and metrics merge without discarding newer streamed entries, logs are
-  capped at 400 entries (200 while paused), and a reconnect starts a new epoch. The wakeword area
-  shows guided training and the real last 20 engine detections only.
+  capped at 400 entries (200 while paused), and a reconnect starts a new epoch. A request the daemon
+  refuses (`PERMISSION_DENIED`, `NOT_FOUND`) is an inline error on that page plus a toast and
+  leaves the socket, its live subscriptions and its epoch intact; only a real transport failure
+  closes the socket and starts the reconnect. The wakeword area shows guided training and the real
+  last 20 engine detections only.
 - **Brightness.** Global brightness affects static frames too. Automatic mode retains the visible 5 %
   floor and discards stale cache entries when its mode changes; manual zero is explicit off. Ring
   frame deduplication keys on pixels **and** brightness, so a brightness-only change is still written.
@@ -130,17 +222,41 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   exactly one blue pulse and no glyph, and the selected display baseline is never covered by a
   disconnect notice. The native A2DP sink is verified armed for the current adapter generation before
   the adapter can be made connectable or discoverable; a lost registration is repaired before the next
-  connect and a failed one is reported as not ready. Incoming connections or discoverability are
-  refused while the audio profile is not advertised. **Incoming connections** off denies new inbound
-  BR/EDR links, including from paired devices, with the adapter and BLE radio still powered and
-  existing links left alone; **Discoverable** on implies incoming connections, and incoming off forces
-  discoverable off. A source already routed through PulseAudio is not torn down to switch owners; the
-  switch completes after it disconnects. A paired source may already hold an ACL from the pre-daemon
-  autopower window; the connect handler repairs the sink and requests the profiles over that link, and
-  a peer that already abandoned A2DP is device-dependent. A connected audio source stays present
-  without a player object, disconnecting another device never stops the active source, slow consumers
-  resynchronize against current state rather than retaining a lost disconnect, and one active native
-  source is the supported model.
+  connect and a failed one is reported as not ready. A connection is also verified to have an A2DP
+  transport: within about five seconds of the profile request, a source without a
+  `MediaTransport1` carrying the A2DP sink UUID is reported with the sentence "audio link is not
+  A2DP" and the daemon asks that source for its A2DP source profile (`Device1.ConnectProfile`,
+  UUID `0000110a`) once per source — it never disconnects the source to renegotiate, so a peer that
+  will not bring A2DP up keeps its link and its verdict; the same source is not asked again for two
+  minutes, and a newer connection or a disconnect cancels a pending verdict. Incoming connections
+  or discoverability are refused while the audio profile is not advertised. **Incoming connections**
+  off denies new inbound BR/EDR links, including from paired devices, with the adapter and BLE radio
+  still powered and existing links left alone; **Discoverable** on implies incoming connections, and
+  incoming off forces discoverable off. A source PulseAudio is actively streaming is not torn down
+  to switch owners; the switch completes after it disconnects, while an idle PulseAudio module set is
+  retired as soon as the native sink is armed even if a source is merely connected or paused. A
+  paired source may already hold an ACL from the pre-daemon autopower window; the connect handler
+  repairs the sink registration and requests the profiles over that link, and a peer that already
+  abandoned A2DP is device-dependent. A connected audio source stays present without a player
+  object, disconnecting another device never stops the active source, slow consumers resynchronize
+  against current state rather than retaining a lost disconnect, and one active native source is the
+  supported model. Volume sync is two way for display, one way for gain: a level the source reports
+  becomes the framework master (phone slider → speaker), and a speaker-side change is written back to
+  the source's AVRCP register so the phone's display follows. That write is a mirror, never a second
+  gain stage: the local curve stays the only attenuation, because writing the register as an
+  additional stage attenuated the same signal twice (10 % on both ends sounded near-silent) and
+  compensating the local trim for the source's share made 5 % far too loud. A report within four
+  AVRCP steps of a level written in the last five seconds is therefore treated as an echo and does
+  not move the master.
+- **Built-in startup.** At boot only a needed compiled-in app starts. The clock is framework-owned
+  and starts whenever the segment display capability exists, preserving timers, alarms and the
+  segment baseline even when another display provider is selected. The ring built-in is a provider
+  and starts only when the persisted settings select it for its resource; deselecting it stops its
+  run without disturbing clock timers. The manifest's `start_on_boot`/`background` flags do not
+  override this rule for a built-in, and a framework-owned helper starts without a user selection.
+  Selecting a built-in starts it immediately, while the explicit none choice leaves its output blank
+  and survives restart. `Launch` on a stopped built-in starts exactly one run under its stable
+  `builtin:<app_id>` ID, and stopping an unselected built-in leaves it stopped.
 - **Lifecycle invariants.** Every terminal path — completion, cancel, error, crash, disconnect,
   dismissal, mute, watchdog expiry, daemon shutdown — releases its presentations, captures,
   microphone and conversation ownership, and the next output is a successful backend write (for a
@@ -186,8 +302,13 @@ credential-mutating routes.
   device-wide diagnostics and log history, forced capture release, wakeword enrollment/training,
   Bluetooth incoming-connection/discoverable policy and unpair, application launch/stop, and
   foreign-app configuration. An app that omits its run ID still identifies as an app through its
-  sandbox UID or supervised PID; silence never grants administrator identity. Per-app configuration,
-  actions and run listings are scoped to the calling app.
+  sandbox UID or supervised PID; silence never grants administrator identity. A compiled-in app
+  is instead an explicit identity: its virtual run shares the daemon's PID with the Web UI and
+  every other in-process client, so a PID alone never selects `capsula.clock` or `capsula.ring`
+  — only that run's stable ID plus the per-boot internal token does, and the Web UI's own reads
+  stay administrator reads. Per-app configuration, actions and run listings are scoped to the
+  calling app; the administrator run table lists each built-in once under its own app ID with
+  its real state, so a running clock shows as running and not as a Launch candidate.
 - **Foreign data stays foreign.** Apps do not read another app's runs, settings or logs; the
   Bluetooth media view redacts the connected peer address/name for app callers while keeping the
   transport/now-playing fields a media provider needs; the shared asset store exposes only normalized
@@ -207,9 +328,15 @@ credential-mutating routes.
   derive the PSK and are never returned; the derived key lives in a 0600 daemon store.
 
 Honest limits: the audible cue proves the mixer consumed a cue at the selected master gain and wrote
-it to the configured sink; it does not measure perceived loudness, and audio already buffered in the
-hardware/PA sink or a full-scale concurrent source in that buffer can still overlap it — mixer-level
-exclusivity cannot reach into the sink's own queue. Visible brightness is a digital/backend
+it to the configured sink; it does not measure perceived loudness. The ceiling, per-app clamp,
+limiter and sink pin are **digital-output** guarantees about PCM submitted through the framework
+mixer — each app contributes at most the master level, an app cannot exceed that level with hot
+samples or extra streams, and the limiter keeps the bus below full scale. They say nothing about
+acoustic level, speaker efficiency or room response. Audio already buffered in the hardware/PA sink
+or written by a non-framework path can still overlap the mixer's output — mixer-level exclusivity
+and the sink pin cannot reach into the sink's own queue, a sink whose volume cannot be read back
+cannot be proven at unity, and a non-unity per-stream sink-input volume (a separate stage the pin
+neither sets nor reads back) is outside the pinned guarantee. Visible brightness is a digital/backend
 statement; photons, gamma and panel failure are not measured. A root or physical compromise, or a
 `-sandbox none` development run, is outside this cooperative model. Zero brightness and zero volume
 are treated as denial, not as an opportunity to record quietly.
@@ -230,6 +357,7 @@ and a documentation-only change needs only the relevant rows.
 | Finish/cancel/error → baseline | Which streams, captures, presentations, timers and conversations must end? What replaces them? | Check resource cleanup plus the next successful backend output; test normal audio drain separately from abort. |
 | Stop/crash/disconnect → recover | Can an old callback or lost event leave a phantom owner or stale route? Can the feature be used again? | Exercise an abnormal exit and a fresh interaction; verify terminal events and convergence to current state. |
 | Save → restart/upgrade | Which user choices and in-flight state must persist? Are all affected package/settings versions compatible? | Restart through the supported service; re-read choices and exercise the installed package, not merely its API health. |
+| Volume/mixer change → output | Which gain stage changed? Does every source still pass the per-app ceiling, the limiter and the sink pin? Can an app exceed the configured level with hot samples, extra streams or a second app? | Drive full-scale S16, hot F32 and overlapping apps through the public playback API; measure the sink PCM (≤ master, ≤ limiter threshold), confirm hot F32 is clamped, and confirm the fifth stream is `RESOURCE_EXHAUSTED`. |
 
 For each relevant path, name the expected terminal owner/output and the allowed time to reach it.
 Distinguish deliberate product limits from missing behavior. Do not silently introduce a timeout,
@@ -244,6 +372,30 @@ Normal logs include routing identity changes and **successful backend writes**, 
 presentation/capture IDs, global brightness, segment masks/colon and ring RGB pixels. Failed driver
 writes are logged as failures, not successful output. Clock logs include countdown pixel counts and
 alert/audio lifecycle; input logs identify handled, consumed and cancelled controls.
+
+Panel recognition logs at Info so a user's swipe can be measured in the field. A resolved gesture
+logs `panel gesture <id> resolved tier=<tier> press_gap=<ms> window=<bound>ms from <trace>`, where the
+tier is one of exactly five names: `chain` (opposite → centre → direction), `centre` (the centre
+gate), `full` (the full-panel crossing of two opposite volume edges), `overlap` (two contacts inside
+one touch) or `keys` (individual key effects); a full-capture
+resolution logs the same fields with `in full capture` inserted after `resolved`, which is also the
+only mode that can resolve a circle. `press_gap` is the measured centre→edge or previous→newest
+press distance, `window` is the bound that applied — 700 ms for the centre gate, 400 ms for the
+full-panel crossing, 250 ms for the chain and every other shadow — and `-` means unknown (an out-of-order
+read). A reverted full-panel step logs `panel full-panel swipe reverted the leading volume step`
+just before the gesture action. A pair outside the crossing window logs
+`panel full-panel crossing rejected tier=keys decision=keys reason=contact gap press_gap=<ms>
+window=400ms; both edges stay volume steps` and produces the two steps with no gesture and no revert.
+A centre that misses
+its bound logs `panel centre -> <key> p+<ms> decision=keys tier=centre reason=contact gap
+press_gap=<ms> window=700ms from <trace>`, and any other abandoned shadow logs `panel gesture
+rejected tier=<tier> decision=keys reason=<reason> press_gap=<ms> window=<ms>: <trace>` with its
+measured `press_gap` and the applied window. Delivery and framework action are logged separately
+(`panel gesture swipe_right delivered to capture cap-1 (mode=full_raw)`, `panel gesture swipe_right:
+next media`, `panel gesture swipe_left: previous media`). `<trace>` renders each contact as `key
+p+<ms> r+<ms>` (or `key p+<ms> down` while the contact is still held) with offsets from the first
+press, `gap <ms>` for the signed release-to-press distance between contacts, and an `overlap`
+marker; it is bounded to five contacts and carries no PCM or presentation metadata.
 
 Animated trace on the Rockchip service:
 
@@ -266,13 +418,31 @@ microphone acoustics or firmware behavior outside the framework.
 ## Automated verification
 
 Race-enabled checks cover `internal/audio`, `internal/input`, `internal/routing`,
-`internal/settings`, `internal/bluetooth`, `internal/discovery`, the assistant module and the daemon
-integration scenarios: timer persistence/repetition/dismissal, countdown geometry and preemption,
-stopwatch arbitration, actual backend blanking, static-frame brightness, visible-indication
-rejection, cancelled versus finite playback, held input and intervening activation IDs, assistant
-dismissal through the circle key, restart after a lost framework connection, the level-fallaway
-endpointer with colored/steady-noise and sustained-vowel regressions, mute/OSD generations, timezone
-preservation and Bluetooth overflow recovery. Integration assertions observe asynchronous backend
+`internal/settings`, `internal/bluetooth`, `internal/discovery`, `internal/wakeword`, both assistant
+modules and the daemon integration scenarios: timer persistence/repetition/dismissal, countdown
+geometry and preemption, stopwatch arbitration, actual backend blanking, static-frame brightness,
+visible-indication rejection, cancelled versus finite playback, held input and intervening activation
+IDs, assistant dismissal through the circle key, restart after a lost framework connection, the
+level-fallaway endpointer with colored/steady-noise and sustained-vowel regressions, mute/OSD
+generations, timezone preservation and Bluetooth overflow recovery. The mixer is pinned to its
+contract: full-scale S16 and hot `PCM_F32LE` through the public playback API stay at or below the
+master, one app's ceiling survives extra streams, its fifth stream is `RESOURCE_EXHAUSTED`, the
+limiter holds the bus below its 0.95 threshold, the sink-pin path runs against a scripted `pactl`,
+and an architecture test fails on a `WritePCM(` call outside `mixLoop`. Bluetooth coverage includes
+the four-octet SBC capability IE, the pure object-tree session assertion with its one profile
+request per source (bounded by the two-minute window and cancelled by a newer connection), the
+acquired-transport-first volume target, `ErrNoAbsoluteVolume` reported once per session, a toggle
+direction resolved from a stale `MediaPlayer1.Status` and from the two-second command memory, the
+centre-gated panel crossing and the 400 ms full-panel crossing (one media command with only the
+completing contact suppressed, the leading full-panel step reverted through the canonical master
+path, a lone volume edge stepping immediately with zero deferral, and two deliberate volume steps
+for a slow opposite pair), the framework Bluetooth provider in the Web UI rendering one `PLAYBACK_PLAYING`
+player from a simulated connected source and no provider at all without one, and the source-volume
+rule: a report from the peer never moves the framework master while the master still reaches the
+transport. Multi-word detection is covered at the model store (legacy migration,
+per-word enablement and binding), the ensemble (score parity with the single-model engine,
+deterministic arbitration, one global cooldown) and delivery (a bound app, no rerouting when it is
+unready). Integration assertions observe asynchronous backend
 updates rather than treating a gRPC send as an acknowledgement, and the audio-gap scenario overflows
 the real assistant transport with voiced PCM so a fast consumer receiving an intact silence burst is
 not mistaken for a dropped-audio test.
@@ -285,8 +455,9 @@ px and 849 px surfaces (login, live settings with unsaved-edit preservation, tim
 settings document, API keys, password change, certificate download, diagnostics pause/resume).
 Limits: these exercises cover no real Wi-Fi or Bluetooth peer, physical temperature, acoustics or
 full training run, and the self-signed TLS endpoint is reached through the proxy without weakening
-validation. Wakeword training keeps a single personal-model slot; a cancel racing the final atomic
-commit may still install the new model.
+validation. Wakeword training writes one artifact per word: installing a word restarts detection
+for all words, retraining keeps that word's enabled state and binding, and a cancel racing the final
+atomic commit may still install that word's new model.
 
 ## Rockchip speaker verification
 
@@ -312,15 +483,22 @@ Scenario results, rendered-output logs/assertions and binary hashes are kept und
 These exercises do not certify acoustic recognition thresholds, subjective LED brightness/gamma,
 long-room wakeword false-positive rates, real Bluetooth re-pairing or source-device behaviour, or
 unverified hardware variants. Bluetooth behavior is exercised with the simulator and real manager
-state-machine tests; no user pairing is touched. Gesture inference (overlap-only two-contact pair,
-vertical full-capture pair, preserved sequential taps, failed-prefix suppression), kernel-timestamp
-windows, 250 ms deferred delivery, tap/swipe media control with the
-`MediaControl1`/transport/receipt fallback, mDNS apply idempotence and the processed-tap endpointer
+state-machine tests; no user pairing is touched. Gesture inference (centre-gated
+centre→edge swipes inside the 700 ms released window, the opposite→centre→direction chain,
+the 400 ms full-panel crossing of opposite volume edges with its leading-step revert,
+a slow opposite pair staying two deliberate volume steps, zero-deferral volume steps,
+full-capture-only circles, preserved sequential taps, suppression of only the completing contact),
+kernel-timestamp windows, tap/swipe media control with the
+command-memory/receipt/`Status`/transport evidence order and the `MediaControl1` fallback, the
+four-octet SBC capability IE, the session assertion with its one profile request per connection,
+`ErrNoAbsoluteVolume`, the framework Bluetooth media provider and the two-way display mirror with
+echo suppression, multi-word detection and delivery, mDNS apply idempotence and the processed-tap endpointer
 have local unit and fixture coverage, and the real daemon passes all 14 assistant scenarios; device
-and acoustic checks for the gesture and endpointer changes remain gates. Passive device traces show
-event shape, not transport success or contact order. A browser session against a real simulator
-daemon observed host-name default/save/restart persistence, invalid-label rejection, no false mDNS
-advertisement claim and the **Restart** labels on Clock, Ring and Diagnostics; a browser run against
-a successful responder fixture exercised the corrected Avahi apply (zero setter calls for startup,
-GET and same-name save; one for a real change; genuine collision with no advertised claim;
-recovery). Real Avahi `.local` resolution and collision behaviour on the device remain gates.
+and acoustic checks for the gesture, Bluetooth-profile, multi-word and endpointer changes remain
+gates. Passive device traces show event shape, not transport success or contact order. A browser
+session against a real simulator daemon observed host-name default/save/restart persistence,
+invalid-label rejection, no false mDNS advertisement claim and the **Restart** labels on Clock, Ring
+and Diagnostics; a browser run against a successful responder fixture exercised the corrected Avahi
+apply (zero setter calls for startup, GET and same-name save; one for a real change; genuine
+collision with no advertised claim; recovery). Real Avahi `.local` resolution and collision behaviour
+on the device remain gates.

@@ -395,6 +395,13 @@ func (d *Daemon) isSelectedDefault(appID string) bool {
 			return true
 		}
 	}
+	// A bound wake word is an operator selection too: its app must be recovered
+	// after a crash so saying the word still reaches it.
+	for _, entry := range values.Wakewords {
+		if entry.AppID == appID {
+			return true
+		}
+	}
 	return false
 }
 
@@ -409,37 +416,53 @@ func (d *Daemon) shuttingDown() bool {
 	}
 }
 
-// reconcileProviderRuns stops the run of a provider the operator just
-// deselected. Only on-demand providers are stopped: a boot or background app
-// still has its own contract (clock timers and alarms, ring alerts), and a
-// compiled-in app has in-process state a deselection must not discard. A
-// deselected assistant is exactly the on-demand case: it must not keep a
-// microphone turn or a reply alive after it stopped being the selected role.
+// reconcileProviderRuns stops providers the operator just deselected. Boot
+// and background supervised apps retain their own lifecycle contract; a
+// framework-owned built-in retains its runtime state, while a non-framework-
+// owned built-in exists only to serve a current selection. A deselected
+// assistant is also stopped so it cannot keep a turn or reply alive.
 func (d *Daemon) reconcileProviderRuns(prev *settings.UserSettings, next settings.UserSettings) {
 	if prev == nil {
 		return
 	}
-	now := make(map[string]bool, len(next.DefaultAppByResource)+1)
+	now := make(map[string]bool, len(next.DefaultAppByResource)+1+len(next.Wakewords))
 	for _, appID := range next.DefaultAppByResource {
 		now[appID] = true
 	}
 	if next.DefaultAssistantAppID != "" {
 		now[next.DefaultAssistantAppID] = true
 	}
-	before := make(map[string]bool, len(prev.DefaultAppByResource)+1)
+	for _, entry := range next.Wakewords {
+		if entry.AppID != "" {
+			now[entry.AppID] = true
+		}
+	}
+	before := make(map[string]bool, len(prev.DefaultAppByResource)+1+len(prev.Wakewords))
 	for _, appID := range prev.DefaultAppByResource {
 		before[appID] = true
 	}
 	if prev.DefaultAssistantAppID != "" {
 		before[prev.DefaultAssistantAppID] = true
 	}
+	for _, entry := range prev.Wakewords {
+		if entry.AppID != "" {
+			before[entry.AppID] = true
+		}
+	}
 	for appID := range before {
 		if appID == "" || now[appID] {
 			continue
 		}
 		app, ok := d.reg.Get(appID)
-		if !ok || app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin ||
-			app.Manifest.StartOnBoot || app.Manifest.Background {
+		if !ok {
+			continue
+		}
+		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
+			systemApp, registered := d.systemApp(appID)
+			if !registered || systemApp.FrameworkOwned {
+				continue
+			}
+		} else if app.Manifest.StartOnBoot || app.Manifest.Background {
 			continue
 		}
 		d.sup.StopApp(appID)
@@ -517,7 +540,7 @@ func (d *Daemon) ensureRunning(appID string) {
 func (d *Daemon) startBootApps() {
 	for _, app := range d.reg.List() {
 		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
-			continue // started by startSystemApps before this pass
+			continue // built-in start policy is handled by startSystemApps
 		}
 		if app.Manifest.StartOnBoot || app.Manifest.Background {
 			d.ensureRunning(app.Manifest.ID)

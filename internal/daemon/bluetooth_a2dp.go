@@ -72,9 +72,10 @@ func (d *Daemon) bluetoothAudioReady() bool {
 //
 // Ordering matters: the endpoint is registered before PulseAudio's competing
 // endpoints are removed, so the adapter advertises an Audio Sink at every
-// point of the switch. A source that is already connected through PulseAudio
-// keeps that route and is never torn down; the native owner takes over after it
-// disconnects, and the next incoming connection finds the registered sink.
+// point of the switch. A source PulseAudio is actively streaming keeps that
+// route; a loaded PulseAudio stack that is not carrying audio is retired as soon
+// as our endpoint is armed, so the next connection cannot land on its Headset
+// endpoint. Either way the next incoming connection finds the registered sink.
 func (d *Daemon) prepareBluetoothAudio() error {
 	if d.bt == nil || d.dev.Platform() == backend.PlatformSimulator {
 		return nil
@@ -87,13 +88,19 @@ func (d *Daemon) prepareBluetoothAudio() error {
 	}
 	registrar, hasRegistrar := d.bt.(bluetooth.A2DPRegistrar)
 	if hasRegistrar && registrar.SinkRegistered() {
-		// The sink is advertised. Do not take ownership from a connected
-		// source PulseAudio is routing; otherwise settle the switch now that
-		// no active stream exists.
-		if d.pulseKeepsBluetoothSource() {
+		// The sink is advertised. Do not take ownership from a source
+		// PulseAudio is actively streaming; otherwise retire its idle module
+		// set and own the sink, so the next connection is native.
+		if d.bluetoothSourceConnected() {
+			// A source's audio route belongs to the source for as long as it is
+			// connected, paused included. Retiring the PulseAudio route of a
+			// paused source tears down its transport, and the resume then has to
+			// renegotiate A2DP mid-playback, which is heard as a freeze. The
+			// switch completes on disconnect, when no route is in use.
 			return nil
 		}
 		if pulseBluetoothModulesLoaded() {
+			d.logs.Infof("bluetooth", "", "retiring PulseAudio Bluetooth discovery: the native sink is armed and no source is connected")
 			d.unloadPulseBluetoothModules()
 		}
 		d.setBluetoothNative(true)
@@ -127,12 +134,14 @@ func (d *Daemon) prepareBluetoothAudio() error {
 	return nil
 }
 
-// pulseKeepsBluetoothSource reports whether PulseAudio owns the audio profiles
-// and is routing a connected source right now. Unloading its modules in that
-// state tears the source's card down, and the source's reconnection can race a
-// registration that has not completed yet.
+// pulseKeepsBluetoothSource reports whether PulseAudio is actively carrying a
+// connected source's audio right now. Only that state is worth preserving: a
+// loaded module set with nothing running is the narrowband trap, because its
+// Headset endpoint stays advertised next to our sink and the next connection can
+// land on HFP even though the native sink is armed and idle. Unloading it makes
+// the following connection use the native sink.
 func (d *Daemon) pulseKeepsBluetoothSource() bool {
-	return pulseBluetoothModulesLoaded() && d.bluetoothSourceConnected()
+	return pulseBluetoothModulesLoaded() && d.bluetoothSourceConnected() && d.pulseStreamsBluetoothSource()
 }
 
 // btOwnerMu serializes audio-owner selection. Settings, the watcher and
@@ -399,12 +408,12 @@ func (s *a2dpStream) receivingWithin(nowNS uint64, grace time.Duration) bool {
 }
 
 // bluetoothReceivingAudio reports whether the framework-owned sink is actually
-// receiving audio for address right now. An acquired transport disappears from
-// BlueZ's object tree and a source may expose no MediaPlayer1.Status, so this
-// sink-side receipt state is the only honest playback evidence for a media
-// toggle. It is read-only: it never publishes or invents playback state, and a
-// failed command leaves it untouched. An empty address accepts the current
-// stream.
+// receiving audio for address right now. While this daemon owns the acquired
+// transport that receipt is the authoritative playback evidence for a media
+// toggle: a source that paused keeps the transport open but stops sending, and
+// its MediaPlayer1.Status lags our own command. It is read-only: it never
+// publishes or invents playback state, and a failed command leaves it untouched.
+// An empty address accepts the current stream.
 func (d *Daemon) bluetoothReceivingAudio(address string) bool {
 	d.btStreamMu.Lock()
 	stream := d.btStream
@@ -545,4 +554,227 @@ func (s *a2dpStream) stopWithRelease(release bool) {
 		}
 		s.d.btStreamMu.Unlock()
 	})
+}
+
+// --- session verification ----------------------------------------------------
+//
+// Connecting the audio profiles is a request, not a result: BlueZ answers
+// ConnectProfile for a profile the peer merely has registered, and the source
+// can still end up on a Headset-only or ACL-only link. The session is therefore
+// asserted after the request. When A2DP is missing the daemon asks for that one
+// profile, once per source, and never disconnects the peer: dropping a user's
+// phone off the adapter stops their audio and cannot be undone by the daemon.
+
+var (
+	// btSessionVerifyDeadline is how long a source has to produce an A2DP
+	// transport, counted from the end of the profile request. Healthy setups on
+	// this unit measured 156-496 ms, so two seconds leaves room for a slow SBC
+	// negotiation without making the user wait five seconds for a link the peer
+	// is not going to open — the field report is "it recovered a couple of
+	// seconds later", which is this deadline. Asking for the profile while AVDTP
+	// is already starting is harmless: BlueZ answers InProgress and the transport
+	// arrives anyway.
+	btSessionVerifyDeadline = 2 * time.Second
+	// btSessionRequestDeadline bounds the one A2DP profile request per source.
+	btSessionRequestDeadline = 15 * time.Second
+	// btRequestWindow is how long a source is left alone after a profile
+	// request. Requesting it creates a new connection generation, so without
+	// this window a source that keeps landing on a non-A2DP profile would be
+	// asked again in a loop.
+	btRequestWindow = 2 * time.Minute
+)
+
+// isProfileInProgress recognizes BlueZ's answer when the profile the daemon asked
+// for is already connecting: the request is redundant, not failed, and the
+// transport arrives on its own.
+func isProfileInProgress(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	return strings.Contains(detail, "inprogress") || strings.Contains(detail, "in progress") ||
+		strings.Contains(detail, "already connected")
+}
+
+// btLinkWait is the outcome of waiting for a source's A2DP transport.
+type btLinkWait int
+
+const (
+	// btLinkVerified: an A2DP transport is present.
+	btLinkVerified btLinkWait = iota
+	// btLinkAbsent: the deadline passed without one.
+	btLinkAbsent
+	// btLinkGone: the source disconnected, or it is not an audio source at all.
+	btLinkGone
+)
+
+// btSessionGuard bounds the A2DP profile request to one per connection, not one
+// per source. A fresh connection is a fresh negotiation and must be allowed to
+// ask again — the third reconnect in the field report was refused because the
+// previous connection's request was still inside the window, and the source was
+// left connected with AVRCP only, which the host then reports as "no audio
+// output". Within one connection the attempt stays bounded, so a source that
+// keeps refusing A2DP cannot be asked in a loop.
+type btSessionGuard struct {
+	mu        sync.Mutex
+	pending   map[string]bool
+	requested map[string]btProfileRequest
+}
+
+// btProfileRequest is the last request made for one source and the connection
+// generation it belonged to.
+type btProfileRequest struct {
+	generation uint64
+	at         time.Time
+}
+
+func newBTSessionGuard() *btSessionGuard {
+	return &btSessionGuard{
+		pending:   map[string]bool{},
+		requested: map[string]btProfileRequest{},
+	}
+}
+
+// claimRequest reports whether this connection may ask the source for its A2DP
+// profile. A new connection generation always may; within one generation the
+// request is allowed once per btRequestWindow.
+func (g *btSessionGuard) claimRequest(address string, generation uint64, now time.Time) bool {
+	key := strings.ToUpper(strings.TrimSpace(address))
+	if key == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pending[key] {
+		return false
+	}
+	if prev, ok := g.requested[key]; ok {
+		if prev.generation == generation && now.Sub(prev.at) < btRequestWindow {
+			return false
+		}
+	}
+	g.pending[key] = true
+	return true
+}
+
+func (g *btSessionGuard) finishRequest(address string, generation uint64, now time.Time) {
+	key := strings.ToUpper(strings.TrimSpace(address))
+	if key == "" {
+		return
+	}
+	g.mu.Lock()
+	delete(g.pending, key)
+	g.requested[key] = btProfileRequest{generation: generation, at: now}
+	g.mu.Unlock()
+}
+
+// awaitBluetoothA2DP waits for the source's audio link to become A2DP until it
+// does, the source leaves, or the deadline passes.
+//
+// The wait is signal-driven: the manager's own event stream is the wake-up, and
+// each event is one reason to re-read the link. There is no observation
+// interval and no periodic object-tree read; the deadline is the only timer.
+func (d *Daemon) awaitBluetoothA2DP(ctx context.Context, verifier bluetooth.A2DPSession, address string) (bluetooth.AudioLink, btLinkWait) {
+	var last bluetooth.AudioLink
+	// Subscribe before the first read: a transport that appears between the
+	// read and the wait is then queued on the watcher instead of being missed.
+	// The subscription is scoped to this wait, not to the whole verdict.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	var events <-chan bluetooth.Event
+	if d.bt != nil {
+		events = d.bt.Watch(watchCtx)
+	}
+	deadline := time.NewTimer(btSessionVerifyDeadline)
+	defer deadline.Stop()
+	for {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		link, err := verifier.Session(callCtx, address)
+		cancel()
+		if err != nil {
+			d.logs.Debugf("bluetooth", "", "audio link for %s: %v", address, err)
+		} else {
+			last = link
+			switch {
+			case !link.Connected, !link.AudioSource:
+				return link, btLinkGone
+			case link.A2DP():
+				return link, btLinkVerified
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return last, btLinkGone
+		case <-deadline.C:
+			return last, btLinkAbsent
+		case _, ok := <-events:
+			if !ok {
+				// The manager closed its stream (shutdown): the link cannot
+				// change anymore, so the current verdict stands.
+				if ctx.Err() != nil {
+					return last, btLinkGone
+				}
+				return last, btLinkAbsent
+			}
+		}
+	}
+}
+
+// verifyBluetoothSession asserts that a newly connected source got an A2DP
+// transport and repairs the link once when it did not. current reports whether
+// this verdict still belongs to the newest connection generation; a newer
+// connection, a disconnect and daemon shutdown all invalidate it. The repair is
+// additionally capped per source by the guard, so it can never loop.
+func (d *Daemon) verifyBluetoothSession(ctx context.Context, address string, audioReady <-chan struct{}, guard *btSessionGuard, generation uint64, current func() bool) {
+	verifier, ok := d.bt.(bluetooth.A2DPSession)
+	if !ok || strings.TrimSpace(address) == "" {
+		return
+	}
+	// Judge the link after the profile request finished: a setup that is still
+	// in flight is not a missing transport.
+	select {
+	case <-audioReady:
+	case <-ctx.Done():
+		return
+	}
+	link, state := d.awaitBluetoothA2DP(ctx, verifier, address)
+	switch state {
+	case btLinkVerified:
+		d.logs.Debugf("bluetooth", "", "audio link for %s is A2DP (%s)", address, link)
+		return
+	case btLinkGone:
+		return
+	}
+	profiles := strings.Join(link.ProfilesUp(), ",")
+	advertised := strings.Join(link.Advertised, ",")
+	if advertised == "" {
+		advertised = "none"
+	}
+	if !current() {
+		return
+	}
+	now := time.Now()
+	if !guard.claimRequest(address, generation, now) {
+		d.logs.Warnf("bluetooth", "", "%s is connected without an A2DP transport (profiles up: %s; peer advertises: %s); the A2DP profile was already requested for this connection, not repeating",
+			address, profiles, advertised)
+		return
+	}
+	d.logs.Warnf("bluetooth", "", "%s is connected without an A2DP transport (profiles up: %s; peer advertises: %s); requesting its A2DP source profile",
+		address, profiles, advertised)
+	// Derived from the verification context, not the daemon's: a newer
+	// connection generation (stopVerify) or daemon shutdown must abort the
+	// request instead of asking a source the user just disconnected.
+	requestCtx, cancel := context.WithTimeout(ctx, btSessionRequestDeadline)
+	err := verifier.RequestA2DPProfile(requestCtx, address)
+	cancel()
+	guard.finishRequest(address, generation, time.Now())
+	if err != nil {
+		if isProfileInProgress(err) {
+			d.logs.Debugf("bluetooth", "", "A2DP profile for %s is already being set up: %v", address, err)
+			return
+		}
+		d.logs.Warnf("bluetooth", "", "A2DP profile request for %s failed: %v; the source stays connected", address, err)
+		return
+	}
+	d.logs.Infof("bluetooth", "", "A2DP profile requested for %s; the source stays connected", address)
 }

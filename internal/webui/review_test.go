@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -693,5 +694,141 @@ func TestCreateApiKeyValidationErrorsAreTyped(t *testing.T) {
 	frame = conn.read()
 	if frame.GetRequestId() != 87 || frame.GetError().GetCode() != webv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 		t.Fatalf("invalid key name error = %+v", frame)
+	}
+}
+
+// TestTrainingStructuredFailureReachesTheBrowser pins the actionable refusal:
+// the terminal event's cause, failing takes and measured splits survive into
+// the browser frames, including the closing error frame.
+func TestTrainingStructuredFailureReachesTheBrowser(t *testing.T) {
+	failure := &frameworkv1.WakewordTrainingFailure{
+		Causes: []string{"tune_gate_failed"},
+		Takes: []*frameworkv1.WakewordFailingTake{
+			{Partition: "word", Index: 3, Cause: "tune_gate_failed", Detail: "never detected"},
+		},
+		Splits: []*frameworkv1.WakewordGateMetrics{
+			{Split: "tune", WordRecordings: 2, Detected: 1, Recall: 0.5, FalseActivations: 1},
+		},
+		Threshold: 0.42,
+		Detail:    "no threshold met the quality gate",
+	}
+	c, _, id := startTraining(t, &scriptedTrainer{
+		stages: []*frameworkv1.TrainWakewordEvent{
+			{Stage: "calibrate", Fraction: 0.9},
+			{Stage: "failed", Fraction: 0.9, Log: failure.GetDetail(), Failure: failure},
+		},
+		endErr: status.Error(codes.FailedPrecondition,
+			"wakeword training: no threshold met the quality gate [cause: tune_gate_failed]; takes to fix: word #3"),
+	})
+
+	var sawFailureFrame, sawErrorFrame bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p := waitTrainingFrame(t, c, id, time.Until(deadline))
+		if p == nil {
+			break
+		}
+		switch p.GetStage() {
+		case "failed":
+			structured := p.GetFailure()
+			if structured == nil {
+				t.Fatalf("failed frame has no structured failure: %+v", p)
+			}
+			if len(structured.GetCauses()) != 1 || structured.GetCauses()[0] != "tune_gate_failed" {
+				t.Fatalf("causes = %v", structured.GetCauses())
+			}
+			if len(structured.GetTakes()) != 1 || structured.GetTakes()[0].GetIndex() != 3 ||
+				structured.GetTakes()[0].GetPartition() != "word" {
+				t.Fatalf("takes = %+v", structured.GetTakes())
+			}
+			if structured.GetThreshold() != 0.42 {
+				t.Fatalf("threshold = %v", structured.GetThreshold())
+			}
+			if len(structured.GetSplits()) != 1 || structured.GetSplits()[0].GetFalseActivations() != 1 {
+				t.Fatalf("splits = %+v", structured.GetSplits())
+			}
+			if p.GetLog() != failure.GetDetail() {
+				t.Fatalf("log = %q", p.GetLog())
+			}
+			sawFailureFrame = true
+		case "error":
+			if p.GetFailure() == nil {
+				t.Fatal("closing error frame lost the structured failure")
+			}
+			if !strings.Contains(p.GetLog(), "tune_gate_failed") || !strings.Contains(p.GetLog(), "word #3") {
+				t.Fatalf("error log lost the cause or take: %q", p.GetLog())
+			}
+			sawErrorFrame = true
+		case "installed":
+			t.Fatal("a failed training stream reported installation")
+		}
+		if sawFailureFrame && sawErrorFrame {
+			break
+		}
+	}
+	if !sawFailureFrame {
+		t.Fatal("structured failure frame was not delivered")
+	}
+	if !sawErrorFrame {
+		t.Fatal("terminal error frame was not delivered")
+	}
+}
+
+// TestTrainingInstalledFrameCarriesMetrics pins the success path: the gate
+// certificate travels with the installed frame for the browser to display.
+func TestTrainingInstalledFrameCarriesMetrics(t *testing.T) {
+	c, _, id := startTraining(t, &scriptedTrainer{stages: []*frameworkv1.TrainWakewordEvent{{
+		Stage: "installed", Fraction: 1,
+		Classifier: &frameworkv1.WakewordClassifierInfo{ModelId: "word.personal", Threshold: 0.59},
+		Metrics: []*frameworkv1.WakewordGateMetrics{
+			{Split: "tune", WordRecordings: 2, Detected: 2, Recall: 1},
+			{Split: "final_test", WordRecordings: 2, Detected: 2, Recall: 1},
+		},
+	}}})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p := waitTrainingFrame(t, c, id, time.Until(deadline))
+		if p == nil {
+			break
+		}
+		if p.GetStage() != "installed" {
+			continue
+		}
+		if p.GetClassifier().GetThreshold() != 0.59 {
+			t.Fatalf("classifier = %+v", p.GetClassifier())
+		}
+		metrics := p.GetMetrics()
+		if len(metrics) != 2 || metrics[0].GetSplit() != "tune" || metrics[1].GetSplit() != "final_test" {
+			t.Fatalf("metrics = %+v", metrics)
+		}
+		if metrics[0].GetDetected() != 2 || metrics[0].GetWordRecordings() != 2 {
+			t.Fatalf("tune metrics = %+v", metrics[0])
+		}
+		return
+	}
+	t.Fatal("installed frame with metrics was not delivered")
+}
+
+// TestWakewordModelViewCarriesMetrics pins the settings view mirror.
+func TestWakewordModelViewCarriesMetrics(t *testing.T) {
+	view := modelView(&frameworkv1.WakewordModelInfo{
+		ModelId: "word.personal", DisplayName: "Marusia", Language: "ru", Available: true, Threshold: 0.59,
+		Metrics: []*frameworkv1.WakewordGateMetrics{
+			{Split: "tune", WordRecordings: 2, Detected: 2, Recall: 1},
+			{Split: "auxiliary_final_test", FalseActivations: 0},
+		},
+	})
+	if view.GetThreshold() != 0.59 {
+		t.Fatalf("threshold = %v", view.GetThreshold())
+	}
+	metrics := view.GetMetrics()
+	if len(metrics) != 2 || metrics[0].GetSplit() != "tune" || metrics[0].GetDetected() != 2 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+	if metrics[1].GetSplit() != "auxiliary_final_test" {
+		t.Fatalf("auxiliary split = %+v", metrics[1])
+	}
+	if legacy := modelView(&frameworkv1.WakewordModelInfo{ModelId: "word.personal"}); len(legacy.GetMetrics()) != 0 {
+		t.Fatalf("legacy model invented metrics: %+v", legacy.GetMetrics())
 	}
 }

@@ -84,34 +84,63 @@ func (r *resampler) pull(n int) []float32 {
 	return out
 }
 
+// decodeStereo converts one interleaved input frame to float32 stereo. The
+// mixer's input domain is bounded: 16-bit samples are in [-1, 1) by
+// construction, while float32 samples outside [-1, 1] are silently clamped
+// (not rejected, so benign overshoot keeps playing) and non-finite samples
+// become silence. The clamp is a contract, not a convenience: the master
+// volume is applied after this decode, so without it an app could exceed the
+// configured ceiling simply by writing large float samples.
 func decodeStereo(pcm []byte, format backend.AudioFormat) []float32 {
 	channels := format.Channels
 	if channels <= 0 {
 		return nil
 	}
-	bps := 2
 	if format.Format == backend.F32LE {
-		bps = 4
+		frameBytes := 4 * channels
+		n := len(pcm) / frameBytes
+		out := make([]float32, n*2)
+		for i := range n {
+			base := i * frameBytes
+			l := decodeF32Sample(binary.LittleEndian.Uint32(pcm[base:]))
+			r := l
+			if channels > 1 {
+				r = decodeF32Sample(binary.LittleEndian.Uint32(pcm[base+4:]))
+			}
+			out[i*2] = l
+			out[i*2+1] = r
+		}
+		return out
 	}
-	frameBytes := bps * channels
+	frameBytes := 2 * channels
 	n := len(pcm) / frameBytes
 	out := make([]float32, n*2)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		base := i * frameBytes
-		sample := func(c int) float64 {
-			off := base + c*bps
-			if format.Format == backend.F32LE {
-				return float64(math.Float32frombits(binary.LittleEndian.Uint32(pcm[off:])))
-			}
-			return float64(int16(binary.LittleEndian.Uint16(pcm[off:]))) / 32768
-		}
-		l := sample(0)
+		l := float32(int16(binary.LittleEndian.Uint16(pcm[base:]))) / 32768
 		r := l
 		if channels > 1 {
-			r = sample(1)
+			r = float32(int16(binary.LittleEndian.Uint16(pcm[base+2:]))) / 32768
 		}
-		out[i*2] = float32(l)
-		out[i*2+1] = float32(r)
+		out[i*2] = l
+		out[i*2+1] = r
 	}
 	return out
+}
+
+// decodeF32Sample bounds one little-endian float32 sample to the mixer's
+// [-1, 1] domain. The exponent test catches NaN and both infinities with one
+// mask, before any comparison can observe them.
+func decodeF32Sample(bits uint32) float32 {
+	if bits&0x7f800000 == 0x7f800000 {
+		return 0
+	}
+	v := math.Float32frombits(bits)
+	if v > 1 {
+		return 1
+	}
+	if v < -1 {
+		return -1
+	}
+	return v
 }

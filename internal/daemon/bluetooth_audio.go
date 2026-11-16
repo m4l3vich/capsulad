@@ -13,8 +13,8 @@ import (
 
 // Bluetooth A2DP sink audio arrives as a PulseAudio source. The framework
 // routes it to the master sink with a loopback so a connected source is
-// audible; the source's own volume is controlled through AVRCP absolute
-// volume, which the volume path forwards.
+// audible; the listening level is the framework master applied locally, and the
+// AVRCP absolute volume is a display mirror of that master in both directions.
 //
 // This is PulseAudio routing, not the framework mixer: the source stream is
 // not ducked or re-mixed by the software mixer, matching the vendor design
@@ -65,6 +65,35 @@ func pulseBluetoothModulesLoadedE() (bool, error) {
 	}
 	return strings.Contains(string(out), "module-bluez5-discover") ||
 		strings.Contains(string(out), "module-bluetooth-discover"), nil
+}
+
+// pulseStreamsBluetoothSource reports whether PulseAudio is carrying a connected
+// source's audio right now: a bluez5 source is RUNNING, or this daemon installed
+// a loopback route for a source (which only happens in PulseAudio owner mode). A
+// loaded module set with an idle or suspended source is not streaming and may be
+// retired in favour of the native sink.
+func (d *Daemon) pulseStreamsBluetoothSource() bool {
+	d.btRouteMu.Lock()
+	routed := len(d.btRoutes) > 0
+	d.btRouteMu.Unlock()
+	if routed {
+		return true
+	}
+	out, err := pulseCommand("list", "short", "sources")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		// pactl list short sources: index name driver sample-spec state.
+		if len(fields) < 2 || !strings.Contains(fields[1], "bluez_source.") {
+			continue
+		}
+		if strings.EqualFold(fields[len(fields)-1], "RUNNING") {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) resetBluetoothRoutes() {
@@ -136,11 +165,10 @@ func (d *Daemon) ensureBluetoothAudioRoute(address string) {
 		d.btRouteMu.Unlock()
 		d.logs.Infof("bluetooth", "", "routing source %s to the speaker", source)
 		d.setBluetoothSourceFixed(address)
-		d.setBluetoothPlaybackGain(d.user.Get().Values.MasterVolume)
-		// The transport exists once the source does; re-apply the framework
-		// level because A2DP setup can reset absolute volume to the source's
-		// cached value.
-		d.forceBluetoothVolume()
+		// A new route starts at the framework level rather than at whatever the
+		// previous route left behind.
+		d.forgetBluetoothGain()
+		d.applyBluetoothGain(d.user.Get().Values.MasterVolume)
 	}()
 }
 
@@ -235,12 +263,13 @@ func (d *Daemon) setBluetoothSourceFixed(address string) {
 }
 
 // setBluetoothPlaybackGain applies the framework master to the Bluetooth
-// loopback as a local safety gain. It is needed because the Mac's AVRCP
-// volume is not a reliable attenuation: the slider can move while the stream
-// stays near full scale. PulseAudio sink-input volume is cubic, so the cube
-// root yields the requested linear gain. The Bluetooth listening level is
-// therefore bounded by the master, and the Mac/AVRCP value is the synced
-// display and, when honored, an additional attenuation.
+// loopback as a local safety gain, and it is the only gain stage: the device
+// module is decoupled from AVRCP (avrcp_absolute_volume=0), so the transport
+// volume the daemon mirrors to the source changes the source's display and not
+// the stream. It is needed because the Mac's AVRCP volume is not a reliable
+// attenuation: the slider can move while the stream stays near full scale.
+// PulseAudio sink-input volume is cubic, so the cube root yields the requested
+// linear gain.
 func (d *Daemon) setBluetoothPlaybackGain(level float64) {
 	if d.dev.Platform() == backend.PlatformSimulator {
 		return
@@ -305,18 +334,28 @@ func (d *Daemon) removeBluetoothAudioRoute(address string) {
 	d.logs.Infof("bluetooth", "", "removed audio route for %s", address)
 }
 
+// restoredBluetoothSource is one source that was already connected when the
+// daemon started, plus the completion of its profile request. Session
+// verification waits on AudioReady instead of racing the request.
+type restoredBluetoothSource struct {
+	Address    string
+	AudioReady <-chan struct{}
+}
+
 // ensureConnectedBluetoothRoutes covers a daemon restart while a source is
-// already connected: no connect event is emitted for existing state.
-func (d *Daemon) ensureConnectedBluetoothRoutes() {
+// already connected: no connect event is emitted for existing state. It returns
+// the sources it restored so the caller can verify their audio link.
+func (d *Daemon) ensureConnectedBluetoothRoutes() []restoredBluetoothSource {
 	if d.bt == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
 	defer cancel()
 	devices, err := d.bt.PairedDevices(ctx)
 	if err != nil {
-		return
+		return nil
 	}
+	restored := make([]restoredBluetoothSource, 0, len(devices))
 	for _, dev := range devices {
 		if dev.Connected {
 			// No connect event is emitted for state that already existed, so
@@ -325,9 +364,16 @@ func (d *Daemon) ensureConnectedBluetoothRoutes() {
 			// its audio route is being restored.
 			d.logs.Infof("bluetooth", "", "source already connected at startup name=%q address=%s; restoring its audio route",
 				dev.Name, dev.Address)
-			d.connectBluetoothAudio(dev.Address)
+			// No connect event follows, so nothing else re-asserts the source's
+			// display of the level; the transport event does it again once the
+			// stream starts.
+			d.mirrorBluetoothVolume(d.user.Get().Values.MasterVolume)
+			restored = append(restored, restoredBluetoothSource{
+				Address: dev.Address, AudioReady: d.connectBluetoothAudio(dev.Address),
+			})
 		}
 	}
+	return restored
 }
 
 func bluezSourceName(address string) string {

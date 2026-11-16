@@ -73,11 +73,13 @@ func TestSystemControlsInPartialAndFullCapture(t *testing.T) {
 	}
 	defer sub.Close()
 
+	// The framework step resolves on the press edge itself: no contact is
+	// deferred while a possible gesture is considered.
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
-	time.Sleep(panelInterContact + 80*time.Millisecond)
 	if volumes.Load() != 1 {
-		t.Fatal("partial capture did not route volume to the framework")
+		t.Fatalf("partial capture did not route volume to the framework on press (%d)", volumes.Load())
 	}
+	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: false}})
 	select {
 	case ev := <-sub.C:
 		t.Fatalf("system volume event leaked to the partial capture: %+v", ev)
@@ -86,7 +88,7 @@ func TestSystemControlsInPartialAndFullCapture(t *testing.T) {
 
 	mode.Store(int32(routing.TouchFull))
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
-	time.Sleep(panelInterContact + 80*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if volumes.Load() != 1 {
 		t.Fatal("full capture still interpreted the system volume control")
 	}
@@ -207,7 +209,7 @@ func TestHeldVolumeKeyRepeats(t *testing.T) {
 		Handlers{VolumeUp: func() bool { steps.Add(1); return true }})
 	defer m.Close()
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
-	time.Sleep(2*volumeRepeatStart + 500*time.Millisecond)
+	time.Sleep(panelInterContact + 2*volumeRepeatStart + 500*time.Millisecond)
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: false}})
 	got := steps.Load()
 	if got < 3 {
@@ -235,7 +237,7 @@ func TestVolumeRampStopsAtBound(t *testing.T) {
 		}})
 	defer m.Close()
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: true}})
-	time.Sleep(3*volumeRepeatStart + 80*time.Millisecond)
+	time.Sleep(panelInterContact + 3*volumeRepeatStart + 80*time.Millisecond)
 	m.Handle(backend.InputEvent{Key: &backend.KeyEvent{Key: "volume_up", Pressed: false}})
 	// One call for the press, one to learn the value is clamped; no more.
 	if got := calls.Load(); got != 2 {
@@ -316,6 +318,29 @@ func pressKey(m *Manager, key string, pressed bool) {
 
 func sendGesture(m *Manager, id, phase string) {
 	m.Handle(backend.InputEvent{Gesture: &backend.GestureEvent{ID: id, Phase: phase}})
+}
+
+// The unmarked centre key is the speaker's own voice control, not a system
+// control: a tap must never send a media command, and the circle stays the only
+// media key. A headset-style "voice button" that also toggles playback is the
+// non-compliant behaviour this pins against.
+func TestCentreKeyNeverDrivesMedia(t *testing.T) {
+	active, talk := &atomic.Bool{}, &atomic.Bool{}
+	m, c := newControlManager(t, active, talk)
+
+	pressKey(m, "center", true)
+	pressKey(m, "center", false)
+	time.Sleep(50 * time.Millisecond)
+	if got := c.mediaToggles.Load() + c.mediaNext.Load() + c.mediaPrevious.Load(); got != 0 {
+		t.Fatalf("a centre tap sent %d media commands, want 0", got)
+	}
+
+	pressKey(m, "play_pause", true)
+	pressKey(m, "play_pause", false)
+	time.Sleep(50 * time.Millisecond)
+	if got := c.mediaToggles.Load(); got != 1 {
+		t.Fatalf("a circle tap toggled %d times, want 1", got)
+	}
 }
 
 // A talk key pressed while an alert sounds dismisses it and is consumed: the
@@ -498,12 +523,12 @@ func TestFullCaptureForwardsControlsWithoutDismissal(t *testing.T) {
 	}
 }
 
-// When a crossing reports both opposite volume edges without the centre, the
-// ordered pair is the left/right swipe, not a volume chord. The swipe must
-// produce previous/next and no volume ramp, and neither contact's release may
-// leak a step. A crossing that reports only one contact remains a volume press
-// and is not inferred as a swipe.
-func TestOppositeVolumeContactsFormASwipe(t *testing.T) {
+// The measured panel emits one key per swipe. A centre press followed by the
+// volume edge inside the inter-contact bound is a skip, and the edge's own
+// volume step is suppressed; neither contact's release may leak a step.
+// Opposite volume edges farther apart than the full-panel window stay two
+// deliberate steps.
+func TestCentreEvidenceSelectsTheSwipe(t *testing.T) {
 	clock := ids.NewClock()
 	logs, err := logbus.New(clock, 100, "")
 	if err != nil {
@@ -520,29 +545,44 @@ func TestOppositeVolumeContactsFormASwipe(t *testing.T) {
 		})
 	defer m.Close()
 
-	// East then west is a leftward crossing. The east contact is still down
-	// when the west edge is pressed, as an overlapping crossing can report.
-	panelKeyAt(m, "volume_up", true, 1_000_000)
-	panelKeyAt(m, "volume_down", true, 1_090_000)
-	panelKeyAt(m, "volume_up", false, 1_150_000)
-	panelKeyAt(m, "volume_down", false, 1_160_000)
-	if got := previous.Load(); got != 1 {
-		t.Fatalf("leftward crossing delivered %d previous, want 1", got)
+	// Centre then east is a rightward swipe, with the east contact still down
+	// when the centre is released.
+	panelKeyAt(m, "center", true, 1_000_000)
+	panelKeyAt(m, "volume_up", true, 1_090_000)
+	panelKeyAt(m, "center", false, 1_150_000)
+	panelKeyAt(m, "volume_up", false, 1_160_000)
+	if got := next.Load(); got != 1 {
+		t.Fatalf("centre/right swipe delivered %d next, want 1", got)
 	}
 	if up.Load() != 0 || down.Load() != 0 {
 		t.Fatalf("swipe leaked volume steps up=%d down=%d", up.Load(), down.Load())
 	}
 
-	// West then east is a rightward crossing.
-	panelKeyAt(m, "volume_down", true, 2_000_000)
-	panelKeyAt(m, "volume_up", true, 2_090_000)
-	panelKeyAt(m, "volume_down", false, 2_150_000)
-	panelKeyAt(m, "volume_up", false, 2_160_000)
-	if got := next.Load(); got != 1 {
-		t.Fatalf("rightward crossing delivered %d next, want 1", got)
+	// Centre then west is a leftward swipe after the centre was released.
+	panelKeyAt(m, "center", true, 2_000_000)
+	panelKeyAt(m, "center", false, 2_050_000)
+	panelKeyAt(m, "volume_down", true, 2_180_000)
+	panelKeyAt(m, "volume_down", false, 2_240_000)
+	if got := previous.Load(); got != 1 {
+		t.Fatalf("centre/left swipe delivered %d previous, want 1", got)
 	}
 	if up.Load() != 0 || down.Load() != 0 {
 		t.Fatalf("swipe leaked volume steps up=%d down=%d", up.Load(), down.Load())
+	}
+
+	// Without the centre a slow opposite pair is two deliberate volume steps.
+	panelKeyAt(m, "volume_down", true, 3_000_000_000)
+	panelKeyAt(m, "volume_down", false, 3_050_000_000)
+	panelKeyAt(m, "volume_up", true, 3_450_000_000)
+	panelKeyAt(m, "volume_up", false, 3_500_000_000)
+	if got := next.Load(); got != 1 || previous.Load() != 1 {
+		t.Fatalf("bare edge pair became a swipe: next=%d previous=%d", next.Load(), previous.Load())
+	}
+	if got := up.Load(); got != 1 {
+		t.Fatalf("bare east edge stepped volume %d times, want 1", got)
+	}
+	if got := down.Load(); got != 1 {
+		t.Fatalf("bare west edge stepped volume %d times, want 1", got)
 	}
 }
 

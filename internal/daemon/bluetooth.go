@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -148,54 +150,261 @@ func (d *Daemon) applyBluetoothSettings(v settings.UserSettings) {
 	}()
 }
 
-// applyBluetoothVolume mirrors the framework master onto the source's AVRCP
-// volume, which the local gain stages complement. BlueZ suppresses the echo of
-// a level it just wrote, so the source does not report it back as a change.
-func (d *Daemon) applyBluetoothVolume(level float64) {
+// The framework master is the authoritative listening level, and the AVRCP
+// absolute-volume register mirrors it so the source's own display follows a
+// speaker-side change. The mirror is a display write, not a gain: the local
+// attenuation stays the only stage that changes how loud the stream is, which is
+// why a compensated build sounded far too loud and a doubly attenuated one
+// near-silent on this unit.
+//
+// A peer's echo is not a usable authority either: it reports the level it thinks
+// it applied, rounds it to its own step, and reports nothing at all when the
+// register is unwritable. Adopting that echo moved the user's master to the
+// peer's neighbour and made a volume press take seconds to be audible while the
+// round trip settled, so the level we just wrote is remembered and its own
+// report is ignored. The memory must stay narrow: a phone's slider drag is a run
+// of reports, and a wide window or step neighbourhood swallowed the whole drag
+// so the speaker lagged behind the phone.
+const (
+	// bluetoothVolumeForwardDeadline bounds one mirror write to the source. The
+	// write is asynchronous and never blocks a key press or the render path.
+	bluetoothVolumeForwardDeadline = 5 * time.Second
+	// bluetoothVolumeEchoWindow is how long after a write the source may still
+	// report exactly that level back. A peer's echo follows its write immediately;
+	// a deliberate change must never wait for a window, so this is a fraction of a
+	// second rather than the seconds an earlier build used.
+	bluetoothVolumeEchoWindow = 900 * time.Millisecond
+	// bluetoothVolumeEchoSlack is the AVRCP step distance a report may differ by
+	// and still be the echo of our write, because a source rounds the level to its
+	// own step count before reporting it. Anything further away is the user's
+	// slider and is adopted at once, even while a write is in flight.
+	bluetoothVolumeEchoSlack = 1
+	// bluetoothVolumeMirrorSettle coalesces the intermediate levels of one
+	// gesture: a key repeat, a slider drag or a full-panel swipe (whose revert
+	// lands ~100 ms after the leading step) replaces the pending level inside this
+	// window, so the peer sees one write per settled level. It is a fixed delay
+	// from the first pending change, not a debounce a continuous gesture can
+	// extend, and it runs on the mirror goroutine, never on the key path.
+	bluetoothVolumeMirrorSettle = 450 * time.Millisecond
+	// bluetoothVolumeEchoMemory bounds how many recent writes are remembered.
+	// Writes are serialized and user-paced, so a handful is enough and the memory
+	// can never grow.
+	bluetoothVolumeEchoMemory = 4
+)
+
+// bluetoothVolumeStep converts a [0,1] level to the AVRCP absolute-volume step
+// the manager writes, so a write and the peer's report are compared in the
+// units the peer actually publishes.
+func bluetoothVolumeStep(level float64) uint16 {
+	if level < 0 {
+		level = 0
+	}
+	if level > 1 {
+		level = 1
+	}
+	return uint16(math.Round(level * 127))
+}
+
+// applyBluetoothGain applies the framework master locally and mirrors it to the
+// source. The local stage is unchanged and remains the only gain: writing the
+// AVRCP register used to attenuate the same signal twice (10 % on both ends
+// sounded near-silent, because the product curve already scales the stream by the
+// master), and compensating the local trim for the source's share made it far too
+// loud — macOS reports the written value back without attenuating the A2DP
+// stream, so the "confirmation" that the source applies it is not evidence. The
+// write that remains is the display mirror: the source's own level indicator
+// follows the speaker, and the peer's echo of it is filtered instead of adopted.
+func (d *Daemon) applyBluetoothGain(level float64) {
 	if d.bt == nil {
 		return
 	}
 	d.btMu.Lock()
-	if d.btVolSet && d.btVolume == level {
+	if d.btGainSet && d.btGain == level {
 		d.btMu.Unlock()
 		return
 	}
-	d.btVolume = level
-	d.btVolSet = true
+	d.btGain, d.btGainSet = level, true
 	d.btMu.Unlock()
 	if d.bluetoothNative() {
 		d.setBluetoothStreamTrim(level)
 	} else {
 		d.setBluetoothPlaybackGain(level)
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
-		defer cancel()
-		if err := d.bt.SetTransportVolume(ctx, level); err != nil {
-			d.logs.Debugf("bluetooth", "", "transport volume: %v", err)
-		}
-	}()
+	d.mirrorBluetoothVolume(level)
 }
 
-// forceBluetoothVolume re-applies the current level after a loopback appears.
-func (d *Daemon) forceBluetoothVolume() {
+// forgetBluetoothGain drops the deduplication memory so the next apply is
+// unconditional, after a new route or a new source appears. Because apply is the
+// mirror's trigger, the same call re-asserts the mirror when a transport or a new
+// connection appears.
+func (d *Daemon) forgetBluetoothGain() {
+	d.btMu.Lock()
+	d.btGainSet = false
+	d.btMu.Unlock()
+}
+
+// bluetoothVolumeEcho is one level this daemon wrote to the source's AVRCP
+// register and when it did. It exists only so the peer's report of our own write
+// is not mistaken for a slider move.
+type bluetoothVolumeEcho struct {
+	step uint16
+	at   time.Time
+}
+
+// noteBluetoothVolumeEchoLocked remembers a level about to be written and
+// returns the slot it took, so a refused write can drop exactly that record.
+// Writes are serialized, so the slot cannot belong to another write.
+func (d *Daemon) noteBluetoothVolumeEchoLocked(step uint16) int {
+	slot := d.btEchoNext
+	d.btEchoes[slot] = bluetoothVolumeEcho{step: step, at: time.Now()}
+	d.btEchoNext = (slot + 1) % len(d.btEchoes)
+	return slot
+}
+
+// bluetoothVolumeEchoedLocked reports whether a report from the source reproduces
+// a level this daemon wrote inside the echo window. The comparison is in AVRCP
+// steps because that is the unit the peer publishes and rounds to. Empty slots
+// carry a zero time, so they fail the window check and never match.
+func (d *Daemon) bluetoothVolumeEchoedLocked(volume uint16) bool {
+	now := time.Now()
+	for i := range d.btEchoes {
+		echo := d.btEchoes[i]
+		if echo.at.IsZero() || now.Sub(echo.at) > bluetoothVolumeEchoWindow {
+			continue
+		}
+		diff := int(echo.step) - int(volume)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= bluetoothVolumeEchoSlack {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetBluetoothVolumeEchoes clears the write memory and the once-per-session
+// diagnosis. It runs on connect and disconnect: an echo belongs to the session
+// that produced it, and a new source must not inherit the previous one's.
+func (d *Daemon) forgetBluetoothVolumeEchoes() {
+	d.btMu.Lock()
+	d.btEchoes = [bluetoothVolumeEchoMemory]bluetoothVolumeEcho{}
+	d.btEchoNext = 0
+	d.btNoVolumeLogged = false
+	d.btMu.Unlock()
+}
+
+// mirrorBluetoothVolume publishes the framework master to the source's AVRCP
+// register so a speaker-side change is visible on the source. It is asynchronous
+// and coalesced in a single slot: a key repeat or a slider drag leaves at most one
+// pending write, the newest level wins, and neither the key path nor the render
+// path ever waits for D-Bus.
+func (d *Daemon) mirrorBluetoothVolume(level float64) {
 	if d.bt == nil {
 		return
 	}
 	d.btMu.Lock()
-	d.btVolSet = false
+	d.btMirrorLevel, d.btMirrorGen = level, d.btMirrorGen+1
+	start := !d.btMirrorBusy
+	d.btMirrorBusy = true
 	d.btMu.Unlock()
-	d.applyBluetoothVolume(d.user.Get().Values.MasterVolume)
+	if start {
+		go d.runBluetoothVolumeMirror()
+	}
 }
 
-// applyBluetoothSourceVolume mirrors an AVRCP volume change made on the source
-// into the framework master through the canonical master-volume path. That path
-// persists the level, applies the local mixer and re-applies the Bluetooth
-// gain; BlueZ does not republish a level it just wrote, so the mirror cannot
-// loop. No OSD or cue is involved: those belong to input handling only.
+// runBluetoothVolumeMirror drains the mirror slot through one coalescing window.
+// The window is fixed from the first pending change, so the newest level inside
+// it is the one written: the leading step of a swipe and its revert land together
+// and the peer sees one write, while a continuous drag still writes at least once
+// per window. It is the only writer, so the echo record it takes belongs to its own
+// write; it exits as soon as no newer level arrived while writing.
+func (d *Daemon) runBluetoothVolumeMirror() {
+	for {
+		timer := time.NewTimer(bluetoothVolumeMirrorSettle)
+		select {
+		case <-d.ctx.Done():
+			// Shutting down: the busy flag stays set so no caller starts a new
+			// runner against a cancelled context.
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		d.btMu.Lock()
+		level, gen := d.btMirrorLevel, d.btMirrorGen
+		d.btMu.Unlock()
+		d.writeBluetoothVolume(level)
+		d.btMu.Lock()
+		if d.btMirrorGen == gen {
+			d.btMirrorBusy = false
+			d.btMu.Unlock()
+			return
+		}
+		d.btMu.Unlock()
+	}
+}
+
+// writeBluetoothVolume writes one mirror level and records it as an echo unless
+// the write was refused. A source without a writable register is normal: the
+// speaker still attenuates locally, a source-slider change still drives the
+// master, and the diagnosis is said once per session at Debug so a volume press
+// does not produce a repeated warning.
+func (d *Daemon) writeBluetoothVolume(level float64) {
+	step := bluetoothVolumeStep(level)
+	d.btMu.Lock()
+	slot := d.noteBluetoothVolumeEchoLocked(step)
+	d.btMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(d.ctx, bluetoothVolumeForwardDeadline)
+	err := d.bt.SetTransportVolume(ctx, level)
+	cancel()
+	if err == nil {
+		// The field question "did we send it, and did the peer take it?" needs
+		// this line: the write is asynchronous and otherwise silent.
+		d.logs.Debugf("bluetooth", "", "transport volume mirrored to the source: %d%%", int(math.Round(level*100)))
+		return
+	}
+	// The register did not take our level, so no report of it can follow: drop
+	// the record instead of treating a later genuine report as its echo.
+	d.btMu.Lock()
+	d.btEchoes[slot] = bluetoothVolumeEcho{}
+	d.btMu.Unlock()
+
+	if errors.Is(err, bluetooth.ErrNoSource) || errors.Is(err, bluetooth.ErrNoTransport) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// No source, or its transport is not configured yet. The transport event
+		// and the next master change re-assert the mirror; there is nothing for
+		// the user to act on.
+		return
+	}
+	if errors.Is(err, bluetooth.ErrNoAbsoluteVolume) {
+		d.btMu.Lock()
+		logged := d.btNoVolumeLogged
+		d.btNoVolumeLogged = true
+		d.btMu.Unlock()
+		if !logged {
+			d.logs.Debugf("bluetooth", "", "source does not accept a mirrored AVRCP volume, the local level stays authoritative: %v", err)
+		}
+		return
+	}
+	d.logs.Debugf("bluetooth", "", "mirror master volume to the source: %v", err)
+}
+
+// applyBluetoothSourceVolume applies a volume the source reports to the framework
+// master. Volume is two-way for display, but a report that reproduces a level this
+// daemon just wrote is the source's echo, not a slider move, and adopting it moved
+// the master to the peer's rounded neighbour. A report outside that echo memory is
+// the user moving the phone's slider, and the speaker follows it once.
 func (d *Daemon) applyBluetoothSourceVolume(volume uint16) {
 	if volume > 127 {
 		volume = 127
+	}
+	d.btMu.Lock()
+	echoed := d.bluetoothVolumeEchoedLocked(volume)
+	d.btMu.Unlock()
+	if echoed {
+		d.logs.Debugf("bluetooth", "", "ignoring the source's echo of the level just written: %d/127", volume)
+		return
 	}
 	level := float64(volume) / 127
 	if math.Abs(level-d.user.Get().Values.MasterVolume) < 0.001 {
@@ -221,9 +430,39 @@ func (d *Daemon) watchBluetooth() {
 	// its next event, leaving it connected with no audio route. Seeding is
 	// idempotent with the connect event that may also arrive.
 	events := d.bt.Watch(d.ctx)
+	d.observeBluetoothCommands()
 	// A source may already be connected when the daemon starts; the manager
 	// seeds its state without emitting a connect event.
-	d.ensureConnectedBluetoothRoutes()
+	//
+	// Session verification is generation-scoped: a new connection bumps the
+	// generation and cancels the pending verdict, a disconnect does the same, and
+	// daemon shutdown cancels through d.ctx. The guard bounds the single A2DP
+	// profile request per source.
+	gen := &atomic.Uint64{}
+	sessions := newBTSessionGuard()
+	var verifyCancel context.CancelFunc
+	stopVerify := func() {
+		if verifyCancel != nil {
+			verifyCancel()
+			verifyCancel = nil
+		}
+	}
+	startVerify := func(address string, audioReady <-chan struct{}) {
+		if strings.TrimSpace(address) == "" {
+			return
+		}
+		stopVerify()
+		ctx, cancel := context.WithTimeout(d.ctx, btSessionVerifyDeadline+btSessionRequestDeadline+30*time.Second)
+		verifyCancel = cancel
+		current := gen.Add(1)
+		go d.verifyBluetoothSession(ctx, address, audioReady, sessions, current, func() bool {
+			return gen.Load() == current
+		})
+	}
+	defer stopVerify()
+	for _, restored := range d.ensureConnectedBluetoothRoutes() {
+		startVerify(restored.Address, restored.AudioReady)
+	}
 	d.publishUI(uichanges.Bluetooth)
 	ring := &bluetoothNotice{}
 	display := &bluetoothNotice{}
@@ -277,6 +516,13 @@ func (d *Daemon) watchBluetooth() {
 					break
 				}
 				d.reconcileBluetoothSession(newest.Media)
+				if newest.Media.Present {
+					// A coalesced-away connect event also lost its verdict. The
+					// session was just reconciled, so assert its audio link too.
+					ready := make(chan struct{})
+					close(ready)
+					startVerify(newest.Media.DeviceAddress, ready)
+				}
 				if following == nil {
 					continue
 				}
@@ -287,9 +533,18 @@ func (d *Daemon) watchBluetooth() {
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.showBluetoothPulse(ring, bluetoothPulseCount)
 				d.showBluetoothIndicator(display)
-				d.connectBluetoothAudio(ev.DeviceAddress)
+				startVerify(ev.DeviceAddress, d.connectBluetoothAudio(ev.DeviceAddress))
+				// A new source session starts with no echo memory, and its own
+				// display gets the current level as soon as its transport exists.
+				d.forgetBluetoothVolumeEchoes()
+				d.mirrorBluetoothVolume(d.user.Get().Values.MasterVolume)
 			case bluetooth.EventDisconnected:
 				d.logs.Infof("bluetooth", "", "source disconnected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
+				// Every disconnect is a real lifecycle change: the daemon never
+				// disconnects a source itself. It supersedes the pending verdict.
+				stopVerify()
+				gen.Add(1)
+				d.forgetBluetoothVolumeEchoes()
 				// Disconnect is a single pulse and no glyph: any connect
 				// glyph still on screen is cleared at once, the display shows
 				// the selected baseline, and only the ring acknowledges the
@@ -312,6 +567,11 @@ func (d *Daemon) watchBluetooth() {
 				}
 			case bluetooth.EventVolume:
 				d.applyBluetoothSourceVolume(ev.Volume)
+			case bluetooth.EventVolumeUnavailable:
+				// Once per source session: the host has no writable absolute
+				// volume, so the master level only moves the local trim. The
+				// media detail says so as well.
+				d.logs.Warnf("bluetooth", "", "%s", ev.Detail)
 			case bluetooth.EventTransport:
 				// BlueZ configured a usable transport; acquire it now instead
 				// of retrying on a timer. The transport exposes AVRCP absolute
@@ -321,7 +581,8 @@ func (d *Daemon) watchBluetooth() {
 				if !d.bluetoothNative() {
 					continue
 				}
-				d.forceBluetoothVolume()
+				d.forgetBluetoothGain()
+				d.applyBluetoothGain(d.user.Get().Values.MasterVolume)
 				d.startBluetoothStream(ev.DeviceAddress)
 			case bluetooth.EventMedia:
 				if ev.Media.Present {
@@ -338,26 +599,57 @@ func (d *Daemon) watchBluetooth() {
 	}
 }
 
-// connectBluetoothAudio brings up the source's A2DP/AVRCP profiles before
-// loading the audio route. Sources often connect at ACL level only.
-func (d *Daemon) connectBluetoothAudio(address string) {
-	if d.bt == nil || strings.TrimSpace(address) == "" {
+// observeBluetoothCommands reports how the manager resolved a transport command.
+// A resolved toggle logs its direction and the evidence behind it at Debug; a
+// failed AVRCP call is the honest failure surface for a media key, so it logs at
+// Warn. It is read-only: the manager never lets an observer change a command.
+func (d *Daemon) observeBluetoothCommands() {
+	observer, ok := d.bt.(bluetooth.CommandObserver)
+	if !ok {
 		return
+	}
+	observer.SetCommandObserver(func(obs bluetooth.CommandObservation) {
+		if obs.Err != nil {
+			d.logs.Warnf("bluetooth", "", "avrcp %s for %s failed: %v", obs.Command, obs.Device, obs.Err)
+			return
+		}
+		evidence := obs.Evidence
+		if evidence == "" {
+			evidence = "none"
+		}
+		d.logs.Debugf("bluetooth", "", "avrcp %s for %s -> %s (evidence=%s)",
+			obs.Command, obs.Device, obs.Method, evidence)
+	})
+}
+
+// connectBluetoothAudio brings up the source's A2DP/AVRCP profiles before
+// loading the audio route. Sources often connect at ACL level only. The returned
+// channel is closed when the profile request has finished (immediately when the
+// daemon does not request one), so session verification can judge the link after
+// the request instead of racing it.
+func (d *Daemon) connectBluetoothAudio(address string) <-chan struct{} {
+	done := make(chan struct{})
+	if d.bt == nil || strings.TrimSpace(address) == "" {
+		close(done)
+		return done
 	}
 	if d.bluetoothNative() {
-		go d.connectBluetoothAudioNative(address)
-		return
+		go func() {
+			defer close(done)
+			d.connectBluetoothAudioNative(address)
+		}()
+		return done
 	}
 	go func() {
+		defer close(done)
 		// If no audio owner became ready at startup (BlueZ was still coming up,
 		// or its registration was lost), resolve it before asking the source
-		// for a profile. A healthy PulseAudio owner reports ready and is left
-		// untouched; this is a one-shot check, not a retry loop. It runs off the
-		// watcher goroutine so notice timers and other sources keep flowing.
-		if !d.bluetoothAudioReady() {
-			if err := d.prepareBluetoothAudio(); err != nil {
-				d.logs.Warnf("bluetooth", "", "audio owner before connecting %s: %v", address, err)
-			}
+		// for a profile. The owner selection is idempotent and serialized; it
+		// also retires a loaded PulseAudio stack that is not carrying audio, so
+		// the source cannot land on its Headset endpoint while the native sink
+		// is armed.
+		if err := d.prepareBluetoothAudio(); err != nil {
+			d.logs.Warnf("bluetooth", "", "audio owner before connecting %s: %v", address, err)
 		}
 		if d.bluetoothNative() {
 			d.connectBluetoothAudioNative(address)
@@ -365,6 +657,7 @@ func (d *Daemon) connectBluetoothAudio(address string) {
 		}
 		d.connectBluetoothAudioPulse(address)
 	}()
+	return done
 }
 
 // connectBluetoothAudioNative registers/verifies the native sink and then asks
@@ -392,11 +685,24 @@ func (d *Daemon) connectBluetoothAudioNative(address string) {
 	if err := d.bt.ConnectAudio(ctx, address); err != nil {
 		d.logs.Warnf("bluetooth", "", "audio profiles for %s failed after %s: %v",
 			address, time.Since(start).Round(time.Millisecond), err)
+	} else if verifier, ok := d.bt.(bluetooth.A2DPSession); ok {
+		// The ConnectProfile calls not failing only means BlueZ accepted the
+		// request. Only the observed transport says the session is A2DP, so log
+		// what was actually observed; the session verification follows it.
+		linkCtx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
+		link, linkErr := verifier.Session(linkCtx, address)
+		cancel()
+		if linkErr != nil {
+			d.logs.Infof("bluetooth", "", "audio profiles accepted for %s in %s; audio link unreadable: %v",
+				address, time.Since(start).Round(time.Millisecond), linkErr)
+		} else {
+			d.logs.Infof("bluetooth", "", "audio profiles accepted for %s in %s; audio link %s",
+				address, time.Since(start).Round(time.Millisecond), link)
+		}
 	} else {
-		d.logs.Infof("bluetooth", "", "A2DP source profile connected for %s in %s",
+		d.logs.Infof("bluetooth", "", "audio profiles accepted for %s in %s",
 			address, time.Since(start).Round(time.Millisecond))
 	}
-	d.forceBluetoothVolume()
 	d.startBluetoothStream(address)
 }
 
@@ -413,11 +719,11 @@ func (d *Daemon) connectBluetoothAudioPulse(address string) {
 	if err := d.bt.ConnectAudio(ctx, address); err != nil {
 		d.logs.Debugf("bluetooth", "", "audio profiles for %s: %v", address, err)
 	} else {
-		d.logs.Infof("bluetooth", "", "audio profiles connected for %s", address)
+		d.logs.Infof("bluetooth", "", "audio profiles accepted for %s; PulseAudio owns the route", address)
 	}
-	// The Mac's AVRCP volume is the single Bluetooth gain and mirrors the
-	// framework master.
-	d.forceBluetoothVolume()
+	// With the device module decoupled from AVRCP, the loopback carries the local
+	// gain (setBluetoothPlaybackGain) and the transport volume is only the
+	// source's display mirror of the framework master.
 	d.ensureBluetoothAudioRoute(address)
 }
 
@@ -569,6 +875,11 @@ func (d *Daemon) segmentDisplayResourceID() string {
 func (d *Daemon) reconcileBluetoothSession(media bluetooth.MediaState) {
 	if d.bt == nil {
 		return
+	}
+	if !media.Present {
+		// A session lost to a coalesced event is over for volume as well: the
+		// echo memory of its writes must not outlive it.
+		d.forgetBluetoothVolumeEchoes()
 	}
 	ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
 	devices, err := d.bt.PairedDevices(ctx)

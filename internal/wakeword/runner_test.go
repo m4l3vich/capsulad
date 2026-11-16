@@ -43,7 +43,8 @@ func newTestManager(t *testing.T, available bool) *Manager {
 		t.Fatal(err)
 	}
 	m := NewManager(context.Background(), clock, logs, []Model{{
-		ID: "test.word", DisplayName: "Test word", EngineID: "test", Available: available,
+		ID: "test.word", DisplayName: "Test word", EngineID: "test",
+		Available: available, Enabled: available,
 	}})
 	m.SetEnabled(true)
 	return m
@@ -282,7 +283,7 @@ func TestRunnerRejectedActivationDoesNotStartCooldown(t *testing.T) {
 	engine := &scriptedEngine{scores: []float64{0.9, 0.9}}
 	r := NewRunner(m, engine, "test.word", RunnerOptions{Threshold: 0.5, ProcessingTap: audio.CaptureProcessingTap, MinConsecutive: 1})
 	r.HandleFrame(frameWithSamples(1280))
-	m.SetModels([]Model{{ID: "test.word", Available: true}})
+	m.SetModels([]Model{{ID: "test.word", Available: true, Enabled: true}})
 	r.HandleFrame(frameWithSamples(1280))
 	if fired != 1 {
 		t.Fatalf("rejected activation consumed cooldown: fired=%d", fired)

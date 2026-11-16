@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,8 +28,8 @@ import (
 )
 
 // startEmptyDaemon runs the daemon against an application directory with no
-// installed packages. The compiled-in clock and ring apps must still be
-// registered, running and selected.
+// installed packages. The compiled-in clock and ring apps are registered; on a
+// genuinely new settings store their provider defaults are auto-seeded.
 func startEmptyDaemon(t *testing.T, base string) *Daemon {
 	t.Helper()
 	cfg := DefaultConfig()
@@ -101,6 +102,12 @@ func TestBuiltinSystemAppsWithoutInstalledPackages(t *testing.T) {
 	if app, _ := d.reg.Get(ringAppID); !hasProvide(app.Manifest.Provides, "led_ring_controller") {
 		t.Fatal("ring app does not provide the ring")
 	}
+	if app, ok := d.systemApp(clockAppID); !ok || !app.FrameworkOwned {
+		t.Fatal("clock app must be explicitly framework-owned")
+	}
+	if app, ok := d.systemApp(ringAppID); !ok || app.FrameworkOwned {
+		t.Fatal("ring app must remain a selection-owned provider")
+	}
 
 	waitForAppSelection(t, d, "display.segment.front", clockAppID)
 	waitForAppSelection(t, d, "light.ring.main", ringAppID)
@@ -137,6 +144,144 @@ func TestBuiltinSystemAppsWithoutInstalledPackages(t *testing.T) {
 	}
 	if kind := ring.ContentKind(); kind != presentations.ContentRingEffect {
 		t.Fatalf("ring baseline content = %v", kind)
+	}
+}
+
+func TestDeselectingRingStopsOnlyRingAndReselectionStartsIt(t *testing.T) {
+	d := startEmptyDaemon(t, shortTempDir(t))
+	waitForAppSelection(t, d, "display.segment.front", clockAppID)
+	waitForAppSelection(t, d, "light.ring.main", ringAppID)
+	waitFor(t, 5*time.Second, "ring app running", func() bool {
+		runs := d.sup.List(ringAppID)
+		return len(runs) == 1 && runs[0].State == supervisor.Ready
+	})
+
+	clock := d.builtins.clock
+	clock.startTimer(60_000, "surviving timer")
+	clockRunID := d.SystemAppRunID(clockAppID)
+	if err := d.writeUserSettings([]string{"default_app_by_resource"}, func(v *settings.UserSettings) {
+		v.DefaultAppByResource["light.ring.main"] = ""
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "deselected ring run stopped", func() bool {
+		return len(d.sup.List(ringAppID)) == 0
+	})
+	if run, ok := d.sup.Get(clockRunID); !ok || run.State != supervisor.Ready {
+		t.Fatalf("clock run after ring deselection = %+v, %v", run, ok)
+	}
+	if timers := clock.listTimers().GetTimers(); len(timers) != 1 || timers[0].GetLabel() != "surviving timer" {
+		t.Fatalf("clock timers after ring deselection = %+v", timers)
+	}
+
+	if err := d.writeUserSettings([]string{"default_app_by_resource"}, func(v *settings.UserSettings) {
+		v.DefaultAppByResource["light.ring.main"] = ringAppID
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "selected ring run restarted", func() bool {
+		runs := d.sup.List(ringAppID)
+		return len(runs) == 1 && runs[0].State == supervisor.Ready
+	})
+	if run, ok := d.sup.Get(clockRunID); !ok || run.State != supervisor.Ready {
+		t.Fatalf("clock run after ring reselection = %+v, %v", run, ok)
+	}
+	if timers := clock.listTimers().GetTimers(); len(timers) != 1 || timers[0].GetLabel() != "surviving timer" {
+		t.Fatalf("clock timers after ring reselection = %+v", timers)
+	}
+}
+
+func TestBuiltinClockFailureIsScopedToRunGeneration(t *testing.T) {
+	d := startEmptyDaemon(t, shortTempDir(t))
+	waitForAppSelection(t, d, "display.segment.front", clockAppID)
+	clock := d.builtins.clock
+	clock.mu.Lock()
+	firstGen := clock.runGen
+	clock.mu.Unlock()
+	firstRun, ok := d.sup.Get(d.SystemAppRunID(clockAppID))
+	if !ok {
+		t.Fatal("initial clock run is missing")
+	}
+
+	if !d.Stop(firstRun.RunID) {
+		t.Fatal("stopping initial clock run failed")
+	}
+	var secondRun supervisor.Run
+	waitFor(t, 5*time.Second, "new clock run generation", func() bool {
+		run, ok := d.sup.Get(firstRun.RunID)
+		if ok && run.State == supervisor.Ready && run.StartedNS > firstRun.StartedNS {
+			secondRun = run
+			return true
+		}
+		return false
+	})
+	clock.mu.Lock()
+	secondGen := clock.runGen
+	clock.mu.Unlock()
+	if secondGen <= firstGen {
+		t.Fatalf("clock generation = %d after %d", secondGen, firstGen)
+	}
+
+	clock.failRun(firstGen, fmt.Errorf("late generation-one failure"))
+	if run, ok := d.sup.Get(secondRun.RunID); !ok || run.StartedNS != secondRun.StartedNS {
+		t.Fatalf("late failure changed the newer run: %+v, %v", run, ok)
+	}
+
+	clock.failRun(secondGen, fmt.Errorf("generation-two failure"))
+	var thirdRun supervisor.Run
+	waitFor(t, 5*time.Second, "clock recovered once for generation two", func() bool {
+		run, ok := d.sup.Get(secondRun.RunID)
+		if ok && run.State == supervisor.Ready && run.StartedNS > secondRun.StartedNS {
+			thirdRun = run
+			return true
+		}
+		return false
+	})
+	clock.failRun(secondGen, fmt.Errorf("duplicate generation-two failure"))
+	if run, ok := d.sup.Get(thirdRun.RunID); !ok || run.StartedNS != thirdRun.StartedNS {
+		t.Fatalf("duplicate failure changed the recovered run: %+v, %v", run, ok)
+	}
+	failures := 0
+	for _, entry := range d.logs.Snapshot(clockAppID) {
+		if strings.Contains(entry.Message, "internal stream failed: generation-two failure") {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("generation-two failure recorded %d times, want once", failures)
+	}
+}
+
+func TestBuiltinClockFailureCallbacksConvergeAcrossRestarts(t *testing.T) {
+	d := startEmptyDaemon(t, shortTempDir(t))
+	waitForAppSelection(t, d, "display.segment.front", clockAppID)
+	clock := d.builtins.clock
+	runID := d.SystemAppRunID(clockAppID)
+
+	// A stream failure and a stop/restart can race on the same built-in. The
+	// callback must either fail the run it belongs to or be ignored, never
+	// tear down a newer generation or crash on a reused recovery guard.
+	for i := range 5 {
+		clock.mu.Lock()
+		gen := clock.runGen
+		clock.mu.Unlock()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			clock.failRun(gen, fmt.Errorf("racing stream failure %d", i))
+		}()
+		d.Stop(runID)
+		<-done
+		waitFor(t, 10*time.Second, "clock converged to one ready run", func() bool {
+			runs := d.sup.List(clockAppID)
+			return len(runs) == 1 && runs[0].State == supervisor.Ready
+		})
+	}
+	clock.mu.Lock()
+	running := clock.running
+	clock.mu.Unlock()
+	if !running {
+		t.Fatal("clock runtime did not recover after racing failures")
 	}
 }
 

@@ -1,0 +1,75 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafb6e8. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.client;
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/client;clientpb";
+
+message ClientState {
+  vk.voice.grpc.front.v1.model.client.PlatformSpecific state = 1;
+}
+message Notification {
+  bytes json = 1;
+}
+message PlatformSpecific {
+  oneof platform_state {
+    vk.voice.grpc.front.v1.model.client.PlatformSpecific.Android android_state = 1;
+    vk.voice.grpc.front.v1.model.client.PlatformSpecific.IOS ios_state = 2;
+    vk.voice.grpc.front.v1.model.client.PlatformSpecific.Capsula capsula_state = 3;
+    vk.voice.grpc.front.v1.model.client.PlatformSpecific.EmbeddedAndroid embedded_android_state = 4;
+  }
+  message Android {
+    bool default_assistant = 1;
+    string default_browser_package = 2;
+    vk.voice.grpc.front.v1.model.client.Flashlight flashlight = 3;
+    vk.voice.grpc.front.v1.model.client.Permissions permissions = 4;
+  }
+  message IOS {
+    bool whatsapp = 1;
+    vk.voice.grpc.front.v1.model.client.Permissions permissions = 2;
+  }
+  message Capsula {
+    int32 clock_brightness = 1;
+    bool demo_mode = 2;
+    bool has_unread_vk_messages = 3;
+    bool mic_on = 4;
+    bool stereo_connected = 5;
+    float volume = 6;
+    vk.voice.grpc.front.v1.model.client.PhraseExecuting phrase_executing = 7;
+    repeated vk.voice.grpc.front.v1.model.client.Notification notifications = 9;
+    reserved 8;
+  }
+  message EmbeddedAndroid {
+    message Watch {
+    }
+    message CarAudio {
+    }
+    message Television {
+    }
+  }
+}
+message Permissions {
+  vk.voice.grpc.front.v1.model.client.PermissionStatus call_phone = 1;
+  vk.voice.grpc.front.v1.model.client.PermissionStatus address_book = 2;
+  vk.voice.grpc.front.v1.model.client.PermissionStatus location = 3;
+}
+message Flashlight {
+  bool supported = 1;
+}
+message PhraseExecuting {
+  string phrase_id = 1;
+  vk.voice.grpc.front.v1.model.client.PhraseExecuting.CommandType current_command_type = 3;
+  int32 commands_executed = 4;
+  int32 commands_left = 5;
+  reserved 2;
+  enum CommandType {
+    COMMAND_TYPE_UNSPECIFIED = 0;
+    COMMAND_TYPE_TTS = 1;
+  }
+}
+enum PermissionStatus {
+  PERMISSION_STATUS_UNSPECIFIED = 0;
+  PERMISSION_STATUS_GRANTED = 1;
+  PERMISSION_STATUS_DENIED = 2;
+}

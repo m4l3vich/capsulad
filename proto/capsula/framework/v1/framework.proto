@@ -52,6 +52,8 @@ message DeviceInfo {
   string boot_id = 8;
   TargetPlatform target_platform = 9;
   repeated BackendAvailability subsystem_backends = 10;
+  // The SoC serial as the host kernel reports it (/proc/cpuinfo Serial on ARM), read once by the daemon; empty when the host cannot report it; never a secret and never the vendor-compatible device_id.
+  string hardware_serial = 11;
 }
 
 // First implementation targets are the three Capsula Mini firmware variants.
@@ -164,7 +166,11 @@ message UserSettings {
   // Physical output resource ID -> app ID, not a named presentation.
   map<string, string> default_app_by_resource = 1;
   string default_assistant_app_id = 2;
-  string wakeword_model_id = 3;
+  // Reserved: the single-word selector was dead state. It was never consulted
+  // when detecting, so it neither enabled nor bound a word. Per-word
+  // configuration and binding live in `wakewords` instead.
+  reserved 3;
+  reserved "wakeword_model_id";
   bool wakeword_enabled = 4;
   map<string, float> display_brightness = 5; // Global [0,1].
   float master_volume = 6;                    // Global [0,1].
@@ -195,6 +201,24 @@ message UserSettings {
   // <hostname>.local. Persisted by internal/settings; applied by the
   // discovery manager at startup and on change. Empty is invalid.
   string hostname = 14;
+  // Per-word configuration. Absent means the legacy state: every installed word
+  // is live under `wakeword_enabled` and bound to the selected assistant. A
+  // present list is authoritative and names every installed word; a word
+  // without an entry is disabled, never live. Replaced as a whole by an update
+  // that owns the field. A repeated field cannot distinguish absent from empty,
+  // so "no word is live" is written by an update whose `update_fields` names
+  // `wakewords` with no entries; an update that does not own the field leaves
+  // the current state alone.
+  repeated WakewordBinding wakewords = 17;
+}
+
+// One installed wake word's configuration. model_id is the artifact id (the
+// file name stem under <data-dir>/wakeword/models). app_id is the app that
+// activates; empty means the selected assistant.
+message WakewordBinding {
+  string model_id = 1;
+  string app_id = 2;
+  bool enabled = 3;
 }
 // Only controls how long the microphone-MUTED visual indication remains.
 // It does not change the mute state or capture/watchdog indication policy.
@@ -591,6 +615,11 @@ service AssistantService {
   // leaves the installed model untouched.
   rpc TrainWakewordClassifier(TrainWakewordClassifierRequest)
       returns (stream TrainWakewordEvent);
+  // Remove one trained word: its artifact and, when the per-word list is
+  // present, its entry. Recordings are shared training data and are never
+  // deleted. Refused while a training run is active.
+  rpc DeleteWakewordClassifier(DeleteWakewordClassifierRequest)
+      returns (DeleteWakewordClassifierResponse);
 }
 
 message WakewordSample {
@@ -623,7 +652,13 @@ message TrainWakewordClassifierRequest {
   repeated string room_sample_ids = 5;     // room-tone background takes
   repeated string speech_sample_ids = 6;   // unrelated-speech background takes
   repeated string false_sample_ids = 7;    // optional known false activations
+  // Additive: the target artifact. Empty creates a new word with a fresh id;
+  // an existing id replaces exactly that artifact and leaves every other word
+  // (and its gate) untouched. A new word is installed disabled.
+  string model_id = 8;
 }
+message DeleteWakewordClassifierRequest { string model_id = 1; }
+message DeleteWakewordClassifierResponse {}
 message WakewordClassifierInfo {
   string model_id = 1;
   string display_name = 2;
@@ -634,12 +669,64 @@ message WakewordClassifierInfo {
   uint32 projection_width = 7;
   uint32 hidden_width = 8;
 }
+// One evaluated split's measured policy result. Values are copied from the
+// trainer's record; clients display them and never recompute a metric.
+message WakewordGateMetrics {
+  // "tune", "final_test", "auxiliary_tune" or "auxiliary_final_test". The
+  // auxiliary splits are the external CNEG corpus: off-policy measurements that
+  // veto installation on a false activation but are not the processed-audio
+  // certificate.
+  string split = 1;
+  uint32 word_recordings = 2;
+  uint32 detected = 3;
+  float recall = 4;
+  uint32 false_activations = 5;
+}
+// One submitted take a refusal asks the operator to change.
+message WakewordFailingTake {
+  // "word", "room", "speech" or "false_activation".
+  string partition = 1;
+  // 1-based position inside the submitted selection for that partition, the
+  // same numbering the Web UI shows.
+  uint32 index = 2;
+  // Optional: set only by a caller that can name the take.
+  string sample_id = 3;
+  // Stable machine cause for this take, for example "take_too_short".
+  string cause = 4;
+  string detail = 5;
+}
+// The structured reason training was refused. It carries every distinct cause,
+// every failing take and every measured split, so a client can give actionable
+// advice instead of parsing one sentence.
+message WakewordTrainingFailure {
+  // Distinct stable causes, most significant first. Values include
+  // too_few_word_takes, too_few_room_takes, too_few_speech_takes,
+  // take_too_short, unusable_take, duplicate_takes, short_context,
+  // no_positive_windows, no_negative_windows, insufficient_heldout,
+  // tune_gate_failed, final_gate_failed, auxiliary_gate_failed,
+  // corpus_missing, corpus_unusable, fit_failed, configuration,
+  // invalid_request and internal.
+  repeated string causes = 1;
+  repeated WakewordFailingTake takes = 2;
+  repeated WakewordGateMetrics splits = 3;
+  // Calibrated threshold the splits were measured at, or 0 when calibration
+  // could not choose one.
+  float threshold = 4;
+  string detail = 5;
+}
 message TrainWakewordEvent {
   string stage = 1;             // stable machine-readable phase name
   float fraction = 2;           // [0,1] within the whole job
   string log = 3;               // optional human-readable detail
   // Set only on the final success event, after the classifier is installed.
   WakewordClassifierInfo classifier = 4;
+  // Additive: the gate certificate on the final success event. Same values the
+  // trainer stored in the installed artifact.
+  repeated WakewordGateMetrics metrics = 5;
+  // Additive: set only on the terminal failure event. The stream still ends
+  // with an error status, so existing clients do not hang; the structured
+  // refusal arrives before that status.
+  WakewordTrainingFailure failure = 6;
 }
 message ListWakewordModelsRequest {}
 message WakewordModelInfo {
@@ -648,6 +735,18 @@ message WakewordModelInfo {
   string language = 3;
   string engine_id = 4;
   bool available = 5;
+  // Additive: the installed model's gate certificate, when it was recorded.
+  repeated WakewordGateMetrics metrics = 6;
+  // Additive: the gate threshold recorded at training time, 0 when unknown.
+  float threshold = 7;
+  // Additive: effective enablement (global switch && the word's own setting &&
+  // availability). A listed word is not necessarily listening.
+  bool enabled = 8;
+  // Additive: the app this word activates. Empty means the selected assistant.
+  string app_id = 9;
+  // Additive: why a listed word cannot be used (unreadable artifact,
+  // unavailable capture preprocessing). Empty for a ready word.
+  string detail = 10;
 }
 message ListWakewordModelsResponse {
   repeated WakewordModelInfo models = 1;
@@ -670,6 +769,12 @@ message AssistantActivation {
   // Carried on the activation so an assistant does not need the
   // administrator-only device settings surface to know this per-turn rule.
   bool hold_to_talk = 6;
+  // The app that received this activation. It is always set: the matched word's
+  // binding when the word is bound to an app, otherwise the selected assistant.
+  // That includes an API activation of a bound word, which honours the binding
+  // exactly like a detection. The framework delivers to this app only and never
+  // reroutes to another app when it is not ready.
+  string app_id = 7;
 }
 message AssistantInputReleased { string activation_id = 1; }
 message BeginConversationRequest { string activation_id = 1; }
@@ -1172,6 +1277,16 @@ message BluetoothMediaState {
   uint64 position_ms = 9;
   uint64 revision = 10;      // monotonic across this daemon's lifetime
   string detail = 11;        // why metadata/control is unavailable, if so
+  // The playback direction the framework resolved for the displayed source
+  // from the same evidence its own media key and toggle use (a command this
+  // daemon just sent, the owned transport's packet receipts, AVRCP status, the
+  // transport state). `playing` is the source-published AVRCP status, which is
+  // absent for a source exposing only MediaControl1; a consumer that shows a
+  // play/pause choice should use direction_playing. direction_known is false
+  // when no direction could be resolved (no source, or a manager that
+  // publishes only its exact state).
+  bool direction_known = 12;
+  bool direction_playing = 13;
 }
 message GetWebUiSecurityRequest {}
 message WebUiSecurityStatus {

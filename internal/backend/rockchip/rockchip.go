@@ -46,6 +46,13 @@ type Config struct {
 	AudioSource string
 	// MicEnableGPIO is the sysfs GPIO number used by S50mic-enable.
 	MicEnableGPIO int
+	// Warnf and Infof receive backend diagnostics so the daemon can route them
+	// into its log bus (rotated log file and Web UI). Both are optional: a nil
+	// hook discards the message, so a Config built for offline inspection or a
+	// test never writes to the process's standard logger, which bypasses the
+	// daemon's log entirely.
+	Warnf func(format string, args ...any)
+	Infof func(format string, args ...any)
 }
 
 func DefaultConfig() Config {

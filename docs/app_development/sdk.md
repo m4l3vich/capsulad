@@ -193,7 +193,7 @@ go mod edit -replace=capsula/sdk=/path/to/platform/capsula-sdk
 ### Connect, start, close
 
 ```go
-env := capsula.FromEnv() // CAPSULA_LIBRARY, CAPSULA_SOCKET, CAPSULA_RUN_ID, CAPSULA_APP_ID, CAPSULA_SDK
+env := capsula.FromEnv() // CAPSULA_LIBRARY, CAPSULA_SOCKET, CAPSULA_RUN_ID, CAPSULA_APP_ID, CAPSULA_SDK, CAPSULA_DEVICE_SERIAL
 client, err := capsula.Connect(ctx, env)   // loads the library, opens the client
 if err != nil { return err }
 defer client.Close()
@@ -684,6 +684,11 @@ Handlers receive the **inner message** as decoded JSON:
 `{actionInvocationId, actionId}`, `{activationId, origin, matchedModelId, monotonicTimeNs,
 expiresMonotonicNs, holdToTalk}`, `{activationId}`. The `"call"` handler receives a `Call`
 whose `info` carries the inbound metadata above; it must call `end()` or `cancel()`.
+
+An activation's `origin` is the only keyword evidence: a manual (touch/key) turn arrives as
+`ACTIVATION_TOUCH` with an empty `matchedModelId` and carries `holdToTalk` when the device is in
+hold-to-talk mode, while only `ACTIVATION_WAKEWORD` carries the id of the word that matched. Read
+`origin` rather than treating a non-empty model id as proof a word was heard.
 
 Error handling: `recv` returns `null` only at end of stream. A timeout or transport failure
 throws a JS error carrying `.status`; catch it if you poll with a short timeout.

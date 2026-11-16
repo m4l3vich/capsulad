@@ -157,8 +157,13 @@ type builtinClock struct {
 	// frameMu serializes baseline frame compute+send so concurrent publishes
 	// cannot reorder frames or mark a failed write as applied.
 	frameMu sync.Mutex
-	// failOnce bounds one stream-failure recovery per run generation.
-	failOnce sync.Once
+	// failureMu serializes recovery with the next generation start. Without
+	// it, a failure could validate an old generation, pause, and then fail a
+	// newer run after the stable run ID has been reused.
+	failureMu sync.Mutex
+	// failedGen records the generation whose single recovery has been claimed.
+	// It is protected by mu and never reset; runGen is monotonically increasing.
+	failedGen uint64
 	// pendingOnce collects one-shot alarms that fired; tick persists their
 	// disabled marker outside the clock lock.
 	pendingOnce []string
@@ -221,11 +226,13 @@ func newBuiltinClock(d *Daemon, segmentID string) *builtinClock {
 }
 
 func (c *builtinClock) start() {
+	c.failureMu.Lock()
 	c.settingsMu.Lock()
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
 		c.settingsMu.Unlock()
+		c.failureMu.Unlock()
 		return
 	}
 	c.running = true
@@ -233,7 +240,6 @@ func (c *builtinClock) start() {
 	gen := c.runGen
 	c.settingsLoaded = false
 	c.settingsRevision = 0
-	c.failOnce = sync.Once{}
 	c.runID = c.d.SystemAppRunID(clockAppID)
 	c.ctx, c.cancel = context.WithCancel(c.d.ctx)
 	c.stopwatch.running = false
@@ -268,6 +274,7 @@ func (c *builtinClock) start() {
 	ctx := c.ctx
 	c.mu.Unlock()
 	c.settingsMu.Unlock()
+	c.failureMu.Unlock()
 	client.SetFailureHandler(func(err error) { c.failRun(gen, err) })
 
 	// Open the internal streams outside lifecycle/settings locks. A slow
@@ -310,25 +317,21 @@ func (c *builtinClock) start() {
 }
 
 // failRun recovers an internal stream failure by failing this run; the daemon
-// schedules a bounded restart. A stale callback from an earlier generation is
-// ignored, and a normal stop (running=false) never triggers recovery.
+// schedules a bounded restart. Recovery is claimed at most once per run
+// generation: a callback from an earlier start or a normal stop is ignored, so
+// a stale stream can never fail a newer run.
 func (c *builtinClock) failRun(gen uint64, err error) {
-	c.settingsMu.Lock()
-	current := c.runGen
-	c.settingsMu.Unlock()
-	if current != gen {
-		return
-	}
+	c.failureMu.Lock()
+	defer c.failureMu.Unlock()
 	c.mu.Lock()
-	running := c.running
-	c.mu.Unlock()
-	if !running {
+	if c.runGen != gen || !c.running || c.failedGen == gen {
+		c.mu.Unlock()
 		return
 	}
-	c.failOnce.Do(func() {
-		c.d.logs.Errorf(clockAppID, "", "internal stream failed: %v; recovering run", err)
-		c.d.recoverSystemApp(clockAppID)
-	})
+	c.failedGen = gen
+	c.mu.Unlock()
+	c.d.logs.Errorf(clockAppID, "", "internal stream failed: %v; recovering run", err)
+	c.d.recoverSystemApp(clockAppID)
 }
 
 func (c *builtinClock) stop() {

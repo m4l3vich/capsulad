@@ -106,8 +106,11 @@ Bring-up instruments:
 - `S49stereo-softvol.sh` primes the stereo playback path; `S51volume_up` sets DAC line-out gain.
 
 The Rockchip backend uses the firmware's `pacat`/`parec` clients: playback to `master` at 48 kHz
-stereo, capture from `speex` at 16 kHz mono S16LE. The subsystem reports `PARTIAL`. Latency, format
-negotiation and coexistence with vendor daemons are open gates.
+stereo, capture from `speex` at 16 kHz mono S16LE. The backend pins the `master` sink gain at unity
+(`pactl set-sink-volume … 100%` followed by a read-back of every channel) at startup and on every
+master change, so the mixer's master is the only gain the framework sets; the pin covers the sink
+volume, not `pacat`'s per-stream sink-input volume, which nothing here sets or reads. The subsystem
+reports `PARTIAL`. Latency, format negotiation and coexistence with vendor daemons are open gates.
 
 Applications capture `audio.input.microphone` through a bounded framework DSP chain that runs only
 for the production S16LE mono 16 kHz `speex` format: 80 Hz high-pass, adaptive spectral suppression
@@ -117,6 +120,18 @@ chain resets on mute, source reopen or a capture gap. Wakeword inference, enroll
 consume this same processed tap (`framework.dsp.v1`); untouched physical `speex` samples exist only
 at `audio.input.microphone.raw`, and frames whose tap declaration does not match are rejected.
 Estimator behaviour and its measured limits are in [WAKEWORD.md](WAKEWORD.md).
+
+The detection budget is per **frontend**, not per word. One complete frontend emits an embedding in
+37.9 ms mean against an 80 ms hop, which is why every installed word shares it: N words add only
+their own heads over one 16×96 embedding ring, and per-hop scoring of N heads allocates nothing.
+Each word keeps one in-memory classifier head of about 53 KB (weights plus its widened embedding
+window) and one JSON artifact of about 130 KB under `<data-dir>/wakeword/models/<id>.json` (the
+installed reference artifact measures 132,984 bytes). Eight words are therefore about 1 MB of
+`/data` plus roughly 0.4 MB of process memory, over one shared 1.15 MB frontend. Installing or
+deleting a word rebuilds the ensemble and re-subscribes one runner, which costs roughly two seconds
+of warm-up for all words; a per-word enable toggle or rebinding takes effect on the next activation
+and costs nothing. The host measurements over N=1…5
+and the device limits are in [WAKEWORD.md](WAKEWORD.md#multiple-wakewords-and-app-binding).
 
 Synthetic pink, brown/rumble and amplitude-modulated room regressions measure 4.23, 8.33 and 3.42 dB
 of cleanup. Real-world evidence is one 10 s background recording — mostly music played through a Mac's
@@ -161,18 +176,44 @@ never summons the assistant; the talk key is `play_pause`.
 
 There is no coordinate panel. `touch.panel.main` advertises `coordinates_available=false` and
 `full_raw_available=false`, while the backend advertises `full_panel_available=true`: all five keys
-and gestures inferred from ordered presses are deliverable. Partial capture receives circle/centre
-key events and swipes/circles; full capture receives every key and gesture with all system effects
-suppressed. The user's map is authoritative — east is volume up, west is volume down — and direction
-is not inverted from a single passive trace.
+and gestures inferred from ordered presses are deliverable. Partial capture receives
+`play_pause`/`center` keys and swipes; full capture additionally recognizes circles while
+forwarding every key, with all system effects suppressed. The user's map is authoritative — east
+is volume up, west is volume down — and direction is not inverted from a single passive trace.
 
-Gestures are inferred from ordered contacts: a full swipe is opposite → centre → direction, or a
-two-contact opposite-edge pair whose first contact is still down when the second is pressed; the
-vertical pair is full-capture only, and a closed perimeter traversal is `circle_cw`/`circle_ccw`.
-Windows and the 700 ms hold use the kernel event timestamp converted to the daemon clock (only an
-invalid event older than 5 s falls back to receive time), and a crossing that reports zero or one
-contact is never a gesture. Raw coordinates are never fabricated. The full gesture, deferral and
-precedence contract is in [SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md).
+Raw captures from `/dev/input/event0` show the node is `gpio-keys` only, advertising `EV_SYN|EV_KEY`
+(`EV=3`), and that a swipe over the whole panel emits exactly one press + SYN + release + SYN.
+Full-panel up reports `0x72` (`volume_down`), right `0xf8` (`mic_toggle`), down `0xf8` and left
+`0x73` (`volume_up`). A swipe anchored at the physical centre can report `0x2c0`
+(`BTN_TRIGGER_HAPPY1`) or `0x246` (`KEY_VOICECOMMAND`). The centre key is therefore the only extra
+gesture evidence a single contact adds: a bare volume edge acts immediately as a volume step, with
+zero deferral. Because the pad reports one key per gesture, a whole-panel crossing appears as two
+opposite end-stop edges; `volume_down` then `volume_up` (or the reverse) with no centre between them
+and a press-to-press gap of at most 400 ms is the full-panel crossing — `swipe_right` (next) or
+`swipe_left` (previous). The leading edge has already stepped when the second resolves the gesture,
+so that one step is reverted through the canonical master-volume path and the completing edge is
+suppressed: the crossing costs a revert inside the 400 ms window, never a deferral. A slow opposite
+pair (> 400 ms) stays two deliberate steps, and a single end-stop key remains a tap, not a skip gesture. The
+retained device log contains a real `center p+0ms r+115ms | gap 14ms volume_down p+130ms down`
+centre→edge pair (130 ms press-to-press, inside the 250 ms window); its previous heuristic also
+scored `volume_down … gap 123ms volume_up` as `swipe_right`, which is now the full-panel crossing
+shape rather than the rejected unanchored pair. The centre gate is a centre press followed by a
+volume edge — no press-gap allowance while the centre is still held, or within 700 ms after it is
+released (the usable form on this pad, which reports one key at a time); the documented
+opposite→centre→direction chain also has 250 ms inter-contact and
+1500 ms total bounds. Every contact acts on its own edge, so a chain's leading edge has already
+produced its action when the direction contact completes the gesture, and a full-panel crossing's
+leading step is reverted the same way. Circles are recognised in full
+capture only. The measured `swipe_half.hex` capture reports one gesture as `0xf8` and the next as
+`0x2c0`, while `swipe_full.hex` holds three gestures with no centre contact; a single edge-only
+report is still indistinguishable from a volume tap, which is why the crossing needs the ordered
+opposite pair inside the window.
+
+These captures prove the event shape, not the deployed resolver's behaviour: the centre→edge pair is
+observed in a retained device log, while the new resolver's on-device recognition still needs
+confirmation with physical presses. Host-side gesture, zero-deferral and full-capture-only circle
+contracts are in [VERIFICATION.md](VERIFICATION.md); the full gesture and precedence contract is in
+[SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md).
 
 ## Vendor stack and supersede
 
@@ -255,14 +296,35 @@ discoverability and pairability stay refused.
 If native registration is impossible the daemon falls back to PulseAudio's
 `module-bluetooth-discover`, which advertises Audio Sink (0x110B), Headset (0x1108) and Audio Source
 (0x110A) and exposes `bluez_source.<ADDR>.a2dp_source`. PA's Bluetooth endpoints are removed only
-after the native sink is armed and never while a source is routed through them; that source keeps
-its PA route until disconnect and the native owner takes the next connection.
+after the native sink is armed, and never while PulseAudio is actively carrying a connected
+source's audio (its bluez5 source is `RUNNING`, or the loopback this daemon loaded for it is
+present). A loaded module set with no running source is retired as soon as the native sink is
+armed, including while a source is merely connected or paused, so the next connection cannot land on
+the Headset (0x1108) endpoint PA keeps advertising; the native owner then takes that connection.
 
 BlueZ may autopower the adapter before `capsulad` starts. In that window a paired source can open an
 ACL while the framework's sink is not advertised; the incoming-connect handler repairs and verifies
 the registration and requests A2DP/AVRCP over the same link via `Device1.ConnectProfile` (no second
 ACL). Whether a peer that already abandoned A2DP honors that request without reconnecting is
 device-dependent (real-peer gate).
+
+After every connection the daemon asserts the session, not the profile request: within about five
+seconds of the profile request finishing it requires a `MediaTransport1` carrying the A2DP sink
+UUID (0x110B) and the SBC codec for that device (`internal/bluetooth.AudioLink`). While the link is
+not A2DP, `BluetoothStatus.Detail` and the media detail both carry the bounded sentence "audio link
+is not A2DP", and a Warn names the profiles that are observably up plus the audio services the
+peer advertises. If no transport appears, the daemon **requests** the peer's A2DP source profile
+(`Device1.ConnectProfile` with the Audio Source UUID `0000110a`, bounded at 15 s) **once per
+connection**, and never disconnects the source to renegotiate: dropping a user's phone off the
+adapter stops their audio mid-sentence and cannot be undone by the daemon, and a reconnect can land
+on an even worse profile. The bound is per connection, not per source: a fresh connection is a fresh
+negotiation and may ask again immediately — the field case where a third reconnect was refused
+because the previous connection's request was remembered left the host with no audio output at all —
+while a second verdict inside one connection is refused, so a source that keeps landing on a
+non-A2DP profile is not asked in a loop. A newer connection, a disconnect and daemon shutdown cancel a pending
+verdict, and a source that stays without a transport keeps its link and its `audio link is not
+A2DP` verdict instead of being cycled. A successful `ConnectProfile` is never logged as a profile
+that is up: the log states the observed transport instead.
 
 On this BlueZ the endpoint API is `SelectConfiguration(ay) -> ay` and `SetConfiguration(o transport,
 a{sv} properties)`. The transport object has no `Endpoint` property, so the path returned by
@@ -271,29 +333,76 @@ a{sv} properties)`. The transport object has no `Endpoint` property, so the path
 silent (the source is paused), and reading its fd blocks while BlueZ streams on a real active
 transport, observed as a silent stream then `EOF`.
 
+Two facts about BlueZ 5.65 that the code depends on: **an acquired `MediaTransport1` is not removed
+from the object tree** (BlueZ unregisters the interface only when the transport is destroyed, while
+`Acquire` merely takes an owner and sets `State=active`), so the object tree stays readable during
+playback and the transport path recorded at `Acquire` is used only to avoid a lookup that could lag
+that reply. And `org.bluez.MediaControl1` **is deprecated but present**: it is exported while an
+AVRCP target/controller session for the device is connected, and each method is an AVRCP
+passthrough key press (Play/Pause/Next/Previous, `VolumeUp`/`VolumeDown`) with no volume value, so
+it is only a fallback for a source that exposes no `MediaPlayer1`.
+
+Skip and voice are sent as an AV/C panel press **and an explicit release**, not through BlueZ's
+`Next()`/`Previous()` convenience methods: those send the press and rely on the peer answering
+`ACCEPTED` before BlueZ emits the release, so one lost reply latches the key and every later press
+of the same operation is ignored, while Play/Pause keeps working because alternating operations
+force a release of the previous key. The operations used are `0x4b` (Forward), `0x4c` (Backward) and
+`0x41` (Voice Recognition, which opens the source's own assistant). Voice needs a `MediaPlayer1`
+object; `MediaControl1` has no such method, so a source exposing only that interface answers
+"does not support this operation" and the daemon reports it instead of pretending to have sent it.
+
 RTP is depacketized and decoded in-process by `internal/sbc`, a pure-Go 8-subband SBC decoder ported
 from the Apache-2.0 Android reference (`internal/sbc/NOTICE`). It keeps synthesis filter history
 across A2DP packets and writes S16LE straight to the mixer — no `sbcdec` process, temp file, chunk
 boundary or warm-up — and matches the system `sbcdec` and the Android reference sample-for-sample on
 the 172-frame fixture (correlation 1.0, RMS 6936). Configuration: 44.1 kHz joint stereo, 16 blocks,
-8 subbands, loudness allocation, bitpool 2..53. PA keeps app playback and the microphones.
-Negotiation reached CONFIGURED/OPEN and created a transport on hardware; audible parity with the
-vendor chain is a listening gate.
+8 subbands, loudness allocation, bitpool 2..53, negotiated from the remote SEP's four-octet SBC
+capabilities. The local SEP advertises the spec's four-octet media codec capabilities
+(`F3 7F 02 35`: 44.1/48/32/16 kHz with joint stereo and stereo, 16/12/8 blocks, 8/4 subbands,
+loudness and SNR, bitpool 2..53). The maximum is 53 because that is the A2DP-recommended
+high-quality ceiling for 44.1 kHz joint stereo and every SBC source must support it; a higher
+advertiseable value (the Mac offers 250) buys no audible quality for SBC and only spends airtime.
+PA keeps app playback and the microphones. Negotiation reached CONFIGURED/OPEN and created a
+transport on hardware; audible parity with the vendor chain is a listening gate.
 
-**Volume.** Source AVRCP volume and the capsulad master are kept equal in both directions through one
-`applyMasterVolume` path (master change writes the transport, transport change updates the master),
-driven by BlueZ `PropertiesChanged`. A source is **not** trusted as the only attenuation: with the
-capsulad master at 5 % and a source output at minimum, the transport volume can read ~6/127 while the
-captured stream is near full scale and the speaker ~90–100 % loud — the slider moved without
-attenuating the stream. Proof level: D-Bus property read plus digital capture; loudness is acoustic.
+**Volume.** The framework master is the listening level and the AVRCP absolute-volume register mirrors
+it in both directions. A volume the source reports (BlueZ `PropertiesChanged`, or the coalesced
+transport read on resync) becomes the framework master through the canonical master path, which
+persists it and applies the local gain, so moving the phone's slider moves the speaker. A change made
+on the speaker (dial, keys, Web UI, an app) is written back to the source's register so the source's
+own level display can follow it; the write is a display mirror, applied asynchronously and never on
+the key or render path, coalesced over about 100 ms so the leading step of a full-panel swipe and its
+revert produce one write, and the local curve (`sqrt(master)` on top of the mixer's own master factor)
+remains the only gain stage, with no compensation factor for the source's share. Field evidence from
+the deployed build: every speaker-side change logs `transport volume mirrored to the source: N%` and
+BlueZ accepts the write with no refusal — whether the peer applies or displays it is the peer's
+decision, and this MacBook does not move its own level display. That is not chased further on our
+side. Both alternatives fail on the unit: writing the register *and* letting it attenuate the stream
+made 10 % on both ends sound near-silent, and compensating the local trim for the host's share made 5 %
+far too loud, because this peer reports the written value back without actually attenuating the A2DP
+stream, so its "confirmation" is not evidence. The peer's report of the level the daemon just wrote is
+therefore suppressed as an echo: a report within one AVRCP step (the peer's own rounding) of a level
+written in the last 900 ms is ignored instead of adopted, while anything further away is the user's
+slider and is adopted at once, even while a write is still open. The window is deliberately narrow —
+an earlier 4-step/5-second filter swallowed a whole slider drag and made the speaker lag the phone.
+The echo memory holds the last four writes, is cleared on connect and disconnect so a new session
+cannot inherit it, and adds no polling. A source without a writable register is not an error: the
+write is refused, logged once per session at Debug, and the speaker keeps attenuating locally while a
+source-side slider still drives the master.
+A source is **not** trusted as the only attenuation:
+with the capsulad master at 5 % and a source output at minimum, the transport volume can read
+~6/127 while the captured stream is near full scale and the speaker ~90–100 % loud — the slider
+moved without attenuating the stream. Proof level: D-Bus property read plus digital capture;
+loudness is acoustic.
 
 With PulseAudio as fallback owner the loopback carries a local safety gain of master^1.5 (cube-root
 compensated, because PA sink-input volume is cubic) while the source is held at a fixed 90 % trim; a
 linear master is too hot at 5–7 % on this amplifier, and gain and trim are applied on source/route
 changes and volume events rather than by periodic re-assert. Audible Bluetooth level is bounded by
 master^1.5 and at most about 0.73 × it. Three numeric stages cannot all equal the master — one must
-be neutral — so the synced pair is source ↔ capsulad, with the PA source (90 %) and loopback
-(cube-root) as the gain stages. The framework volume cue peaks at 0.22 of full scale.
+be neutral — so the master is the one synced value and the source register is its mirror, with the
+PA source (90 %) and the loopback (cube-root) as the gain stages. The framework volume cue peaks at
+0.22 of full scale.
 
 PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on every source
 connect in the fallback path, because PA recreates it with the default (1) on a profile reconnect;
@@ -307,23 +416,32 @@ ms target at ~44.1 kHz. The native endpoint bypasses that loopback and its resam
 UART IRQ is moved to CPU3 by the boot hook, because `hci_uart` logged `Unexpected start frame`
 errors while the IRQ shared CPU0 with the daemon and wakeword inference.
 
-HSP/HFP telephony is not implemented: only A2DP Sink plus AVRCP CT. Paired-device listing and unpair
-are Web-UI/CLI only — `ListPairedDevices` and `UnpairDevice` reject supervised app callers by run ID
-and sandbox UID, while the rest of the Bluetooth surface is app-facing. The browser never receives a
-Bluetooth address: each paired device is identified by an opaque ID derived from the address, and
-unpair resolves that ID server-side before calling the framework. Unpair is exercised against the
-simulator manager only.
+HSP/HFP telephony is not implemented: only A2DP Sink plus AVRCP CT, which is why a session that
+lands on a Headset profile is silent rather than narrowband, and why the daemon requests its own
+A2DP source profile and reports the link instead of accepting any connected profile. Paired-device
+listing and unpair are Web-UI/CLI only — `ListPairedDevices` and `UnpairDevice` reject supervised app
+callers by run ID and sandbox UID, while the rest of the Bluetooth surface is app-facing. The
+browser never receives a Bluetooth address: each paired device is identified by an opaque ID derived
+from the address, and unpair resolves that ID server-side before calling the framework. Unpair is
+exercised against the simulator manager only.
 
 Verified with a paired MacBook: after `Device1.ConnectProfile(0x110A)` and the AVRCP profile,
 `Device1.Connected=true`, `MediaControl1.Connected=true`, and `MediaPlayer1`/`MediaTransport1`
-objects exist; AVRCP Play/Pause/Next/Previous calls succeed and the player state moves to `playing`
-(the Web UI shows the `bluetooth` player as `PLAYBACK_PLAYING`); setting the framework volume to 50
-% writes `Volume=64` of 127 on the idle A2DP transport and restoring 80 % writes `102`; toggling
-`Pairable`/`Discoverable` from the Web UI reaches BlueZ and survives a reboot
+objects exist; AVRCP Play/Pause/Next/Previous calls succeed and the player state moves to `playing`;
+setting the framework volume to 50 % writes `Volume=64` of 127 on the idle A2DP transport and
+restoring 80 % writes `102`; toggling `Pairable`/`Discoverable` from the Web UI reaches BlueZ and
+survives a reboot
 (`bluetooth_discoverable` is a typed setting and discoverable implies pairable). That MacBook's
 `MediaPlayer1` exposes `Device` and `Position` but no `Status` or `Track` at rest, so title/artist
 stay empty: metadata is read when a source publishes it, and macOS fills those attributes only for
 some players.
+
+The Web UI "Now playing" panel is fed by the framework, not by a shipped app: while a source is
+connected, the panel lists one framework-owned player (`bluetooth`) built from the public
+`BluetoothMediaService`, with the playback direction the daemon resolved and the source's metadata,
+and its transport buttons call that service's `Command`. No media app is bundled and no app id is
+reserved for one. The simulator proves the provider view and command routing; the MacBook session
+above predates it, so the rendered Overview was not observed against a physical phone.
 
 ## mDNS and Avahi
 
@@ -476,11 +594,22 @@ resolve zones.
    photometer-verified.
 2. **Audio under load.** Latency and underrun behaviour under sustained load, and pre-roll timing,
    are unmeasured; routing, ducking and indication termination are verified digitally.
-3. **Touch contract.** Verify a tap resolves once after the 250 ms window, a held circle summons at
-   700 ms, an overlapping edge-to-edge crossing steps no volume, sequential opposite taps and
-   circle-then-microphone stay key actions, a 0/1-contact glide is not a gesture, and an unfinished
-   sequence produces no mute/volume/summon effect — with windows following the kernel timestamp even
-   when the read loop is delayed. Raw coordinate semantics need a different panel.
+3. **Touch contract.** Confirm on the unit, with physical presses and the deployed resolver, that a
+   bare volume tap steps exactly once with no added latency, a volume edge pressed while the centre
+   is still held (or within 700 ms of its release) resolves `swipe_right`/`swipe_left` while the
+   centre keeps its own action, the
+   opposite→centre→direction chain resolves the gesture after its leading edge has already stepped,
+   a full-panel crossing (`volume_down`→`volume_up` or the reverse, no centre, ≤ 400 ms
+   press-to-press) resolves `swipe_right`/`swipe_left`, suppresses the completing step and reverts
+   the leading one, a slow opposite pair stays two steps, a held circle summons at 700 ms, a single
+   end-stop key stays a volume step, and an unfinished
+   sequence produces no further effect — with windows following the kernel timestamp even when the
+   read loop is delayed. The centre→edge form and the volume timing are now device-confirmed (a
+   79 ms centre→`volume_up` resolved `swipe_right` and sent `BLUETOOTH_MEDIA_NEXT`; a 114 ms
+   centre→`volume_down` sent `BLUETOOTH_MEDIA_PREVIOUS`). Still open on the unit: the full-capture
+   circle traversal, the 700 ms hold summon, and whether any deliberate action other than a
+   centre tap or a whole-panel crossing can carry a gesture — the pad reports one key at a time and
+   a lone end-stop edge carries no gesture evidence. Raw coordinate semantics need a different panel.
 4. **Power cycle and pairing.** The boot hook, health gate and vendor fallback are exercised by
    service restarts, not by a power cycle. Pair and unpair a throwaway device through the Web UI
    (unpair is deliberately not run against the user's MacBook), exercise a source that publishes
@@ -489,8 +618,12 @@ resolve zones.
 5. **Native A2DP ordering.** Confirm the sink is advertised before the adapter is connectable after a
    cold boot and after a BlueZ restart or power cycle, that a failed registration keeps
    pairable/discoverable off with the documented `Detail`, and that a source connected in the
-   pre-daemon autopower window either recovers A2DP on the same link or needs a reconnect. PA-module
-   removal timing around an active source is a real-device gate.
+   pre-daemon autopower window either recovers A2DP on the same link or needs a reconnect. Confirm a
+   strict peer accepts the conformant four-octet SBC capability IE, and record the
+   "audio link is not A2DP" Warn together with the one A2DP profile request per source and its
+   outcome, confirming the source stays connected throughout. PA-module removal timing around an
+   active source, and the retirement of an idle module set while a paused source is still connected,
+   are real-device gates.
 6. **mDNS host name.** Save a label, confirm `.local` resolution with `avahi-resolve`, restart Avahi
    through the device init system and confirm the label is re-adopted, and check that a colliding or
    invalid name keeps the prior name and reports the collision. With the label active, a Settings GET

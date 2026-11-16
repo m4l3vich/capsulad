@@ -20,6 +20,38 @@ const (
 	bluezNamespace = "/org/bluez"
 )
 
+// Evidence a transport command's direction came from. They are the reasons
+// logged with a resolved toggle so a field report can tell a lagging peer status
+// from a sink-side receipt, and the evidence a published playback direction
+// carries.
+const (
+	// EvidenceStatus is the source's cached MediaPlayer1.Status.
+	EvidenceStatus = "status"
+	// EvidenceTransport is the source's A2DP transport state as BlueZ sees it.
+	EvidenceTransport = "transport"
+	// EvidenceReceipt is this sink's own packet receipts on the acquired
+	// transport.
+	EvidenceReceipt = "receipt"
+	// EvidenceMemory is the direction this daemon commanded moments ago.
+	EvidenceMemory = "memory"
+)
+
+// commandMemoryWindow is how long a direction this daemon commanded stays
+// authoritative over a lagging peer status. It has to cover the peer's AVRCP
+// notification latency (tens to hundreds of milliseconds, worst case a couple of
+// seconds on a congested link) without overriding a deliberate later tap.
+const commandMemoryWindow = 2 * time.Second
+
+// commandMemoryDevices caps the per-device direction memory so a long bond list
+// cannot grow it without bound.
+const commandMemoryDevices = 8
+
+// commandRecord is the direction this daemon last commanded for one device.
+type commandRecord struct {
+	method string
+	at     time.Time
+}
+
 // BlueZ is the real manager. It reads the object manager and subscribes to
 // PropertiesChanged/ObjectManager/NameOwnerChanged signals; every notification
 // refreshes the whole small object tree instead of trying to merge partial
@@ -58,7 +90,39 @@ type BlueZ struct {
 	volumeSet    bool
 	volumeWrote  bool
 	volumeDevice string
-	transportKey string
+	// volumePending is the level the framework asked for while the source had
+	// not reported absolute volume yet. BlueZ creates MediaTransport1.Volume
+	// only from a peer report and refuses a write that would create it, so the
+	// request is remembered and re-asserted when the property finally appears
+	// instead of adopting the peer's stale level.
+	volumePending       uint16
+	volumePendingDevice string
+	// volumeAbsent is set when a write was refused for lack of the property; it
+	// feeds the media/status detail and the once-per-session warning. It is
+	// cleared by the first observed level for the same source.
+	volumeAbsent         bool
+	volumeAbsentDevice   string
+	volumeAbsentNotified string
+	// volumeMissingDevice and volumeMissingSince record the source whose
+	// transport exists but has not reported a level yet, and when a write was
+	// first refused for that. Inside volumeGraceWindow it is "not reported
+	// yet", not a verdict: the peer commonly reports a moment after it starts
+	// streaming, and concluding earlier is what told the user the source
+	// "does not expose" volume while it was about to.
+	volumeMissingDevice string
+	volumeMissingSince  time.Time
+	transportKey        string
+
+	// Command direction memory. A source's MediaPlayer1.Status is BlueZ's cache
+	// of the peer's AVRCP notifications and stays stale for a moment after a
+	// command this daemon sent; remembering our own decision long enough to
+	// invert it keeps a second tap from repeating the first.
+	cmdMu       sync.Mutex
+	cmdMemory   map[string]commandRecord
+	cmdObserver func(CommandObservation)
+	// now is the wall clock used for the command-memory window. Tests replace
+	// it; production uses time.Now.
+	now func() time.Time
 
 	registrationMu sync.Mutex
 	endpointMu     sync.Mutex
@@ -73,11 +137,12 @@ type BlueZ struct {
 	transport   dbus.ObjectPath
 
 	// audioStreamProbe is read-only evidence from the sink owner that the
-	// acquired transport is receiving audio right now. It is needed because an
-	// acquired MediaTransport1 disappears from the object tree and a source may
-	// expose no MediaPlayer1.Status, leaving BlueZ unable to resolve a toggle
-	// direction. It is consulted for a toggle only; it never becomes published
-	// playback state.
+	// acquired transport is receiving audio right now. While this sink owns the
+	// transport it is the authoritative toggle evidence (an acquired
+	// MediaTransport1 does stay in BlueZ 5.65's object tree, but its State does
+	// not change when the source stops sending, and a source may expose no
+	// MediaPlayer1.Status at all). It is consulted for a toggle only; it never
+	// becomes published playback state.
 	probeMu          sync.RWMutex
 	audioStreamProbe func(address string) bool
 
@@ -521,9 +586,20 @@ func (b *BlueZ) SetTrusted(ctx context.Context, address string, trusted bool) er
 	return b.refresh(ctx)
 }
 
-// SetTransportVolume writes the AVRCP absolute volume of the displayed
-// source's transport. With avrcp_absolute_volume=0 in PulseAudio this changes
-// only the remote volume, not the local source gain.
+// SetTransportVolume writes the AVRCP absolute volume of the displayed source's
+// transport. With avrcp_absolute_volume=0 in PulseAudio this changes only the
+// remote volume, not the local source gain.
+//
+// The target is resolved without depending on the object tree alone: the
+// transport this sink acquired is tried first (an acquired MediaTransport1 stays
+// in the tree in BlueZ 5.65, but the recorded path cannot lag the Acquire reply),
+// then the tree lookup, then the source's A2DP transport even when it exposes no
+// Volume property - which is how a source without absolute volume is told apart
+// from a source without a transport.
+//
+// The write is always attempted when a transport exists: a source that has not
+// reported its level yet is common right after it starts streaming, and only a
+// refusal (or the grace window) is evidence that it has none.
 func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	if level < 0 {
 		level = 0
@@ -536,18 +612,27 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 		return err
 	}
 	media := mediaFrom(objs)
-	path, props := findVolumeTransport(objs, media.DeviceAddress)
-	if path == "" {
-		return ErrUnsupported
+	if !media.Present || media.DeviceAddress == "" {
+		return ErrNoSource
 	}
-	if _, ok := props["Volume"]; !ok {
-		return ErrUnsupported
+	path, _, _ := b.volumeTarget(objs, media.DeviceAddress)
+	if path == "" {
+		return ErrNoTransport
 	}
 	value := uint16(math.Round(level * 127))
-	if err := b.conn.Object(bluezService, path).CallWithContext(ctx,
-		"org.freedesktop.DBus.Properties.Set", 0,
-		"org.bluez.MediaTransport1", "Volume", dbus.MakeVariant(value)).Err; err != nil {
-		return fmt.Errorf("set transport volume: %w", err)
+	if err := b.writeTransportVolume(ctx, path, value); err != nil {
+		if !isUnknownProperty(err) {
+			return fmt.Errorf("set transport volume: %w", err)
+		}
+		// BlueZ refused the property: it has not been created yet (or is
+		// read-only). Record the request so it can be re-asserted when the peer
+		// finally reports a level, and only diagnose a source that stays
+		// silent past the grace window.
+		if b.noteAbsoluteVolumeMissing(media.DeviceAddress, value) {
+			return fmt.Errorf("%w (source %s): %v", ErrNoAbsoluteVolume, media.DeviceAddress, err)
+		}
+		return fmt.Errorf("%w: source %s has not reported AVRCP absolute volume yet",
+			ErrNoAbsoluteVolume, media.DeviceAddress)
 	}
 	// Record the level we just wrote so the PropertiesChanged echo of our own
 	// write is not republished as a source-side change, even when no snapshot
@@ -556,8 +641,127 @@ func (b *BlueZ) SetTransportVolume(ctx context.Context, level float64) error {
 	b.mu.Lock()
 	b.volume, b.volumeSet, b.volumeWrote = value, true, true
 	b.volumeDevice = media.DeviceAddress
+	b.volumePending, b.volumePendingDevice = 0, ""
+	b.volumeAbsent, b.volumeAbsentDevice = false, ""
+	b.volumeAbsentNotified = ""
+	b.volumeMissingDevice, b.volumeMissingSince = "", time.Time{}
 	b.mu.Unlock()
 	return nil
+}
+
+// writeTransportVolume is the single org.bluez.MediaTransport1.Volume write
+// site. BlueZ answers success before the AVRCP SetAbsoluteVolume reaches the
+// peer, so a nil error means the property was written, not that the peer obeyed.
+func (b *BlueZ) writeTransportVolume(ctx context.Context, path dbus.ObjectPath, value uint16) error {
+	return b.conn.Object(bluezService, path).CallWithContext(ctx,
+		"org.freedesktop.DBus.Properties.Set", 0,
+		"org.bluez.MediaTransport1", "Volume", dbus.MakeVariant(value)).Err
+}
+
+// volumeTarget resolves the transport that carries the displayed source's AVRCP
+// absolute volume. hasVolume reports whether that transport currently exposes
+// the Volume property, which BlueZ only creates from a peer report.
+func (b *BlueZ) volumeTarget(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) (dbus.ObjectPath, map[string]dbus.Variant, bool) {
+	if device == "" {
+		return "", nil, false
+	}
+	// The transport this sink acquired, when it belongs to the displayed source.
+	b.endpointMu.Lock()
+	owned := b.transport
+	b.endpointMu.Unlock()
+	if owned != "" {
+		if props, ok := objs[owned]["org.bluez.MediaTransport1"]; ok {
+			dev := objectPathProp(props, "Device")
+			if dev == "" || strings.EqualFold(deviceAddressAt(objs, dev), device) {
+				_, hasVolume := props["Volume"]
+				return owned, props, hasVolume
+			}
+		}
+	}
+	if path, props := findVolumeTransport(objs, device); path != "" {
+		return path, props, true
+	}
+	// No transport exposes Volume: report the source's A2DP transport anyway so
+	// the caller can distinguish "no absolute volume" from "no transport".
+	if path, props := a2dpTransportFor(objs, findDevicePath(objs, device)); path != "" {
+		return path, props, false
+	}
+	return "", nil, false
+}
+
+// volumeGraceWindow is how long a source may have a transport without a
+// writable absolute volume before that counts as a verdict. BlueZ creates
+// MediaTransport1.Volume only from the peer's first report, which commonly
+// arrives a moment after the transport is configured; concluding earlier told
+// the user the source "does not expose" volume while it was about to.
+const volumeGraceWindow = 3 * time.Second
+
+// noteAbsoluteVolumeMissing records a refused volume write for the source and
+// remembers the level to reach once it reports one. It reports whether the
+// source is now diagnosed as having no writable absolute volume: only then does
+// the first such record in a source session publish EventVolumeUnavailable, so
+// the user and the log learn why the host volume did not move. Inside the grace
+// window the refusal is "not reported yet" and stays quiet.
+func (b *BlueZ) noteAbsoluteVolumeMissing(device string, level uint16) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.clockNow()
+	b.volumePending, b.volumePendingDevice = level, device
+	if !strings.EqualFold(b.volumeMissingDevice, device) {
+		b.volumeMissingDevice, b.volumeMissingSince = device, now
+		return false
+	}
+	if now.Before(b.volumeMissingSince) {
+		// A clock that went backwards must not shorten the window; restart it.
+		b.volumeMissingSince = now
+		return false
+	}
+	if now.Sub(b.volumeMissingSince) < volumeGraceWindow {
+		return false
+	}
+	b.volumeAbsent, b.volumeAbsentDevice = true, device
+	if strings.EqualFold(b.volumeAbsentNotified, device) {
+		return true
+	}
+	b.volumeAbsentNotified = device
+	event := Event{
+		Kind: EventVolumeUnavailable, DeviceAddress: device, Media: b.media,
+		Detail: fmt.Sprintf("source %s does not expose AVRCP absolute volume: BlueZ has no MediaTransport1.Volume to write, so the master level is applied locally only", device),
+	}
+	for _, ch := range b.subs {
+		deliverEvent(ch, event)
+	}
+	return true
+}
+
+// pendingVolumeLocked consumes the level requested before the source reported
+// absolute volume. It reports false when that level already equals what the peer
+// reported, in which case there is nothing to re-assert.
+func (b *BlueZ) pendingVolumeLocked(device string, observed uint16) (uint16, bool) {
+	if b.volumePendingDevice == "" || !strings.EqualFold(b.volumePendingDevice, device) {
+		return 0, false
+	}
+	level := b.volumePending
+	b.volumePending, b.volumePendingDevice = 0, ""
+	return level, level != observed
+}
+
+// volumeAbsentDetailLocked is the bounded sentence the media state carries when
+// the displayed source has no writable absolute volume. hasVolume is the current
+// observation: the sentence disappears the moment the peer reports a level.
+// Until the grace window passes it says the level has not been reported yet,
+// which is what is actually known.
+func (b *BlueZ) volumeAbsentDetailLocked(device string, hasVolume bool) string {
+	if hasVolume {
+		return ""
+	}
+	if b.volumeAbsent && strings.EqualFold(b.volumeAbsentDevice, device) {
+		return "the source does not expose AVRCP absolute volume"
+	}
+	if b.volumeMissingDevice != "" && strings.EqualFold(b.volumeMissingDevice, device) {
+		return "the source has not reported AVRCP absolute volume yet"
+	}
+	return ""
 }
 
 // TransportVolume reads the displayed source's AVRCP transport volume.
@@ -567,21 +771,36 @@ func (b *BlueZ) TransportVolume(ctx context.Context) (uint16, error) {
 		return 0, err
 	}
 	media := mediaFrom(objs)
-	path, props := findVolumeTransport(objs, media.DeviceAddress)
+	path, props, hasVolume := b.volumeTarget(objs, media.DeviceAddress)
 	if path == "" {
-		return 0, ErrUnsupported
+		return 0, ErrNoTransport
 	}
-	value, ok := props["Volume"]
-	if !ok {
-		return 0, ErrUnsupported
+	if !hasVolume {
+		return 0, ErrNoAbsoluteVolume
 	}
-	switch v := value.Value().(type) {
+	switch v := props["Volume"].Value().(type) {
 	case uint16:
 		return v, nil
 	case uint32:
 		return uint16(v), nil
 	}
-	return 0, ErrUnsupported
+	return 0, ErrNoAbsoluteVolume
+}
+
+// isUnknownProperty recognizes the D-Bus answers for a property that does not
+// exist (BlueZ's Volume before the peer reports one, or a read-only one).
+func isUnknownProperty(err error) bool {
+	var dbusErr dbus.Error
+	if !errors.As(err, &dbusErr) {
+		return false
+	}
+	detail := strings.ToLower(dbusErr.Name + " " + fmt.Sprint(dbusErr.Body))
+	return strings.Contains(detail, "unknownproperty") ||
+		strings.Contains(detail, "unknown property") ||
+		strings.Contains(detail, "invalidargs") ||
+		strings.Contains(detail, "invalid arguments") ||
+		strings.Contains(detail, "read-only") ||
+		strings.Contains(detail, "notsupported")
 }
 
 func (b *BlueZ) Media(ctx context.Context) (MediaState, error) {
@@ -610,6 +829,91 @@ func (b *BlueZ) audioStreaming(address string) bool {
 	return probe != nil && probe(address)
 }
 
+// SetCommandObserver installs a read-only observer for resolved transport
+// commands. The daemon uses it to log the direction and the evidence behind it,
+// and to report an AVRCP call error at Warn. It never changes a command.
+func (b *BlueZ) SetCommandObserver(fn func(CommandObservation)) {
+	b.mu.Lock()
+	b.cmdObserver = fn
+	b.mu.Unlock()
+}
+
+func (b *BlueZ) observeCommand(obs CommandObservation) {
+	b.mu.Lock()
+	fn := b.cmdObserver
+	b.mu.Unlock()
+	if fn != nil {
+		fn(obs)
+	}
+}
+
+func (b *BlueZ) clockNow() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// rememberCommand records the direction this daemon just commanded so the next
+// toggle can invert it instead of trusting a peer status that has not caught up.
+// Only Play/Pause carry a direction; a skip is not a playback state.
+func (b *BlueZ) rememberCommand(device, method string) {
+	if device == "" || (method != "Play" && method != "Pause") {
+		return
+	}
+	key := strings.ToUpper(strings.TrimSpace(device))
+	now := b.clockNow()
+	b.cmdMu.Lock()
+	defer b.cmdMu.Unlock()
+	if b.cmdMemory == nil {
+		b.cmdMemory = make(map[string]commandRecord, commandMemoryDevices)
+	}
+	b.cmdMemory[key] = commandRecord{method: method, at: now}
+	for addr, rec := range b.cmdMemory {
+		if now.Sub(rec.at) > commandMemoryWindow {
+			delete(b.cmdMemory, addr)
+		}
+	}
+	for len(b.cmdMemory) > commandMemoryDevices {
+		oldest, oldestAt := "", now
+		for addr, rec := range b.cmdMemory {
+			if addr == key {
+				continue
+			}
+			if oldest == "" || rec.at.Before(oldestAt) {
+				oldest, oldestAt = addr, rec.at
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(b.cmdMemory, oldest)
+	}
+}
+
+// rememberedCommand reports the direction this daemon last commanded for the
+// device while it is still recent enough to outrank the peer's lagging status.
+func (b *BlueZ) rememberedCommand(device string) (string, bool) {
+	if device == "" {
+		return "", false
+	}
+	key := strings.ToUpper(strings.TrimSpace(device))
+	now := b.clockNow()
+	b.cmdMu.Lock()
+	defer b.cmdMu.Unlock()
+	rec, ok := b.cmdMemory[key]
+	if !ok {
+		return "", false
+	}
+	// A clock that went backwards (or a test that reset it) must not keep a
+	// stale direction authoritative.
+	if now.Before(rec.at) || now.Sub(rec.at) > commandMemoryWindow {
+		delete(b.cmdMemory, key)
+		return "", false
+	}
+	return rec.method, true
+}
+
 func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	if err := b.refresh(ctx); err != nil {
 		return err
@@ -626,22 +930,84 @@ func (b *BlueZ) Command(ctx context.Context, cmd Command) error {
 	}
 	target, ok := b.mediaTarget(objs, device, cmd)
 	if !ok {
+		b.observeCommand(CommandObservation{Device: device, Command: cmd, Err: ErrUnsupported})
 		return ErrUnsupported
 	}
-	if err := b.conn.Object(bluezService, target.path).CallWithContext(ctx, target.iface+"."+target.method, 0).Err; err != nil {
-		return fmt.Errorf("%s %s: %w", target.iface, target.method, err)
+	if err := b.sendCommand(ctx, target, cmd); err != nil {
+		callErr := fmt.Errorf("%s %s: %w", target.iface, target.method, err)
+		b.observeCommand(CommandObservation{
+			Device: device, Command: cmd, Method: target.method, Evidence: target.evidence, Err: callErr,
+		})
+		return callErr
 	}
+	b.rememberCommand(device, target.method)
+	method := target.method
+	if target.iface == "org.bluez.MediaPlayer1" && panelOperation(cmd) != 0 {
+		method = "Press+Release"
+	}
+	b.observeCommand(CommandObservation{
+		Device: device, Command: cmd, Method: method, Evidence: target.evidence,
+	})
 	// AVRCP applies commands asynchronously; the signal watcher publishes the
 	// resulting state. Refresh once so the immediate reply is as fresh as BlueZ
 	// allows.
 	return b.refresh(ctx)
 }
 
+// avcForward and avcBackward are the AV/C panel operation ids a skip uses. They
+// are the same ids BlueZ's own Next/Previous convenience methods send.
+const (
+	avcForward  = byte(0x4b)
+	avcBackward = byte(0x4c)
+)
+
+// panelOperation maps a command to the AV/C panel operation id it presses, for
+// the commands that are panel keys rather than named player methods. A skip is
+// the one that must always carry a release.
+func panelOperation(cmd Command) byte {
+	switch cmd {
+	case CommandNext:
+		return avcForward
+	case CommandPrevious:
+		return avcBackward
+	default:
+		return 0
+	}
+}
+
+// sendCommand performs one transport command and, for a panel operation on a
+// MediaPlayer1 target, always sends the release half of the AV/C passthrough.
+//
+// BlueZ's Next()/Previous() convenience methods send the press and rely on the
+// peer answering ACCEPTED to send the release. A peer that answers INTERIM,
+// NOT_IMPLEMENTED or an operand-less ACCEPTED leaves the key held for the rest of
+// the session, and every later press of the same op is then ignored — while
+// Play/Pause keeps working because alternating Play and Pause forces a release
+// of the previous key. Press plus an unconditional Release is the same AV/C
+// sequence a hardware remote sends, and it cannot latch.
+func (b *BlueZ) sendCommand(ctx context.Context, target mediaTarget, cmd Command) error {
+	object := b.conn.Object(bluezService, target.path)
+	if target.iface == "org.bluez.MediaPlayer1" && panelOperation(cmd) != 0 {
+		op := panelOperation(cmd)
+		if err := object.CallWithContext(ctx, "org.bluez.MediaPlayer1.Press", 0, op).Err; err != nil {
+			return err
+		}
+		// Release is sent even when the press failed to be acknowledged by the
+		// peer: a latched key is worse than a packet the peer ignores.
+		releaseCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return object.CallWithContext(releaseCtx, "org.bluez.MediaPlayer1.Release", 0).Err
+	}
+	return object.CallWithContext(ctx, target.iface+"."+target.method, 0).Err
+}
+
 // mediaTarget is the public BlueZ object and method one transport command uses.
+// evidence names the fact a toggle direction came from, for the command log.
 type mediaTarget struct {
-	path   dbus.ObjectPath
-	iface  string
-	method string
+	path     dbus.ObjectPath
+	iface    string
+	method   string
+	evidence string
 }
 
 // mediaTarget resolves a command without crossing devices: when the framework
@@ -652,55 +1018,128 @@ type mediaTarget struct {
 func (b *BlueZ) mediaTarget(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string, cmd Command) (mediaTarget, bool) {
 	// Only a toggle needs a direction; Play/Pause/Next/Previous are explicit.
 	var playing bool
-	if cmd == CommandToggle {
-		playing = b.playingFor(objs, nil, device)
-	}
+	var evidence string
 	if path := findPlayerPath(objs, device); path != "" {
 		props := objs[path]["org.bluez.MediaPlayer1"]
 		if cmd == CommandToggle {
-			playing = b.playingFor(objs, props, device)
+			playing, evidence = b.playingFor(objs, props, device)
 		}
 		method := playerMethod(cmd, playing)
 		if method == "" {
 			return mediaTarget{}, false
 		}
-		return mediaTarget{path: path, iface: "org.bluez.MediaPlayer1", method: method}, true
+		return mediaTarget{path: path, iface: "org.bluez.MediaPlayer1", method: method, evidence: evidence}, true
 	}
 	if path, _ := findControlPath(objs, device); path != "" {
 		// MediaControl1 publishes no playback status; direction comes from the
-		// transport or the sink receipt evidence for the same device.
+		// owned transport's receipts or the transport state for the same device.
+		if cmd == CommandToggle {
+			playing, evidence = b.playingFor(objs, nil, device)
+		}
 		method := controlMethod(cmd, playing)
 		if method == "" {
 			return mediaTarget{}, false
 		}
-		return mediaTarget{path: path, iface: "org.bluez.MediaControl1", method: method}, true
+		return mediaTarget{path: path, iface: "org.bluez.MediaControl1", method: method, evidence: evidence}, true
 	}
 	return mediaTarget{}, false
 }
 
-// playingFor resolves playback direction from the strongest public evidence:
-// a MediaPlayer1.Status when the source publishes one, then the source's own
-// A2DP transport state, then the sink's packet-receipt probe (an acquired
-// transport is absent from the object tree). Unknown resolves to false, which
-// sends Play; it never invents a paused state after a failed command.
-func (b *BlueZ) playingFor(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, playerProps map[string]dbus.Variant, device string) bool {
+// playingFor resolves playback direction from the strongest evidence available
+// and names it. It is the single resolver both consumers use: mediaTarget for a
+// toggle, and PlaybackDirection for a published playback state, so a consumer
+// that reports PLAYING cannot be inverted by a toggle that would send Play.
+//
+//   - memory: a direction this daemon commanded inside commandMemoryWindow
+//     outranks every cached peer fact, because the next toggle must invert that
+//     command, not repeat it.
+//   - receipt: while this daemon owns the source's acquired transport, the sink's
+//     own packet receipts are authoritative - a fresh receipt means the source is
+//     playing and no receipt while we hold the transport means it is paused.
+//   - status: otherwise the source's MediaPlayer1.Status, which is only BlueZ's
+//     cache of the peer's AVRCP notifications.
+//   - transport: without a status, the source's observed transport state.
+//
+// Unknown resolves to false, which sends Play; it never invents a paused state
+// after a failed command.
+func (b *BlueZ) playingFor(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, playerProps map[string]dbus.Variant, device string) (bool, string) {
+	if method, ok := b.rememberedCommand(device); ok {
+		// Play was the last direction we commanded, so the source is playing as
+		// far as this daemon knows and the next toggle pauses it; Pause means
+		// the opposite. This is the inversion, not a repetition of the cache.
+		return method == "Play", EvidenceMemory
+	}
+	if b.ownsA2DPTransportFor(objs, device) {
+		return b.audioStreaming(device), EvidenceReceipt
+	}
 	if playerProps != nil {
 		if status := strProp(playerProps, "Status"); status != "" {
-			return status == "playing"
+			return status == "playing", EvidenceStatus
 		}
 	}
 	if device == "" {
 		if path, props := findPlayer(objs); path != "" {
 			if status := strProp(props, "Status"); status != "" {
-				return status == "playing"
+				return status == "playing", EvidenceStatus
 			}
 			device = playerDeviceAddress(objs, props)
 		}
 	}
 	if transportPlaying(objs, device) {
+		return true, EvidenceTransport
+	}
+	return b.audioStreaming(device), EvidenceReceipt
+}
+
+// PlaybackDirection resolves the displayed source's playback direction from the
+// same evidence a toggle uses, so a consumer that publishes it as PLAYING or
+// PAUSED cannot disagree with the direction the next toggle takes. It reads the
+// object tree instead of the cached media state because the cached status is
+// exactly the lagging fact the direction memory exists to outrank.
+func (b *BlueZ) PlaybackDirection(ctx context.Context) (Direction, error) {
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return Direction{}, err
+	}
+	media := mediaFrom(objs)
+	if !media.Present {
+		return Direction{}, nil
+	}
+	// Mirror mediaTarget: a MediaPlayer1 exists for this source on the player
+	// path, so its status is read; the MediaControl1 path has none.
+	var playerProps map[string]dbus.Variant
+	if path := findPlayerPath(objs, media.DeviceAddress); path != "" {
+		playerProps = objs[path]["org.bluez.MediaPlayer1"]
+	}
+	playing, evidence := b.playingFor(objs, playerProps, media.DeviceAddress)
+	return Direction{Present: true, Playing: playing, Evidence: evidence}, nil
+}
+
+// --- A2DP repair -------------------------------------------------------------
+
+// ownsA2DPTransportFor reports whether the transport this sink acquired belongs
+// to the given source. Only then are the sink's packet receipts authoritative:
+// while PulseAudio owns the stream, or before a transport is acquired, the sink
+// has no receipts to speak for the source.
+func (b *BlueZ) ownsA2DPTransportFor(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) bool {
+	b.endpointMu.Lock()
+	path := b.transport
+	b.endpointMu.Unlock()
+	if path == "" {
+		return false
+	}
+	props, ok := objs[path]["org.bluez.MediaTransport1"]
+	if !ok {
+		// Acquired transports stay in BlueZ 5.65's object tree; an object map
+		// that does not have it is a test or a partially read snapshot, and the
+		// recorded path is still this sink's single transport.
 		return true
 	}
-	return b.audioStreaming(device)
+	dev := objectPathProp(props, "Device")
+	if dev == "" || device == "" {
+		return true
+	}
+	return strings.EqualFold(deviceAddressAt(objs, dev), device)
 }
 
 // transportPlaying reports whether BlueZ currently shows the same device's
@@ -830,6 +1269,13 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 	}
 	devices := devicesFrom(objs)
 	media := mediaFrom(objs)
+	// The session assertion is part of the adapter status: a source that is
+	// connected without an A2DP transport is the state that produced
+	// "telephone quality" while every ConnectProfile call had succeeded.
+	link := audioLinkFrom(objs, media.DeviceAddress)
+	if detail := link.Detail(); detail != "" {
+		status.Detail = joinDetail(status.Detail, detail)
+	}
 
 	b.mu.Lock()
 	b.adapter = adapterPath
@@ -860,38 +1306,70 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 		events = append(events, Event{Kind: EventAdapter, Media: media})
 	}
 
+	// AVRCP absolute volume, scoped to the same connected source the framework
+	// displays. A background phone's transport must not move the master.
+	if media.DeviceAddress != b.volumeDevice {
+		b.volume, b.volumeSet, b.volumeWrote = 0, false, false
+		b.volumeDevice = media.DeviceAddress
+		if !strings.EqualFold(b.volumeAbsentDevice, media.DeviceAddress) {
+			b.volumeAbsent, b.volumeAbsentDevice = false, ""
+		}
+		if !strings.EqualFold(b.volumeMissingDevice, media.DeviceAddress) {
+			// The grace window belongs to one source session.
+			b.volumeMissingDevice, b.volumeMissingSince = "", time.Time{}
+		}
+		b.volumeAbsentNotified = ""
+	}
+	volumePath, volumeProps, hasVolume := b.volumeTarget(objs, media.DeviceAddress)
+	var reassert bool
+	var reassertValue uint16
+	if hasVolume {
+		volume := transportVolumeValue(volumeProps)
+		if strings.EqualFold(b.volumeAbsentDevice, media.DeviceAddress) {
+			b.volumeAbsent, b.volumeAbsentDevice = false, ""
+		}
+		publish, echo := volumeObservation(b.volume, b.volumeSet, b.volumeWrote, volume)
+		switch {
+		case echo:
+			b.volumeSet = true
+		case publish:
+			if level, ok := b.pendingVolumeLocked(media.DeviceAddress, volume); ok {
+				// The peer's first report created Volume after our write was
+				// refused for lack of it. Reach the level the framework asked
+				// for instead of adopting the peer's stale one; recording it as
+				// the observed level suppresses the echo of the write below.
+				b.volume, b.volumeSet = level, true
+				reassert, reassertValue = true, level
+			} else {
+				b.volume, b.volumeSet = volume, true
+				events = append(events, Event{
+					Kind: EventVolume, Volume: volume, Media: media,
+					DeviceAddress: media.DeviceAddress, DeviceName: media.DeviceName,
+				})
+			}
+		}
+		b.volumeWrote = false
+	} else {
+		// No transport volume: the next source's first level is initial state
+		// again. A remembered request survives, so a source that only reports
+		// volume later still converges on the configured level.
+		b.volumeSet = false
+		b.volumeWrote = false
+		b.volume = 0
+	}
+
+	// The source-scoped part of the bounded detail: a source that refuses
+	// absolute volume is why its own slider does not move with the master.
+	if detail := b.volumeAbsentDetailLocked(media.DeviceAddress, hasVolume); detail != "" {
+		media.Detail = joinDetail(media.Detail, detail)
+	}
+
 	if mediaChanged(b.media, media) {
 		b.revision++
 		media.Revision = b.revision
 		events = append(events, Event{Kind: EventMedia, Media: media})
 	} else {
 		media.Revision = b.media.Revision
-	}
-
-	// AVRCP absolute volume, scoped to the same connected source the framework
-	// displays. A background phone's transport must not move the master.
-	if media.DeviceAddress != b.volumeDevice {
-		b.volume, b.volumeSet, b.volumeWrote = 0, false, false
-		b.volumeDevice = media.DeviceAddress
-	}
-	if volume, ok := transportVolume(objs, media.DeviceAddress); ok {
-		publish, echo := volumeObservation(b.volume, b.volumeSet, b.volumeWrote, volume)
-		switch {
-		case echo:
-			b.volumeSet = true
-		case publish:
-			b.volume, b.volumeSet = volume, true
-			events = append(events, Event{
-				Kind: EventVolume, Volume: volume, Media: media,
-				DeviceAddress: media.DeviceAddress, DeviceName: media.DeviceName,
-			})
-		}
-		b.volumeWrote = false
-	} else {
-		// No transport: the next source's first level is initial state again.
-		b.volumeSet = false
-		b.volumeWrote = false
-		b.volume = 0
 	}
 	// A pending or active transport is the point at which the stream can be
 	// acquired; publish the transition instead of having callers poll for it.
@@ -907,6 +1385,15 @@ func (b *BlueZ) refresh(ctx context.Context) error {
 
 	b.media = media
 	b.mu.Unlock()
+
+	// The peer's first report materialised Volume: assert the configured level
+	// once. The write happens outside the state lock; the level recorded above
+	// keeps its PropertiesChanged echo from being published as a source change.
+	if reassert && volumePath != "" {
+		wctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_ = b.writeTransportVolume(wctx, volumePath, reassertValue)
+		cancel()
+	}
 
 	if endpointRegistrationInvalidated(prevAdapter, adapterPath, prevStatus, status) {
 		// BlueZ drops endpoint registrations when the adapter is power-cycled
@@ -1419,21 +1906,31 @@ func findVolumeTransport(objs map[dbus.ObjectPath]map[string]map[string]dbus.Var
 	return idlePath, idleProps
 }
 
-// transportVolume reads the AVRCP absolute volume of the display source's
-// transport. ok is false when no transport exposes the property, i.e. the
-// source does not support absolute volume.
-func transportVolume(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device string) (uint16, bool) {
-	path, props := findVolumeTransport(objs, device)
-	if path == "" {
-		return 0, false
+// transportVolumeValue decodes a transport's Volume variant (BlueZ publishes a
+// uint16; a uint32 is tolerated for a differently built BlueZ).
+func transportVolumeValue(props map[string]dbus.Variant) uint16 {
+	v, ok := props["Volume"]
+	if !ok {
+		return 0
 	}
-	switch v := props["Volume"].Value().(type) {
+	switch value := v.Value().(type) {
 	case uint16:
-		return v, true
+		return value
 	case uint32:
-		return uint16(v), true
+		return uint16(value)
 	}
-	return 0, false
+	return 0
+}
+
+// joinDetail appends one bounded sentence to a status detail.
+func joinDetail(detail, sentence string) string {
+	if sentence == "" {
+		return detail
+	}
+	if detail == "" {
+		return sentence
+	}
+	return detail + "; " + sentence
 }
 
 // volumeObservation decides what an observed transport level means.

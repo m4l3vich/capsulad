@@ -7,13 +7,24 @@ const props = defineProps({
   samples: { type: Array, default: () => [] },
   samplesLoaded: { type: Boolean, default: false },
   micLive: { type: Boolean, default: false },
-  micReason: { type: String, default: '' }
+  micReason: { type: String, default: '' },
+  // target selects the artifact this setup trains: null creates a new word,
+  // {modelId, displayName} retrains that word in place. The id is the artifact
+  // identity, so the display name may change without rebinding the word.
+  target: { type: Object, default: null }
 })
 
 const emit = defineEmits(['close', 'refresh'])
 
-const STORAGE_KEY = 'capsula.wakeword.setup.v5'
+const STORAGE_KEY = 'capsula.wakeword.setup.v6'
 const CUE_MS = 3000
+
+// The target is part of the setup identity: switching between "create a new
+// word" and "retrain this word" starts a fresh selection instead of silently
+// reusing takes recorded for a different job.
+function targetModelId() {
+  return String(props.target?.modelId || '')
+}
 
 const STEPS = [
   { key: 'setup', label: 'Setup', title: 'Name your wakeword and place Capsula' },
@@ -124,6 +135,45 @@ const WORD_VARIATIONS = {
   ]
 }
 
+const SPLIT_LABELS = {
+  tune: 'Tuning check',
+  final_test: 'Final check',
+  auxiliary_tune: 'External speech check · tuning',
+  auxiliary_final_test: 'External speech check · final'
+}
+
+const PARTITION_LABELS = {
+  word: 'Wakeword recording',
+  room: 'Room recording',
+  speech: 'Phrase recording',
+  false_activation: 'False-activation recording',
+  negative: 'Held-out recording'
+}
+
+// Every cause the trainer can report has one plain instruction, so a refusal
+// tells the user what to re-record instead of showing a machine string.
+const CAUSE_ADVICE = {
+  too_few_word_takes: 'Record more independent wakeword takes.',
+  too_few_room_takes: 'Record more room-noise takes, staying quiet during each one.',
+  too_few_speech_takes: 'Record more everyday-phrase takes without the wakeword.',
+  take_too_short: 'Re-record the listed take and let the full cue and recording finish.',
+  unusable_take: 'Re-record the listed take in a quiet room, close to the microphone, saying the word once.',
+  duplicate_takes: 'Re-record the listed take: an exact copy of another take cannot be used.',
+  short_context: 'Re-record the listed take with a short pause before and after the wakeword.',
+  no_positive_windows: 'Re-record the listed take so the complete wakeword is inside the recording.',
+  no_negative_windows: 'Record longer room and phrase takes so Capsula has background to learn from.',
+  insufficient_heldout: 'Record more independent takes so some can be held back for an honest final check.',
+  tune_gate_failed: 'No workable sensitivity was found on the held-back tuning takes; re-record the listed takes.',
+  final_gate_failed: 'The held-back final check failed; re-record the listed takes and start a new setup.',
+  auxiliary_gate_failed: 'The external speech check fired on unrelated audio; the model is not installed. Re-record in a quieter room.',
+  corpus_missing: 'Capsula is missing its negative-training corpus; training cannot run until it is installed on the device.',
+  corpus_unusable: 'Capsula cannot read its negative-training corpus; it must be rebuilt before training.',
+  configuration: 'Capsula is not configured for training; its input processing setting must be fixed first.',
+  invalid_request: 'The training request was incomplete; start the setup again.',
+  fit_failed: 'Capsula could not fit the classifier; retry once, and report the technical detail if it repeats.',
+  internal: 'Capsula hit an internal fault; the installed wakeword is unchanged.'
+}
+
 const STAGE_LABELS = {
   load: 'Getting ready to listen',
   validate: 'Checking the selected recordings',
@@ -140,8 +190,9 @@ const STAGE_LABELS = {
 
 function emptySetup() {
   return {
-    version: 5,
-    word: '',
+    version: 6,
+    modelId: targetModelId(),
+    word: props.target?.displayName || '',
     language: 'ru',
     placement: false,
     step: 'setup',
@@ -156,6 +207,7 @@ function loadSetup() {
   try {
     const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || 'null')
     if (!saved || typeof saved !== 'object') return base
+    if (String(saved.modelId || '') !== base.modelId) return base
     const word = typeof saved.word === 'string' ? saved.word.slice(0, 100) : ''
     const language = saved.language === 'en' ? 'en' : 'ru'
     const step = STEPS.some((s) => s.key === saved.step) ? saved.step : 'setup'
@@ -168,7 +220,7 @@ function loadSetup() {
     }
     return {
       ...base,
-      word,
+      word: word || base.word,
       language,
       step,
       placement: Boolean(saved.placement),
@@ -202,6 +254,8 @@ const training = reactive({
   fraction: 0,
   logs: [],
   error: '',
+  failure: null,
+  metrics: [],
   installed: null
 })
 
@@ -238,7 +292,8 @@ const busy = computed(() => Boolean(recording.value) || training.running || trai
 function saveSetup() {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-      version: 5,
+      version: 6,
+      modelId: setup.modelId,
       word: setup.word,
       language: setup.language,
       placement: placementDraft.value || stepIndex.value > 0,
@@ -350,6 +405,38 @@ const recordProgress = computed(() => {
 })
 
 const percent = computed(() => Math.min(100, Math.max(0, Math.round((Number(training.fraction) || 0) * 100))))
+function splitRows(splits) {
+  return (Array.isArray(splits) ? splits : []).map((split, index) => {
+    const words = Number(split.wordRecordings) || 0
+    return {
+      key: `${split.split || 'split'}-${index}`,
+      label: SPLIT_LABELS[split.split] || String(split.split || 'Check'),
+      words,
+      detected: Number(split.detected) || 0,
+      recall: words > 0 && typeof split.recall === 'number' ? `${Math.round(split.recall * 100)}%` : '—',
+      falseActivations: Number(split.falseActivations) || 0
+    }
+  })
+}
+
+const trainingMetrics = computed(() => splitRows(training.metrics))
+const failureSplits = computed(() => splitRows(training.failure?.splits))
+const failureCauses = computed(() => {
+  const causes = Array.isArray(training.failure?.causes) ? training.failure.causes : []
+  return causes.map((cause) => ({
+    cause,
+    advice: CAUSE_ADVICE[cause] || 'Training was refused; review the recordings and try again.'
+  }))
+})
+const failingTakeRows = computed(() => {
+  const takes = Array.isArray(training.failure?.takes) ? training.failure.takes : []
+  return takes.map((take, index) => ({
+    key: `${take.partition || 'take'}-${take.index || index}-${index}`,
+    label: `${PARTITION_LABELS[take.partition] || 'Recording'} ${Number(take.index) || index + 1}`,
+    detail: take.detail || CAUSE_ADVICE[take.cause] || ''
+  }))
+})
+
 const stageLabel = computed(() => {
   if (training.cancelling) return 'Stopping on Capsula…'
   const stage = String(training.stage || '')
@@ -566,6 +653,8 @@ function resetTrainingState() {
   training.fraction = 0
   training.logs = []
   training.error = ''
+  training.failure = null
+  training.metrics = []
   training.installed = null
   cancelRequested = false
   cancelAcknowledged = false
@@ -585,6 +674,7 @@ async function startTraining() {
   try {
     const result = await socket.request({
       train: {
+        modelId: setup.modelId,
         displayName: setup.word,
         language: setup.language,
         seed: randomSeed(),
@@ -634,6 +724,22 @@ function handleProgress(progress) {
   if (!progress) return
   if (progress.trainingId && training.id && progress.trainingId !== training.id) return
   const stage = String(progress.stage || '')
+  // A typed refusal arrives before the stream ends: it names the causes, the
+  // takes to re-record and the measured gates, so it replaces the generic error.
+  if (progress.failure) {
+    training.running = false
+    training.cancelling = false
+    training.error = ''
+    training.failure = progress.failure
+    training.installed = null
+    cancelRequested = false
+    clearCancelBackstop()
+    offTraining?.()
+    offTraining = null
+    emit('refresh')
+    if (closing.value) closeDialog()
+    return
+  }
   if (stage === 'error') {
     const stopped = cancelRequested || training.cancelling || /cancel/i.test(String(progress.log || ''))
     training.running = false
@@ -641,6 +747,7 @@ function handleProgress(progress) {
     training.error = stopped
       ? 'Training stopped. If you stopped it near the final step, refresh and check the current wakeword.'
       : (progress.log || 'Training stopped before a new wakeword was confirmed.')
+    training.failure = null
     training.installed = null
     cancelRequested = false
     clearCancelBackstop()
@@ -661,6 +768,7 @@ function handleProgress(progress) {
     training.stage = stage
     training.fraction = 1
     training.installed = progress.classifier || {}
+    training.metrics = Array.isArray(progress.metrics) ? progress.metrics : []
     setup.completed = true
     saveSetup()
     emit('refresh')
@@ -876,7 +984,9 @@ onBeforeUnmount(() => {
     <div class="modal-box flex h-[calc(100dvh-2rem)] max-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col overflow-hidden p-0 sm:h-[90dvh] sm:max-h-[54rem] sm:w-[min(96vw,54rem)]">
       <header class="flex shrink-0 items-start gap-3 border-b border-base-300 px-5 py-4">
         <div class="min-w-0 flex-1">
-          <p class="text-xs font-semibold uppercase tracking-wide text-primary">Personal wakeword</p>
+          <p class="text-xs font-semibold uppercase tracking-wide text-primary">
+            {{ props.target ? 'Retrain a wakeword' : 'New wakeword' }}
+          </p>
           <h2 id="wakeword-dialog-title" ref="headingEl" tabindex="-1" class="text-lg font-semibold sm:text-xl">
             {{ STEPS[stepIndex].title }}
           </h2>
@@ -909,6 +1019,13 @@ onBeforeUnmount(() => {
 
         <!-- Setup -->
         <div v-if="stepKey === 'setup'" class="mt-4 grid gap-4">
+          <div v-if="props.target" class="alert alert-info" role="status">
+            <span>
+              Replacing <strong>{{ props.target.displayName || props.target.modelId }}</strong>.
+              Training replaces only this word; your other wakewords and their app bindings stay unchanged.
+              Renaming it here does not change which app it starts.
+            </span>
+          </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="form-control w-full">
               <span class="label-text font-medium">Which word should wake Capsula?</span>
@@ -1114,6 +1231,41 @@ onBeforeUnmount(() => {
                 <span v-if="training.installed.language">· {{ languageName(training.installed.language) }}</span>
               </p>
               <p class="mt-2 text-sm opacity-80">Nothing was switched on automatically. Close this dialog, then use the Wakeword section to choose this wakeword and turn detection on.</p>
+              <div v-if="trainingMetrics.length" class="mt-3">
+                <p class="text-sm font-medium">Measured on held-back recordings</p>
+                <p v-if="training.installed.threshold" class="mt-1 text-xs opacity-70">
+                  Sensitivity threshold {{ Number(training.installed.threshold).toFixed(2) }}
+                </p>
+                <div class="mt-2 overflow-x-auto">
+                  <table class="table table-xs">
+                    <thead>
+                      <tr>
+                        <th>Check</th>
+                        <th>Words found</th>
+                        <th>Recall</th>
+                        <th>False activations</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in trainingMetrics" :key="row.key">
+                        <td class="whitespace-nowrap">{{ row.label }}</td>
+                        <td>{{ row.words ? `${row.detected} / ${row.words}` : '—' }}</td>
+                        <td>{{ row.recall }}</td>
+                        <td>{{ row.falseActivations }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="mt-2 text-xs opacity-60">The external speech check uses a separate licensed corpus; it can block installation but is not the held-back certificate.</p>
+              </div>
+              <p class="mt-3 text-sm opacity-80">
+                <template v-if="props.target">
+                  This word keeps its enabled state and app binding. Detection restarts for all words, so allow about two seconds before speaking.
+                </template>
+                <template v-else>
+                  The new word is installed switched off. Enable it in Settings → Wakeword and choose the app it should start. Detection restarts for all words, so allow about two seconds before speaking.
+                </template>
+              </p>
               <details v-if="training.installed.modelId" class="mt-2">
                 <summary class="cursor-pointer text-xs opacity-70">Technical details</summary>
                 <p class="mt-1 break-all font-mono text-xs opacity-70">{{ training.installed.modelId }}</p>
@@ -1124,6 +1276,54 @@ onBeforeUnmount(() => {
                   {{ resetArmed ? 'Confirm new setup' : 'Start a new setup' }}
                 </button>
               </div>
+            </div>
+          </div>
+
+          <div v-else-if="training.failure" class="alert alert-error" role="alert">
+            <div class="min-w-0">
+              <p class="font-semibold">Training stopped. The new wakeword was not installed.</p>
+              <p v-if="training.failure.detail" class="mt-1 text-sm">{{ training.failure.detail }}</p>
+
+              <div v-if="failureCauses.length" class="mt-3">
+                <p class="text-sm font-medium">What to do</p>
+                <ul class="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  <li v-for="cause in failureCauses" :key="cause.cause">{{ cause.advice }}</li>
+                </ul>
+              </div>
+
+              <div v-if="failingTakeRows.length" class="mt-3">
+                <p class="text-sm font-medium">Recordings to change</p>
+                <ul class="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  <li v-for="take in failingTakeRows" :key="take.key">
+                    <span class="font-medium">{{ take.label }}</span><span v-if="take.detail"> — {{ take.detail }}</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div v-if="failureSplits.length" class="mt-3 overflow-x-auto">
+                <p class="text-sm font-medium">Measured at the failed gate</p>
+                <table class="table table-xs mt-1">
+                  <thead>
+                    <tr>
+                      <th>Check</th>
+                      <th>Words found</th>
+                      <th>Recall</th>
+                      <th>False activations</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in failureSplits" :key="row.key">
+                      <td class="whitespace-nowrap">{{ row.label }}</td>
+                      <td>{{ row.words ? `${row.detected} / ${row.words}` : '—' }}</td>
+                      <td>{{ row.recall }}</td>
+                      <td>{{ row.falseActivations }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p v-if="!setup.finalTestConsumed" class="mt-3 text-xs opacity-70">The already-installed wakeword is unchanged. Re-record the listed takes and train again.</p>
+              <p v-else class="mt-3 text-xs opacity-70">The already-installed wakeword is unchanged. The held-back final check has already been used for these recordings, so start a new setup with fresh takes.</p>
             </div>
           </div>
 

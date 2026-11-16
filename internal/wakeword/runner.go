@@ -3,6 +3,7 @@ package wakeword
 import (
 	"encoding/binary"
 	"math"
+	"strings"
 	"time"
 
 	"capsulad/internal/audio"
@@ -19,14 +20,38 @@ type Engine interface {
 	Reset()
 }
 
+// ScoreEngine is the shared-frontend detector interface: one Process call scores
+// every model against the newest complete context. The returned slice is owned
+// by the engine and must be consumed before the next call.
+type ScoreEngine interface {
+	Process(samples []int16) []float64
+	Reset()
+}
+
+// singleEngine adapts one model's Engine to ScoreEngine, so a single-model
+// detector and an ensemble share the policy below instead of keeping two copies
+// of the streak, cooldown and gate rules.
+type singleEngine struct {
+	Engine
+	score [1]float64
+}
+
+func (e *singleEngine) Process(samples []int16) []float64 {
+	e.score[0] = e.Engine.Process(samples)
+	return e.score[:]
+}
+
 // RunnerOptions tunes the activation policy. The defaults follow the decision
-// in docs/WAKEWORD.md: two consecutive windows above threshold, then a 2.9 s
-// cooldown so one utterance cannot fire twice.
+// in docs/WAKEWORD.md: two consecutive windows above the model's threshold, then
+// a 2.9 s global cooldown so one utterance cannot fire twice — not even as two
+// different words.
 // defaultResumeDelay is how long detection stays off after the assistant
 // releases the audio path: its last output is still being captured.
 const defaultResumeDelay = 1200 * time.Millisecond
 
 type RunnerOptions struct {
+	// Threshold applies to the single-model NewRunner constructor. An ensemble
+	// takes each model's calibrated threshold from its DetectionSpec.
 	Threshold      float64
 	WindowSamples  int
 	MinConsecutive int
@@ -59,27 +84,56 @@ func (o RunnerOptions) withDefaults() RunnerOptions {
 
 // Runner feeds engine windows from the framework capture tap and turns
 // detections into activations through the manager, which still enforces mute,
-// the selected assistant and bounded pre-roll.
+// per-model enablement, the bound app and bounded pre-roll.
 type Runner struct {
 	manager *Manager
-	engine  Engine
-	modelID string
+	engine  ScoreEngine
+	specs   []DetectionSpec
 	opts    RunnerOptions
 
+	// streaks counts consecutive above-threshold windows per model. peaks holds
+	// each model's maximum score since the last trace line.
+	streaks []int
+	peaks   []float64
+
 	pending      []int16
-	consecutive  int
 	lastFireNS   uint64
 	lastSequence uint64
-	maxScore     float64
 	lastLogNS    uint64
 	lastBeatNS   uint64
 	frames       uint64
 }
 
-// NewRunner pairs an engine with the manager. modelID must be registered as an
-// available model, otherwise Trigger would reject the detection.
+// NewRunner pairs a single-model engine with the manager. modelID must be
+// registered as an available model, otherwise Trigger would reject the
+// detection.
 func NewRunner(m *Manager, engine Engine, modelID string, opts RunnerOptions) *Runner {
-	return &Runner{manager: m, engine: engine, modelID: modelID, opts: opts.withDefaults()}
+	opts = opts.withDefaults()
+	return newRunner(m, &singleEngine{Engine: engine}, []DetectionSpec{
+		{ModelID: modelID, Threshold: opts.Threshold},
+	}, opts)
+}
+
+// NewEnsembleRunner pairs a shared-frontend score engine with one policy per
+// head. specs must list every head in the engine's order.
+func NewEnsembleRunner(m *Manager, engine ScoreEngine, specs []DetectionSpec, opts RunnerOptions) *Runner {
+	opts = opts.withDefaults()
+	normalized := make([]DetectionSpec, len(specs))
+	for i, spec := range specs {
+		normalized[i] = DetectionSpec{ModelID: spec.ModelID, Threshold: normalizeThreshold(spec.Threshold)}
+	}
+	return newRunner(m, engine, normalized, opts)
+}
+
+func newRunner(m *Manager, engine ScoreEngine, specs []DetectionSpec, opts RunnerOptions) *Runner {
+	return &Runner{
+		manager: m,
+		engine:  engine,
+		specs:   specs,
+		opts:    opts,
+		streaks: make([]int, len(specs)),
+		peaks:   make([]float64, len(specs)),
+	}
 }
 
 // HandleFrame consumes one capture chunk. It is called from the subscriber
@@ -122,12 +176,9 @@ func (r *Runner) HandleFrame(f audio.Frame) {
 			r.resetStream()
 			return
 		}
-		score := r.engine.Process(r.pending)
+		scores := r.engine.Process(r.pending)
 		r.pending = r.pending[:0]
-		if score > r.maxScore {
-			r.maxScore = score
-		}
-		r.step(score)
+		r.step(scores)
 	}
 }
 
@@ -135,45 +186,116 @@ func (r *Runner) HandleFrame(f audio.Frame) {
 // completing one feature window or one consecutive-score run.
 func (r *Runner) resetStream() {
 	r.pending = r.pending[:0]
-	r.consecutive = 0
-	r.maxScore = 0
+	clear(r.streaks)
+	clear(r.peaks)
 	r.engine.Reset()
 }
 
-// step applies the two-window rule and the cooldown.
-func (r *Runner) step(score float64) {
+// step applies the per-model consecutive-window rule, the global cooldown and
+// the arbitration rule, then fires at most one activation.
+func (r *Runner) step(scores []float64) {
+	now := r.manager.clock.NowNS()
 	// Periodic score telemetry: without it a mis-tuned threshold is invisible.
+	// It is per model because every word has its own calibrated threshold.
 	if r.opts.Trace {
-		if now := r.manager.clock.NowNS(); now-r.lastLogNS >= 500_000_000 {
-			r.manager.logs.Debugf("wakeword", "", "score max=%.3f threshold=%.2f", r.maxScore, r.opts.Threshold)
-			r.maxScore = 0
+		for i := range r.specs {
+			if i < len(scores) && scores[i] > r.peaks[i] {
+				r.peaks[i] = scores[i]
+			}
+		}
+		if now-r.lastLogNS >= 500_000_000 {
+			for i, spec := range r.specs {
+				r.manager.logs.Debugf("wakeword", "", "score model=%s max=%.3f threshold=%.2f",
+					spec.ModelID, r.peaks[i], spec.Threshold)
+				r.peaks[i] = 0
+			}
 			r.lastLogNS = now
 		}
 	}
-	if math.IsNaN(score) || score < r.opts.Threshold {
-		r.consecutive = 0
+
+	inCooldown := r.lastFireNS != 0 && now-r.lastFireNS < uint64(r.opts.Cooldown)
+	best := -1
+	completed := false
+	var bestMargin, bestScore float64
+	var bestID string
+	for i, spec := range r.specs {
+		score := 0.0
+		if i < len(scores) {
+			score = scores[i]
+		}
+		if math.IsNaN(score) || score < spec.Threshold {
+			r.streaks[i] = 0
+			continue
+		}
+		r.streaks[i]++
+		if r.streaks[i] < r.opts.MinConsecutive {
+			continue
+		}
+		completed = true
+		if inCooldown {
+			continue
+		}
+		// A word that is not effectively enabled (or whose artifact became
+		// unavailable) is dropped before arbitration, so a disabled word cannot
+		// shadow an enabled one on the same hop.
+		if _, ok := r.manager.detectionTarget(spec.ModelID); !ok {
+			r.streaks[i] = 0
+			continue
+		}
+		margin := (score - spec.Threshold) / (1 - spec.Threshold)
+		if best < 0 || betterCandidate(margin, score, spec.ModelID, bestMargin, bestScore, bestID) {
+			best, bestMargin, bestScore, bestID = i, margin, score, spec.ModelID
+		}
+	}
+	if !completed {
 		return
 	}
-	r.consecutive++
-	if r.consecutive < r.opts.MinConsecutive {
-		return
-	}
-	now := r.manager.clock.NowNS()
-	if r.lastFireNS != 0 && now-r.lastFireNS < uint64(r.opts.Cooldown) {
-		return
-	}
-	// Inference may have taken long enough for the assistant to acquire audio
-	// or the user to mute. Do not publish a score computed before that change.
+	// Inference may have taken long enough for the assistant to acquire audio or
+	// the user to mute. Do not publish a score computed before that change, and
+	// do not keep embeddings from one side of the break: without this reset the
+	// context after unmute would contain pre-mute audio.
 	if !r.manager.detecting() {
 		r.resetStream()
 		return
 	}
-	r.consecutive = 0
-	r.engine.Reset()
-	if _, ok := r.manager.Trigger("wakeword", r.modelID); ok {
-		r.lastFireNS = now
-		r.manager.logs.Infof("wakeword", "", "detected word=%s score=%.3f", r.modelID, score)
+	if best < 0 {
+		return
 	}
+	// Fire exactly once. Losers' streaks reset without consuming the cooldown:
+	// they did not activate anything, and the winner's cooldown covers the whole
+	// utterance anyway.
+	clear(r.streaks)
+	r.engine.Reset()
+	winner := r.specs[best].ModelID
+	if _, ok := r.manager.Trigger("wakeword", winner); !ok {
+		return
+	}
+	r.lastFireNS = now
+	r.manager.logs.Infof("wakeword", "", "detected word=%s score=%.3f", winner, bestScore)
+	if r.opts.Trace && len(r.specs) > 1 {
+		var others []string
+		for _, spec := range r.specs {
+			if spec.ModelID != winner {
+				others = append(others, spec.ModelID)
+			}
+		}
+		r.manager.logs.Debugf("wakeword", "", "arbitration winner=%s margin=%.3f; context reset for %s",
+			winner, bestMargin, strings.Join(others, ","))
+	}
+}
+
+// betterCandidate is the deterministic tie-break: normalized margin first
+// (calibrated thresholds differ, so raw scores are not comparable across
+// words), then the higher raw score, then the lexicographically smaller model
+// id so two identical artifacts still resolve the same way every time.
+func betterCandidate(margin, score float64, id string, bestMargin, bestScore float64, bestID string) bool {
+	if margin != bestMargin {
+		return margin > bestMargin
+	}
+	if score != bestScore {
+		return score > bestScore
+	}
+	return id < bestID
 }
 
 // detecting reports whether inference should run at all.

@@ -29,7 +29,7 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 	writeKeyNode(t, gpio, "volumeup-key", keyVolumeUp, "volup")
 	writeKeyNode(t, gpio, "playpause-key", keyPlayPause, "play-pause")
 	writeKeyNode(t, gpio, "volumedown-key", keyVolumeDown, "voldown")
-	// The two stock DTBs disagree on the centre key label; the node name is
+	// The two stock DTBs disagree on the talk-key label; the node name is
 	// authoritative.
 	writeKeyNode(t, gpio, "voice-key", keyHappy, "happy")
 

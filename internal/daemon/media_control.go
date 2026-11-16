@@ -15,10 +15,13 @@ import (
 
 // The physical circle key and panel swipes drive current media through public
 // APIs only. A standard provider that is actually playing or paused is
-// preferred; when no provider app exists (the shipped Mini has none), the
-// connected Bluetooth source is controlled through the public
-// BluetoothMediaService on the same socket. There is no private transport or
-// second control plane: both paths are the daemon's normal public services.
+// preferred; its published direction comes from the manager's own resolver, so
+// a PLAY/PAUSE derived from it cannot invert the manager's next toggle. When no
+// provider is playing or paused — the daemon bundles no Bluetooth provider app,
+// so that is the normal case for a connected phone — the source is controlled
+// through the public BluetoothMediaService on the same socket, which resolves
+// its own direction. There is no private transport or second control plane:
+// both paths are the daemon's normal public services.
 const mediaPlayerService = "capsula.contracts.media.v1.MediaPlayerService"
 
 type mediaAction int
@@ -224,7 +227,7 @@ func (s *systemMediaController) execute(parent context.Context, action mediaActi
 	// A standard player that is actually playing or paused is the current
 	// media and wins over the Bluetooth source. When no standard player is
 	// active, the connected Bluetooth source is the coherent fallback: the
-	// device is a Bluetooth speaker even with no provider app installed.
+	// device is a Bluetooth speaker with no provider app installed.
 	if best == nil || best.rank < 2 {
 		if s.controlBluetooth(ctx, conn, action) {
 			return
@@ -259,10 +262,9 @@ func (s *systemMediaController) execute(parent context.Context, action mediaActi
 }
 
 // controlBluetooth uses the public BluetoothMediaService over the same socket.
-// It is only a fallback for the zero-provider case; a playing or paused
-// standard provider is always preferred. The service itself rejects a command
-// when no source is present, so no private transport or second control plane is
-// introduced.
+// It is the zero-provider path; a playing or paused standard provider is always
+// preferred. The service itself rejects a command when no source is present, so
+// no private transport or second control plane is introduced.
 func (s *systemMediaController) controlBluetooth(ctx context.Context, conn *grpc.ClientConn, action mediaAction) bool {
 	client := frameworkv1.NewBluetoothMediaServiceClient(conn)
 	state, err := client.GetState(ctx, &frameworkv1.GetBluetoothMediaStateRequest{})
@@ -285,7 +287,9 @@ func (s *systemMediaController) controlBluetooth(ctx context.Context, conn *grpc
 		s.d.logs.Warnf("media", "", "Bluetooth media command failed: %v", err)
 		return false
 	}
-	s.d.logs.Infof("media", "", "Bluetooth media %s accepted for %s (playing=%t)",
+	// BlueZ answers a transport command when it queues the AV/C passthrough, not
+	// when the peer acts on it, so this states what was sent, not what happened.
+	s.d.logs.Infof("media", "", "Bluetooth media %s sent to %s (playing=%t)",
 		command, after.GetDeviceName(), after.GetPlaying())
 	return true
 }

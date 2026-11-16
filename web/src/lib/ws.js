@@ -209,6 +209,10 @@ class CapsuleSocket {
 
   fail(id, error) {
     const failure = Object.assign(new Error(error.message || 'request failed'), { code: error.code })
+    // A per-request failure settles exactly that request (or subscription) and
+    // nothing else. Transport state and its epoch belong to onclose: an RPC the
+    // daemon refused must stay an inline error on the page, never a reason to
+    // declare the socket disconnected or to reconnect.
     // A rejected subscription has no pending command entry, but its view must
     // still leave the loading state instead of waiting forever.
     const waiter = this.snapshotWaiters.get(id)

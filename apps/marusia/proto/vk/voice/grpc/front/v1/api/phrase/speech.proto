@@ -1,0 +1,117 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafe530. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.api.phrase;
+
+import "google/protobuf/wrappers.proto";
+import "vk/voice/grpc/front/v1/model/options/request.proto";
+import "vk/voice/grpc/front/v1/model/phrase_commands/commands.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/api/phrase;phrasepb";
+
+message SpeechRequestQoSOptions {
+  int32 status_interval_ms = 1;
+}
+message SpeechRequestFlowmodeOptions {
+  string model = 1;
+  int32 no_input_timeout_ms = 2;
+  int32 speech_complete_timeout_ms = 3;
+  int32 dictation_max_duration_ms = 4;
+  string event_on_finish = 5;
+  string punctuator_model_kind = 6;
+}
+message SpeechRequestOptions {
+  int32 speech_start_timeout_ms = 1;
+  google.protobuf.BoolValue use_asrld_recognize = 2;
+}
+message SpeechRequestInit {
+  vk.voice.grpc.front.v1.model.options.RequestAudioOptions audio_options = 1;
+  vk.voice.grpc.front.v1.api.phrase.SpeechRequestQoSOptions qos_options = 2;
+  vk.voice.grpc.front.v1.model.options.RequestClientOptions client_options = 3;
+  vk.voice.grpc.front.v1.api.phrase.SpeechRequestInit.SpeechMode mode = 4;
+  vk.voice.grpc.front.v1.api.phrase.SpeechRequestFlowmodeOptions flowmode_options = 5;
+  vk.voice.grpc.front.v1.model.options.RequestKeywordOptions keyword_options = 6;
+  vk.voice.grpc.front.v1.model.options.RequestInfraOptions infra_options = 7;
+  vk.voice.grpc.front.v1.model.options.RequestMailOptions mail_options = 8;
+  vk.voice.grpc.front.v1.model.options.RequestDialogOptions dialog_options = 9;
+  vk.voice.grpc.front.v1.model.options.RequestTelephonyOptions telephony_options = 10;
+  vk.voice.grpc.front.v1.api.phrase.SpeechRequestOptions speech_options = 11;
+  enum SpeechMode {
+    SPEECH_MODE_UNSPECIFIED = 0;
+    SPEECH_MODE_GENERAL = 1;
+    SPEECH_MODE_FLOWMODE = 2;
+  }
+}
+message SpeechRequestRecovery {
+  string phrase_id = 1;
+}
+message SpeechRequestChunk {
+  int32 chunk_num = 1;
+  bytes data = 2;
+}
+message SpeechRequestEos {
+}
+message SpeechRequestAbort {
+  string reason = 1;
+}
+message SpeechResponseQoSOptions {
+  int32 chunk_length_ms_hint = 1;
+  int32 status_interval_ms = 2;
+  bool chunks_overflow_acceptable = 3;
+}
+message SpeechResponseInit {
+  string phrase_id = 1;
+  vk.voice.grpc.front.v1.api.phrase.SpeechResponseQoSOptions qos = 2;
+}
+message SpeechResponseStatus {
+  int32 chunks_received = 1;
+  int32 audio_received_ms = 2;
+  int64 last_chunk_received_ts_ms = 3;
+  int32 status_num = 4;
+}
+message SpeechResponseEos {
+}
+message SpeechResponseKeywordConfirmed {
+}
+message SpeechResponseTextSoFar {
+  string text = 1;
+}
+message SpeechResponseFinish {
+  oneof continuation {
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseFinish.ContinuationAbort abort = 1;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseFinish.ContinuationNoop noop = 2;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseFinish.ContinuationResult result = 3;
+  }
+  message ContinuationNoop {
+  }
+  message ContinuationAbort {
+    string reason = 1;
+  }
+  message ContinuationResult {
+  }
+}
+message SpeechResponseCommands {
+  repeated vk.voice.grpc.front.v1.model.phrase_commands.CommandsBundle bundles = 1;
+}
+message SpeechRequest {
+  oneof kind {
+    vk.voice.grpc.front.v1.api.phrase.SpeechRequestInit init = 1;
+    vk.voice.grpc.front.v1.api.phrase.SpeechRequestRecovery recovery = 2;
+    vk.voice.grpc.front.v1.api.phrase.SpeechRequestChunk chunk = 3;
+    vk.voice.grpc.front.v1.api.phrase.SpeechRequestEos eos = 4;
+    vk.voice.grpc.front.v1.api.phrase.SpeechRequestAbort abort = 5;
+  }
+}
+message SpeechResponse {
+  oneof kind {
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseInit init = 1;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseEos eos = 2;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseStatus status = 3;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseKeywordConfirmed keyword_confirmed = 4;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseTextSoFar text_so_far = 5;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseCommands commands = 6;
+    vk.voice.grpc.front.v1.api.phrase.SpeechResponseFinish finish = 7;
+  }
+  int64 send_ts_ms = 8;
+}

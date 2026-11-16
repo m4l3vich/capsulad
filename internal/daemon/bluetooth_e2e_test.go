@@ -243,11 +243,18 @@ func TestBluetoothConnectNotifications(t *testing.T) {
 	waitFor(t, 3*time.Second, "ring pulse released", func() bool {
 		return d.router.Current(ringID).SelectedAppID != routing.SystemAppID
 	})
-	// A source-side AVRCP change reaches the master through the event path
-	// (no polling ticker) and the mirrored level is not pushed back.
+	// A source-side AVRCP change reaches the daemon through the event path (no
+	// polling ticker) and becomes the framework master: the phone's slider drives
+	// the speaker. The mirror then carries the same level back, so the source's
+	// display agrees with the master, and the peer's echo of that write is not
+	// adopted as a second change.
 	mem.SimulateVolume(64)
 	waitFor(t, 2*time.Second, "master volume synced from source", func() bool {
 		return math.Abs(d.user.Get().Values.MasterVolume-64.0/127) < 0.001
+	})
+	waitFor(t, 2*time.Second, "the source register mirrors the master", func() bool {
+		level, ok := mem.TransportVolumeWritten()
+		return ok && level == 64
 	})
 }
 

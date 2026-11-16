@@ -1,0 +1,32 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafcea0. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.phrase_commands;
+
+import "google/protobuf/any.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/phrase_commands;phrase_commandspb";
+
+message CommandPlayUrlsPreload {
+  repeated string urls = 1;
+}
+message CommandBgMusicPreload {
+  repeated string urls = 1;
+}
+message CommandPlayUrl {
+  string url = 1;
+}
+message CommandBgMusic {
+  string url = 1;
+}
+message CommandShowText {
+  string text = 1;
+}
+message CommandSendEvent {
+  string event = 1;
+  bytes callback_data = 2;
+}
+message CommandsBundle {
+  repeated google.protobuf.Any commands = 1;
+}

@@ -56,13 +56,23 @@ type UserSettings struct {
 	// DefaultAppByResource maps physical output resource IDs to app IDs.
 	DefaultAppByResource     map[string]string        `json:"defaultAppByResource,omitempty"`
 	DefaultAssistantAppID    string                   `json:"defaultAssistantAppId,omitempty"`
-	WakewordModelID          string                   `json:"wakewordModelId,omitempty"`
+	Wakewords                []WakewordBinding        `json:"wakewords,omitempty"`
 	WakewordEnabled          bool                     `json:"wakewordEnabled,omitempty"`
 	DisplayBrightness        map[string]float32       `json:"displayBrightness,omitempty"`
 	MasterVolume             float32                  `json:"masterVolume,omitempty"`
 	MicrophoneMuted          bool                     `json:"microphoneMuted,omitempty"`
 	TouchHoldMode            TouchHoldMode            `json:"touchHoldMode,omitempty"`
 	MutedMicrophoneIndicator MutedMicrophoneIndicator `json:"mutedMicrophoneIndicator,omitempty"`
+}
+
+// WakewordBinding is one installed wake word's configuration. ModelID is the
+// artifact id under <data-dir>/wakeword/models; AppID empty targets the selected
+// assistant. An absent Wakewords list on UserSettings is the legacy state in
+// which every installed word is live under WakewordEnabled.
+type WakewordBinding struct {
+	ModelID string `json:"modelId,omitempty"`
+	AppID   string `json:"appId,omitempty"`
+	Enabled bool   `json:"enabled,omitempty"`
 }
 
 // MutedMicrophoneIndicator controls only the visual muted indication.
@@ -236,4 +246,11 @@ type BluetoothMediaState struct {
 	PositionMS    uint64 `json:"positionMs,omitempty"`
 	Revision      uint64 `json:"revision,omitempty"`
 	Detail        string `json:"detail,omitempty"`
+	// DirectionKnown reports whether the framework resolved a playback
+	// direction for the displayed source.
+	DirectionKnown bool `json:"directionKnown,omitempty"`
+	// DirectionPlaying is that direction. Playing above is the source-published
+	// AVRCP status, which a MediaControl1-only source never publishes; prefer
+	// this field when DirectionKnown is true.
+	DirectionPlaying bool `json:"directionPlaying,omitempty"`
 }

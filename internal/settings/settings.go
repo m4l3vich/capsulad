@@ -34,11 +34,33 @@ const (
 	MutedUntilUnmute MutedIndicatorMode = 3
 )
 
+// WakewordBinding is one installed wake word's configuration: whether that word
+// may activate and which app it activates. ModelID is the artifact id (the file
+// name stem under <data-dir>/wakeword/models). AppID empty means the selected
+// assistant, which is also the legacy single-word behaviour.
+type WakewordBinding struct {
+	ModelID string `json:"model_id"`
+	AppID   string `json:"app_id"`
+	Enabled bool   `json:"enabled"`
+}
+
+// MaxWakewordBindings bounds the per-word configuration. Eight heads at
+// 0.2–0.4 ms each stay well inside the 80 ms hop; a longer list is an operator
+// mistake, not a supported detector.
+const MaxWakewordBindings = 8
+
 // UserSettings is the device-wide configuration rendered by the Web UI.
+// Wakewords is the whole per-word list; nil is the legacy state in which every
+// installed word is live under WakewordEnabled and bound to the selected
+// assistant, and an empty non-nil list is the explicit "no word is live" state.
+// The key is always written: `null` is the legacy state, `[]` is the explicit
+// empty list, so a document cannot lose the distinction by being re-encoded.
+// The retired wakeword_model_id key is not read: that selector never gated
+// anything, so restoring it from an old document would resurrect dead state.
 type UserSettings struct {
 	DefaultAppByResource  map[string]string  `json:"default_app_by_resource"`
 	DefaultAssistantAppID string             `json:"default_assistant_app_id"`
-	WakewordModelID       string             `json:"wakeword_model_id"`
+	Wakewords             []WakewordBinding  `json:"wakewords"`
 	WakewordEnabled       bool               `json:"wakeword_enabled"`
 	DisplayBrightness     map[string]float64 `json:"display_brightness"`
 	MasterVolume          float64            `json:"master_volume"`
@@ -189,6 +211,7 @@ func (s *UserStore) Get() UserSnapshot {
 
 func cloneUser(v UserSettings) UserSettings {
 	out := v
+	out.Wakewords = cloneBindings(v.Wakewords)
 	out.DefaultAppByResource = make(map[string]string, len(v.DefaultAppByResource))
 	for k, val := range v.DefaultAppByResource {
 		out.DefaultAppByResource[k] = val
@@ -220,8 +243,11 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 				next.DefaultAppByResource = cloneMap(patch.DefaultAppByResource)
 			case "default_assistant_app_id":
 				next.DefaultAssistantAppID = patch.DefaultAssistantAppID
-			case "wakeword_model_id":
-				next.WakewordModelID = patch.WakewordModelID
+			case "wakewords":
+				// Whole-list replacement, like default_app_by_resource: the
+				// browser sends every entry, so adding or removing a word is one
+				// patch instead of a per-entry merge with ambiguous ordering.
+				next.Wakewords = cloneBindings(patch.Wakewords)
 			case "wakeword_enabled":
 				next.WakewordEnabled = patch.WakewordEnabled
 			case "display_brightness":
@@ -290,6 +316,19 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 	return snap, nil
 }
 
+// cloneBindings deep-copies the per-word list. nil stays nil: it is the legacy
+// state, and an empty non-nil list is the explicit "no word is live" state.
+// The copy is allocated before filling so a zero-length slice stays non-nil;
+// append would return nil and silently turn "no word is live" back into legacy.
+func cloneBindings(in []WakewordBinding) []WakewordBinding {
+	if in == nil {
+		return nil
+	}
+	out := make([]WakewordBinding, len(in))
+	copy(out, in)
+	return out
+}
+
 func cloneMap[T any](in map[string]T) map[string]T {
 	out := make(map[string]T, len(in))
 	for k, v := range in {
@@ -334,6 +373,32 @@ func validateUser(v UserSettings) error {
 	}
 	if err := discovery.ValidateHostname(v.Hostname); err != nil {
 		return fmt.Errorf("hostname %q: %w", v.Hostname, err)
+	}
+	if err := validateWakewords(v.Wakewords); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateWakewords checks the shape of the per-word list. Model availability is
+// not checked here: an artifact can be installed, deleted or repaired between
+// writes, and Settings is a durable record, not the engine's registry.
+func validateWakewords(list []WakewordBinding) error {
+	if list == nil {
+		return nil
+	}
+	if len(list) > MaxWakewordBindings {
+		return fmt.Errorf("wakewords: at most %d words are supported, got %d", MaxWakewordBindings, len(list))
+	}
+	seen := make(map[string]int, len(list))
+	for i, entry := range list {
+		if entry.ModelID == "" {
+			return fmt.Errorf("wakewords[%d]: model_id is required", i)
+		}
+		if _, ok := seen[entry.ModelID]; ok {
+			return fmt.Errorf("wakewords[%d]: model %q is listed twice", i, entry.ModelID)
+		}
+		seen[entry.ModelID] = i
 	}
 	return nil
 }

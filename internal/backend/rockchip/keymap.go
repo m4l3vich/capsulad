@@ -21,9 +21,9 @@ const (
 	keyEnter      = 28  // KEY_ENTER
 	keyOK         = 0x160
 	keyBtn0       = 0x100
-	// The two stock DTBs use different codes and labels for the same unmarked
-	// centre key. It is not a voice key: on Capsula Mini the circle/play-pause
-	// key is the talk button and the centre key is neutral.
+	// The two stock DTBs use different codes and labels for the same key: the
+	// unmarked centre of the five-key layout, which is the neutral centre
+	// control. The circle at the bottom is the separate play/pause talk key.
 	keyVoiceCmd = 0x246 // KEY_VOICECOMMAND label on the boot_b DTB
 	keyHappy    = 0x2c0 // BTN_TRIGGER_HAPPY1 label on the boot_a DTB
 )
@@ -110,12 +110,14 @@ func keySemantic(nodeName, label string) string {
 		return "volume_up"
 	case has("volumedown", "voldown", "volume down"):
 		return "volume_down"
-	case has("playpause", "play-pause", "play/pause", "play"):
+	case has("playpause", "play-pause", "play/pause"):
+		// The circle at the bottom of the five-key layout: the play/pause talk
+		// key. One short press toggles media, a hold is hold-to-talk.
 		return "play_pause"
 	case has("center", "centre", "happy", "voice", "assistant"):
-		// The Mini's stock centre key is labelled "happy" in one DTB and
-		// "GPIO Volume Voice-assistant" in the other. It is neutral: the
-		// play/pause circle is the talk button.
+		// The unmarked centre key: BTN_TRIGGER_HAPPY1 (label "happy") in one DTB,
+		// KEY_VOICECOMMAND (label "GPIO Volume Voice-assistant") in the other. It
+		// is neutral — it dismisses and anchors panel gestures, never summons.
 		return "center"
 	case has("primary", "enter", "ok"):
 		return "primary"

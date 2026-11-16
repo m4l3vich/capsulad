@@ -94,7 +94,7 @@ NATIVE_LIBRARY := libcapsula.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsula.so.1
 endif
 
-.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant test test-go test-race test-sdk check-sdk-abi test-dumbassistant clean
+.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia clean
 
 all: release
 
@@ -137,14 +137,16 @@ capsulad-cli-host:
 # boot/S99btctl.sh. App artifacts are produced and packaged by the app build
 # targets (`make dumbassistant`, `make devapps`); assembly only copies the
 # ready-made .tar.gz files, so nothing is ever packaged for or on the device.
-# Native runtime symlinks are materialised because a bundle must be
-# self-contained on the target filesystem.
+# Native runtime symlinks are rebuilt from capsula-native.json during deploy;
+# the bundle carries only the regular runtime files so its tarball is extractable.
 deploy-bundle: capsulad capsulad-cli native
 	rm -rf $(DEPLOYDIR) $(DEPLOY_TARBALL)
 	mkdir -p $(DEPLOYDIR)/lib/include $(DEPLOYDIR)/apps $(DEPLOYDIR)/boot
 	cp $(BINDIR)/capsulad $(DEPLOYDIR)/capsulad
 	cp $(BINDIR)/capsulad-cli $(DEPLOYDIR)/capsulad-cli
-	cp -RL $(LIBDIR)/. $(DEPLOYDIR)/lib/
+	@for f in $(LIBDIR)/*; do \
+		if [ -f "$$f" ] && [ ! -L "$$f" ]; then cp "$$f" $(DEPLOYDIR)/lib/; fi; \
+	done
 	cp -R $(INCLUDEDIR)/capsula $(DEPLOYDIR)/lib/include/
 	cp deploy/rockchip-stock/S99btctl.sh $(DEPLOYDIR)/boot/S99btctl.sh
 	@set -e; \
@@ -263,11 +265,22 @@ dumbassistant: $(PACKAGER_TARGET)
 	@rm -f $(APPDIR)/org.capsula.dumbassistant-*.tar.gz
 	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsula.dumbassistant
 
+# Marusia is the second optional first-party app. It has no packaged assets:
+# the reply is a TTS URL fetched at turn time. The staged package directory and
+# its <id>-<version>.tar.gz land side by side in $(APPDIR).
+marusia: $(PACKAGER_TARGET)
+	rm -rf $(APPDIR)/org.capsula.marusia
+	mkdir -p $(APPDIR)/org.capsula.marusia
+	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsula.marusia/marusia ./cmd/marusia
+	cp apps/marusia/manifest.toml $(APPDIR)/org.capsula.marusia/manifest.toml
+	@rm -f $(APPDIR)/org.capsula.marusia-*.tar.gz
+	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsula.marusia
+
 # `make test` runs every module that ships in this repository: the root Go
 # module, both nested Go modules, the Rust binding and the native crate (the
 # frozen C ABI), plus a compile of the public C++ example. `make test-race`
 # adds the race detector to the root module.
-test: test-go test-sdk test-dumbassistant
+test: test-go test-sdk test-dumbassistant test-marusia
 
 test-go:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...
@@ -289,6 +302,12 @@ check-sdk-abi:
 
 test-dumbassistant:
 	cd apps/dumbassistant && $(CGO_GO_ENV) $(GO) test ./...
+
+# Tests run on the build host, so the host link mode applies: a darwin host
+# needs the external linker for LC_UUID. No test reaches the network; the
+# protocol tests use in-process TLS listeners.
+test-marusia:
+	cd apps/marusia && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 # Remove generated binaries and packages but leave build/demo (operator data)
 # untouched.

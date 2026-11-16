@@ -1,0 +1,14 @@
+// Reconstructed from the FileDescriptorProto embedded in the vendor binary
+// /private/tmp/speaker/voice-agent, .rodata offset 0xafc8f0. Do not hand-edit.
+syntax = "proto3";
+
+package vk.voice.grpc.front.v1.model.client;
+
+import "google/protobuf/wrappers.proto";
+
+option go_package = "pkg/protogen/vk/voice/grpc/front/v1/model/client;clientpb";
+
+message Coords {
+  google.protobuf.DoubleValue longitude = 1;
+  google.protobuf.DoubleValue latitude = 2;
+}

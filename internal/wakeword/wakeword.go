@@ -20,13 +20,37 @@ type Model struct {
 	DisplayName string
 	Language    string
 	EngineID    string
-	Available   bool
+	// Available reports that the artifact loads and its engine runs on this
+	// device. It is independent of enablement and binding: an unusable artifact
+	// stays listed so the operator can retrain it.
+	Available bool
+	// Enabled is the effective enablement of this word: the global detection
+	// switch, this word's own setting and its availability, already combined by
+	// the daemon. A detector activation for a model that is not enabled is
+	// refused, so a saved binding cannot keep a suspended word live.
+	Enabled bool
+	// AppID is the app this word is bound to. Empty means the currently selected
+	// assistant, which is also the legacy single-word behaviour.
+	AppID string
+	// Threshold is the calibrated decision threshold stored in the artifact.
+	Threshold float64
+	// Detail explains why a listed model cannot be used (unreadable artifact,
+	// unavailable capture preprocessing). Empty for a ready model.
+	Detail string
+	// Gate is the quality certificate recorded when this model was trained:
+	// tune/final-test recall and false activations, the threshold and the
+	// auxiliary off-policy result. It is nil for placeholder entries and for
+	// artifacts that predate the record. The report is immutable once set.
+	Gate *GateReport
 }
 
 type Activation struct {
-	ID        string
-	Origin    string
-	ModelID   string
+	ID      string
+	Origin  string
+	ModelID string
+	// AppID is the app the matching word is bound to. Empty means the selected
+	// assistant: manual and API activations always use that path.
+	AppID     string
 	TimeNS    uint64
 	UnixMS    int64
 	ExpiresNS uint64
@@ -207,9 +231,39 @@ func (m *Manager) DismissDetection(id string) bool {
 	return false
 }
 
+// detectionTarget resolves the live policy for one detector model: the global
+// switch may be off, the microphone may be muted, or the artifact may be
+// unavailable or not enabled. It returns the effective model so the caller can
+// use its binding and display name. The runner calls it before arbitration so a
+// word that cannot fire never shadows one that can.
+func (m *Manager) detectionTarget(modelID string) (Model, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.enabled || m.muted {
+		return Model{}, false
+	}
+	model, ok := m.modelLocked(modelID)
+	if !ok || !model.Available || !model.Enabled {
+		return model, false
+	}
+	return model, true
+}
+
+// modelLocked finds one advertised model. The caller holds m.mu; it never
+// decides enablement, because manual origins bypass parts of that policy.
+func (m *Manager) modelLocked(modelID string) (Model, bool) {
+	for _, model := range m.models {
+		if model.ID == modelID {
+			return model, true
+		}
+	}
+	return Model{}, false
+}
+
 // Trigger creates an activation for the selected model. It is the simulator's
 // manual detection path and the hook a real DSP engine calls. Manual origins are
-// not gated on detector availability; engine detections still are.
+// not gated on detector availability or per-word enablement; engine detections
+// are gated on both.
 func (m *Manager) Trigger(origin, modelID string) (Activation, bool) {
 	m.mu.Lock()
 	manual := ManualOrigin(origin)
@@ -224,25 +278,26 @@ func (m *Manager) Trigger(origin, modelID string) (Activation, bool) {
 	} else if modelID == "" && len(m.models) > 0 {
 		modelID = m.models[0].ID
 	}
-	displayName := ""
+	displayName, appID := "", ""
 	if !manual {
-		known := false
-		for _, model := range m.models {
-			if model.ID == modelID && model.Available {
-				known = true
-				displayName = model.DisplayName
-				break
-			}
-		}
-		if !known {
+		model, found := m.modelLocked(modelID)
+		switch {
+		case !found || !model.Available:
 			m.mu.Unlock()
 			m.logs.Warnf("wakeword", "", "detection for unavailable model %q ignored", modelID)
 			return Activation{}, false
+		// Per-word enablement is enforced here, not only in the runner: an
+		// explicit API trigger must not reactivate a word the operator disabled.
+		case !model.Enabled:
+			m.mu.Unlock()
+			m.logs.Warnf("wakeword", "", "detection for disabled model %q ignored", modelID)
+			return Activation{}, false
 		}
+		displayName, appID = model.DisplayName, model.AppID
 	}
 	now := m.clock.NowNS()
 	act := Activation{
-		ID: ids.New("act"), Origin: origin, ModelID: modelID,
+		ID: ids.New("act"), Origin: origin, ModelID: modelID, AppID: appID,
 		TimeNS: now, UnixMS: time.Now().UnixMilli(), ExpiresNS: now + uint64(5*time.Second),
 	}
 	// Only the real detector's origin is a detection. Manual buttons, the

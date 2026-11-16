@@ -213,11 +213,28 @@ message MediaPlayerView {
   uint64 revision = 12;
 }
 
+// MediaProviderKind says who publishes a media provider. It is additive: a
+// client that predates it reads MEDIA_PROVIDER_KIND_APP and keeps addressing
+// providers by app_id.
+enum MediaProviderKind {
+  // An installed or compiled-in application that declares the standard media
+  // contract in its manifest. app_id identifies it.
+  MEDIA_PROVIDER_KIND_APP = 0;
+  // The daemon's own provider for the connected Bluetooth source, published
+  // from the framework's BluetoothMediaService. It has no app identity: app_id
+  // is empty, and its commands are the framework's Bluetooth media commands.
+  MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA = 1;
+}
+
 message MediaProviderView {
+  // Empty for a framework provider. Only MEDIA_PROVIDER_KIND_APP providers have
+  // an application to address.
   string app_id = 1;
   string name = 2;
   repeated MediaPlayerView players = 3;
+  // Set when the provider was listed but its players could not be read.
   string error = 4;
+  MediaProviderKind kind = 5;
 }
 
 message RunView {
@@ -312,7 +329,10 @@ message MutedIndicatorView {
 message SettingsValues {
   map<string, string> default_app_by_resource = 1;
   string default_assistant_app_id = 2;
-  string wakeword_model_id = 3;
+  // Reserved: the single-word selector was dead state and never gated a
+  // detection. Per-word configuration lives in `wakewords`.
+  reserved 3;
+  reserved "wakeword_model_id";
   bool wakeword_enabled = 4;
   map<string, float> display_brightness = 5;
   float master_volume = 6;
@@ -327,6 +347,20 @@ message SettingsValues {
   string hostname = 14;
   bool bluetooth_incoming_connections = 15;
   bool bluetooth_discoverable = 16;
+  // Per-word configuration. An empty list means no word has a stored entry: the
+  // legacy state (every installed word lives under wakeword_enabled and targets
+  // the selected assistant) or an explicit "no word is live" list. A repeated
+  // field cannot carry that difference on the wire, and both behave the same
+  // here: no per-word intent is stored. A word's own switch is set through its
+  // entry, and an installed word is never live without one.
+  repeated WakewordBindingView wakewords = 17;
+}
+
+// One installed wake word's durable configuration.
+message WakewordBindingView {
+  string model_id = 1;
+  string app_id = 2; // empty = the selected assistant
+  bool enabled = 3;  // the word's own switch, before the global switch
 }
 
 message WakewordModelView {
@@ -335,6 +369,18 @@ message WakewordModelView {
   string language = 3;
   string engine_id = 4;
   bool available = 5;
+  // Additive: the installed model's gate certificate, when it was recorded.
+  repeated WakewordGateMetricsView metrics = 6;
+  // Additive: the gate threshold recorded at training time, 0 when unknown.
+  float threshold = 7;
+  // Additive: effective enablement (global switch && the word's setting &&
+  // availability). The daemon decorates the model list with it so the browser
+  // never has to join the registry and the settings itself.
+  bool enabled = 8;
+  // Additive: the app this word activates; empty means the selected assistant.
+  string app_id = 9;
+  // Additive: why a listed word cannot be used. Empty for a ready word.
+  string detail = 10;
 }
 
 message WakewordSampleView {
@@ -639,8 +685,12 @@ message Command {
     RevokeApiKey revoke_api_key = 14;
     WifiCommand wifi = 15;
     FalseDetection false_detection = 16;
+    DeleteWakeword delete_wakeword = 17;
   }
 }
+
+// DeleteWakeword removes one trained word from the device.
+message DeleteWakeword { string model_id = 1; }
 
 // FalseDetection dismisses one stored detection the user judged spurious. It
 // is purely presentational: no training data is affected.
@@ -686,12 +736,19 @@ enum TouchBehavior {
 
 message AssistantSettings {
   string default_assistant_app = 1;
-  string wakeword_model = 2;
+  // Reserved: the dead single-word selector. Detection is configured per word
+  // through `wakewords`.
+  reserved 2;
+  reserved "wakeword_model";
   bool wakeword_enabled = 3;
   TouchBehavior touch_hold = 4;
-  // Field names this patch owns: default_assistant_app, wakeword_model,
+  // Field names this patch owns: default_assistant_app, wakewords,
   // wakeword_enabled, touch_hold_mode. Empty means every field.
   repeated string update_fields = 5;
+  // Whole-list replacement of the per-word configuration. An empty list means
+  // the explicit "no word is live" state; omitting the field and the mask keeps
+  // the stored list.
+  repeated WakewordBindingView wakewords = 6;
 }
 
 enum MutedIndicatorMode {
@@ -780,9 +837,13 @@ enum MediaAction {
 }
 
 message MediaCommand {
+  // Required for an app provider (MEDIA_PROVIDER_KIND_APP) and ignored for a
+  // framework provider, which has no app identity. A client that predates
+  // MediaProviderKind leaves it at the default and addresses an app.
   string app_id = 1;
   string player_id = 2;
   MediaAction action = 3;
+  MediaProviderKind kind = 4;
 }
 
 message MediaResult {
@@ -832,6 +893,9 @@ message TrainWakeword {
   repeated string room_sample_ids = 5;
   repeated string speech_sample_ids = 6;
   repeated string false_sample_ids = 7;
+  // Empty creates a new word; an installed id retrains that word in place,
+  // replacing only its artifact.
+  string model_id = 8;
 }
 
 message TrainingHandle { string training_id = 1; }
@@ -991,10 +1055,40 @@ message WakewordClassifierView {
   uint32 hidden_width = 8;
 }
 
+// One evaluated split's measured policy result, copied from the trainer.
+message WakewordGateMetricsView {
+  // "tune", "final_test", "auxiliary_tune" or "auxiliary_final_test".
+  string split = 1;
+  uint32 word_recordings = 2;
+  uint32 detected = 3;
+  float recall = 4;
+  uint32 false_activations = 5;
+}
+
+message WakewordFailingTakeView {
+  string partition = 1;
+  uint32 index = 2;
+  string sample_id = 3;
+  string cause = 4;
+  string detail = 5;
+}
+
+message WakewordTrainingFailureView {
+  repeated string causes = 1;
+  repeated WakewordFailingTakeView takes = 2;
+  repeated WakewordGateMetricsView splits = 3;
+  float threshold = 4;
+  string detail = 5;
+}
+
 message Progress {
   string training_id = 1;
   string stage = 2;
   float fraction = 3;
   string log = 4;
   WakewordClassifierView classifier = 5;
+  // Additive: set on the terminal failure frame.
+  WakewordTrainingFailureView failure = 6;
+  // Additive: gate certificate on the installed frame.
+  repeated WakewordGateMetricsView metrics = 7;
 }

@@ -54,6 +54,7 @@ The launcher injects these variables. Read them; never hard-code a path.
 | `CAPSULA_LIBRARY` | Absolute path of the compatible `libcapsula`. `/capsula/lib/libcapsula.so.1` in namespace modes. |
 | `CAPSULA_LIBRARY_DIR` | Directory for the library's own dependency resolution. |
 | `CAPSULA_ASSETS` | The read-only asset store: `/assets` in namespace modes, the host path otherwise. |
+| `CAPSULA_DEVICE_SERIAL` | The SoC serial read by the daemon from the host (`/proc/cpuinfo` `Serial` on ARM), provided when known and omitted entirely when unknown. This is not a `device_id`. |
 | `CAPSULA_APP_DIR` | Script hosts only (quickjs, micropython): the package root, `/app` in namespace modes and the host path otherwise. Native apps do not receive this variable. |
 | `CAPSULA_INTERPRETER` | Script runtimes only: the engine executable that is running the script. |
 | `TZ` | The resolved device timezone, when one is configured. |
@@ -134,27 +135,43 @@ Invocation: func(ctx context.Context, inv *capsula.LaunchInvocation) {
 
 ## Assistant activations
 
-An assistant app is a normal app that claims the `voice_assistant` role and is selected as the
-device's assistant. Turns arrive as `AssistantActivation` on the app bus:
+An assistant app is a normal app that claims the `voice_assistant` role. It becomes the device's
+assistant when it is selected, or when a wake word is **bound** to it: the operator binds each
+installed word to one app, so different words can start different apps. Turns arrive as
+`AssistantActivation` on the app bus:
 
 | Field | Meaning |
 |---|---|
 | `activation_id` | Identity of this turn. One-shot; never reused. |
 | `origin` | `ACTIVATION_WAKEWORD`, `ACTIVATION_TOUCH` or `ACTIVATION_API`. |
-| `matched_model_id` | The wakeword model that matched, empty for touch/API. |
+| `matched_model_id` | The wakeword artifact id that matched. Empty for `ACTIVATION_TOUCH` — the wake-word manager's internal placeholder id is never delivered to an app — and for an API activation the daemon trigger did not name. Only `origin` is keyword evidence. |
 | `monotonic_time_ns` | When the framework decided to activate. |
 | `expires_monotonic_ns` | The window in which the turn and its pre-roll are valid. |
-| `hold_to_talk` | True for a touch activation while the device is in hold-to-talk mode. |
+| `hold_to_talk` | True for a manual (touch/key) activation while the device is in hold-to-talk mode. |
+| `app_id` | Always set: the app this activation was delivered to (the bound app, or the selected assistant when the word is unbound). |
 
 Behaviour an assistant must implement:
 
 - The framework does not launch the assistant per turn. It is already running and ready.
+- A word bound to an app is delivered to that app only. If that app is not ready the activation is
+  logged and dropped with an explicit reason; the framework never reroutes it to the selected
+  assistant or to another word. Unbound words and manual keys target the selected assistant; an API
+  activation of a bound word is delivered to that same app, exactly like a detection.
+- Use `origin` — never `matched_model_id` — as keyword evidence. Only `ACTIVATION_WAKEWORD` means
+  a word was heard; a manual (touch/key) activation is `ACTIVATION_TOUCH` with an **empty**
+  `matched_model_id`, so an app that treats any non-empty model id as a keyword claims to have heard
+  a word on a key press. `hold_to_talk` likewise belongs to the manual activation and is set from
+  the device's touch mode.
 - The app decides when to begin capture; beginning late loses the audio before it opened.
 - Passing `activation_id` when opening the microphone attaches the bounded pre-roll for that
   turn. Only the app that received the activation can use it, and only once.
 - With `hold_to_talk=true`, the release arrives as `AssistantInputReleased{activation_id}` on
   the same stream and ends input. In summon mode the turn may outlive the hold.
 - The app is responsible for ending the turn: close the microphone and conversation streams.
+- The circle/play-pause key dismisses the turn that currently owns a capture, playback or ring
+  resource among the selected assistant and the bound apps, through the app's declared `dismiss`
+  action. Detection pauses while any of those apps holds audio, so a bound word's reply cannot
+  re-trigger detection either.
 
 ## Settings delivery
 
@@ -234,12 +251,15 @@ restarts immediately. A run that reports ready and dies at once keeps accumulati
 
 ### Boot
 
-On daemon start, in order: compiled-in system apps, then every installed app with
-`start_on_boot = true` or `background = true`, then the configured default provider for each
-resource and the selected assistant. An app that is already running is not started twice.
+On daemon start, framework-owned compiled-in helpers and selected compiled-in providers start
+first, then every installed app with `start_on_boot = true` or `background = true`, then the
+configured default provider for each resource and the selected assistant. A built-in provider is
+started only when selected, regardless of its manifest's `start_on_boot` or `background` flags;
+framework-owned helpers are marked explicitly and start independently of selection. An app that is
+already running is not started twice.
 
-`background = true` therefore has two effects: the app is started at boot, and deselecting it
-does not stop it. `start_on_boot = true` gives the same protection from deselection.
+For installed apps, `background = true` therefore has two effects: the app is started at boot, and
+deselecting it does not stop it. `start_on_boot = true` gives the same protection from deselection.
 
 ## Graceful shutdown: what an app must do
 
@@ -287,7 +307,7 @@ administrator-only. Administrators read the same stream with
 - A provider is selected by app ID in device settings, never by a port or a stable output
   identifier.
 - Selecting a provider starts it if it is installed and not running.
-- Deselecting a provider stops it, unless it declares `start_on_boot` or `background`.
+- Deselecting a provider stops it, unless it declares `start_on_boot` or `background`; a compiled-in provider is stopped unless explicitly framework-owned.
 - Uninstalling a provider requires it to be stopped first, and removing the selection is the
   durable way to keep it off.
 - A presentation is owned by one run; when that run ends, its presentations and captures are

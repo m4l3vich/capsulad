@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,13 @@ const (
 	a2dpEndpointID = dbus.ObjectPath("/org/capsula/a2dp/sbc")
 )
 
-// SBC capability bits (A2DP section 4.3.2).
+// SBC capability bits (A2DP section 4.3.2). The media codec capabilities of an
+// SBC SEP are exactly four octets:
+//
+//	[0] sampling frequency (bits 7-4) | channel mode (bits 3-0)
+//	[1] block length (7-4) | subbands (3-2) | allocation method (1-0)
+//	[2] minimum bitpool
+//	[3] maximum bitpool
 const (
 	sbcFreq44k    = 0x20
 	sbcFreq48k    = 0x10
@@ -45,6 +52,33 @@ const (
 	sbcAllocLoud  = 0x01
 	sbcAllocSNR   = 0x02
 )
+
+// SBC parameters this sink advertises and negotiates.
+//
+// The maximum bitpool is 53, the A2DP-recommended ceiling for 44.1 kHz joint
+// stereo with 16 blocks and 8 subbands (about 328 kbit/s). Bitpool is a
+// frame-sized budget shared by all subbands, so raising it past 53 buys no
+// audible quality for SBC at this rate and only spends Bluetooth airtime that
+// the E0/E1 retransmission window cannot afford on the 1 GHz A35. 53 is the
+// highest value every SBC source is required to support, so no peer is excluded
+// by it.
+const (
+	sbcMinBitpool = 0x02
+	sbcMaxBitpool = 0x35
+)
+
+// sbcSinkCapabilities builds the four-octet SBC media codec capabilities of the
+// local sink. BlueZ copies this blob verbatim into the local SEP, so it must use
+// the spec layout: frequencies 44.1/48/32/16 kHz (44.1 kHz is negotiated first),
+// joint stereo and stereo, 16/12/8 blocks, 8/4 subbands, loudness and SNR.
+func sbcSinkCapabilities() []byte {
+	freq := byte(sbcFreq44k | sbcFreq48k | sbcFreq32k | sbcFreq16k)
+	mode := byte(sbcModeJoint | sbcModeStereo)
+	block := byte(sbcBlock16 | sbcBlock12 | sbcBlock8)
+	subbands := byte(sbcSub8 | sbcSub4)
+	alloc := byte(sbcAllocLoud | sbcAllocSNR)
+	return []byte{freq | mode, block | subbands | alloc, sbcMinBitpool, sbcMaxBitpool}
+}
 
 type sbcEndpoint struct {
 	b *BlueZ
@@ -253,14 +287,15 @@ func endpointRegistrationInvalidated(prevAdapter, adapter dbus.ObjectPath, prev,
 		prev.Powered != next.Powered
 }
 
-// a2dpEndpointProps is the local SBC sink capability advertised to BlueZ:
-// sampling frequency, channel mode, block length, subbands, allocation method,
-// minimum and maximum bitpool.
+// a2dpEndpointProps is the local SBC sink capability advertised to BlueZ. The
+// capabilities are the spec's four-octet SBC media codec capabilities; BlueZ
+// does not validate them, it copies them into the local SEP and a strict source
+// parses them according to A2DP section 4.3.2.
 func a2dpEndpointProps() map[string]dbus.Variant {
 	return map[string]dbus.Variant{
 		"UUID":         dbus.MakeVariant(a2dpSinkUUID),
 		"Codec":        dbus.MakeVariant(byte(0)),
-		"Capabilities": dbus.MakeVariant([]byte{0xF0, 0x0F, 0xF0, 0x0C, 0x03, 0x02, 0x35}),
+		"Capabilities": dbus.MakeVariant(sbcSinkCapabilities()),
 	}
 }
 
@@ -411,24 +446,227 @@ func bytesProp(props map[string]dbus.Variant, key string) []byte {
 	return nil
 }
 
+// AudioLink is the observed audio path of one connected source. A2DPState is
+// the state of a MediaTransport1 that carries the A2DP sink UUID and the SBC
+// codec; an empty state means the source has no A2DP transport at all, which is
+// what a Headset-only (or ACL-only) link looks like even though ConnectProfile
+// succeeded for its profiles.
+type AudioLink struct {
+	Address     string
+	Connected   bool
+	AudioSource bool
+	// A2DPState is "idle", "pending" or "active" for the source's A2DP sink
+	// transport, empty when the source has none.
+	A2DPState string
+	// AVRCP reports an observable AVRCP session (a MediaControl1 that is
+	// connected, or the source's MediaPlayer1).
+	AVRCP bool
+	// Advertised names the audio-relevant services the peer advertises, so a
+	// log names what the source could have brought up instead.
+	Advertised []string
+}
+
+// A2DP reports whether the source actually has an A2DP transport. It is the
+// assertion the daemon makes after a connection: "the audio profiles
+// connected" without a transport is not an audio link.
+func (l AudioLink) A2DP() bool { return l.A2DPState != "" }
+
+// ProfilesUp names the audio profiles this link observably has up.
+func (l AudioLink) ProfilesUp() []string {
+	up := make([]string, 0, 2)
+	if l.A2DP() {
+		up = append(up, "a2dp")
+	}
+	if l.AVRCP {
+		up = append(up, "avrcp")
+	}
+	if len(up) == 0 {
+		up = append(up, "acl-only")
+	}
+	return up
+}
+
+// Detail is the bounded status sentence for a connected source without an A2DP
+// transport, empty when the link is fine.
+func (l AudioLink) Detail() string {
+	if !l.Connected || !l.AudioSource || l.A2DP() {
+		return ""
+	}
+	return "audio link is not A2DP"
+}
+
+// String is the one-line diagnostic form for logs.
+func (l AudioLink) String() string {
+	state := l.A2DPState
+	if state == "" {
+		state = "none"
+	}
+	peer := strings.Join(l.Advertised, ",")
+	if peer == "" {
+		peer = "none"
+	}
+	return fmt.Sprintf("a2dp=%s profiles=%s peer=%s", state, strings.Join(l.ProfilesUp(), ","), peer)
+}
+
+// audioServiceNames maps the remote audio services a source advertises to the
+// names used in diagnostics. A peer that advertises Headset but no Audio Source
+// can only offer a narrowband link to us in the first place.
+var audioServiceNames = map[string]string{
+	"0000110a-0000-1000-8000-00805f9b34fb": "a2dp-source",
+	"0000110c-0000-1000-8000-00805f9b34fb": "avrcp-target",
+	"0000110e-0000-1000-8000-00805f9b34fb": "avrcp-controller",
+	"00001108-0000-1000-8000-00805f9b34fb": "headset",
+	"0000111e-0000-1000-8000-00805f9b34fb": "handsfree",
+	"0000111f-0000-1000-8000-00805f9b34fb": "handsfree-gateway",
+}
+
+func advertisedAudioServices(props map[string]dbus.Variant) []string {
+	value, ok := props["UUIDs"]
+	if !ok {
+		return nil
+	}
+	uuids, _ := value.Value().([]string)
+	out := make([]string, 0, len(uuids))
+	for _, uuid := range uuids {
+		if name, ok := audioServiceNames[strings.ToLower(uuid)]; ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sortedTransportPaths returns every MediaTransport1 object path in
+// deterministic order so a link inspection cannot depend on map iteration.
+func sortedTransportPaths(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant) []dbus.ObjectPath {
+	paths := make([]dbus.ObjectPath, 0, len(objs))
+	for path, ifaces := range objs {
+		if _, ok := ifaces["org.bluez.MediaTransport1"]; ok {
+			paths = append(paths, path)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+	return paths
+}
+
+// a2dpTransportFor finds the A2DP sink transport of exactly one device: the
+// A2DP sink UUID plus the SBC codec, exactly what our endpoint registers. With
+// no device there is no answer - a background phone's transport must never be
+// mistaken for the displayed source's.
+func a2dpTransportFor(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, device dbus.ObjectPath) (dbus.ObjectPath, map[string]dbus.Variant) {
+	if device == "" {
+		return "", nil
+	}
+	var idlePath dbus.ObjectPath
+	var idleProps map[string]dbus.Variant
+	for _, path := range sortedTransportPaths(objs) {
+		props := objs[path]["org.bluez.MediaTransport1"]
+		if strProp(props, "UUID") != a2dpSinkUUID {
+			continue
+		}
+		if codec, ok := props["Codec"]; ok && byteValue(codec) != 0 {
+			continue
+		}
+		if dev := objectPathProp(props, "Device"); dev != "" && dev != device {
+			continue
+		}
+		switch strProp(props, "State") {
+		case "active", "pending":
+			return path, props
+		default:
+			if idlePath == "" {
+				idlePath, idleProps = path, props
+			}
+		}
+	}
+	return idlePath, idleProps
+}
+
+// audioLinkFrom inspects the object tree for one source. It is a pure read so a
+// unit test can pin the assertion without a bus.
+func audioLinkFrom(objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant, address string) AudioLink {
+	link := AudioLink{Address: address}
+	dev := findDevicePath(objs, address)
+	if dev == "" {
+		return link
+	}
+	props := objs[dev]["org.bluez.Device1"]
+	link.Connected = boolProp(props, "Connected")
+	link.AudioSource = audioSourceDevice(props)
+	link.Advertised = advertisedAudioServices(props)
+	if control, ok := objs[dev]["org.bluez.MediaControl1"]; ok && boolProp(control, "Connected") {
+		link.AVRCP = true
+	}
+	if path, _ := a2dpTransportFor(objs, dev); path != "" {
+		link.A2DPState = strProp(objs[path]["org.bluez.MediaTransport1"], "State")
+		if link.A2DPState == "" {
+			link.A2DPState = "idle"
+		}
+	}
+	if path := findPlayerPath(objs, address); path != "" {
+		link.AVRCP = true
+	}
+	return link
+}
+
+// Session reports the audio link BlueZ currently has for one connected source.
+// It answers "is this session actually A2DP", not "did ConnectProfile reply".
+func (b *BlueZ) Session(ctx context.Context, address string) (AudioLink, error) {
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return AudioLink{Address: address}, err
+	}
+	if findDevicePath(objs, address) == "" {
+		return AudioLink{Address: address}, nil
+	}
+	return audioLinkFrom(objs, address), nil
+}
+
+// a2dpSourceProfile is the peer's Audio Source profile: the profile a speaker
+// asks a phone to bring up when the two connected over AVRCP only.
+const a2dpSourceProfile = "0000110a-0000-1000-8000-00805f9b34fb"
+
+// RequestA2DPProfile asks one connected source to bring its A2DP source profile
+// up. It is a request, not a result: BlueZ answers the profile request before
+// AVDTP finishes, so the caller still judges the link by Session.
+//
+// It never disconnects the source. A peer that will not negotiate A2DP keeps its
+// link and the daemon reports the missing transport: dropping a user's phone off
+// the adapter to force a renegotiation stops their audio mid-sentence and can
+// leave the link on an even worse profile.
+func (b *BlueZ) RequestA2DPProfile(ctx context.Context, address string) error {
+	objs, err := b.objects(ctx)
+	if err != nil {
+		return err
+	}
+	path := findDevicePath(objs, address)
+	if path == "" {
+		return fmt.Errorf("%w: unknown device %s", ErrNoSource, address)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	err = b.conn.Object(bluezService, path).CallWithContext(callCtx,
+		"org.bluez.Device1.ConnectProfile", 0, a2dpSourceProfile).Err
+	if err != nil {
+		return fmt.Errorf("request the A2DP source profile of %s: %w", address, err)
+	}
+	return nil
+}
+
+// selectSBCConfig chooses a concrete SBC configuration from the remote SEP's
+// four-octet media codec capabilities. BlueZ 5.65 passes exactly what the peer
+// advertised (a2dp.c: setup->rsep -> codec->data) and uses the returned blob
+// verbatim as the stream configuration, so the answer must be a configuration
+// the peer offered: every selected bit comes from its own masks.
 func selectSBCConfig(caps []byte) []byte {
 	if len(caps) < 4 {
-		return []byte{0x21, 0x15, 0x02, 0x35}
+		// No usable capabilities: a source is only here if it offered SBC, so
+		// answer with the sink's own preferred configuration.
+		return []byte{sbcFreq44k | sbcModeJoint, sbcBlock16 | sbcSub8 | sbcAllocLoud, sbcMinBitpool, sbcMaxBitpool}
 	}
-	var freqMask, modeMask, blockMask, subMask, allocMask byte
-	var minBP, maxBP byte
-	if len(caps) >= 7 {
-		// Local endpoint capability form: one bitmask per field.
-		freqMask, modeMask = caps[0], caps[1]
-		blockMask, subMask, allocMask = caps[2], caps[3], caps[4]
-		minBP, maxBP = caps[5], caps[6]
-	} else {
-		// BlueZ passes the remote SEP's four-byte SBC capabilities:
-		// frequency+channel mode, block+subbands+allocation, min/max bitpool.
-		freqMask, modeMask = caps[0], caps[0]
-		blockMask, subMask, allocMask = caps[1], caps[1], caps[1]
-		minBP, maxBP = caps[2], caps[3]
-	}
+	freqMask, modeMask := caps[0], caps[0]
+	blockMask, subMask, allocMask := caps[1], caps[1], caps[1]
+	minBP, maxBP := caps[2], caps[3]
 	pick := func(mask byte, prefs ...byte) byte {
 		for _, p := range prefs {
 			if mask&p != 0 {
@@ -463,8 +701,8 @@ func selectSBCConfig(caps []byte) []byte {
 	if maxBP < minBP {
 		maxBP = minBP
 	}
-	if maxBP > 53 {
-		maxBP = 53
+	if maxBP > sbcMaxBitpool {
+		maxBP = sbcMaxBitpool
 	}
 	if maxBP < minBP {
 		maxBP = minBP

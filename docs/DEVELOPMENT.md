@@ -29,7 +29,7 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make native` | `libcapsula`, header, symlinks and `capsula-native.json` |
 | `make web` | `npm ci && npm run build` into `internal/webui/dist` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
-| `make devapps` / `make dumbassistant` | development apps and the optional assistant: package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
+| `make devapps` / `make dumbassistant` / `make marusia` | development apps and the two optional assistants: package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
 | `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps` |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
@@ -110,8 +110,9 @@ contract for the artifact, manifest and install flow is
 Packaging runs on the build host, never on the device. Each app build target compiles its tree
 and then packages it with `capsulad-cli app package DIR`, which writes `<id>-<version>.tar.gz`
 beside the package directory: `make dumbassistant` leaves
-`build/apps/org.capsula.dumbassistant-<version>.tar.gz`, and `make devapps` leaves one archive
-per development app under `build/devapps`. `apps/devtools/build.sh` takes `PACKAGE=0` to stage
+`build/apps/org.capsula.dumbassistant-<version>.tar.gz`, `make marusia` leaves
+`build/apps/org.capsula.marusia-<version>.tar.gz`, and `make devapps` leaves one archive per
+development app under `build/devapps`. `apps/devtools/build.sh` takes `PACKAGE=0` to stage
 the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli` to choose the packager.
 A cross build packages with the host-executable `build/bin/capsulad-cli-host`
 (`make capsulad-cli-host`), because the cross-target CLI cannot run on the build host.
@@ -158,10 +159,18 @@ apps/*.tar.gz               application packages
 boot/S99btctl.sh            boot hook
 ```
 
-`lib/` must contain the SONAME named by `capsula-native.json` (`libcapsula.so.1` on the
-device), not only `libcapsula.so.1.0.0`: the deploy preflight resolves the declared library
-before installing. `make deploy-bundle` materialises the symlinks with `cp -RL`; a bundle
-assembled by hand must do the same.
+`lib/` carries regular files only: the real runtime library (`libcapsula.so.1.0.0` on the
+device), `capsula-native.json` and any host extras. `make deploy-bundle` copies regular files
+and never dereferences the build tree's `libcapsula.so -> libcapsula.so.1 -> libcapsula.so.1.0.0`
+links, so one library is 4 MiB in the bundle instead of 12 MiB. The deployer rebuilds the ABI
+layout after installing the files: it reads `library` from the installed `capsula-native.json`,
+links that SONAME to the matching `libcapsula.so.1.0.0`, and links `libcapsula.so` to the
+SONAME, relative to the lib directory, refusing an absolute or escaping target and leaving a
+conflicting regular file alone with a warning. A hand-assembled bundle follows the same rule —
+ship the real file, not the links — and the preflight resolves the declared library from the
+bundle's regular files or from the installed layout. A runtime file whose installed copy is
+byte-identical is skipped rather than rewritten, so redeploying an unchanged runtime needs no
+free space on the data partition and cannot fail there.
 
 `capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run]
 [-staging DIR] [-timeout DURATION]` accepts that directory or the tarball. `capsulad-cli`
@@ -255,7 +264,27 @@ adb shell /data/capsdemo/capsulad -health -socket /data/capsdemo/run/hal.sock
 ```
 
 The bundle may be pushed as a directory or as the `.tar.gz`; a directory avoids a second
-unpacked copy in the tmpfs. Staging defaults to `/tmp/capsulad-deploy-*`; the bundle itself
+unpacked copy in the tmpfs. **Run the deployment detached when the daemon owns the network
+interface.** On the Rockchip stock board the daemon owns the Wi-Fi station, so `deploy` stopping it
+drops the link, which kills an attached `adb shell` mid-deployment — observed three times in one
+session, once after the old daemon had been stopped and the binaries swapped but before the restart,
+leaving the board with no running daemon. `nohup ... &` is not enough (the shell's process group is
+killed); use a script and the init helper:
+
+```sh
+# /tmp/deploy.sh
+/tmp/capsula-bundle/capsulad-cli -data-dir /data/capsdemo deploy /tmp/capsula-bundle \
+  -staging /run -timeout 180s > /tmp/deploy.log 2>&1
+echo "exit=$?" >> /tmp/deploy.log
+```
+```sh
+adb shell chmod +x /tmp/deploy.sh
+adb shell start-stop-daemon -S -b -x /tmp/deploy.sh
+# reconnect when the link returns, then read /tmp/deploy.log and the health gate
+```
+If a deployment is cut off between `stopped the daemon` and `restarted`, start the stack with
+`/etc/init.d/S99btctl.sh start` (never by running the daemon by hand) and check the installed
+binary's md5 before retrying. Staging defaults to `/tmp/capsulad-deploy-*`; the bundle itself
 can live on `/run` when vendor files consume `/tmp`. Run the CLI from the pushed bundle so
 the installed `/data/capsdemo/capsulad-cli` is not the executable being replaced. Keep a host
 rollback copy of `capsulad` and `capsulad-cli` (`adb pull`) until the health gate and the
@@ -329,8 +358,9 @@ disables the UI), `-native-lib-dir`, `-sandbox auto|namespaces|mountns|uid|none`
 ## Tests
 
 ```sh
-make test          # root Go module, sdk/go, Rust binding, native crate, C++ example, assistant
+make test          # root Go module, sdk/go, Rust binding, native crate, C++ example, both assistants
 make test-race     # root Go module with -race
+make test-marusia  # the apps/marusia module's tests from the repository root
 ```
 
 `make test` does not run the interpreters or device backends. Focused commands:
@@ -340,6 +370,8 @@ go test -ldflags '-linkmode=external' ./internal/routing ./internal/presentation
 go test -race -ldflags '-linkmode=external' ./internal/daemon ./internal/audio
 go test -run 'TestDumbAssistant|TestSupervisor' ./internal/daemon
 (cd sdk/go && CGO_ENABLED=1 go test ./...)
+(cd apps/dumbassistant && CGO_ENABLED=1 go test ./...)
+(cd apps/marusia && go test ./...)        # no test reaches the network; TLS listeners are loopback
 cargo test --manifest-path sdk/native/Cargo.toml
 sdk/go/regenerate-abi.sh --check
 ```

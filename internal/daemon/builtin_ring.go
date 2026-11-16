@@ -65,8 +65,13 @@ type builtinRing struct {
 	runGen uint64
 	// frameMu serializes baseline frame compute+send and applied bookkeeping.
 	frameMu sync.Mutex
-	// failOnce bounds one stream-failure recovery per run generation.
-	failOnce sync.Once
+	// failureMu serializes recovery with the next generation start, so a
+	// recovery already in flight cannot fail a run started under the reused
+	// stable run ID.
+	failureMu sync.Mutex
+	// failedGen records the generation whose single recovery has been claimed.
+	// It is protected by mu and never reset; runGen is monotonically increasing.
+	failedGen uint64
 	// pixelCount is derived from the advertised ring capability at start.
 	pixelCount  uint32
 	watchers    map[int]chan *ringv1.RingState
@@ -104,11 +109,13 @@ func defaultRingPalette() (string, ringpalette.Gradient) {
 }
 
 func (r *builtinRing) start() {
+	r.failureMu.Lock()
 	r.settingsMu.Lock()
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
 		r.settingsMu.Unlock()
+		r.failureMu.Unlock()
 		return
 	}
 	r.running = true
@@ -116,7 +123,6 @@ func (r *builtinRing) start() {
 	gen := r.runGen
 	r.settingsLoaded = false
 	r.settingsRevision = 0
-	r.failOnce = sync.Once{}
 	r.runID = r.d.SystemAppRunID(ringAppID)
 	ctx, cancel := context.WithCancel(r.d.ctx)
 	r.cancel = cancel
@@ -125,6 +131,7 @@ func (r *builtinRing) start() {
 	r.client = client
 	r.mu.Unlock()
 	r.settingsMu.Unlock()
+	r.failureMu.Unlock()
 	client.SetFailureHandler(func(err error) { r.failRun(gen, err) })
 
 	// Opening the stream talks to the daemon's own gRPC endpoint. Doing that
@@ -159,24 +166,20 @@ func (r *builtinRing) start() {
 }
 
 // failRun recovers an internal stream failure by failing this run; the daemon
-// schedules a bounded restart. Stale generations and normal stops are ignored.
+// schedules a bounded restart. Recovery is claimed at most once per run
+// generation: a callback from an earlier start or a normal stop is ignored.
 func (r *builtinRing) failRun(gen uint64, err error) {
-	r.settingsMu.Lock()
-	current := r.runGen
-	r.settingsMu.Unlock()
-	if current != gen {
-		return
-	}
+	r.failureMu.Lock()
+	defer r.failureMu.Unlock()
 	r.mu.Lock()
-	running := r.running
-	r.mu.Unlock()
-	if !running {
+	if r.runGen != gen || !r.running || r.failedGen == gen {
+		r.mu.Unlock()
 		return
 	}
-	r.failOnce.Do(func() {
-		r.d.logs.Errorf(ringAppID, "", "internal stream failed: %v; recovering run", err)
-		r.d.recoverSystemApp(ringAppID)
-	})
+	r.failedGen = gen
+	r.mu.Unlock()
+	r.d.logs.Errorf(ringAppID, "", "internal stream failed: %v; recovering run", err)
+	r.d.recoverSystemApp(ringAppID)
 }
 
 func (r *builtinRing) stop() {

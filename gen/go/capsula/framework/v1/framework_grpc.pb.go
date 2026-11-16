@@ -1178,12 +1178,13 @@ var InputService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	AssistantService_ListWakewordModels_FullMethodName      = "/capsula.framework.v1.AssistantService/ListWakewordModels"
-	AssistantService_BeginConversation_FullMethodName       = "/capsula.framework.v1.AssistantService/BeginConversation"
-	AssistantService_RecordWakewordSample_FullMethodName    = "/capsula.framework.v1.AssistantService/RecordWakewordSample"
-	AssistantService_ListWakewordSamples_FullMethodName     = "/capsula.framework.v1.AssistantService/ListWakewordSamples"
-	AssistantService_DeleteWakewordSample_FullMethodName    = "/capsula.framework.v1.AssistantService/DeleteWakewordSample"
-	AssistantService_TrainWakewordClassifier_FullMethodName = "/capsula.framework.v1.AssistantService/TrainWakewordClassifier"
+	AssistantService_ListWakewordModels_FullMethodName       = "/capsula.framework.v1.AssistantService/ListWakewordModels"
+	AssistantService_BeginConversation_FullMethodName        = "/capsula.framework.v1.AssistantService/BeginConversation"
+	AssistantService_RecordWakewordSample_FullMethodName     = "/capsula.framework.v1.AssistantService/RecordWakewordSample"
+	AssistantService_ListWakewordSamples_FullMethodName      = "/capsula.framework.v1.AssistantService/ListWakewordSamples"
+	AssistantService_DeleteWakewordSample_FullMethodName     = "/capsula.framework.v1.AssistantService/DeleteWakewordSample"
+	AssistantService_TrainWakewordClassifier_FullMethodName  = "/capsula.framework.v1.AssistantService/TrainWakewordClassifier"
+	AssistantService_DeleteWakewordClassifier_FullMethodName = "/capsula.framework.v1.AssistantService/DeleteWakewordClassifier"
 )
 
 // AssistantServiceClient is the client API for AssistantService service.
@@ -1204,6 +1205,10 @@ type AssistantServiceClient interface {
 	// A failed gate or a cancelled request ends the stream with an error and
 	// leaves the installed model untouched.
 	TrainWakewordClassifier(ctx context.Context, in *TrainWakewordClassifierRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TrainWakewordEvent], error)
+	// Remove one trained word: its artifact and, when the per-word list is
+	// present, its entry. Recordings are shared training data and are never
+	// deleted. Refused while a training run is active.
+	DeleteWakewordClassifier(ctx context.Context, in *DeleteWakewordClassifierRequest, opts ...grpc.CallOption) (*DeleteWakewordClassifierResponse, error)
 }
 
 type assistantServiceClient struct {
@@ -1292,6 +1297,16 @@ func (c *assistantServiceClient) TrainWakewordClassifier(ctx context.Context, in
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AssistantService_TrainWakewordClassifierClient = grpc.ServerStreamingClient[TrainWakewordEvent]
 
+func (c *assistantServiceClient) DeleteWakewordClassifier(ctx context.Context, in *DeleteWakewordClassifierRequest, opts ...grpc.CallOption) (*DeleteWakewordClassifierResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteWakewordClassifierResponse)
+	err := c.cc.Invoke(ctx, AssistantService_DeleteWakewordClassifier_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AssistantServiceServer is the server API for AssistantService service.
 // All implementations must embed UnimplementedAssistantServiceServer
 // for forward compatibility.
@@ -1310,6 +1325,10 @@ type AssistantServiceServer interface {
 	// A failed gate or a cancelled request ends the stream with an error and
 	// leaves the installed model untouched.
 	TrainWakewordClassifier(*TrainWakewordClassifierRequest, grpc.ServerStreamingServer[TrainWakewordEvent]) error
+	// Remove one trained word: its artifact and, when the per-word list is
+	// present, its entry. Recordings are shared training data and are never
+	// deleted. Refused while a training run is active.
+	DeleteWakewordClassifier(context.Context, *DeleteWakewordClassifierRequest) (*DeleteWakewordClassifierResponse, error)
 	mustEmbedUnimplementedAssistantServiceServer()
 }
 
@@ -1337,6 +1356,9 @@ func (UnimplementedAssistantServiceServer) DeleteWakewordSample(context.Context,
 }
 func (UnimplementedAssistantServiceServer) TrainWakewordClassifier(*TrainWakewordClassifierRequest, grpc.ServerStreamingServer[TrainWakewordEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method TrainWakewordClassifier not implemented")
+}
+func (UnimplementedAssistantServiceServer) DeleteWakewordClassifier(context.Context, *DeleteWakewordClassifierRequest) (*DeleteWakewordClassifierResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteWakewordClassifier not implemented")
 }
 func (UnimplementedAssistantServiceServer) mustEmbedUnimplementedAssistantServiceServer() {}
 func (UnimplementedAssistantServiceServer) testEmbeddedByValue()                          {}
@@ -1453,6 +1475,24 @@ func _AssistantService_TrainWakewordClassifier_Handler(srv interface{}, stream g
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AssistantService_TrainWakewordClassifierServer = grpc.ServerStreamingServer[TrainWakewordEvent]
 
+func _AssistantService_DeleteWakewordClassifier_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteWakewordClassifierRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AssistantServiceServer).DeleteWakewordClassifier(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AssistantService_DeleteWakewordClassifier_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AssistantServiceServer).DeleteWakewordClassifier(ctx, req.(*DeleteWakewordClassifierRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AssistantService_ServiceDesc is the grpc.ServiceDesc for AssistantService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1475,6 +1515,10 @@ var AssistantService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteWakewordSample",
 			Handler:    _AssistantService_DeleteWakewordSample_Handler,
+		},
+		{
+			MethodName: "DeleteWakewordClassifier",
+			Handler:    _AssistantService_DeleteWakewordClassifier_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

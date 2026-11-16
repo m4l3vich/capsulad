@@ -256,25 +256,43 @@ func (d *Daemon) assistantAppID() string {
 
 func (d *Daemon) deliverActivation(act wakeword.Activation) {
 	// A real detector activation advanced the bounded detection history even
-	// when there is no ready assistant to receive it; refresh the browser view.
+	// when there is no ready app to receive it; refresh the browser view.
 	if act.Origin == "wakeword" {
 		d.publishUI(uichanges.Wakeword)
 	}
-	appID := d.assistantAppID()
+	// A word bound to an app is delivered to that app only. Falling back to the
+	// selected assistant here would turn a misconfigured binding into a
+	// second-best reroute the user did not ask for, so an unready target is an
+	// explicit drop with its own reason.
+	appID, reason := wakewordDeliveryTarget(act.AppID, d.assistantAppID(), func(appID string) bool {
+		_, ready := d.bus.ReadyApp(appID)
+		return ready
+	})
 	if appID == "" {
-		d.logs.Warnf("wakeword", "", "activation=%s dropped: no selected assistant", act.ID)
-		return
-	}
-	if _, ok := d.bus.ReadyApp(appID); !ok {
-		d.logs.Warnf("wakeword", "", "activation=%s dropped: selected assistant %s is not ready", act.ID, appID)
+		switch reason {
+		case dropNoSelection:
+			d.logs.Warnf("wakeword", "", "activation=%s dropped: no selected assistant", act.ID)
+		case dropBoundUnready:
+			d.logs.Warnf("wakeword", act.AppID, "activation=%s dropped: word %s is bound to %s, which is not ready (not rerouted)", act.ID, act.ModelID, act.AppID)
+		default:
+			d.logs.Warnf("wakeword", "", "activation=%s dropped: selected assistant is not ready", act.ID)
+		}
 		return
 	}
 	msg := &frameworkv1.AssistantActivation{
 		ActivationId: act.ID, Origin: frameworkv1.ActivationOrigin_ACTIVATION_WAKEWORD,
 		MatchedModelId: act.ModelID, MonotonicTimeNs: act.TimeNS, ExpiresMonotonicNs: act.ExpiresNS,
+		AppId: appID,
 	}
 	if wakeword.ManualOrigin(act.Origin) {
 		msg.Origin = frameworkv1.ActivationOrigin_ACTIVATION_TOUCH
+		// A manual trigger uses a placeholder model id internally (the
+		// wake-word manager needs a non-empty identity for its own bookkeeping).
+		// It must not reach an app as a matched model: an app that treats a
+		// model id as wake-word evidence would then claim it heard a keyword on
+		// a key press, which is what made a touch turn fail the service's
+		// keyword check.
+		msg.MatchedModelId = ""
 		msg.HoldToTalk = d.user.Get().Values.TouchHoldMode == settings.HoldToTalk
 	}
 	// Record the grant before delivery so an app that opens the microphone
@@ -293,6 +311,33 @@ func (d *Daemon) deliverActivation(act wakeword.Activation) {
 		d.touchActMu.Unlock()
 	}
 	d.logs.Infof("wakeword", appID, "activation=%s delivered", act.ID)
+}
+
+// Reasons an activation reaches no app. A bound word never falls back to the
+// selected assistant: that would reroute a turn the user bound to one app.
+const (
+	dropNoSelection     = "no-selected-assistant"
+	dropBoundUnready    = "bound-app-not-ready"
+	dropSelectedUnready = "selected-assistant-not-ready"
+)
+
+// wakewordDeliveryTarget resolves the app an activation must reach. A bound app
+// wins; an empty binding means the selected assistant. It never substitutes one
+// app for another, so the caller can report an explicit drop reason.
+func wakewordDeliveryTarget(boundApp, selectedApp string, ready func(string) bool) (string, string) {
+	appID := boundApp
+	reason := dropBoundUnready
+	if appID == "" {
+		appID = selectedApp
+		reason = dropSelectedUnready
+	}
+	if appID == "" {
+		return "", dropNoSelection
+	}
+	if !ready(appID) {
+		return "", reason
+	}
+	return appID, ""
 }
 
 type activationGrant struct {
