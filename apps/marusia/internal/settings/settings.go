@@ -30,6 +30,9 @@ const (
 	KeyClientVersion  = "client_version"
 	KeyKeyword        = "keyword"
 	KeyHWID           = "hw_id"
+	KeyKeywordMode    = "keyword_mode"
+	KeyCapabilities   = "capabilities_json"
+	KeyClientData     = "client_data_json"
 )
 
 // Defaults mirror manifest.toml.
@@ -39,10 +42,29 @@ const (
 	DefaultClientVersion = "44.91"
 	DefaultKeyword       = "marusya"
 	DefaultHWID          = "9F25725B"
+	// DefaultCapabilitiesJSON is the capability payload of the Capsula Mini
+	// firmware this app targets. Its only recovered evidence is the hex token
+	// the shipped agent sent on /connect; see vkclient.DefaultCapabilitiesHex.
+	DefaultCapabilitiesJSON = `{"capabilities_hex":"` + vkclient.DefaultCapabilitiesHex + `"}`
+	// DefaultKeywordMode is no_kw: this app starts capturing after the wake
+	// word, so the phrase it uploads never begins with the keyword and
+	// kw_params can only end in "keyword not confirmed".
+	DefaultKeywordMode = KeywordModeNoKeyword
 	// DefaultSessionFile is where the shipped vendor agent left its own
 	// session and device identity on the device. The path is a manifest
 	// setting so an operator can point at a different file or disable it.
 	DefaultSessionFile = "/data/voice-agent/session.json"
+)
+
+// Keyword policies for keyword_options.
+const (
+	// KeywordModeNoKeyword sends no_kw: the service must transcribe the
+	// command without waiting for a keyword.
+	KeywordModeNoKeyword = "no_kw"
+	// KeywordModeParams sends kw_params. It is only correct when the uploaded
+	// phrase begins with the keyword (the probe sends a whole utterance
+	// including the wake word; the app's own capture does not).
+	KeywordModeParams = "kw_params"
 )
 
 // Serial sources name where Config.Serial came from. They label one log line
@@ -68,6 +90,9 @@ type Values struct {
 	ClientVersion  string
 	Keyword        string
 	HWID           string
+	KeywordMode    string
+	Capabilities   string
+	ClientData     string
 }
 
 // Default returns the manifest defaults for a fresh app instance.
@@ -78,6 +103,8 @@ func Default() Values {
 		ClientVersion: DefaultClientVersion,
 		Keyword:       DefaultKeyword,
 		HWID:          DefaultHWID,
+		KeywordMode:   DefaultKeywordMode,
+		Capabilities:  DefaultCapabilitiesJSON,
 		SessionFile:   DefaultSessionFile,
 	}
 }
@@ -122,6 +149,12 @@ func Read(changed *capsulad.SettingsChanged) (Values, error) {
 			values.Keyword = text
 		case KeyHWID:
 			values.HWID = text
+		case KeyKeywordMode:
+			values.KeywordMode = text
+		case KeyCapabilities:
+			values.Capabilities = text
+		case KeyClientData:
+			values.ClientData = text
 		}
 	}
 	return values, nil
@@ -221,6 +254,14 @@ type Config struct {
 	ClientVersion string
 	Keyword       string
 	HWID          string
+	// KeywordMode is KeywordModeNoKeyword or KeywordModeParams.
+	KeywordMode string
+	// CapabilitiesJSON is the validated payload of
+	// RequestClientOptions.capabilities.json.
+	CapabilitiesJSON []byte
+	// ClientDataJSON is the payload of RequestClientOptions.client_data; empty
+	// leaves the field unset.
+	ClientDataJSON []byte
 }
 
 // HasSession reports whether both explicit session credentials are configured.
@@ -346,19 +387,61 @@ func Build(values Values, fallback Fallback) (Config, []string, error) {
 		hwid = DefaultHWID
 	}
 
+	keywordMode := strings.TrimSpace(values.KeywordMode)
+	if keywordMode == "" {
+		keywordMode = DefaultKeywordMode
+	}
+	switch keywordMode {
+	case KeywordModeNoKeyword, KeywordModeParams:
+	default:
+		return Config{}, warnings, fmt.Errorf("setting %s=%q is not a keyword policy (want %s or %s)",
+			KeyKeywordMode, values.KeywordMode, KeywordModeNoKeyword, KeywordModeParams)
+	}
+	if keywordMode == KeywordModeParams && keyword == "" {
+		return Config{}, warnings, fmt.Errorf("setting %s=%s needs a non-empty %s",
+			KeyKeywordMode, KeywordModeParams, KeyKeyword)
+	}
+	if keywordMode == KeywordModeParams {
+		warnings = append(warnings, "keyword_mode=kw_params requires the uploaded phrase to begin with the "+
+			"keyword; a capture that starts after the wake word is answered with \"keyword not confirmed\". "+
+			"The default "+DefaultKeywordMode+" is correct for this app's post-wake capture.")
+	}
+
+	// Recognition cannot start without the client capability payload: it is
+	// the one init field the previous build omitted, and every phrase ended
+	// with a terminal finish and no text. An empty setting falls back to the
+	// documented model default; a malformed value is rejected so the app keeps
+	// its last good configuration instead of opening a phrase that cannot be
+	// recognized.
+	capabilitiesText := strings.TrimSpace(values.Capabilities)
+	if capabilitiesText == "" {
+		capabilitiesText = DefaultCapabilitiesJSON
+	}
+	capabilitiesJSON := []byte(capabilitiesText)
+	if err := vkclient.ValidateCapabilitiesJSON(capabilitiesJSON); err != nil {
+		return Config{}, warnings, fmt.Errorf("setting %s: %w", KeyCapabilities, err)
+	}
+	clientDataJSON := []byte(strings.TrimSpace(values.ClientData))
+	if err := vkclient.ValidateClientDataJSON(clientDataJSON); err != nil {
+		return Config{}, warnings, fmt.Errorf("setting %s: %w", KeyClientData, err)
+	}
+
 	return Config{
-		BaseURL:       base,
-		XTokenID:      strings.TrimSpace(values.XToken),
-		Serial:        serial,
-		SerialSource:  serialSource,
-		DeviceID:      deviceID,
-		SessionID:     strings.TrimSpace(values.SessionID),
-		SessionSecret: strings.TrimSpace(values.SessionSecret),
-		SessionFile:   strings.TrimSpace(values.SessionFile),
-		Format:        format,
-		ClientVersion: clientVersion,
-		Keyword:       keyword,
-		HWID:          hwid,
+		BaseURL:          base,
+		XTokenID:         strings.TrimSpace(values.XToken),
+		Serial:           serial,
+		SerialSource:     serialSource,
+		DeviceID:         deviceID,
+		SessionID:        strings.TrimSpace(values.SessionID),
+		SessionSecret:    strings.TrimSpace(values.SessionSecret),
+		SessionFile:      strings.TrimSpace(values.SessionFile),
+		Format:           format,
+		ClientVersion:    clientVersion,
+		Keyword:          keyword,
+		HWID:             hwid,
+		KeywordMode:      keywordMode,
+		CapabilitiesJSON: capabilitiesJSON,
+		ClientDataJSON:   clientDataJSON,
 	}, warnings, nil
 }
 

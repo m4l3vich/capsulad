@@ -135,3 +135,29 @@ label = "Keyword hardware id"
 description = "Keyword id sent in keyword_options.kw_params."
 type = "text"
 default = "9F25725B"
+[[settings]]
+key = "keyword_mode"
+label = "Keyword policy"
+description = "no_kw transcribes the command directly. kw_params requires the uploaded phrase to begin with the keyword: the service confirms the keyword from the received audio, so a capture that starts after the wake word is answered \"keyword not confirmed\". Keep no_kw unless you are testing a whole utterance that starts with the wake word."
+type = "select"
+default = "no_kw"
+[[settings.choices]]
+value = "no_kw"
+label = "No keyword (transcribe the command)"
+[[settings.choices]]
+value = "kw_params"
+label = "Keyword params (phrase must start with the wake word)"
+
+[[settings]]
+key = "capabilities_json"
+label = "Client capabilities payload"
+description = "JSON sent as RequestClientOptions.capabilities.json in the phrase init. The default carries the capability token the shipped Capsula Mini firmware sent on /connect (31c0255a004201d1408a235de880400000); the vendor's exact JSON schema was not recoverable, so override this with the exact vendor payload if you have it. An empty value is rejected: a phrase opened without capabilities never produced text."
+type = "text"
+default = "{\"capabilities_hex\":\"31c0255a004201d1408a235de880400000\"}"
+
+[[settings]]
+key = "client_data_json"
+label = "Client data payload"
+description = "JSON sent as RequestClientOptions.client_data.json. Empty leaves the field unset, which is what the vendor's own init does unless its control connection supplies client data."
+type = "text"
+default = ""

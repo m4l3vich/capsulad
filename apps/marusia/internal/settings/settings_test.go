@@ -346,3 +346,78 @@ func TestPlaintextWarningOnCredentialCarryingEndpoints(t *testing.T) {
 		})
 	}
 }
+
+// The capability payload defaults to the recovered Capsula Mini token, survives
+// Build unchanged, and a malformed operator override is rejected instead of
+// being sent.
+func TestBuildCarriesTheCapabilitiesPayload(t *testing.T) {
+	config, _, err := Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+		Serial: "SN1"}, Fallback{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := string(config.CapabilitiesJSON); got != DefaultCapabilitiesJSON {
+		t.Fatalf("capabilities = %q, want %q", got, DefaultCapabilitiesJSON)
+	}
+	if !strings.Contains(DefaultCapabilitiesJSON, vkclient.DefaultCapabilitiesHex) {
+		t.Fatalf("the model default does not carry the recovered token: %q", DefaultCapabilitiesJSON)
+	}
+	if len(config.ClientDataJSON) != 0 {
+		t.Fatalf("client_data = %q, want unset", config.ClientDataJSON)
+	}
+
+	custom := `{"capabilities_hex":"deadbeef"}`
+	config, _, err = Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+		Serial: "SN1", Capabilities: custom, ClientData: `{"client":"capsula"}`}, Fallback{})
+	if err != nil {
+		t.Fatalf("build with an override: %v", err)
+	}
+	if string(config.CapabilitiesJSON) != custom {
+		t.Fatalf("capabilities = %q, want %q", config.CapabilitiesJSON, custom)
+	}
+	if string(config.ClientDataJSON) != `{"client":"capsula"}` {
+		t.Fatalf("client_data = %q", config.ClientDataJSON)
+	}
+
+	for _, payload := range []string{"not-json", `{"capabilities_hex":"abc"}`, `{"capabilities_hex":"zz"}`} {
+		if _, _, err := Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+			Serial: "SN1", Capabilities: payload}, Fallback{}); err == nil {
+			t.Fatalf("capabilities_json=%q must be rejected", payload)
+		}
+	}
+}
+
+// This app captures after the wake word, so kw_params can never be confirmed.
+// The default policy is no_kw; kw_params is opt-in and validated.
+func TestBuildKeywordMode(t *testing.T) {
+	config, warnings, err := Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+		Serial: "SN1"}, Fallback{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if config.KeywordMode != KeywordModeNoKeyword {
+		t.Fatalf("keyword_mode = %q, want %q", config.KeywordMode, KeywordModeNoKeyword)
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, "keyword_mode") {
+			t.Fatalf("the default policy must not warn: %q", warning)
+		}
+	}
+
+	config, warnings, err = Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+		Serial: "SN1", KeywordMode: KeywordModeParams}, Fallback{})
+	if err != nil {
+		t.Fatalf("build with kw_params: %v", err)
+	}
+	if config.KeywordMode != KeywordModeParams {
+		t.Fatalf("keyword_mode = %q", config.KeywordMode)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "keyword not confirmed") {
+		t.Fatalf("kw_params must warn about the keyword confirmation: %v", warnings)
+	}
+
+	if _, _, err := Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
+		Serial: "SN1", KeywordMode: "strict_kw"}, Fallback{}); err == nil {
+		t.Fatal("an unknown keyword mode must be rejected")
+	}
+}

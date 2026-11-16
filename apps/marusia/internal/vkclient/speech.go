@@ -2,6 +2,8 @@ package vkclient
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -26,6 +28,79 @@ const (
 	// FrameBytes is one mono s16le 80 ms frame.
 	FrameBytes = FrameSamples * 2
 )
+
+// DefaultCapabilitiesHex is the capability token the shipped voice agent sent
+// on every vendored HTTP control call, recovered from the device userdata
+// image (_capsula-mini-rockchip-backup/11_userdata.img, the rt_logs entries for
+// /connect):
+//
+//	capabilities_hex=31c0255a004201d1408a235de880400000
+//
+// The vendor builds it with sprintf("%llx%016llx%016llx", ...) over a
+// capability bitmask (voice-agent offset 0x12fbb0), so the value is a
+// per-firmware feature set, not a per-unit credential. This is the token of the
+// Capsula Mini firmware 44.91 this app targets; another firmware can override
+// it through the capabilities_json setting.
+const DefaultCapabilitiesHex = "31c0255a004201d1408a235de880400000"
+
+// DefaultCapabilitiesJSON is the model default payload for
+// RequestClientOptions.capabilities.json.
+//
+// The recovered field is `bytes json = 1`; the vendor sets it present but the
+// exact JSON schema was not recoverable from the binary. The only capability
+// evidence the device leaks is the hex token above, so the default carries it
+// under the same key the vendor uses on /connect. It is a documented model
+// default, not a proof of the vendor's schema: an operator with the exact
+// payload can override it with the capabilities_json setting.
+var DefaultCapabilitiesJSON = []byte(`{"capabilities_hex":"` + DefaultCapabilitiesHex + `"}`)
+
+// ValidateCapabilitiesJSON rejects a capabilities payload the app must not
+// send: the init field is JSON, and the recovered token (when present) is hex.
+// A non-object JSON document is accepted so an operator can paste the vendor's
+// exact payload even if it is not shaped like the default.
+func ValidateCapabilitiesJSON(payload []byte) error {
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" {
+		return errors.New("vkclient: capabilities payload is empty; the phrase init needs " +
+			"RequestClientOptions.capabilities or the service has nothing to gate recognition on")
+	}
+	if !json.Valid(payload) {
+		return errors.New("vkclient: capabilities payload is not valid JSON")
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(payload, &object) != nil {
+		return nil
+	}
+	raw, ok := object["capabilities_hex"]
+	if !ok {
+		return nil
+	}
+	var token string
+	if err := json.Unmarshal(raw, &token); err != nil {
+		return errors.New("vkclient: capabilities_hex must be a JSON string")
+	}
+	if len(token)%2 != 0 {
+		return errors.New("vkclient: capabilities_hex must have an even number of hex digits")
+	}
+	if _, err := hex.DecodeString(token); err != nil {
+		return errors.New("vkclient: capabilities_hex is not hex")
+	}
+	return nil
+}
+
+// ValidateClientDataJSON checks the optional RequestClientOptions.client_data
+// payload. The message has the same shape as capabilities (bytes json = 1) but
+// no recovered token of its own, so only its JSON syntax is checked. Empty means
+// "send nothing".
+func ValidateClientDataJSON(payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if !json.Valid(payload) {
+		return errors.New("vkclient: client_data payload is not valid JSON")
+	}
+	return nil
+}
 
 // AudioFormat is the upload framing advertised in
 // SpeechRequestInit.audio_options.format.
@@ -76,50 +151,75 @@ type SpeechOptions struct {
 	Format         AudioFormat
 	Timezone       string
 	ActivationType string
-	Keyword        string
+	// Keyword is the wake word name sent inside keyword_options.kw_params.
+	Keyword string
+	// KeywordInAudio states that the uploaded phrase begins with the wake
+	// word. kw_params is sent only when it is true: the service confirms the
+	// keyword from the phrase audio it receives, so a capture that starts
+	// after the wake word (this app's activation) can never be confirmed and
+	// the service ends the phrase with "keyword not confirmed".
+	KeywordInAudio bool
 	HWID           string
 	// MediaState is required inside keyword_params: the service rejects an init
 	// whose kw_params omits it with "unknown media state".
 	MediaState clientpb.MediaState
 	Brand      string
+	// CapabilitiesJSON is the payload of RequestClientOptions.capabilities
+	// (clientpb.ClientCapabilities.json). The field is present in the vendor's
+	// own init; a zero value falls back to DefaultCapabilitiesJSON so a caller
+	// cannot silently open a phrase without it.
+	CapabilitiesJSON []byte
+	// ClientDataJSON is the payload of RequestClientOptions.client_data. Empty
+	// leaves the field unset, which is what the vendor's own init does unless a
+	// control-connection parameter supplies client data.
+	ClientDataJSON []byte
 	// StatusIntervalMS is the requested status cadence. The vendor sets the
 	// field but its constant was not recovered, so this is an inference.
 	StatusIntervalMS int32
 }
 
 // BuildInit assembles the SpeechRequestInit the vendor's packed-init builder
-// produces: audio framing, device info, the Capsula client state with the
-// microphone on, GENERAL mode and the keyword parameters.
+// produces: audio framing, the capability payload, device info, the Capsula
+// client state with the microphone on, GENERAL mode and the keyword choice.
 func BuildInit(opts SpeechOptions, serial, version string) *phrasepb.SpeechRequestInit {
-	init := &phrasepb.SpeechRequestInit{
-		AudioOptions: &optionspb.RequestAudioOptions{Format: opts.Format.proto()},
-		ClientOptions: &optionspb.RequestClientOptions{
-			DeviceInfo: &clientpb.DeviceInfo{
-				Serial:  serial,
-				Version: version,
-				Brand:   opts.Brand,
-			},
-			State: &clientpb.ClientState{
-				State: &clientpb.PlatformSpecific{
-					PlatformState: &clientpb.PlatformSpecific_CapsulaState{
-						CapsulaState: &clientpb.PlatformSpecific_Capsula{MicOn: true},
-					},
+	capabilities := opts.CapabilitiesJSON
+	if len(capabilities) == 0 {
+		capabilities = DefaultCapabilitiesJSON
+	}
+	clientOptions := &optionspb.RequestClientOptions{
+		Capabilities: &clientpb.ClientCapabilities{Json: capabilities},
+		DeviceInfo: &clientpb.DeviceInfo{
+			Serial:  serial,
+			Version: version,
+			Brand:   opts.Brand,
+		},
+		State: &clientpb.ClientState{
+			State: &clientpb.PlatformSpecific{
+				PlatformState: &clientpb.PlatformSpecific_CapsulaState{
+					CapsulaState: &clientpb.PlatformSpecific_Capsula{MicOn: true},
 				},
 			},
-			Timezone:       opts.Timezone,
-			ActivationType: opts.ActivationType,
 		},
-		Mode: phrasepb.SpeechRequestInit_SPEECH_MODE_GENERAL,
+		Timezone:       opts.Timezone,
+		ActivationType: opts.ActivationType,
+	}
+	if len(opts.ClientDataJSON) > 0 {
+		clientOptions.ClientData = &clientpb.ClientData{Json: opts.ClientDataJSON}
+	}
+	init := &phrasepb.SpeechRequestInit{
+		AudioOptions:  &optionspb.RequestAudioOptions{Format: opts.Format.proto()},
+		ClientOptions: clientOptions,
+		Mode:          phrasepb.SpeechRequestInit_SPEECH_MODE_GENERAL,
 	}
 	if opts.StatusIntervalMS > 0 {
 		init.QosOptions = &phrasepb.SpeechRequestQoSOptions{StatusIntervalMs: opts.StatusIntervalMS}
 	}
 	// The variant is always present: the service answers an absent one with
 	// "Invalid 'kw_type' param: unknown keyword type" and drops the phrase
-	// before any audio is transcribed. A turn without keyword evidence states
-	// no_kw explicitly.
+	// before any audio is transcribed. A turn whose audio does not contain the
+	// wake word states no_kw explicitly.
 	init.KeywordOptions = &optionspb.RequestKeywordOptions{}
-	if opts.Keyword == "" {
+	if opts.Keyword == "" || !opts.KeywordInAudio {
 		init.KeywordOptions.KwVariant = &optionspb.RequestKeywordOptions_NoKw{
 			NoKw: &optionspb.RequestKeywordOptions_NoKeyword{},
 		}
@@ -139,6 +239,14 @@ func BuildInit(opts SpeechOptions, serial, version string) *phrasepb.SpeechReque
 		}
 	}
 	return init
+}
+
+// KeywordMode names the keyword_options variant these options produce.
+func (o SpeechOptions) KeywordMode() string {
+	if o.Keyword == "" || !o.KeywordInAudio {
+		return "no_kw"
+	}
+	return "kw_params"
 }
 
 // StreamStatus is one SpeechResponseStatus frame.

@@ -463,8 +463,11 @@ func Run(ctx context.Context, opts Options) (result Result) {
 		if text == "" {
 			// A clean terminal frame with no text and no command is the
 			// service declining to answer. Reporting it as success would
-			// claim a turn that said nothing.
-			detail := "the service returned no answer: recognition produced no text and no command"
+			// claim a turn that said nothing. The init facts are included
+			// because "no text" is the symptom of an init the service would
+			// not recognize: this is the line a probe turn has to move.
+			detail := fmt.Sprintf("the service returned no answer: recognition produced no text and no command "+
+				"(keyword_mode=%s, capabilities=%dB)", opts.Speech.KeywordMode(), effectiveCapabilitiesLen(opts.Speech))
 			if finish != "" {
 				detail += " (terminal frame: " + finish + ")"
 			}
@@ -598,4 +601,14 @@ func isCancel(err error) bool {
 // revision, so the turn fails once per revision instead of retrying the attach.
 func authRejected(err error) bool {
 	return vkclient.IsCode(err, vkclient.CodeUnauthenticated) || vkclient.IsCode(err, vkclient.CodePermissionDenied)
+}
+
+// effectiveCapabilitiesLen reports the capability bytes the init will carry.
+// BuildInit substitutes the model default for an empty payload, so an empty
+// option set still sends one; the log must not claim zero when it does not.
+func effectiveCapabilitiesLen(speech vkclient.SpeechOptions) int {
+	if len(speech.CapabilitiesJSON) > 0 {
+		return len(speech.CapabilitiesJSON)
+	}
+	return len(vkclient.DefaultCapabilitiesJSON)
 }

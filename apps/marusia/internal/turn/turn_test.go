@@ -875,3 +875,48 @@ func TestTurnNoAudioOutcome(t *testing.T) {
 		}
 	})
 }
+
+// A terminal frame that carries text and commands but no play_url is a real
+// answer, not NoAnswer: before the init fix every phrase ended exactly here
+// with zero text, so this pins the success path the recognition fix must reach.
+func TestTurnCompletesOnTerminalFrameWithTextAndCommands(t *testing.T) {
+	stream := newFakeStream(nil)
+	stream.onEOS = func() {
+		for _, event := range []*vkclient.Event{
+			{Kind: vkclient.EventInit, PhraseID: "p-2", ChunkLengthHintMS: 80},
+			{Kind: vkclient.EventStatus, Status: &vkclient.StreamStatus{ChunksReceived: 2, AudioReceivedMS: 160}},
+			{Kind: vkclient.EventTextSoFar, Text: "включаю музыку"},
+			{Kind: vkclient.EventCommands, Commands: []vkclient.Command{
+				{Kind: vkclient.CommandShowText, Text: "включаю музыку"},
+				{Kind: vkclient.CommandSendEvent, Event: "music_started"},
+			}},
+			{Kind: vkclient.EventFinish, Finish: vkclient.FinishResult},
+			{Kind: vkclient.EventEOS},
+		} {
+			stream.events <- event
+		}
+	}
+	chunks := make(chan []byte, 8)
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := Run(ctx, Options{
+		Endpoint:   &fakeEndpoint{stream: stream},
+		Chunks:     chunks,
+		Player:     &fakePlayer{},
+		Indicator:  &fakeIndicator{},
+		EndSilence: 40 * time.Millisecond,
+		MaxSpeech:  2 * time.Second,
+	})
+	if result.Outcome != Completed {
+		t.Fatalf("outcome = %v (%s), want completed", result.Outcome, result.Detail)
+	}
+	if result.Text != "включаю музыку" {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if result.PlayedURL != "" {
+		t.Fatalf("played url = %q, want none", result.PlayedURL)
+	}
+}

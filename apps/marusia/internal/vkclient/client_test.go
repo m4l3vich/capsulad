@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"capsulad/apps/marusia/internal/vkproto/clientpb"
@@ -675,6 +676,7 @@ func TestAuthorizeMetadataAndSpeechTurn(t *testing.T) {
 		Format:           FormatWave,
 		Timezone:         "Europe/Moscow",
 		Keyword:          "marusya",
+		KeywordInAudio:   true,
 		HWID:             "9F25725B",
 		StatusIntervalMS: 1000,
 	})
@@ -1308,16 +1310,16 @@ func TestEOSLeavesTheRequestSideOpen(t *testing.T) {
 }
 
 func TestBuildInitKeywordMediaState(t *testing.T) {
-	init := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", HWID: "9F25725B"},
-		testSerial, "44.91")
+	init := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", KeywordInAudio: true,
+		HWID: "9F25725B"}, testSerial, "44.91")
 	params := init.GetKeywordOptions().GetKwParams()
 	if params.GetMediaState() != clientpb.MediaState_MEDIA_STATE_STOP {
 		t.Fatalf("media_state = %v, want STOP (the service refuses an unspecified state)",
 			params.GetMediaState())
 	}
 
-	playing := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", HWID: "9F25725B",
-		MediaState: clientpb.MediaState_MEDIA_STATE_PLAY}, testSerial, "44.91")
+	playing := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", KeywordInAudio: true,
+		HWID: "9F25725B", MediaState: clientpb.MediaState_MEDIA_STATE_PLAY}, testSerial, "44.91")
 	if got := playing.GetKeywordOptions().GetKwParams().GetMediaState(); got != clientpb.MediaState_MEDIA_STATE_PLAY {
 		t.Fatalf("explicit media_state = %v", got)
 	}
@@ -1329,5 +1331,115 @@ func TestBuildInitKeywordMediaState(t *testing.T) {
 	}
 	if plain.GetKwParams() != nil {
 		t.Fatalf("no_keyword init carried kw_params: %+v", plain.GetKwParams())
+	}
+}
+
+// The recovery token is the only capability evidence the device leaks, and the
+// init field it fills was the one field the previous build omitted entirely.
+// These tests pin the exact bytes so a future refactor cannot silently drop
+// them back to a bare init.
+func TestBuildInitSendsTheRecoveredCapabilitiesPayload(t *testing.T) {
+	init := BuildInit(SpeechOptions{Format: FormatWave}, testSerial, "44.91")
+	capabilities := init.GetClientOptions().GetCapabilities()
+	if capabilities == nil {
+		t.Fatal("init has no RequestClientOptions.capabilities")
+	}
+	const want = `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}`
+	if got := string(capabilities.GetJson()); got != want {
+		t.Fatalf("capabilities.json = %q, want %q", got, want)
+	}
+	if got := DefaultCapabilitiesHex; got != "31c0255a004201d1408a235de880400000" {
+		t.Fatalf("DefaultCapabilitiesHex = %q", got)
+	}
+
+	// The payload is also present on the wire, not just in the struct.
+	payload, err := proto.Marshal(init)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	decoded := &phrasepb.SpeechRequestInit{}
+	if err := proto.Unmarshal(payload, decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := string(decoded.GetClientOptions().GetCapabilities().GetJson()); got != want {
+		t.Fatalf("round-tripped capabilities.json = %q, want %q", got, want)
+	}
+}
+
+func TestBuildInitUsesAnOverriddenCapabilitiesAndClientData(t *testing.T) {
+	init := BuildInit(SpeechOptions{
+		Format:           FormatWave,
+		CapabilitiesJSON: []byte(`{"capabilities_hex":"deadbeef"}`),
+		ClientDataJSON:   []byte(`{"client":"capsula"}`),
+	}, testSerial, "44.91")
+	if got := string(init.GetClientOptions().GetCapabilities().GetJson()); got != `{"capabilities_hex":"deadbeef"}` {
+		t.Fatalf("capabilities.json = %q", got)
+	}
+	if got := string(init.GetClientOptions().GetClientData().GetJson()); got != `{"client":"capsula"}` {
+		t.Fatalf("client_data.json = %q", got)
+	}
+	if got := init.GetClientOptions().GetClientData().GetJson(); got == nil {
+		t.Fatal("client_data.json is unset")
+	}
+
+	// Empty client data leaves the field unset, as the vendor's own init does.
+	plain := BuildInit(SpeechOptions{Format: FormatWave}, testSerial, "44.91")
+	if plain.GetClientOptions().GetClientData() != nil {
+		t.Fatalf("client_data = %+v, want unset", plain.GetClientOptions().GetClientData())
+	}
+}
+
+// kw_params is only valid when the uploaded phrase begins with the keyword;
+// the service confirms the keyword from the received audio, so a post-wake
+// capture can only ever be answered with "keyword not confirmed".
+func TestBuildInitKeywordRequiresTheKeywordInAudio(t *testing.T) {
+	postWake := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", HWID: "9F25725B"},
+		testSerial, "44.91")
+	if postWake.GetKeywordOptions().GetNoKw() == nil {
+		t.Fatalf("post-wake keyword init = %+v, want no_kw", postWake.GetKeywordOptions())
+	}
+	if params := postWake.GetKeywordOptions().GetKwParams(); params != nil {
+		t.Fatalf("post-wake init claimed kw_params: %+v", params)
+	}
+	if got := (SpeechOptions{Keyword: "marusya"}).KeywordMode(); got != "no_kw" {
+		t.Fatalf("KeywordMode = %q, want no_kw", got)
+	}
+
+	fullUtterance := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya",
+		KeywordInAudio: true, HWID: "9F25725B"}, testSerial, "44.91")
+	if params := fullUtterance.GetKeywordOptions().GetKwParams(); params == nil || params.GetKeyword() != "marusya" {
+		t.Fatalf("whole-utterance init kw_params = %+v", params)
+	}
+	if got := (SpeechOptions{Keyword: "marusya", KeywordInAudio: true}).KeywordMode(); got != "kw_params" {
+		t.Fatalf("KeywordMode = %q, want kw_params", got)
+	}
+}
+
+func TestValidateCapabilitiesJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{"recovered default", string(DefaultCapabilitiesJSON), false},
+		{"opaque vendor payload", `{"anything":[1,2,3]}`, false},
+		{"non-object JSON", `"31c0255a"`, false},
+		{"empty", "", true},
+		{"whitespace", "  \n", true},
+		{"not JSON", "31c0255a", true},
+		{"odd hex token", `{"capabilities_hex":"abc"}`, true},
+		{"non-hex token", `{"capabilities_hex":"zz"}`, true},
+		{"non-string token", `{"capabilities_hex":49}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateCapabilitiesJSON([]byte(tc.payload))
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateCapabilitiesJSON(%q) = nil, want an error", tc.payload)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateCapabilitiesJSON(%q) = %v", tc.payload, err)
+			}
+		})
 	}
 }

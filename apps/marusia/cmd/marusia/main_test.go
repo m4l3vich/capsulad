@@ -397,65 +397,54 @@ func TestPumpMicStopsAfterCancel(t *testing.T) {
 	}
 }
 
-func TestKeywordOptionsFollowActivationEvidence(t *testing.T) {
+// A turn's keyword policy is a configuration choice, not a property of the
+// activation: this app starts capturing after the wake word, so kw_params could
+// never be confirmed. The default states no_kw explicitly, and kw_params is sent
+// only when the operator selects it.
+func TestSpeechOptionsKeywordPolicy(t *testing.T) {
 	config := settings.Config{
 		Format:  vkclient.FormatWave,
 		Keyword: "marusya",
 		HWID:    "9F25725B",
 	}
-
-	wake := &capsulad.Activation{
-		Origin:         capsulad.ActivationOriginWakeword,
-		MatchedModelID: "wakeword-model-1",
+	init := vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	if init.GetKeywordOptions().GetNoKw() == nil {
+		t.Fatalf("default init = %+v, want no_kw", init.GetKeywordOptions())
 	}
-	wakeInit := vkclient.BuildInit(speechOptionsFor(config, wake), "serial", "version")
-	wakeParams := wakeInit.GetKeywordOptions().GetKwParams()
-	if wakeParams == nil || wakeParams.GetKeyword() != "marusya" || wakeParams.GetHwId() != "9F25725B" {
-		t.Fatalf("wake-word init kw_params = %+v", wakeParams)
-	}
-	if wakeParams.GetMediaState() != clientpb.MediaState_MEDIA_STATE_STOP {
-		t.Fatalf("wake-word media_state = %v, want STOP", wakeParams.GetMediaState())
+	if init.GetKeywordOptions().GetKwParams() != nil {
+		t.Fatalf("default init carried kw_params: %+v", init.GetKeywordOptions().GetKwParams())
 	}
 
-	// A touch turn states no_kw: the service rejects an absent variant with
-	// "Invalid 'kw_type' param: unknown keyword type".
-	touch := &capsulad.Activation{Origin: capsulad.ActivationOriginTouch}
-	touchInit := vkclient.BuildInit(speechOptionsFor(config, touch), "serial", "version")
-	if touchInit.GetKeywordOptions().GetNoKw() == nil {
-		t.Fatalf("touch init = %+v, want no_kw", touchInit.GetKeywordOptions())
+	config.KeywordMode = settings.KeywordModeParams
+	init = vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	params := init.GetKeywordOptions().GetKwParams()
+	if params == nil || params.GetKeyword() != "marusya" || params.GetHwId() != "9F25725B" {
+		t.Fatalf("kw_params init = %+v", params)
 	}
-	if touchInit.GetKeywordOptions().GetKwParams() != nil {
-		t.Fatalf("touch init carried kw_params: %+v", touchInit.GetKeywordOptions().GetKwParams())
+	if params.GetMediaState() != clientpb.MediaState_MEDIA_STATE_STOP {
+		t.Fatalf("media_state = %v, want STOP", params.GetMediaState())
 	}
 }
 
-// Only a wake-word activation carries keyword evidence. An API activation — and
-// a touch activation, even one the framework delivered with a stale match — must
-// not claim a keyword: the service answers "keyword not confirmed" instead of
-// transcribing the phrase.
-func TestSpeechOptionsClaimAKeywordOnlyForAWakeword(t *testing.T) {
-	config := settings.Config{Format: vkclient.FormatWave, Keyword: "marusya"}
-	cases := []struct {
-		name       string
-		activation *capsulad.Activation
-		want       string
-	}{
-		{"api", &capsulad.Activation{Origin: capsulad.ActivationOriginAPI}, ""},
-		{"touch", &capsulad.Activation{Origin: capsulad.ActivationOriginTouch}, ""},
-		{"touch with a model id", &capsulad.Activation{Origin: capsulad.ActivationOriginTouch, MatchedModelID: "manual.button"}, ""},
-		{"unspecified", &capsulad.Activation{}, ""},
-		{"wakeword", &capsulad.Activation{Origin: capsulad.ActivationOriginWakeword, MatchedModelID: "word"}, "marusya"},
+// The capability payload travels from settings into the init unchanged, and a
+// configuration with no payload still falls back to the documented model
+// default instead of opening a phrase without capabilities.
+func TestSpeechOptionsCarryCapabilities(t *testing.T) {
+	defaults := settings.Default()
+	config, _, err := settings.Build(defaults, settings.Fallback{Serial: "serial", DeviceID: "device"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			options := speechOptionsFor(config, tc.activation)
-			if options.Keyword != tc.want {
-				t.Fatalf("keyword = %q, want %q", options.Keyword, tc.want)
-			}
-			if options.MediaState != clientpb.MediaState_MEDIA_STATE_STOP {
-				t.Fatalf("media_state = %v, want STOP", options.MediaState)
-			}
-		})
+	init := vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	if got := string(init.GetClientOptions().GetCapabilities().GetJson()); got != settings.DefaultCapabilitiesJSON {
+		t.Fatalf("capabilities = %q, want the model default %q", got, settings.DefaultCapabilitiesJSON)
+	}
+
+	custom := `{"capabilities_hex":"deadbeef"}`
+	config.CapabilitiesJSON = []byte(custom)
+	init = vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	if got := string(init.GetClientOptions().GetCapabilities().GetJson()); got != custom {
+		t.Fatalf("capabilities = %q, want %q", got, custom)
 	}
 }
 

@@ -12,6 +12,11 @@
 //	MARUSIA_PROBE_SERIAL    SoC serial, sent as x-device-sn
 //	MARUSIA_PROBE_WAV       path to a 16 kHz mono 16-bit PCM WAV to send
 //	MARUSIA_PROBE_PACE      optional per-20 ms-chunk delay, e.g. 20ms
+//	MARUSIA_PROBE_CAPABILITIES_JSON  init capabilities payload; defaults to the
+//	                        recovered Capsula Mini token
+//	MARUSIA_PROBE_CLIENT_DATA_JSON   init client_data payload; empty by default
+//	MARUSIA_PROBE_KEYWORD_MODE       kw_params (default; a whole utterance that
+//	                        starts with the wake word) or no_kw
 //
 // What it reports: the init phrase id and QoS, the chunk accounting, every
 // text_so_far, every command, the play_url, and then the HTTP status,
@@ -81,14 +86,38 @@ func main() {
 	}
 	log.Printf("probe: AuthReady accepted the session")
 
-	stream, err := client.OpenSpeech(ctx, vkclient.SpeechOptions{
+	capabilities := []byte(env("MARUSIA_PROBE_CAPABILITIES_JSON", string(vkclient.DefaultCapabilitiesJSON)))
+	if err := vkclient.ValidateCapabilitiesJSON(capabilities); err != nil {
+		log.Fatalf("probe: capabilities: %v", err)
+	}
+	clientData := []byte(env("MARUSIA_PROBE_CLIENT_DATA_JSON", ""))
+	if err := vkclient.ValidateClientDataJSON(clientData); err != nil {
+		log.Fatalf("probe: client_data: %v", err)
+	}
+	keywordMode := env("MARUSIA_PROBE_KEYWORD_MODE", "kw_params")
+	speech := vkclient.SpeechOptions{
 		Format:           vkclient.FormatWave,
 		Timezone:         "Europe/Moscow",
-		Keyword:          env("MARUSIA_PROBE_KEYWORD", "marusya"),
 		HWID:             env("MARUSIA_PROBE_HWID", "9F25725B"),
 		MediaState:       clientpb.MediaState_MEDIA_STATE_STOP,
 		StatusIntervalMS: 1000,
-	})
+		CapabilitiesJSON: capabilities,
+		ClientDataJSON:   clientData,
+	}
+	switch keywordMode {
+	case "kw_params":
+		// The probe sends a whole utterance; the supplied prompts start with
+		// the wake word, so kw_params can be confirmed.
+		speech.Keyword = env("MARUSIA_PROBE_KEYWORD", "marusya")
+		speech.KeywordInAudio = true
+	case "no_kw":
+	default:
+		log.Fatalf("MARUSIA_PROBE_KEYWORD_MODE: want kw_params or no_kw, got %q", keywordMode)
+	}
+	log.Printf("probe: init keyword_mode=%s capabilities=%dB client_data=%dB",
+		speech.KeywordMode(), len(capabilities), len(clientData))
+
+	stream, err := client.OpenSpeech(ctx, speech)
 	if err != nil {
 		log.Fatalf("probe: open speech: %v", err)
 	}

@@ -27,7 +27,9 @@ A turn sends the following to the configured vendor endpoint:
 | `xtoken_id` (the configured value, possibly empty) | attach body `{"serial", "with_secret", "xtoken_id"}` | provisioning credential; only used when no session is configured or readable |
 | Session id and session secret from the `session_id`/`session_secret` settings, else the vendor session file, else the attach reply | gRPC metadata (`x-session-id`, `authorization: Bearer …`) | runtime credential, held in memory only |
 | A fresh request UUID | gRPC `x-client-request-id` on every RPC | request correlation |
-| Timezone name and keyword parameters | `SpeechRequestInit` | vendor's own init surface |
+| Client capability payload: the `capabilities_json` setting, default `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}` | `SpeechRequestInit.client_options.capabilities.json` | the device capability token the shipped firmware advertised on `/connect`; the field the previous build omitted |
+| Optional `client_data_json` (empty by default) | `SpeechRequestInit.client_options.client_data.json` | operator-provided vendor payload; unset unless configured |
+| Timezone name and the keyword policy | `SpeechRequestInit` | vendor's own init surface |
 
 The attach reply's account id is decoded for the log and is never sent, and
 `DeviceService.GetInfo` is a local framework call over the Unix socket, not
@@ -106,16 +108,23 @@ session, and `xtoken_id` is a manufacturing credential this unit does not hold.
 | `device_id` | empty | stable `x-device-id`, masked; also the HTTP identity |
 | `audio_format` | `wave` | upload framing; `ogg_opus` is declared but refused |
 | `client_version` | `44.91` | advertised client/firmware version |
-| `keyword` | `marusya` | keyword name in `keyword_options.kw_params` |
-| `hw_id` | `9F25725B` | keyword id in `keyword_options.kw_params` |
+| `keyword_mode` | `no_kw` | `no_kw` asks the service to transcribe the command directly; `kw_params` claims the phrase begins with the keyword and is only valid for audio that actually does |
+| `keyword` | `marusya` | keyword name used when `keyword_mode=kw_params` |
+| `hw_id` | `9F25725B` | keyword id used when `keyword_mode=kw_params` |
+| `capabilities_json` | `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}` | `RequestClientOptions.capabilities.json`; the default is the recovered Capsula Mini token, documented as a model default rather than a proven vendor schema |
+| `client_data_json` | empty | `RequestClientOptions.client_data.json`; empty leaves the field unset |
 
 Validation: `session_id` and `session_secret` must both be set or both be empty
 (a half-supplied pair is rejected with a reason and the previous configuration is
 kept); `session_file` may be empty to disable the file fallback; `endpoint_custom`
 must be an absolute `http(s)://` URL without a path, query or fragment;
 `audio_format` must be `wave` or `ogg_opus`; `client_version`, `keyword` and
-`hw_id` fall back to their defaults when blank. Nothing is trimmed into a
-credential: the values are used exactly as stored.
+`hw_id` fall back to their defaults when blank; `keyword_mode` must be `no_kw` or
+`kw_params`; `capabilities_json` must be non-empty valid JSON (an empty value
+falls back to the model default, a malformed one is rejected and the previous
+configuration is kept), and `capabilities_hex`, when present, must be an even
+number of hex digits. Nothing is trimmed into a credential: the values are used
+exactly as stored.
 
 The sandbox has no writable filesystem and the SDK does not write app settings,
 so an empty `device_id` cannot be persisted by the app. The stable device id
@@ -304,9 +313,17 @@ MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV=/path/16k-mono.wav \
   go run ./cmd/marusia-probe
 ```
 
-It prints the init QoS, the chunk accounting, every `text_so_far`, every command,
-the `play_url` (shortened to `scheme://host/path`, because the query is the
-signature), and then the HTTP status, `Content-Type`, size and first bytes of
+`MARUSIA_PROBE_CAPABILITIES_JSON` overrides the init capability payload (default:
+the recovered Capsula Mini token), `MARUSIA_PROBE_CLIENT_DATA_JSON` sets
+`client_data` (empty by default), and `MARUSIA_PROBE_KEYWORD_MODE` is `kw_params`
+by default because the probe sends a whole utterance, wake word included: the
+prompts in `/tmp/marusia-prompts` (`Маруся, как дела?` and friends) are exactly
+that. Use `no_kw` for a prompt without the wake word.
+
+It prints the keyword policy and the capability/client-data payload sizes before
+the turn, then the init QoS, the chunk accounting, every `text_so_far`, every
+command, the `play_url` (shortened to `scheme://host/path`, because the query is
+the signature), and then the HTTP status, `Content-Type`, size and first bytes of
 that URL. No credential is written to disk or to the log; the probe is refused
 outright without them. It is a diagnostic, not a test: it needs network egress and
 a live session.
@@ -350,18 +367,54 @@ Proven live against the production deployment with the device's own session
 | `Phrase/GetResult` | `Unimplemented` |
 | the recovery session (`session.json`) on the gRPC surface | accepted, no attach performed |
 
+### Capability payload and keyword policy (2026-11-17)
+
+The previous build opened every phrase without
+`RequestClientOptions.capabilities`, and every turn ended with a terminal
+`finish`, no `text_so_far`, no command and no `play_url`. Two things changed,
+both from recoverable evidence rather than a guess:
+
+- **The capability token is recovered.** The device userdata image
+  (`_capsula-mini-rockchip-backup/11_userdata.img`) contains the shipped agent's
+  own telemetry URLs. Every `/connect` call carried
+  `capabilities_hex=31c0255a004201d1408a235de880400000`, i.e. the exact
+  capability advertisement of firmware 44.91. Disassembling the agent shows it
+  is built by `sprintf("%llx%016llx%016llx", …)` over a capability bitmask
+  (`voice-agent` offset `0x12fbb0`), so it is per-firmware, not per-unit. The
+  app now sends it in `client_options.capabilities.json` as the documented
+  model default
+  `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}`
+  (`capabilities_json` overrides it).
+- **The keyword policy was wrong by construction.** `kw_params` makes the
+  service confirm the keyword from the audio it receives. This app starts
+  capturing when the wake word has already been spoken, so the phrase it
+  uploads never begins with the keyword and `kw_params` could only ever end in
+  "keyword not confirmed". The default is now `no_kw`; `kw_params` is opt-in and
+  warns that the phrase must begin with the keyword. The probe keeps
+  `kw_params` because it uploads a whole utterance.
+
+What is *not* recovered: the exact JSON schema the vendor puts in
+`capabilities.json` (`bytes json = 1`). The binary sets the field present but its
+value comes from the control connection, and no schema string exists in the
+image. The default above therefore carries the only recovered evidence under the
+same key the vendor's `/connect` uses; it is a model default, not a claim about
+the vendor's schema, and `capabilities_json` replaces it verbatim when the exact
+payload is known.
+
 Unproven, and therefore not claimed by the app:
 
-- **Recognition itself.** Every phrase tried ended with a terminal `finish` but no
-  `text_so_far`, no command and no `play_url`: `kw_params` aborts with "keyword
-  not confirmed" (including for a real human recording of "Маруся" from the
-  device's own wakeword samples), while `strict_kw`/`no_kw` answer `finish
-  result` with zero text or abort "processing failed". Tried: 20/80/160 ms chunks,
-  8 and 16 kHz, Ogg-Opus as one chunk and as Ogg pages, silence padding,
+- **Recognition itself.** No live turn has been run since the capability payload
+  and the `no_kw` default landed, because no session credential is available in
+  this tree. The remaining gate is one real probe turn: with the recovered
+  capability payload and `no_kw`, the terminal frame must carry `text_so_far` or
+  a `play_url`. Every earlier attempt — `kw_params` (which aborts "keyword not
+  confirmed", including for a real human recording of "Маруся"),
+  `strict_kw`/`no_kw` with no capability payload, 20/80/160 ms chunks, 8 and
+  16 kHz, Ogg-Opus as one chunk and as Ogg pages, silence padding,
   `use_asrld_recognize`, and `activation_type` in {"", keyword, button, "listen
-  command"}. A likely missing piece is the vendor's `ClientCapabilities.json` /
-  `client_data` payload, whose schema the recon marked unrecoverable, or a
-  keyword-confirmation exchange the stock client performs locally.
+  command"} — ended with zero text. If the probe still returns zero text with
+  the payload present, the next step is `client_data` from the control
+  connection, which is why `client_data_json` exists.
 - **The TTS media type.** No `play_url` was ever returned, so the body was never
   fetched. The decoder therefore still accepts WAV PCM only and names whatever
   else arrives (Ogg, MP3, FLAC, MP4/AAC, RF64) in one line. Adding a decoder is
@@ -369,8 +422,8 @@ Unproven, and therefore not claimed by the app:
 - The service accepting an attach with an empty `xtoken_id`: it does not (4002
   "xtoken_id is required"). The attach path therefore exists only for a
   provisioned unit.
-- `mode = GENERAL`, empty `brand`, empty `activation_type`, and no `client_data`,
-  `player_data` or coordinates.
+- `mode = GENERAL`, empty `brand`, empty `activation_type`, and no `player_data`
+  or coordinates (`client_data` is only sent when `client_data_json` is set).
 - Port 443 for `https` bases.
 - Local end-of-speech is an energy gate (learned noise floor, 700 ms hangover,
   6 s no-speech, 15 s cap). Server `status_num` values are logged in the turn
