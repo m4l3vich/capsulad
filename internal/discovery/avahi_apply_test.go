@@ -594,3 +594,29 @@ func TestPostSetterProbingApplyKeepsStatusClean(t *testing.T) {
 		t.Fatalf("setter calls = %v, want exactly one", writes)
 	}
 }
+
+// TestAvahiResponderLostStateIsTerminalOnly pins the classification a browse
+// stream depends on: the RUNNING → REGISTERING → RUNNING cycle Avahi produces
+// while re-probing a changed host name must not read as the responder going
+// away, and the terminal states must.
+func TestAvahiResponderLostStateIsTerminalOnly(t *testing.T) {
+	cases := []struct {
+		state int32
+		lost  bool
+	}{
+		{stateRunning, false},
+		{avahiServerRegistering, false},
+		{avahiServerInvalid, true},
+		{avahiServerCollision, true},
+		{avahiServerFailure, true},
+		{7, false}, // unknown state: not proof of loss
+	}
+	for _, tc := range cases {
+		if got := avahiResponderLostState(tc.state); got != tc.lost {
+			t.Errorf("avahiResponderLostState(%d) = %v, want %v", tc.state, got, tc.lost)
+		}
+	}
+	if avahiResponderLostState(avahiServerRegistering) {
+		t.Error("REGISTERING was treated as a lost responder; a rename would kill every browse stream")
+	}
+}

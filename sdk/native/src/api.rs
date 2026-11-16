@@ -175,6 +175,33 @@ pub struct CapsuladApi {
     pub uuid_v4: unsafe extern "C" fn(*mut Buf) -> i32,
     pub url_parse: unsafe extern "C" fn(*const c_char, usize, *mut Buf) -> i32,
     pub http_cancel: unsafe extern "C" fn(u64, u64) -> i32,
+
+    // --- appended after http_cancel (never reordered) ------------------------
+    pub tcp_open:
+        unsafe extern "C" fn(*const c_char, usize, u16, *const u8, usize, u32, *mut u64) -> i32,
+    pub stream_read: unsafe extern "C" fn(u64, usize, u32, *mut Buf) -> i32,
+    pub stream_write: unsafe extern "C" fn(u64, *const u8, usize, u32, *mut usize) -> i32,
+    pub stream_shutdown: unsafe extern "C" fn(u64, i32) -> i32,
+    pub stream_close: unsafe extern "C" fn(u64) -> i32,
+    pub stream_info: unsafe extern "C" fn(u64, *mut Buf) -> i32,
+
+    pub udp_open:
+        unsafe extern "C" fn(*const c_char, usize, u16, *const u8, usize, u32, *mut u64) -> i32,
+    pub udp_send:
+        unsafe extern "C" fn(u64, *const u8, usize, *const u8, usize, u32, *mut usize) -> i32,
+    pub udp_recv: unsafe extern "C" fn(u64, usize, u32, *mut Buf, *mut Buf) -> i32,
+    pub udp_close: unsafe extern "C" fn(u64) -> i32,
+
+    pub listener_open: unsafe extern "C" fn(*const u8, usize, u32, *mut u64, *mut Buf) -> i32,
+    pub listener_accept: unsafe extern "C" fn(u64, u32, *mut u64, *mut Buf) -> i32,
+    pub listener_recv: unsafe extern "C" fn(u64, usize, u32, *mut Buf, *mut Buf) -> i32,
+    pub listener_send: unsafe extern "C" fn(u64, *const u8, usize, *const u8, usize, u32) -> i32,
+    pub listener_info: unsafe extern "C" fn(u64, *mut Buf) -> i32,
+    pub listener_close: unsafe extern "C" fn(u64) -> i32,
+
+    pub mdns_publish: unsafe extern "C" fn(u64, *const u8, usize, u32, *mut Buf) -> i32,
+    pub mdns_unpublish: unsafe extern "C" fn(u64, *const c_char, usize, u32) -> i32,
+    pub mdns_browse_open: unsafe extern "C" fn(u64, *const u8, usize, u32, *mut u64) -> i32,
 }
 
 #[repr(C)]
@@ -888,6 +915,297 @@ unsafe extern "C" fn c_http_request(
 }
 
 /* ------------------------------------------------------------------ *
+ * Streams, UDP, listeners and mDNS
+ * ------------------------------------------------------------------ */
+
+unsafe extern "C" fn c_tcp_open(
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    options_json: *const u8,
+    options_len: usize,
+    timeout_ms: u32,
+    out_stream: *mut u64,
+) -> i32 {
+    run(|| {
+        let host = input_str(host, host_len)?;
+        let options = input_bytes(options_json, options_len)?;
+        if out_stream.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_stream"));
+        }
+        let handle = crate::stream::open(host, port, options, timeout_ms)?;
+        write_out(out_stream, handle)
+    })
+}
+
+unsafe extern "C" fn c_stream_read(
+    stream: u64,
+    max_len: usize,
+    timeout_ms: u32,
+    out_data: *mut Buf,
+) -> i32 {
+    run(|| {
+        if out_data.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let inner = crate::stream::stream_handle(stream)?;
+        match crate::runtime::runtime().block_on(inner.read(max_len, timeout_ms)) {
+            Ok(bytes) => write_out(out_data, alloc_buf(bytes)),
+            Err(err) if err.status == ffi::END_OF_STREAM => {
+                // The ABI promises END_OF_STREAM with an empty buffer.
+                write_out(out_data, Buf::empty())?;
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
+    })
+}
+
+unsafe extern "C" fn c_stream_write(
+    stream: u64,
+    data: *const u8,
+    len: usize,
+    timeout_ms: u32,
+    out_written: *mut usize,
+) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out_written.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_written"));
+        }
+        let inner = crate::stream::stream_handle(stream)?;
+        let written = crate::runtime::runtime().block_on(inner.write(bytes, timeout_ms))?;
+        write_out(out_written, written)
+    })
+}
+
+unsafe extern "C" fn c_stream_shutdown(stream: u64, how: i32) -> i32 {
+    run(|| {
+        let inner = crate::stream::stream_handle(stream)?;
+        crate::runtime::runtime().block_on(inner.shutdown(how))
+    })
+}
+
+unsafe extern "C" fn c_stream_close(stream: u64) -> i32 {
+    run(|| crate::stream::close(stream))
+}
+
+unsafe extern "C" fn c_stream_info(stream: u64, out: *mut Buf) -> i32 {
+    run(|| {
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let inner = crate::stream::stream_handle(stream)?;
+        write_out(out, alloc_json(inner.info_json()))
+    })
+}
+
+unsafe extern "C" fn c_udp_open(
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    options_json: *const u8,
+    options_len: usize,
+    timeout_ms: u32,
+    out_udp: *mut u64,
+) -> i32 {
+    run(|| {
+        let host = input_str(host, host_len)?;
+        let options = input_bytes(options_json, options_len)?;
+        if out_udp.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_udp"));
+        }
+        let handle = crate::udp::open(host, port, options, timeout_ms)?;
+        write_out(out_udp, handle)
+    })
+}
+
+unsafe extern "C" fn c_udp_send(
+    udp: u64,
+    peer_json: *const u8,
+    peer_len: usize,
+    data: *const u8,
+    len: usize,
+    timeout_ms: u32,
+    out_sent: *mut usize,
+) -> i32 {
+    run(|| {
+        if out_sent.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_sent"));
+        }
+        let peer = crate::udp::parse_peer(input_bytes(peer_json, peer_len)?)?;
+        let bytes = input_bytes(data, len)?;
+        let inner = crate::udp::socket(udp)?;
+        let sent = crate::runtime::runtime().block_on(inner.send(peer, bytes, timeout_ms))?;
+        write_out(out_sent, sent)
+    })
+}
+
+unsafe extern "C" fn c_udp_recv(
+    udp: u64,
+    max_len: usize,
+    timeout_ms: u32,
+    out_data: *mut Buf,
+    out_peer_json: *mut Buf,
+) -> i32 {
+    run(|| {
+        if out_data.is_null() || out_peer_json.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "udp_recv needs non-null data and peer outputs",
+            ));
+        }
+        let inner = crate::udp::socket(udp)?;
+        let (data, peer) = crate::runtime::runtime().block_on(inner.recv(max_len, timeout_ms))?;
+        write_out(out_data, alloc_buf(data))?;
+        write_out(out_peer_json, alloc_json(crate::udp::peer_json(peer)))
+    })
+}
+
+unsafe extern "C" fn c_udp_close(udp: u64) -> i32 {
+    run(|| crate::udp::close(udp))
+}
+
+unsafe extern "C" fn c_listener_open(
+    options_json: *const u8,
+    options_len: usize,
+    timeout_ms: u32,
+    out_listener: *mut u64,
+    out_info: *mut Buf,
+) -> i32 {
+    run(|| {
+        let options = input_bytes(options_json, options_len)?;
+        if out_listener.is_null() || out_info.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "listener_open needs non-null handle and info outputs",
+            ));
+        }
+        let (handle, info) = crate::listener::open(options, timeout_ms)?;
+        write_out(out_info, alloc_json(info))?;
+        write_out(out_listener, handle)
+    })
+}
+
+unsafe extern "C" fn c_listener_accept(
+    listener: u64,
+    timeout_ms: u32,
+    out_stream: *mut u64,
+    out_peer_json: *mut Buf,
+) -> i32 {
+    run(|| {
+        if out_stream.is_null() || out_peer_json.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "listener_accept needs non-null stream and peer outputs",
+            ));
+        }
+        let inner = crate::listener::listener(listener)?;
+        let (handle, peer) = crate::runtime::runtime().block_on(inner.accept(timeout_ms))?;
+        write_out(out_peer_json, alloc_json(peer))?;
+        write_out(out_stream, handle)
+    })
+}
+
+unsafe extern "C" fn c_listener_recv(
+    listener: u64,
+    max_len: usize,
+    timeout_ms: u32,
+    out_data: *mut Buf,
+    out_peer_json: *mut Buf,
+) -> i32 {
+    run(|| {
+        if out_data.is_null() || out_peer_json.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "listener_recv needs non-null data and peer outputs",
+            ));
+        }
+        let inner = crate::listener::listener(listener)?;
+        let (data, peer) = crate::runtime::runtime().block_on(inner.recv(max_len, timeout_ms))?;
+        write_out(out_data, alloc_buf(data))?;
+        write_out(out_peer_json, alloc_json(peer))
+    })
+}
+
+unsafe extern "C" fn c_listener_send(
+    listener: u64,
+    peer_json: *const u8,
+    peer_len: usize,
+    data: *const u8,
+    len: usize,
+    timeout_ms: u32,
+) -> i32 {
+    run(|| {
+        let peer = crate::udp::parse_peer(input_bytes(peer_json, peer_len)?)?;
+        let bytes = input_bytes(data, len)?;
+        let inner = crate::listener::listener(listener)?;
+        crate::runtime::runtime().block_on(inner.send(peer, bytes, timeout_ms))?;
+        Ok(())
+    })
+}
+
+unsafe extern "C" fn c_listener_info(listener: u64, out: *mut Buf) -> i32 {
+    run(|| {
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let inner = crate::listener::listener(listener)?;
+        write_out(out, alloc_json(inner.info_json()))
+    })
+}
+
+unsafe extern "C" fn c_listener_close(listener: u64) -> i32 {
+    run(|| crate::listener::close(listener))
+}
+
+unsafe extern "C" fn c_mdns_publish(
+    client: u64,
+    request_json: *const u8,
+    request_len: usize,
+    timeout_ms: u32,
+    out_json: *mut Buf,
+) -> i32 {
+    run(|| {
+        if out_json.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let request = input_bytes(request_json, request_len)?;
+        let response = crate::mdns::publish(client, request, timeout_ms)?;
+        write_out(out_json, alloc_json(response))
+    })
+}
+
+unsafe extern "C" fn c_mdns_unpublish(
+    client: u64,
+    publication_id: *const c_char,
+    publication_id_len: usize,
+    timeout_ms: u32,
+) -> i32 {
+    run(|| {
+        let publication_id = input_str(publication_id, publication_id_len)?;
+        crate::mdns::unpublish(client, publication_id, timeout_ms)
+    })
+}
+
+unsafe extern "C" fn c_mdns_browse_open(
+    client: u64,
+    request_json: *const u8,
+    request_len: usize,
+    timeout_ms: u32,
+    out_call: *mut u64,
+) -> i32 {
+    run(|| {
+        if out_call.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_call"));
+        }
+        let request = input_bytes(request_json, request_len)?;
+        let call = crate::mdns::browse_open(client, request, timeout_ms)?;
+        write_out(out_call, call)
+    })
+}
+
+/* ------------------------------------------------------------------ *
  * Remote gRPC
  * ------------------------------------------------------------------ */
 
@@ -1097,6 +1415,18 @@ unsafe extern "C" fn c_handle_info(handle: u64, out: *mut Buf) -> i32 {
             write_out(out, alloc_json(http.info_json()))?;
             return Ok(());
         }
+        if let Some(stream) = crate::stream::STREAMS.get(handle) {
+            write_out(out, alloc_json(stream.info_json()))?;
+            return Ok(());
+        }
+        if let Some(udp) = crate::udp::UDP_SOCKETS.get(handle) {
+            write_out(out, alloc_json(udp.info_json()))?;
+            return Ok(());
+        }
+        if let Some(listener) = crate::listener::LISTENERS.get(handle) {
+            write_out(out, alloc_json(listener.info_json()))?;
+            return Ok(());
+        }
         Err(SdkError::new(NOT_FOUND, "unknown handle"))
     })
 }
@@ -1155,6 +1485,25 @@ pub static API: CapsuladApi = CapsuladApi {
     uuid_v4: c_uuid_v4,
     url_parse: c_url_parse,
     http_cancel: c_http_cancel,
+    tcp_open: c_tcp_open,
+    stream_read: c_stream_read,
+    stream_write: c_stream_write,
+    stream_shutdown: c_stream_shutdown,
+    stream_close: c_stream_close,
+    stream_info: c_stream_info,
+    udp_open: c_udp_open,
+    udp_send: c_udp_send,
+    udp_recv: c_udp_recv,
+    udp_close: c_udp_close,
+    listener_open: c_listener_open,
+    listener_accept: c_listener_accept,
+    listener_recv: c_listener_recv,
+    listener_send: c_listener_send,
+    listener_info: c_listener_info,
+    listener_close: c_listener_close,
+    mdns_publish: c_mdns_publish,
+    mdns_unpublish: c_mdns_unpublish,
+    mdns_browse_open: c_mdns_browse_open,
 };
 
 #[no_mangle]

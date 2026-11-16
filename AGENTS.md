@@ -48,6 +48,15 @@ packages out of a first-party app's production binary (`go list -deps` is the ch
 test-only loopback server over the transport seam is fine. Add a missing capability to the
 shared SDK instead of giving an app a second network stack.
 
+## Native SDK ABI is pre-release 1.0 (non-negotiable)
+
+The native SDK (`sdk/native`, `sdk/go`, `sdk/rust`) is pre-release with no external consumers.
+Do not bump `CAPSULAD_ABI_MINOR` (or the `abi_minor` in `capsulad-native.json` / runtime
+metadata) for additive function-table changes: keep ABI 1.0 / `1.0.0` until the first external
+consumer or a release. The table stays append-only — append new entries after the previous last
+field, never reorder or remove — and keep the `struct_size` negotiation so older bindings still
+load their shorter prefix.
+
 ## Keep the application manual in step (non-negotiable)
 
 Any change to an application-facing API MUST include the corresponding update to

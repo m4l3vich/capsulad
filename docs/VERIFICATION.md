@@ -193,16 +193,16 @@ stock Rockchip image.
 ## Verified only on the simulator or host
 
 - Complete virtual backend (segment display, RGB ring, contacts, keys and audio). The Go
-  suites for this tree were run here: `make test` and `make test-race` reported 32 packages
+  suites for this tree were run here: `make test` and `make test-race` reported 33 packages
   ok, with the single known `internal/daemon`
   `TestDumbAssistantEndsAfterSpeechOverColoredRoom` failure (see
   [Known pre-existing failures](#known-pre-existing-failures)); the clean race run reported
-  **0 data races**. `make test-sdk` passed (Rust 13 + 1 doc-test, native 39 + 23 integration,
-  the C++ example compiled), and the gated `CAPSULAD_TEST_LIBRARY` Go SDK suites passed 23
-  tests with no skips.
+  **0 data races**. `make test-sdk` exited 0; its per-suite counts and the gated Go SDK result
+  (37 pass, 0 fail, 1 skip) are recorded in the networking bullet below.
 - **Host builds and target compile (this macOS host, 2026-11-17).** `make daemon` produced
   `capsulad` 41,095,522 bytes and `capsulad-cli` 11,792,818 bytes (0.1.0-dev, SDK 0.5);
-  `make native` produced `libcapsulad.1.dylib` 5,270,288 bytes with metadata ABI 1.0;
+  `make native` produced `libcapsulad.1.dylib` 5,270,288 bytes with metadata ABI 1.0, which the
+  appended networking surface keeps (pre-release);
   `make sdk-go` and `make sdk-rust` passed (596,400-byte rlib); a fresh `WORK` directory built
   `capsulad-quickjs` 1,120,416 bytes and `capsulad-micropython` 352,520 bytes; `make devapps`
   built the sample set (`dev.hardware` 964,863 bytes); `make dumbassistant` produced a
@@ -427,7 +427,7 @@ stock Rockchip image.
   `src/primitives.rs` (base64, RFC 3986 percent coding, SHA-256, getrandom, UUIDv4 and
   absolute-URL decomposition) and `src/headers.rs` (strict header and metadata maps). The C
   ABI appends the new entry points and `CAPSULAD_STATUS_TOO_LARGE` without reordering the
-  table, so ABI 1.0 keeps its identity. Coverage:
+  table, so a binding built against the older prefix keeps its identity. Coverage:
   `cargo test --manifest-path sdk/native/Cargo.toml` exercises the primitives, the URL
   parser, HTTP over real loopback sockets (content length, chunked bodies, redirects,
   cross-origin header stripping, size caps, timeouts, TLS verification against the
@@ -438,7 +438,8 @@ stock Rockchip image.
   device DNS, clock or trust-store behavior. These suites were run for this verification:
   `make test-sdk` exercised the Rust primitives, HTTP, TLS and remote-gRPC coverage and the
   Go binding tests above, and `sdk/go go test ./...` passed 22 tests with
-  `CAPSULAD_TEST_LIBRARY` set (0 skips).
+  `CAPSULAD_TEST_LIBRARY` set (0 skips) at that point; the current networking run reports its own
+  counts below.
 
 - **Marusia delegates networking to the shared SDK (host builds).** `internal/vkclient`'s
   production transport calls `capsulad.OpenHTTP` and `capsulad.OpenGRPC`;
@@ -462,7 +463,69 @@ stock Rockchip image.
   not prove that the sandbox's outbound TLS reaches the vendor endpoint (open gate 16), and
   the size figure is a host binary, not the packaged aarch64 app. Both gated tests were run
   here with `CAPSULAD_TEST_LIBRARY` pointing at the staged host library and passed; the plain
-  and gated Marusia suites also passed under `-race` (5 packages, 0 races).
+  and gated Marusia suites also passed under `-race` (5 packages, 0 races). On HEAD `0727796`,
+  `go test ./...` and `go test -race ./...` in `apps/marusia` passed **7 packages** with
+  **0 data races**.
+
+- **Native SDK streams, UDP, listeners and mDNS (host only).** `libcapsulad` carries the
+  networking surface in its **ABI 1.0 pre-release** table (`tcp_open`, the stream functions,
+  UDP, the daemon-mediated listener functions and the mDNS calls) plus
+  `CAPSULAD_STATUS_UNSUPPORTED = 16`. The ABI identity is not bumped: `make native` produced a
+  **536-byte** `capsulad_api` table, `capsulad_version()` reports **`1.0.0`**,
+  `capsulad_abi_major()` is **1**, `capsulad_abi_minor()` is **0** and the emitted runtime
+  metadata names **minor 0**. The new pointers are appended after `http_cancel`; a table sized
+  for the pre-networking v1.0 prefix is still accepted
+  (`api_reports_v1_0_and_old_tables_still_load`) and a major-2 request is rejected with
+  `UNSUPPORTED_ABI` without writing the table. This is the append-only rule in `AGENTS.md`, not
+  a minor bump.
+  `sdk/native/tests/net.rs` covers, against loopback and fixture sockets:
+  `api_reports_v1_0_and_old_tables_still_load`, `tcp_round_trip_eof_and_shutdown`,
+  `tcp_timeout_leaves_stream_usable_and_close_unblocks`, `tcp_open_validates_arguments`,
+  `tls_stream_verifies_the_embedded_ca`, `udp_unconnected_send_recv_and_timeout`,
+  `udp_connected_send_recv_and_close_unblocks`,
+  `udp_rejects_bad_peer_and_oversized_datagrams`, and a fake daemon over a real `AF_UNIX`
+  `SOCK_SEQPACKET` pair for `listener_open_accept_over_real_control_channel`,
+  `listener_udp_recv_and_send_over_control_channel`,
+  `listener_open_without_control_channel_is_unsupported`,
+  `listener_open_with_invalid_fd_is_unsupported`, `listener_policy_error_is_surfaced`,
+  `listener_close_unblocks_accept`, `listener_options_are_validated` and
+  `mdns_validates_handles_and_requests`. The daemon side is covered by
+  `internal/appcontrol` (`TestTCPListenerFDIsUsable`, `TestUDPListenerFDIsUsable`,
+  `TestPolicyRejections` for 5353, the Web UI port, multicast/broadcast and the port range,
+  `TestMaxListenersPerRun`, `TestOversizedRequestIsRejected`,
+  `TestCloseRunReleasesSocketAndAllowsRelaunch`, `TestSendErrorClosesDupWithoutLeak`) and
+  `internal/supervisor` (`TestControlChannelPassesFDAndEnv` proves the descriptor is fd 3 with
+  `CAPSULAD_CONTROL_FD=3`; `TestControlChannelAbortOnFailedSpawn` proves a failed spawn releases
+  it). Discovery is covered with a fake responder: `internal/discovery`
+  (`TestNormalizeService`, `TestNormalizeQuery`, `TestServiceManagerPublishesAndBrowses`,
+  `TestUnsupportedServicesAreExplicit`) and `internal/daemon`
+  (`TestDiscoveryPublishIsScopedToRun`, `TestDiscoveryAuthAndFailureMapping`,
+  `TestDiscoveryBrowseStreamsEvents`, `TestRemoveRunPublicationsOnlyRunOwned`). The Go binding
+  adds option/status mapping (`TestTCPOptionsEncode`, `TestUDPAndListenerOptionsEncode`,
+  `TestMDNSCanonicalJSON`, `TestNetworkStatusMapping`) and loopback suites
+  (`TestTCPLoopbackEcho`, `TestUDPLoopbackEcho`, `TestTLSLoopbackEcho`) that are gated on
+  `CAPSULAD_TEST_LIBRARY`; `TestListenerPolicyUnsupported` and `TestMDNSPublishBrowse` need an
+  environment without a control channel, and `CAPSULAD_TEST_MDNS=1` with a supervised run id and
+  a live Avahi, respectively, so they are not host evidence. The Go binding
+  identity is checked by `sdk/go/regenerate-abi.sh --check`, which pins ABI minor 0 and status
+  16.
+
+  Runs recorded for this verification (host only, no device):
+  `cargo test --manifest-path sdk/native/Cargo.toml` passed **88** tests (lib 40, http 23,
+  net 25); `sdk/rust` passed **25** (lib 21, network 3, doc-test 1); the gated Go SDK suites with
+  `CAPSULAD_TEST_LIBRARY` reported **37 pass, 0 fail, 1 skip** (`TestMDNSPublishBrowse`, as
+  above); the focused `internal/appcontrol`, `internal/discovery`, `internal/supervisor` and
+  `internal/sandbox` suites passed **85** tests; the daemon discovery subset
+  (`go test ./internal/daemon -run 'TestDiscovery|TestRemoveRunPublications'`) passed **5/5**;
+  the full `internal/daemon` package passed **211** with the one known failure below.
+  `make test-sdk` exited **0**; `make test-go` reported **33 packages ok** with that same single
+  failure; `make test-race` also reported **33 packages ok**, **0 data races**, and the same
+  single failure.
+
+  Every listener and peer is a loopback fixture or a fake daemon; the responder is a fake, not
+  Avahi. Proof level: descriptor transfer, policy enforcement, stream/datagram bytes, timeout and
+  close behavior, ABI table negotiation and TLS verification on the host. It does **not** prove
+  device DNS, the device trust store, LAN reachability or Avahi visibility — see gates 22–24.
 
 - **Bluetooth advertised name (unit, simulator and WebSocket).** `ValidateAdapterName` is the
   single rule shared by the real manager, the simulator and the Web UI: trim, non-empty,
@@ -571,10 +634,11 @@ any latency figure, and one complete spoken turn. Those are open gate 16.
 ## Known pre-existing failures
 
 - `internal/daemon` `TestDumbAssistantEndsAfterSpeechOverColoredRoom` fails in this environment
-  and reproduces on pristine HEAD ("speech end 1 not detected", about 11 s). It is an
-  environmental/timing failure, not a regression from the changes recorded above. `make test`
-  and `make test-race` reported 32 packages ok with this one test the only failure, and the
-  race run reported **0 data races**.
+  and reproduces on pristine HEAD ("speech end 1 not detected"). It is an
+  environmental/timing failure, not a regression from the changes recorded above. The failure
+  fired at **11.10 s** here against **11.08 s, 11.28 s and 11.83 s** on pristine HEAD, so the
+  timing is in the same band. `make test-go` and `make test-race` reported 33 packages ok with
+  this one test the only failure, and the race run reported **0 data races**.
 - No settings race is recorded. An earlier settings-race report came from a race run whose
   staged host library had been removed by a failed native cross-build; the clean full
   `make test-race` run reported **0 data races**, so that report was a broken-build artifact,
@@ -684,3 +748,28 @@ document stays stable.
     settings-race report came from a race run against a staged host library that a failed
     native cross-build had removed; it was not a confirmed race. Re-open this gate only if
     settings concurrency changes.
+22. **Real Avahi publish/browse visibility.** On the unit, publish `_example._tcp` through
+    `DiscoveryService` from a supervised test app, confirm a second mDNS browser on the LAN
+    sees the instance with the expected host, addresses, port and TXT, confirm a colliding
+    instance is renamed rather than duplicated, unpublish removes it, run exit removes it, and
+    `avahi-browse -rt` still resolves after an Avahi or daemon restart. No device run of the
+    app-facing publication path is recorded; the host evidence uses a fake responder.
+23. **Listener LAN reachability and port policy.** On the unit, allocate an ephemeral TCP
+    listener, reach it from another host on the LAN, confirm 5353 and the configured Web UI port
+    are refused with the documented code, that a port already in use is `TRANSPORT`, that the
+    16-listener cap holds under the deployed supervisor, that a UDP listener receives and
+    replies, and that no listener survives run exit. All current listener evidence is loopback
+    or a fake daemon; nothing proves the device's interfaces or firewall behavior.
+24. **TLS roots and DNS on the device.** From inside the app sandbox, dial a public host by name
+    and verify the device trust store accepts it, dial with `roots: "pem"` and a private CA,
+    observe the failure modes for a name mismatch and a missing CA, and confirm that the sandbox
+    resolver (`/etc/resolv.conf`, `/etc/hosts`) works. The host proves verification against the
+    embedded test CA and loopback sockets only; device DNS, trust-store contents and outbound
+    reachability are unverified.
+
+No device evidence exists for the networking surface described in
+[app_development/network.md](app_development/network.md): outbound streams, UDP, listener
+allocation and mDNS publication are host-verified only, and these three gates must close before
+any device support is claimed. Do not read a host loopback fixture or the fake responder as a
+device result, and do not claim Avahi visibility, LAN reachability or device TLS/DNS behavior
+from this record.

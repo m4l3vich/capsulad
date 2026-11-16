@@ -18,10 +18,17 @@ hardware and every application process:
 - It exposes one local Unix socket. Every gRPC method an app can call lives on that socket,
   including app-to-app calls, which are relayed through the framework. There is no network
   gRPC listener and no per-app socket.
+- An app never creates or binds its own listening socket. When an app needs a fixed inbound
+  TCP or UDP port, the daemon allocates and binds the listener under policy and passes the
+  listening descriptor over the run's control channel; the app serves it and never owns the
+  bind. `udp_open` sockets bind an ephemeral port only, so they carry replies, not services.
 - It persists app settings declared in the app manifest, renders them in the Web UI, and
   delivers changes to the owning app.
 - It discovers app-published interfaces and relays calls to them, so one app can serve another
   without listening on anything.
+- Outbound TCP/UDP/TLS goes through the shared native SDK, and mDNS publication and browsing go
+  through the daemon's Avahi responder. An app never runs its own TLS server, mDNS responder or
+  listening socket.
 
 An app is therefore a normal process — native binary, JavaScript or Python — that connects to
 the framework socket, declares itself ready, serves the events it is given, and exits cleanly
@@ -226,6 +233,7 @@ The full walkthrough, including manifest fields, deployment bundles and rollback
 | [manifest.md](manifest.md) | Every manifest field, type, default, constraint and validation rule; runtimes; settings, actions, arguments, interfaces; complete examples. |
 | [lifecycle.md](lifecycle.md) | Launch, identity, environment variables, run states, restart and backoff, settings and action callbacks, shutdown, failures versus stops. |
 | [sdk.md](sdk.md) | The native SDK model, Go/Rust/C usage, handles and threading, status model, JSON versus protobuf, deadlines, outbound HTTP(S)/TLS, remote gRPC (TLS/h2c), encoding/hash/random/URL primitives, script hosts. |
+| [network.md](network.md) | Outbound TCP streams with verified TLS, UDP datagrams, daemon-mediated listeners (`CAPSULAD_CONTROL_FD`), and mDNS publish/browse through the daemon's Avahi responder: options, limits, errors, cleanup and examples. |
 | [app-bus.md](app-bus.md) | `Connect`, routed `Call`, notifications, descriptor publication, encoding rules, one stream per app, error codes. |
 | [services.md](services.md) | Every framework service and method with request/response fields. |
 | [output-input.md](output-input.md) | Presentation messages, readiness, captures, routing priority, touch modes, keys, gestures, dismissal. |

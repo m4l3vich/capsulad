@@ -425,6 +425,7 @@ func (d *Daemon) registerServices(srv *grpc.Server) {
 	frameworkv1.RegisterBluetoothMediaServiceServer(srv, &bluetoothMediaService{d: d})
 	frameworkv1.RegisterSensorServiceServer(srv, &sensorService{d: d})
 	frameworkv1.RegisterAssetServiceServer(srv, &assetService{d: d})
+	frameworkv1.RegisterDiscoveryServiceServer(srv, &discoveryService{d: d})
 	d.registerApplicationServices(srv)
 	d.registerMediaPlane(srv)
 	d.registerDiagnostics(srv)

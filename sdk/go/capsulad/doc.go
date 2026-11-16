@@ -63,7 +63,18 @@
 // fails with a typed error (LibraryError or ABIError) before any framework
 // state is touched.
 //
-// # Outbound networking and primitives
+// # App networking and primitives
+//
+// The appended ABI v1 surface exposes the runtime's networking primitives without
+// linking a Go transport stack: OpenTCP returns a *TCPStream (verified TLS
+// optional, io.EOF on a clean close, context-aware Read/Write), OpenUDP
+// returns a connected or unconnected *UDPConn, and OpenListener returns a
+// daemon-allocated *Listener (TCP Accept or UDP Receive/Send; Info reports the
+// actual bound port). Client.PublishMDNS, Client.UnpublishMDNS and
+// Client.BrowseMDNS use the daemon's Avahi responder; BrowseMDNS returns an
+// *MDNSBrowse iterator whose Next returns io.EOF at the end. Missing runtime
+// capabilities are reported as a *StatusError with native status
+// CAPSULAD_STATUS_UNSUPPORTED (16), never as a silent fallback.
 //
 // OpenHTTP and OpenGRPC return native clients for URLs outside the daemon;
 // GRPCClient.NewStream/Unary reuse the same Stream/call machinery. TLS is

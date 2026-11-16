@@ -36,6 +36,10 @@ pub const STATUS_NOT_FOUND: i32 = 12;
 pub const STATUS_BUSY: i32 = 13;
 pub const STATUS_INTERNAL: i32 = 14;
 pub const STATUS_TOO_LARGE: i32 = 15;
+/// The runtime lacks the capability (no control channel, no mDNS responder or
+/// an unsupported listener protocol). Appended to the v1 table in this
+/// pre-release tree.
+pub const STATUS_UNSUPPORTED: i32 = 16;
 
 pub const EVENT_UNKNOWN: i32 = 0;
 pub const EVENT_INVOCATION: i32 = 1;
@@ -282,6 +286,30 @@ pub type UuidV4Fn = unsafe extern "C" fn(*mut Buf) -> i32;
 pub type UrlParseFn = unsafe extern "C" fn(*const c_char, usize, *mut Buf) -> i32;
 pub type HttpCancelFn = unsafe extern "C" fn(u64, u64) -> i32;
 
+// Appended surface: streams, UDP, listeners and mDNS.
+pub type TcpOpenFn =
+    unsafe extern "C" fn(*const c_char, usize, u16, *const u8, usize, u32, *mut u64) -> i32;
+pub type StreamReadFn = unsafe extern "C" fn(u64, usize, u32, *mut Buf) -> i32;
+pub type StreamWriteFn = unsafe extern "C" fn(u64, *const u8, usize, u32, *mut usize) -> i32;
+pub type StreamShutdownFn = unsafe extern "C" fn(u64, i32) -> i32;
+pub type StreamCloseFn = unsafe extern "C" fn(u64) -> i32;
+pub type StreamInfoFn = unsafe extern "C" fn(u64, *mut Buf) -> i32;
+pub type UdpOpenFn =
+    unsafe extern "C" fn(*const c_char, usize, u16, *const u8, usize, u32, *mut u64) -> i32;
+pub type UdpSendFn =
+    unsafe extern "C" fn(u64, *const u8, usize, *const u8, usize, u32, *mut usize) -> i32;
+pub type UdpRecvFn = unsafe extern "C" fn(u64, usize, u32, *mut Buf, *mut Buf) -> i32;
+pub type UdpCloseFn = unsafe extern "C" fn(u64) -> i32;
+pub type ListenerOpenFn = unsafe extern "C" fn(*const u8, usize, u32, *mut u64, *mut Buf) -> i32;
+pub type ListenerAcceptFn = unsafe extern "C" fn(u64, u32, *mut u64, *mut Buf) -> i32;
+pub type ListenerRecvFn = unsafe extern "C" fn(u64, usize, u32, *mut Buf, *mut Buf) -> i32;
+pub type ListenerSendFn = unsafe extern "C" fn(u64, *const u8, usize, *const u8, usize, u32) -> i32;
+pub type ListenerInfoFn = unsafe extern "C" fn(u64, *mut Buf) -> i32;
+pub type ListenerCloseFn = unsafe extern "C" fn(u64) -> i32;
+pub type MdnsPublishFn = unsafe extern "C" fn(u64, *const u8, usize, u32, *mut Buf) -> i32;
+pub type MdnsUnpublishFn = unsafe extern "C" fn(u64, *const c_char, usize, u32) -> i32;
+pub type MdnsBrowseOpenFn = unsafe extern "C" fn(u64, *const u8, usize, u32, *mut u64) -> i32;
+
 /// Function table. Field order is frozen by ABI v1; future minors only append.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -342,6 +370,27 @@ pub struct Api {
     pub uuid_v4: UuidV4Fn,
     pub url_parse: UrlParseFn,
     pub http_cancel: HttpCancelFn,
+
+    // Appended after http_cancel: streams, UDP, listeners and mDNS.
+    pub tcp_open: TcpOpenFn,
+    pub stream_read: StreamReadFn,
+    pub stream_write: StreamWriteFn,
+    pub stream_shutdown: StreamShutdownFn,
+    pub stream_close: StreamCloseFn,
+    pub stream_info: StreamInfoFn,
+    pub udp_open: UdpOpenFn,
+    pub udp_send: UdpSendFn,
+    pub udp_recv: UdpRecvFn,
+    pub udp_close: UdpCloseFn,
+    pub listener_open: ListenerOpenFn,
+    pub listener_accept: ListenerAcceptFn,
+    pub listener_recv: ListenerRecvFn,
+    pub listener_send: ListenerSendFn,
+    pub listener_info: ListenerInfoFn,
+    pub listener_close: ListenerCloseFn,
+    pub mdns_publish: MdnsPublishFn,
+    pub mdns_unpublish: MdnsUnpublishFn,
+    pub mdns_browse_open: MdnsBrowseOpenFn,
 }
 
 /// Bytes this binding was compiled against. A native table must be at least
@@ -357,7 +406,7 @@ impl Api {
             std::mem::size_of::<F>() == std::mem::size_of::<usize>()
                 && unsafe { std::mem::transmute_copy::<F, usize>(&field) } != 0
         }
-        let required: [(&str, bool); 46] = [
+        let required: [(&str, bool); 65] = [
             ("client_connect", set(self.client_connect)),
             ("client_close", set(self.client_close)),
             (
@@ -407,6 +456,25 @@ impl Api {
             ("uuid_v4", set(self.uuid_v4)),
             ("url_parse", set(self.url_parse)),
             ("http_cancel", set(self.http_cancel)),
+            ("tcp_open", set(self.tcp_open)),
+            ("stream_read", set(self.stream_read)),
+            ("stream_write", set(self.stream_write)),
+            ("stream_shutdown", set(self.stream_shutdown)),
+            ("stream_close", set(self.stream_close)),
+            ("stream_info", set(self.stream_info)),
+            ("udp_open", set(self.udp_open)),
+            ("udp_send", set(self.udp_send)),
+            ("udp_recv", set(self.udp_recv)),
+            ("udp_close", set(self.udp_close)),
+            ("listener_open", set(self.listener_open)),
+            ("listener_accept", set(self.listener_accept)),
+            ("listener_recv", set(self.listener_recv)),
+            ("listener_send", set(self.listener_send)),
+            ("listener_info", set(self.listener_info)),
+            ("listener_close", set(self.listener_close)),
+            ("mdns_publish", set(self.mdns_publish)),
+            ("mdns_unpublish", set(self.mdns_unpublish)),
+            ("mdns_browse_open", set(self.mdns_browse_open)),
         ];
         for (name, present) in required {
             if !present {
@@ -477,6 +545,7 @@ mod tests {
         assert_eq!(STATUS_BUSY, 13);
         assert_eq!(STATUS_INTERNAL, 14);
         assert_eq!(STATUS_TOO_LARGE, 15);
+        assert_eq!(STATUS_UNSUPPORTED, 16);
 
         assert_eq!(EVENT_UNKNOWN, 0);
         assert_eq!(EVENT_INVOCATION, 1);
@@ -554,7 +623,26 @@ mod tests {
             assert_eq!(offset(p, addr_of!((*p).uuid_v4)), 360);
             assert_eq!(offset(p, addr_of!((*p).url_parse)), 368);
             assert_eq!(offset(p, addr_of!((*p).http_cancel)), 376);
+            assert_eq!(offset(p, addr_of!((*p).tcp_open)), 384);
+            assert_eq!(offset(p, addr_of!((*p).stream_read)), 392);
+            assert_eq!(offset(p, addr_of!((*p).stream_write)), 400);
+            assert_eq!(offset(p, addr_of!((*p).stream_shutdown)), 408);
+            assert_eq!(offset(p, addr_of!((*p).stream_close)), 416);
+            assert_eq!(offset(p, addr_of!((*p).stream_info)), 424);
+            assert_eq!(offset(p, addr_of!((*p).udp_open)), 432);
+            assert_eq!(offset(p, addr_of!((*p).udp_send)), 440);
+            assert_eq!(offset(p, addr_of!((*p).udp_recv)), 448);
+            assert_eq!(offset(p, addr_of!((*p).udp_close)), 456);
+            assert_eq!(offset(p, addr_of!((*p).listener_open)), 464);
+            assert_eq!(offset(p, addr_of!((*p).listener_accept)), 472);
+            assert_eq!(offset(p, addr_of!((*p).listener_recv)), 480);
+            assert_eq!(offset(p, addr_of!((*p).listener_send)), 488);
+            assert_eq!(offset(p, addr_of!((*p).listener_info)), 496);
+            assert_eq!(offset(p, addr_of!((*p).listener_close)), 504);
+            assert_eq!(offset(p, addr_of!((*p).mdns_publish)), 512);
+            assert_eq!(offset(p, addr_of!((*p).mdns_unpublish)), 520);
+            assert_eq!(offset(p, addr_of!((*p).mdns_browse_open)), 528);
         }
-        assert_eq!(TABLE_SIZE, 384);
+        assert_eq!(TABLE_SIZE, 536);
     }
 }

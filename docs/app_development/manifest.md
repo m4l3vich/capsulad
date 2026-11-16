@@ -6,8 +6,10 @@ launch arguments, the interfaces it publishes, an optional custom settings docum
 optional provenance evidence.
 
 The manifest is **declarative metadata for the supervisor, the UI and discovery**. It is not a
-permission or security policy: it cannot declare an output port, a service endpoint, a socket
-or a capability grant. Access is decided by the framework from the connection's identity.
+permission or security policy: it cannot declare an output port, a service endpoint, a listening
+socket, an mDNS advertisement or a capability grant. Access is decided by the framework from the
+connection's identity, and a listener or publication is requested at runtime from the daemon, not
+declared here.
 
 Validation runs at packaging (`capsulad-cli app package`), at install and at launch. Unknown
 keys are rejected, so a typo cannot silently disable a feature.

@@ -3444,3 +3444,207 @@ var AssetService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "capsulad/framework/v1/framework.proto",
 }
+
+const (
+	DiscoveryService_Publish_FullMethodName   = "/capsulad.framework.v1.DiscoveryService/Publish"
+	DiscoveryService_Unpublish_FullMethodName = "/capsulad.framework.v1.DiscoveryService/Unpublish"
+	DiscoveryService_Browse_FullMethodName    = "/capsulad.framework.v1.DiscoveryService/Browse"
+)
+
+// DiscoveryServiceClient is the client API for DiscoveryService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// -----------------------------------------------------------------------------
+// Local service discovery through the host's mDNS responder.
+//
+// The daemon publishes and browses on behalf of supervised apps; it never
+// opens the mDNS port itself. Avahi owns multicast DNS on the stock image.
+// Publish/Unpublish are scoped to the caller's supervised run and are removed
+// when that run exits. Browse is a server stream of resolved services. A build
+// without a responder returns FAILED_PRECONDITION or UNIMPLEMENTED, never a
+// false success.
+// -----------------------------------------------------------------------------
+type DiscoveryServiceClient interface {
+	Publish(ctx context.Context, in *PublishServiceRequest, opts ...grpc.CallOption) (*PublishServiceResponse, error)
+	Unpublish(ctx context.Context, in *UnpublishServiceRequest, opts ...grpc.CallOption) (*UnpublishServiceResponse, error)
+	Browse(ctx context.Context, in *BrowseServicesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DiscoveredService], error)
+}
+
+type discoveryServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewDiscoveryServiceClient(cc grpc.ClientConnInterface) DiscoveryServiceClient {
+	return &discoveryServiceClient{cc}
+}
+
+func (c *discoveryServiceClient) Publish(ctx context.Context, in *PublishServiceRequest, opts ...grpc.CallOption) (*PublishServiceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishServiceResponse)
+	err := c.cc.Invoke(ctx, DiscoveryService_Publish_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *discoveryServiceClient) Unpublish(ctx context.Context, in *UnpublishServiceRequest, opts ...grpc.CallOption) (*UnpublishServiceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnpublishServiceResponse)
+	err := c.cc.Invoke(ctx, DiscoveryService_Unpublish_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *discoveryServiceClient) Browse(ctx context.Context, in *BrowseServicesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DiscoveredService], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &DiscoveryService_ServiceDesc.Streams[0], DiscoveryService_Browse_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[BrowseServicesRequest, DiscoveredService]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiscoveryService_BrowseClient = grpc.ServerStreamingClient[DiscoveredService]
+
+// DiscoveryServiceServer is the server API for DiscoveryService service.
+// All implementations must embed UnimplementedDiscoveryServiceServer
+// for forward compatibility.
+//
+// -----------------------------------------------------------------------------
+// Local service discovery through the host's mDNS responder.
+//
+// The daemon publishes and browses on behalf of supervised apps; it never
+// opens the mDNS port itself. Avahi owns multicast DNS on the stock image.
+// Publish/Unpublish are scoped to the caller's supervised run and are removed
+// when that run exits. Browse is a server stream of resolved services. A build
+// without a responder returns FAILED_PRECONDITION or UNIMPLEMENTED, never a
+// false success.
+// -----------------------------------------------------------------------------
+type DiscoveryServiceServer interface {
+	Publish(context.Context, *PublishServiceRequest) (*PublishServiceResponse, error)
+	Unpublish(context.Context, *UnpublishServiceRequest) (*UnpublishServiceResponse, error)
+	Browse(*BrowseServicesRequest, grpc.ServerStreamingServer[DiscoveredService]) error
+	mustEmbedUnimplementedDiscoveryServiceServer()
+}
+
+// UnimplementedDiscoveryServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedDiscoveryServiceServer struct{}
+
+func (UnimplementedDiscoveryServiceServer) Publish(context.Context, *PublishServiceRequest) (*PublishServiceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Publish not implemented")
+}
+func (UnimplementedDiscoveryServiceServer) Unpublish(context.Context, *UnpublishServiceRequest) (*UnpublishServiceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Unpublish not implemented")
+}
+func (UnimplementedDiscoveryServiceServer) Browse(*BrowseServicesRequest, grpc.ServerStreamingServer[DiscoveredService]) error {
+	return status.Errorf(codes.Unimplemented, "method Browse not implemented")
+}
+func (UnimplementedDiscoveryServiceServer) mustEmbedUnimplementedDiscoveryServiceServer() {}
+func (UnimplementedDiscoveryServiceServer) testEmbeddedByValue()                          {}
+
+// UnsafeDiscoveryServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to DiscoveryServiceServer will
+// result in compilation errors.
+type UnsafeDiscoveryServiceServer interface {
+	mustEmbedUnimplementedDiscoveryServiceServer()
+}
+
+func RegisterDiscoveryServiceServer(s grpc.ServiceRegistrar, srv DiscoveryServiceServer) {
+	// If the following call pancis, it indicates UnimplementedDiscoveryServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&DiscoveryService_ServiceDesc, srv)
+}
+
+func _DiscoveryService_Publish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiscoveryServiceServer).Publish(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiscoveryService_Publish_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiscoveryServiceServer).Publish(ctx, req.(*PublishServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DiscoveryService_Unpublish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnpublishServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiscoveryServiceServer).Unpublish(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiscoveryService_Unpublish_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiscoveryServiceServer).Unpublish(ctx, req.(*UnpublishServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DiscoveryService_Browse_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(BrowseServicesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(DiscoveryServiceServer).Browse(m, &grpc.GenericServerStream[BrowseServicesRequest, DiscoveredService]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiscoveryService_BrowseServer = grpc.ServerStreamingServer[DiscoveredService]
+
+// DiscoveryService_ServiceDesc is the grpc.ServiceDesc for DiscoveryService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var DiscoveryService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "capsulad.framework.v1.DiscoveryService",
+	HandlerType: (*DiscoveryServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Publish",
+			Handler:    _DiscoveryService_Publish_Handler,
+		},
+		{
+			MethodName: "Unpublish",
+			Handler:    _DiscoveryService_Unpublish_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Browse",
+			Handler:       _DiscoveryService_Browse_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "capsulad/framework/v1/framework.proto",
+}

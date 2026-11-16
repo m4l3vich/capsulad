@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "Capsulad native SDK: UDS gRPC engine, outbound HTTP/remote gRPC and a stable C ABI"
+description = "Capsulad native SDK: UDS gRPC engine, outbound HTTP, TCP/TLS streams, UDP, daemon-mediated listeners, mDNS and a stable C ABI"
 publish = false
 
 [lib]
@@ -24,7 +24,7 @@ prost-types = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring", "logging"] }
 tonic = { version = "0.14", default-features = false, features = ["transport"] }
 tower = { version = "0.5", features = ["util"] }

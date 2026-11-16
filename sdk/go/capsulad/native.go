@@ -47,6 +47,7 @@ const (
 	statusBusy        = 13
 	statusInternal    = 14
 	statusTooLarge    = 15
+	statusUnsupported = 16
 )
 
 var (
@@ -670,4 +671,213 @@ func nativeStatusError(op string, status int32, detail string) error {
 		detail = fmt.Sprintf("native status %d", status)
 	}
 	return &StatusError{Op: op, Code: status, Message: detail, NativeStatus: true}
+}
+
+/* ------------------------------------------------------------------ *
+ * Appended surface: streams, UDP, listeners and mDNS
+ * ------------------------------------------------------------------ */
+
+func tcpOpenNative(host string, port uint16, options []byte, timeoutMS uint32) (uint64, error) {
+	h, hl := cstr(host)
+	data, length := cbytes(options)
+	var handle C.capsulad_handle
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_tcp_open(h, hl, C.uint16_t(port), data, length,
+		C.uint32_t(timeoutMS), &handle, ep, el)
+	runtime.KeepAlive(host)
+	runtime.KeepAlive(options)
+	if err := nativeError("open tcp stream", status, errText(&errBuf)); err != nil {
+		return 0, err
+	}
+	return uint64(handle), nil
+}
+
+func streamReadNative(handle uint64, maxLen int, timeoutMS uint32) ([]byte, int32, string) {
+	var out C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_stream_read(C.capsulad_handle(handle), C.size_t(maxLen),
+		C.uint32_t(timeoutMS), &out, ep, el)
+	return takeBuf(out), int32(status), errText(&errBuf)
+}
+
+func streamWriteNative(handle uint64, data []byte, timeoutMS uint32) (int, int32, string) {
+	d, length := cbytes(data)
+	var written C.size_t
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_stream_write(C.capsulad_handle(handle), d, length,
+		C.uint32_t(timeoutMS), &written, ep, el)
+	runtime.KeepAlive(data)
+	return int(written), int32(status), errText(&errBuf)
+}
+
+func streamShutdownNative(handle uint64, how int32) error {
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_stream_shutdown(C.capsulad_handle(handle), C.int32_t(how),
+		ep, el)
+	return nativeStatusError("shutdown stream", int32(status), errText(&errBuf))
+}
+
+func streamCloseNative(handle uint64) error {
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_stream_close(C.capsulad_handle(handle), ep, el)
+	return nativeStatusError("close stream", int32(status), errText(&errBuf))
+}
+
+func streamInfoNative(handle uint64) ([]byte, int32, string) {
+	var out C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_stream_info(C.capsulad_handle(handle), &out, ep, el)
+	return takeBuf(out), int32(status), errText(&errBuf)
+}
+
+func udpOpenNative(host string, port uint16, options []byte, timeoutMS uint32) (uint64, error) {
+	h, hl := cstr(host)
+	data, length := cbytes(options)
+	var handle C.capsulad_handle
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_udp_open(h, hl, C.uint16_t(port), data, length,
+		C.uint32_t(timeoutMS), &handle, ep, el)
+	runtime.KeepAlive(host)
+	runtime.KeepAlive(options)
+	if err := nativeStatusError("open udp socket", int32(status), errText(&errBuf)); err != nil {
+		return 0, err
+	}
+	return uint64(handle), nil
+}
+
+func udpSendNative(handle uint64, peerJSON, data []byte, timeoutMS uint32) (int, int32, string) {
+	p, pl := cbytes(peerJSON)
+	d, dl := cbytes(data)
+	var sent C.size_t
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_udp_send(C.capsulad_handle(handle), p, pl, d, dl,
+		C.uint32_t(timeoutMS), &sent, ep, el)
+	runtime.KeepAlive(peerJSON)
+	runtime.KeepAlive(data)
+	return int(sent), int32(status), errText(&errBuf)
+}
+
+func udpRecvNative(handle uint64, maxLen int, timeoutMS uint32) ([]byte, []byte, int32, string) {
+	var out C.capsulad_buf
+	var peer C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_udp_recv(C.capsulad_handle(handle), C.size_t(maxLen),
+		C.uint32_t(timeoutMS), &out, &peer, ep, el)
+	return takeBuf(out), takeBuf(peer), int32(status), errText(&errBuf)
+}
+
+func udpCloseNative(handle uint64) error {
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_udp_close(C.capsulad_handle(handle), ep, el)
+	return nativeStatusError("close udp socket", int32(status), errText(&errBuf))
+}
+
+func listenerOpenNative(options []byte, timeoutMS uint32) (uint64, []byte, int32, string) {
+	data, length := cbytes(options)
+	var handle C.capsulad_handle
+	var info C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_open(data, length, C.uint32_t(timeoutMS),
+		&handle, &info, ep, el)
+	runtime.KeepAlive(options)
+	return uint64(handle), takeBuf(info), int32(status), errText(&errBuf)
+}
+
+func listenerAcceptNative(handle uint64, timeoutMS uint32) (uint64, []byte, int32, string) {
+	var stream C.capsulad_handle
+	var peer C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_accept(C.capsulad_handle(handle),
+		C.uint32_t(timeoutMS), &stream, &peer, ep, el)
+	return uint64(stream), takeBuf(peer), int32(status), errText(&errBuf)
+}
+
+func listenerRecvNative(handle uint64, maxLen int, timeoutMS uint32) ([]byte, []byte, int32, string) {
+	var out C.capsulad_buf
+	var peer C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_recv(C.capsulad_handle(handle), C.size_t(maxLen),
+		C.uint32_t(timeoutMS), &out, &peer, ep, el)
+	return takeBuf(out), takeBuf(peer), int32(status), errText(&errBuf)
+}
+
+func listenerSendNative(handle uint64, peerJSON, data []byte, timeoutMS uint32) (int, int32, string) {
+	p, pl := cbytes(peerJSON)
+	d, dl := cbytes(data)
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_send(C.capsulad_handle(handle), p, pl, d, dl,
+		C.uint32_t(timeoutMS), ep, el)
+	runtime.KeepAlive(peerJSON)
+	runtime.KeepAlive(data)
+	// listener_send has no out_sent parameter: a successful call sent the whole
+	// datagram.
+	sent := 0
+	if int32(status) == statusOK {
+		sent = len(data)
+	}
+	return sent, int32(status), errText(&errBuf)
+}
+
+func listenerInfoNative(handle uint64) ([]byte, int32, string) {
+	var out C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_info(C.capsulad_handle(handle), &out, ep, el)
+	return takeBuf(out), int32(status), errText(&errBuf)
+}
+
+func listenerCloseNative(handle uint64) error {
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_listener_close(C.capsulad_handle(handle), ep, el)
+	return nativeStatusError("close listener", int32(status), errText(&errBuf))
+}
+
+func mdnsPublishNative(client uint64, request []byte, timeoutMS uint32) ([]byte, int32, string) {
+	data, length := cbytes(request)
+	var out C.capsulad_buf
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_mdns_publish(C.capsulad_handle(client), data, length,
+		C.uint32_t(timeoutMS), &out, ep, el)
+	runtime.KeepAlive(request)
+	return takeBuf(out), int32(status), errText(&errBuf)
+}
+
+func mdnsUnpublishNative(client uint64, publicationID string, timeoutMS uint32) (int32, string) {
+	id, idLen := cstr(publicationID)
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_mdns_unpublish(C.capsulad_handle(client), id, idLen,
+		C.uint32_t(timeoutMS), ep, el)
+	runtime.KeepAlive(publicationID)
+	return int32(status), errText(&errBuf)
+}
+
+func mdnsBrowseOpenNative(client uint64, request []byte, timeoutMS uint32) (uint64, error) {
+	data, length := cbytes(request)
+	var call C.capsulad_handle
+	var errBuf [nativeErrSize]byte
+	ep, el := errPtr(&errBuf)
+	status := C.capsulad_shim_mdns_browse_open(C.capsulad_handle(client), data, length,
+		C.uint32_t(timeoutMS), &call, ep, el)
+	runtime.KeepAlive(request)
+	if err := nativeStatusError("open mdns browse", int32(status), errText(&errBuf)); err != nil {
+		return 0, err
+	}
+	return uint64(call), nil
 }

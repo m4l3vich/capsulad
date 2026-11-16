@@ -5,8 +5,10 @@ speaker; `capsulad` is the project and the daemon, and "Capsula Mini" is only th
 name. It supervises application processes, owns the hardware abstraction, routes
 dynamic presentations and captures, mixes audio, serves an HTTPS Web UI, and exposes one
 local gRPC surface over a Unix socket. Applications are ordinary executables or scripts
-that talk to that socket through the shared native SDK or a script host; they never listen
-on a socket of their own or write hardware directly.
+that talk to that socket through the shared native SDK or a script host. They never create or
+bind a listening socket of their own and never write hardware directly: outbound networking and
+mDNS run through the shared SDK and the daemon's responder, and a fixed inbound TCP or UDP port
+exists only as a listener the daemon allocated and handed to the app.
 
 The only supported hardware configuration is the Capsula Mini rev 4 running the stock
 Rockchip firmware (RK3308, aarch64 glibc 2.33). Its board specifics are inert data in
@@ -43,22 +45,32 @@ version.
    sensors · Bluetooth · GPIO       static API keys, /ws protobuf stream
 ```
 
-- **One Unix-socket gRPC API.** Sixteen framework services (device, settings, routing,
+- **One Unix-socket gRPC API.** Seventeen framework services (device, settings, routing,
   presentation, audio, input, assistant, application, application configuration,
-  app-interface, app-bus, sensor, system, Bluetooth media, diagnostics, asset) on one socket.
-  There is no network gRPC listener and no per-app IPC socket.
+  app-interface, app-bus, sensor, system, Bluetooth media, diagnostics, asset, discovery) on one
+  socket. There is no network gRPC listener and no per-app IPC socket. Inbound TCP/UDP is not a
+  service on that socket: the daemon allocates and binds a listening socket, applies the address
+  and port policy, and passes the descriptor over the run's inherited control channel
+  (`CAPSULAD_CONTROL_FD`). An app therefore serves a listener it never created.
 - **AppBus reverse RPC.** Each app holds one long-lived `Connect` stream. Routed unary
-  and streaming calls reach other apps through `AppBusService.Call`; no app accepts an
-  inbound connection.
+  and streaming calls reach other apps through `AppBusService.Call`; no app accepts an inbound
+  bus connection. A routed call never opens a connection to the target.
 - **Shared native SDK.** `libcapsulad` is a pure Rust cdylib exposing a frozen C ABI v1
   through one bounded `capsulad_get_api` table. It owns the Unix-socket gRPC engine,
   protobuf/JSON reflection, AppBus sessions, routed calls, the raw-PCM audio path,
-  outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, and the
+  outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, outbound TCP/TLS streams,
+  UDP, daemon-mediated listeners, mDNS calls, and the
   encoding/hash/random/URL primitives (base64, percent coding, SHA-256, getrandom,
-  UUIDv4, absolute-URL parsing). ABI 1.0 keeps its identity: the new entry points are
-  appended to the table under the same major version. Thin Go and Rust bindings load it
+  UUIDv4, absolute-URL parsing). ABI 1 keeps its identity (1.0, pre-release): the HTTP,
+  remote-gRPC, primitive, stream, UDP, listener and mDNS entry points are appended to the table,
+  and `CAPSULAD_STATUS_UNSUPPORTED` is appended to the status list. The table stays append-only
+  at ABI 1.0 until the first external consumer or release. Thin Go and Rust bindings load it
   dynamically; C and C++ use the installed header. Native apps should not bundle their
   own HTTP, TLS or gRPC stack.
+- **Egress and discovery.** Outbound streams verify TLS 1.2+ with system, webpki or caller PEM
+  roots and have no insecure mode. mDNS publication and browsing go through the daemon's Avahi
+  responder, never an app-owned responder: publications are scoped to the calling run, removed
+  on run exit, and surfaced through `DiscoveryService` and the SDK's mDNS calls.
 - **Presentations and captures.** Apps open output presentations and acquire routing
   captures. First valid frame makes a presentation eligible; the latest eligible capture
   wins; release, crash and app stop fall back to the selected default baseline.
@@ -147,7 +159,10 @@ version.
   UTF-8 bytes on a rune boundary, because that is the SSID limit; the saved host name is
   only a fallback for a device without Bluetooth.
 - **Discovery:** Avahi mDNS host name (`<label>.local`), applied idempotently and never
-  written when the label is already active.
+  written when the label is already active, plus app-facing mDNS publication and browsing
+  through `DiscoveryService` and the SDK's `mdns_*` calls. A publication is scoped to the
+  calling run and removed on unpublish, run exit and daemon shutdown; a build without a
+  responder (the simulator) rejects the call instead of faking success.
 - **Personal wakewords:** on-device training and inference over the shared processed
   microphone tap, with take-provenance sidecars and atomic model replacement. Each installed
   word is its own artifact under `<data-dir>/wakeword/models/<id>.json`, can be enabled or
@@ -335,6 +350,10 @@ before the next turn.
   on-device recognition after deployment is still to be confirmed by physical presses.
 - **Script hosts inherit the mount-only sandbox.** QuickJS and MicroPython are sandboxed
   exactly like native apps; there is no stronger isolation available.
+- **Apps share the device's network stack.** `CLONE_NEWNET` is unavailable, so there is no
+  per-app network namespace and no per-destination egress allowlist. Listener binds are
+  daemon-policed, but a compromised app can still reach anything the device routes. Treat
+  native apps as trusted code.
 - **Amlogic is unsupported and has no backend.** `-platform amlogic-stock` and
   `-platform amlogic-alpine` are rejected as unknown platforms
   (`unknown platform "…" (simulator, rockchip-stock)`), and the historical
@@ -440,7 +459,7 @@ before the next turn.
 |---|---|
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | prerequisites, build targets, cross builds, packaging, deployment, simulator, tests, admin commands |
 | [docs/app_development/README.md](docs/app_development/README.md) | the application manual: supported targets, prerequisites, a complete native app and the page index |
-| [manifest](docs/app_development/manifest.md), [lifecycle](docs/app_development/lifecycle.md), [sdk](docs/app_development/sdk.md), [app bus](docs/app_development/app-bus.md) | artifact and manifest fields, launch/identity/restart, the native SDK including HTTP/TLS, remote gRPC and primitives, and script hosts, routed calls between apps |
+| [manifest](docs/app_development/manifest.md), [lifecycle](docs/app_development/lifecycle.md), [sdk](docs/app_development/sdk.md), [network](docs/app_development/network.md), [app bus](docs/app_development/app-bus.md) | artifact and manifest fields, launch/identity/restart, the native SDK including HTTP/TLS, remote gRPC, streams, UDP, listeners and primitives, the `<label>.local`/mDNS surface, and script hosts, routed calls between apps |
 | [services](docs/app_development/services.md), [output & input](docs/app_development/output-input.md), [audio](docs/app_development/audio.md), [settings & actions](docs/app_development/settings-actions.md) | every framework service and method, presentations/captures/keys/gestures, audio streams and indication, typed settings and actions |
 | [assets](docs/app_development/assets.md), [standard contracts](docs/app_development/standard-contracts.md), [packaging & deployment](docs/app_development/packaging-deployment.md), [security](docs/app_development/security.md), [troubleshooting](docs/app_development/troubleshooting.md) | the asset store, clock/ring/media contracts, install and deployment bundles, sandbox and trust boundaries, common failures |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | proof levels, measured device evidence, host-only evidence, unavailable paths and open gates |

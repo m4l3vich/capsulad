@@ -284,6 +284,10 @@ func (d *Daemon) onRunExit(run supervisor.Run) {
 func (d *Daemon) cleanupRun(runID, appID string) {
 	d.pres.RemoveRun(runID)
 	d.router.RemoveRun(runID)
+	d.removeRunPublications(runID)
+	if d.appControl != nil {
+		d.appControl.CloseRun(runID)
+	}
 	d.audio.RemoveRun(runID)
 	d.dropPending(runID)
 	// A held talk-key activation belongs to the app that received the press.

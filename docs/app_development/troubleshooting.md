@@ -211,6 +211,67 @@ To break a loop: `app stop <run-id>` (a deliberate stop stays stopped), then fix
 If the app is the selected default, deselect it or select another provider before expecting it to
 stay stopped. Uninstalling a looping app requires stopping its run first.
 
+## TCP dial, TLS and DNS fail
+
+**Symptom** — `tcp_open` (or `http_open`/`grpc_open`) fails, or a stream stalls before any data.
+
+| Status / message | Cause | Fix |
+|---|---|---|
+| `TRANSPORT` naming a host or address | DNS failed, the name has no record, or the host is unreachable from the device's network | Resolve the name yourself first; use an IP literal to isolate DNS; check the device's link. The sandbox mounts `/etc/resolv.conf` and `/etc/hosts` read-only. |
+| `TRANSPORT` naming a certificate or host name | Untrusted chain, expired certificate, or the certificate does not match `server_name` | Use the right `server_name`, install the CA with `ca_pem`, or fix the server certificate. There is no verification override. |
+| `TRANSPORT` right after `tcp_open` succeeds | The peer closed or reset before the first read | Treat it as a failed exchange; do not retry in a tight loop. |
+| `TIMEOUT` | The deadline covered DNS, TCP and TLS together and was too small, or the peer accepted but never completed the handshake | Raise `timeout_ms` (`0` selects 30 s) and retry once. |
+| `INVALID_ARGUMENT` mentioning an option | A mistyped key such as `root` or `tls_verify` | Use only `tls`, `roots`, `ca_pem`, `server_name`, `nodelay`. Unknown keys are rejected on purpose. |
+| `INVALID_ARGUMENT` for the host or port | Empty host, host over 255 bytes, or port `0` | Pass a real name or IP and a port in `1..65535`. |
+| `stream_write` returns fewer bytes than sent | Normal short write | Loop until everything is written; never assume one write drains the buffer. |
+| `INVALID_ARGUMENT` on a zero-length write | `stream_write` rejects an empty buffer | Write only when you have bytes; an empty write is a caller bug, not a flush. |
+| `stream_read` returns `END_OF_STREAM` | The peer closed cleanly | Stop reading and close the stream. It is not an error, and it is not a zero-byte frame. |
+| `CLOSED` on write | `CAPSULAD_SHUTDOWN_WRITE` was already applied | Stop writing; close the stream when the read side is done. |
+
+## UDP send or receive fails
+
+| Status / message | Cause | Fix |
+|---|---|---|
+| `INVALID_ARGUMENT` "needs both host and port, or neither" | `udp_open` got a host with port `0`, or an empty host with a port | Pass both to connect, or neither to stay unconnected. |
+| `INVALID_ARGUMENT` on the local port | `udp_open` binds an ephemeral port only | Leave the bind port at `0`; a fixed inbound UDP port is a UDP listener. |
+| `INVALID_ARGUMENT` "is not an IP literal" | Peer JSON carried a DNS name | Resolve the name yourself and send to an IP literal. |
+| `NOT_CONNECTED` on send | Unconnected socket with empty peer JSON | Name the peer on every send. |
+| `TOO_LARGE` | Payload over 65507 bytes, or a receive `max_len` above it | Chunk at the application level; a datagram cannot exceed the protocol maximum. |
+| Received fewer bytes than sent | `max_len` was smaller than the datagram | UDP truncates: the remainder of that datagram is lost, not buffered. |
+
+## mDNS publication does nothing
+
+**Symptom** — `Publish` fails, or a browser on the LAN never sees the service.
+
+| Status / message | Cause | Fix |
+|---|---|---|
+| `FAILED_PRECONDITION` naming the responder | Simulator or a build without Avahi, or Avahi is not running/registering after a restart | mDNS is device-only; retry on the unit after `avahi-daemon` is up. Never treat this as a successful publication. |
+| `PERMISSION_DENIED` | The call was made without a supervised app identity | Connect with `CAPSULAD_RUN_ID` from inside the run; an administrator connection cannot publish. |
+| `INVALID_ARGUMENT` about the service type | `example._tcp`, `_example.tcp`, or a name with an underscore inside | Use `_example._tcp` or `_example._udp`; a domain suffix may follow. |
+| `INVALID_ARGUMENT` about instance or TXT | Instance over 63 UTF-8 bytes, more than 16 TXT records, or over 1024 bytes total | Shorten the instance and TXT set. |
+| `NOT_FOUND` on unpublish | Wrong id, or a publication owned by another run | Keep the `publicationId` returned by `Publish` and unpublish from the same run. |
+| `Browse` emits nothing | The service type is wrong, the peer is on another link, or the browser is not resolved yet | Verify the type on the publisher, and allow for resolve latency. One `ADDED` event arrives per resolved address. |
+| Browse shows a different instance name | Avahi renamed a collision | Expected; the advertised name can differ from the requested one. |
+| `UNAVAILABLE` on an open browse stream | The responder stopped or the daemon restarted | Resubscribe. |
+
+Publications disappear on their own when the run exits; that is cleanup, not a bug.
+
+## Listener refused, port in use or accept stalls
+
+**Symptom** — `listener_open` fails, or `listener_accept` never returns.
+
+| Status / message | Cause | Fix |
+|---|---|---|
+| `UNSUPPORTED` | No usable `CAPSULAD_CONTROL_FD`: the process was not started by the supervisor, the supervisor could not create the channel (one `WARN` in the daemon log, and the run still starts), or the runtime predates the appended networking surface | Run as a supervised app with a runtime that carries the appended table; check the daemon log for `control channel unavailable`. Never create the socket yourself. |
+| `INVALID_ARGUMENT` naming 5353 or the Web UI port | The port is reserved | Use `0` (ephemeral) or a port in `1024..65535`. |
+| `INVALID_ARGUMENT` naming the bind address | The address is multicast, a broadcast address or not a local interface address | Use `0.0.0.0`, `::`, a loopback address or an address the device actually owns. |
+| `TRANSPORT` saying the port is in use | The explicit port is already bound on the device | Request `0` and read the port from `out_info`. |
+| `INVALID_ARGUMENT` naming the 16-listener cap | The run leaked listener handles | Close every listener on every exit path. |
+| `accept` returns `TIMEOUT` | No client connected within the bound | Expected; the listener stays usable. `0` polls once instead of waiting. |
+| `accept` returns `CANCELLED` | The listener was closed from another thread | Reopen if the service should continue. |
+| A peer cannot reach the service | The bind is loopback-only, or a firewall/router is in the way | Bind a specific interface address or the wildcard; then treat the service as LAN-exposed. |
+| Accepted stream reads stall | The peer connected but sends nothing | Bound every read with a timeout and close idle connections. |
+
 ## Simulator versus device differences
 
 | Area | Simulator | Device |
@@ -223,6 +284,9 @@ stay stopped. Uninstalling a looping app requires stopping its run first.
 | Touch | Virtual panel with optional coordinate injection | Five keys, no raw coordinates |
 | Audio | Virtual 16 kHz mono capture, 48 kHz stereo output | Backend capture format (normally the same), vendor DSP tap |
 | Brightness and cues | Virtual, always present | Hardware dependent; a backend may be partial or absent |
+| Network egress | The host's network stack, DNS and trust store | The device's own link, DNS and trust store; no per-destination allowlist in either |
+| Listening sockets | Daemon-allocated exactly as on the device; reachable from the host's LAN | Daemon-allocated under the same policy; reachable from the device's LAN |
+| mDNS | Unsupported — no Avahi responder; `Publish`/`Browse` return `FAILED_PRECONDITION` | Avahi over the system D-Bus; visible to the local link |
 
 If it works only on the simulator, check the architecture first, then the runtime, then the
 sandbox mode. A host `darwin` build fails on the device with

@@ -102,7 +102,7 @@ int capsulad_shim_load(const char *path, char *err, size_t err_len) {
   /* Check the prefix this binding actually calls. A future minor may append
    * fields; an older minor may expose a shorter prefix, which is accepted as
    * long as every required field is inside struct_size. */
-  size_t required = offsetof(capsulad_api, http_cancel) + sizeof(table.http_cancel);
+  size_t required = offsetof(capsulad_api, mdns_browse_open) + sizeof(table.mdns_browse_open);
   if (table.abi_major != CAPSULAD_ABI_MAJOR || table.struct_size < required ||
       table.client_connect == NULL || table.client_close == NULL ||
       table.client_register_descriptors == NULL ||
@@ -123,7 +123,16 @@ int capsulad_shim_load(const char *path, char *err, size_t err_len) {
       table.base64_decode == NULL || table.percent_encode == NULL ||
       table.percent_decode == NULL || table.sha256 == NULL ||
       table.random_bytes == NULL || table.uuid_v4 == NULL ||
-      table.url_parse == NULL || table.http_cancel == NULL) {
+      table.url_parse == NULL || table.http_cancel == NULL ||
+      table.tcp_open == NULL || table.stream_read == NULL ||
+      table.stream_write == NULL || table.stream_shutdown == NULL ||
+      table.stream_close == NULL || table.stream_info == NULL ||
+      table.udp_open == NULL || table.udp_send == NULL || table.udp_recv == NULL ||
+      table.udp_close == NULL || table.listener_open == NULL ||
+      table.listener_accept == NULL || table.listener_recv == NULL ||
+      table.listener_send == NULL || table.listener_info == NULL ||
+      table.listener_close == NULL || table.mdns_publish == NULL ||
+      table.mdns_unpublish == NULL || table.mdns_browse_open == NULL) {
     if (err != NULL && err_len > 0) {
       snprintf(err, err_len, "native library exposes an incomplete ABI v1 table "
                "(major %u, minor %u, struct_size %zu, required %zu)",
@@ -423,6 +432,144 @@ int32_t capsulad_shim_uuid_v4(capsulad_buf *out, char *err, size_t err_len) {
 int32_t capsulad_shim_url_parse(const char *url, size_t len, capsulad_buf *out_json,
                                 char *err, size_t err_len) {
   return capture(api()->url_parse(url, len, out_json), err, err_len);
+}
+
+int32_t capsulad_shim_tcp_open(const char *host, size_t host_len, uint16_t port,
+                               const uint8_t *options_json, size_t options_len,
+                               uint32_t timeout_ms, capsulad_handle *out_stream,
+                               char *err, size_t err_len) {
+  return capture(api()->tcp_open(host, host_len, port, options_json, options_len,
+                                 timeout_ms, out_stream),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_stream_read(capsulad_handle stream, size_t max_len,
+                                  uint32_t timeout_ms, capsulad_buf *out_data,
+                                  char *err, size_t err_len) {
+  return capture(api()->stream_read(stream, max_len, timeout_ms, out_data),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_stream_write(capsulad_handle stream, const uint8_t *data,
+                                   size_t len, uint32_t timeout_ms,
+                                   size_t *out_written, char *err, size_t err_len) {
+  return capture(api()->stream_write(stream, data, len, timeout_ms, out_written),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_stream_shutdown(capsulad_handle stream, int32_t how,
+                                      char *err, size_t err_len) {
+  return capture(api()->stream_shutdown(stream, how), err, err_len);
+}
+
+int32_t capsulad_shim_stream_close(capsulad_handle stream, char *err, size_t err_len) {
+  return capture(api()->stream_close(stream), err, err_len);
+}
+
+int32_t capsulad_shim_stream_info(capsulad_handle stream, capsulad_buf *out_json,
+                                  char *err, size_t err_len) {
+  return capture(api()->stream_info(stream, out_json), err, err_len);
+}
+
+int32_t capsulad_shim_udp_open(const char *host, size_t host_len, uint16_t port,
+                               const uint8_t *options_json, size_t options_len,
+                               uint32_t timeout_ms, capsulad_handle *out_udp,
+                               char *err, size_t err_len) {
+  return capture(api()->udp_open(host, host_len, port, options_json, options_len,
+                                 timeout_ms, out_udp),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_udp_send(capsulad_handle udp, const uint8_t *peer_json,
+                               size_t peer_len, const uint8_t *data, size_t len,
+                               uint32_t timeout_ms, size_t *out_sent,
+                               char *err, size_t err_len) {
+  return capture(api()->udp_send(udp, peer_json, peer_len, data, len, timeout_ms,
+                                 out_sent),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_udp_recv(capsulad_handle udp, size_t max_len,
+                               uint32_t timeout_ms, capsulad_buf *out_data,
+                               capsulad_buf *out_peer_json, char *err, size_t err_len) {
+  return capture(api()->udp_recv(udp, max_len, timeout_ms, out_data, out_peer_json),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_udp_close(capsulad_handle udp, char *err, size_t err_len) {
+  return capture(api()->udp_close(udp), err, err_len);
+}
+
+int32_t capsulad_shim_listener_open(const uint8_t *options_json, size_t options_len,
+                                    uint32_t timeout_ms, capsulad_handle *out_listener,
+                                    capsulad_buf *out_info, char *err, size_t err_len) {
+  return capture(api()->listener_open(options_json, options_len, timeout_ms,
+                                      out_listener, out_info),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_listener_accept(capsulad_handle listener, uint32_t timeout_ms,
+                                      capsulad_handle *out_stream,
+                                      capsulad_buf *out_peer_json,
+                                      char *err, size_t err_len) {
+  return capture(api()->listener_accept(listener, timeout_ms, out_stream, out_peer_json),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_listener_recv(capsulad_handle listener, size_t max_len,
+                                    uint32_t timeout_ms, capsulad_buf *out_data,
+                                    capsulad_buf *out_peer_json,
+                                    char *err, size_t err_len) {
+  return capture(api()->listener_recv(listener, max_len, timeout_ms, out_data,
+                                      out_peer_json),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_listener_send(capsulad_handle listener,
+                                    const uint8_t *peer_json, size_t peer_len,
+                                    const uint8_t *data, size_t len,
+                                    uint32_t timeout_ms, char *err, size_t err_len) {
+  return capture(api()->listener_send(listener, peer_json, peer_len, data, len,
+                                      timeout_ms),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_listener_info(capsulad_handle listener, capsulad_buf *out_json,
+                                    char *err, size_t err_len) {
+  return capture(api()->listener_info(listener, out_json), err, err_len);
+}
+
+int32_t capsulad_shim_listener_close(capsulad_handle listener,
+                                     char *err, size_t err_len) {
+  return capture(api()->listener_close(listener), err, err_len);
+}
+
+int32_t capsulad_shim_mdns_publish(capsulad_handle client,
+                                   const uint8_t *request_json, size_t request_len,
+                                   uint32_t timeout_ms, capsulad_buf *out_json,
+                                   char *err, size_t err_len) {
+  return capture(api()->mdns_publish(client, request_json, request_len, timeout_ms,
+                                     out_json),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_mdns_unpublish(capsulad_handle client,
+                                     const char *publication_id,
+                                     size_t publication_id_len, uint32_t timeout_ms,
+                                     char *err, size_t err_len) {
+  return capture(api()->mdns_unpublish(client, publication_id, publication_id_len,
+                                       timeout_ms),
+                 err, err_len);
+}
+
+int32_t capsulad_shim_mdns_browse_open(capsulad_handle client,
+                                       const uint8_t *request_json,
+                                       size_t request_len, uint32_t timeout_ms,
+                                       capsulad_handle *out_call,
+                                       char *err, size_t err_len) {
+  return capture(api()->mdns_browse_open(client, request_json, request_len, timeout_ms,
+                                         out_call),
+                 err, err_len);
 }
 
 int32_t capsulad_shim_buf_free(capsulad_buf buf) { return api()->buf_free(buf); }

@@ -9,9 +9,11 @@ call uses. It carries:
 - framework-to-app custom calls, which other local callers reach through `AppBusService.Call`;
 - app-to-framework replies, notifications and call results.
 
-There is no per-app socket, no app-owned listener and no app-to-app direct transport. A routed
-call never opens a connection to the target; the daemon relays frames over the target's existing
-`Connect` stream.
+There is no per-app socket and no app-to-app direct transport. A routed call never opens a
+connection to the target; the daemon relays frames over the target's existing `Connect` stream.
+The bus is also not an inbound network endpoint: an app that needs one asks the daemon for a
+listener and serves it directly, outside this stream (see
+[network.md](network.md#daemon-mediated-listeners)).
 
 ```text
 caller ──Call stream──► capsulad ──AppInbound──► target app's Connect stream

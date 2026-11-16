@@ -1,6 +1,6 @@
 /* Code generated from sdk/native/include/capsulad/capsulad.h by sdk/go/regenerate-abi.sh. DO NOT EDIT. */
 /*
- * Capsulad native SDK - stable C ABI v1 (major 1, minor 0).
+ * Capsulad native SDK - stable C ABI v1 (major 1, minor 0, pre-release).
  *
  * The shared library is a pure Rust cdylib. It speaks the framework's gRPC
  * contract over the daemon's Unix domain socket and owns protobuf reflection
@@ -12,7 +12,11 @@
  * from any thread. Each handle is internally synchronized. A call handle has
  * one logical reader; concurrent recv_* calls on the same handle are
  * serialized. cancel/release/cloase may be called from another thread and
- * unblock a pending recv_*.
+ * unblock a pending recv_*. Stream, UDP and listener handles are also
+ * process-local and thread-safe: one logical reader per stream, independent
+ * read and write halves (a parked read never blocks a write or a write
+ * half-close), and close from another thread aborts a pending read/write/
+ * accept/recv with CANCELLED or CLOSED.
  *
  * Errors: every function returns an int32_t capsulad_status. On a non-OK
  * status, capsulad_last_error() returns a thread-local, NUL-terminated detail
@@ -71,7 +75,11 @@ typedef enum capsulad_status {
   CAPSULAD_STATUS_INTERNAL = 14,
   /* A bounded buffer (HTTP body, header/trailer block or chunk) exceeded its
    * cap. */
-  CAPSULAD_STATUS_TOO_LARGE = 15
+  CAPSULAD_STATUS_TOO_LARGE = 15,
+  /* The runtime lacks the capability: no control channel for listeners, no
+   * mDNS responder, or an unsupported listener protocol. Appended to the v1
+   * status list in this pre-release tree. */
+  CAPSULAD_STATUS_UNSUPPORTED = 16
 } capsulad_status;
 
 /* Base64 alphabet/padding flags for capsulad_api.base64_encode/decode.
@@ -90,6 +98,13 @@ typedef enum capsulad_call_kind {
   CAPSULAD_CALL_CLIENT_STREAM = 2,
   CAPSULAD_CALL_BIDI = 3
 } capsulad_call_kind;
+
+/* Stream half-closes for capsulad_api.stream_shutdown. */
+enum {
+  CAPSULAD_SHUTDOWN_WRITE = 0,
+  CAPSULAD_SHUTDOWN_READ = 1,
+  CAPSULAD_SHUTDOWN_BOTH = 2
+};
 
 /* AppBus inbound lifecycle event kinds delivered to capsulad_event_fn. */
 typedef enum capsulad_event_kind {
@@ -283,7 +298,7 @@ typedef const char *(*capsulad_fn_last_error)(void);
 typedef int32_t (*capsulad_fn_handle_info)(capsulad_handle handle,
                                           capsulad_buf *out_json);
 
-/* --- appended v1 surface: HTTP, remote gRPC, primitives ------------------- */
+/* --- appended surface: HTTP, remote gRPC, primitives ---------------------- */
 
 /* Opens an HTTP/1.1 client. options_json is snake_case; unknown keys are
  * rejected. Known keys: roots ("system" default | "webpki" | "pem"),
@@ -390,10 +405,145 @@ typedef int32_t (*capsulad_fn_url_parse)(const char *url, size_t len,
 typedef int32_t (*capsulad_fn_http_cancel)(capsulad_handle http,
                                            uint64_t request_id);
 
+/* --- appended surface: streams, UDP, listeners and mDNS ------------------- */
+
+/* Outbound TCP, optionally TLS. host is a DNS name or IP literal; port is
+ * 1..65535. options_json is snake_case; unknown keys are rejected:
+ *   {"tls":false,
+ *    "roots":"system"|"webpki"|"pem",
+ *    "ca_pem":"...",
+ *    "server_name":"...",
+ *    "nodelay":true}
+ * tls=true performs a verified TLS 1.2+ handshake with the configured roots;
+ * there is no insecure mode ("pem" trusts only ca_pem, like http_open).
+ * server_name overrides SNI and certificate verification (defaults to host).
+ * timeout_ms bounds DNS + TCP + TLS; 0 selects a 30 s default.
+ * Returns a stream handle. */
+typedef int32_t (*capsulad_fn_tcp_open)(
+    const char *host, size_t host_len, uint16_t port,
+    const uint8_t *options_json, size_t options_len, uint32_t timeout_ms,
+    capsulad_handle *out_stream);
+
+/* One read, at most max_len bytes. max_len 0 means 64 KiB; the cap is 4 MiB
+ * (TOO_LARGE past it). timeout_ms semantics:
+ *   0           poll once
+ *   0xFFFFFFFF  wait indefinitely
+ *   other       bound the wait in milliseconds
+ * A clean remote close returns CAPSULAD_STATUS_END_OF_STREAM with an empty
+ * buffer ({data = NULL, len = 0}).
+ * Reads are serialized (one logical reader per stream) but the write half is
+ * independent: a read parked in this call never delays stream_write or
+ * stream_shutdown(WRITE). */
+typedef int32_t (*capsulad_fn_stream_read)(capsulad_handle stream,
+                                           size_t max_len, uint32_t timeout_ms,
+                                           capsulad_buf *out_data);
+/* One write. data must be non-empty (len 0 is INVALID_ARGUMENT); out_written
+ * is in 1..len and may be less than len, and zero is returned only with an
+ * error. timeout_ms as for stream_read. */
+typedef int32_t (*capsulad_fn_stream_write)(capsulad_handle stream,
+                                            const uint8_t *data, size_t len,
+                                            uint32_t timeout_ms,
+                                            size_t *out_written);
+/* Half-close: CAPSULAD_SHUTDOWN_WRITE sends FIN/close_notify; READ wakes a
+ * pending read and makes further reads return END_OF_STREAM; BOTH does both.
+ * SHUTDOWN_WRITE takes only the write half, so a reader parked on an idle
+ * stream does not delay the FIN/close_notify; reads stay usable afterwards
+ * until the peer closes. */
+typedef int32_t (*capsulad_fn_stream_shutdown)(capsulad_handle stream,
+                                               int32_t how);
+/* Releases the handle and unblocks a pending read/write with CANCELLED. */
+typedef int32_t (*capsulad_fn_stream_close)(capsulad_handle stream);
+/* JSON diagnostics: kind, host, port, tls, server_name, peer, closed and the
+ * two shutdown flags. */
+typedef int32_t (*capsulad_fn_stream_info)(capsulad_handle stream,
+                                           capsulad_buf *out_json);
+
+/* UDP socket. host/port may both be empty/0 for an unconnected socket;
+ * otherwise the socket is connect()ed to that peer. options_json:
+ *   {"bind":"0.0.0.0","port":0}
+ * The bind port must be 0 (ephemeral): this is an outbound socket, and a
+ * fixed inbound port would bypass daemon policy. A non-zero port fails with
+ * CAPSULAD_STATUS_INVALID_ARGUMENT and a message pointing at listener_open,
+ * which is the only path to a fixed inbound UDP port. The bind address is
+ * still selectable (for example "127.0.0.1" or "::1"); a bind literal with an
+ * embedded non-zero port is rejected the same way.
+ * timeout_ms bounds resolution/bind/connect; 0 selects a 30 s default. */
+typedef int32_t (*capsulad_fn_udp_open)(
+    const char *host, size_t host_len, uint16_t port,
+    const uint8_t *options_json, size_t options_len, uint32_t timeout_ms,
+    capsulad_handle *out_udp);
+/* One datagram (max 65507 bytes). peer_json is optional:
+ *   {"address":"1.2.3.4","port":53}
+ * Empty peer_json uses the connected peer and fails with NOT_CONNECTED when
+ * the socket is unconnected. Timeouts as for stream_read. */
+typedef int32_t (*capsulad_fn_udp_send)(
+    capsulad_handle udp, const uint8_t *peer_json, size_t peer_len,
+    const uint8_t *data, size_t len, uint32_t timeout_ms, size_t *out_sent);
+/* Receives one datagram and its peer JSON {"address","port"}. max_len 0 means
+ * 65507; larger requests are TOO_LARGE. Receives are serialized (one logical
+ * reader per socket). Timeouts as for stream_read. */
+typedef int32_t (*capsulad_fn_udp_recv)(
+    capsulad_handle udp, size_t max_len, uint32_t timeout_ms,
+    capsulad_buf *out_data, capsulad_buf *out_peer_json);
+typedef int32_t (*capsulad_fn_udp_close)(capsulad_handle udp);
+
+/* Daemon-mediated listener. The app never binds a listening socket: the
+ * daemon allocates it and passes the descriptor over the inherited control
+ * channel (env CAPSULAD_CONTROL_FD, AF_UNIX SOCK_SEQPACKET; SOCK_DGRAM is
+ * accepted where the platform has no SOCK_SEQPACKET, as on macOS). options_json:
+ *   {"protocol":"tcp"|"udp","bind":"127.0.0.1","port":0,"backlog":64}
+ * port 0 requests an ephemeral port; the daemon rejects reserved ports and
+ * non-local bind addresses. out_info receives:
+ *   {"protocol":"tcp","address":"0.0.0.0","port":54321}
+ * Without a usable control channel every listener call is UNSUPPORTED. */
+typedef int32_t (*capsulad_fn_listener_open)(
+    const uint8_t *options_json, size_t options_len, uint32_t timeout_ms,
+    capsulad_handle *out_listener, capsulad_buf *out_info);
+/* TCP: accepts one connection, returning a normal stream handle and peer JSON.
+ * Timeouts as for stream_read; a timeout leaves the listener usable. */
+typedef int32_t (*capsulad_fn_listener_accept)(
+    capsulad_handle listener, uint32_t timeout_ms,
+    capsulad_handle *out_stream, capsulad_buf *out_peer_json);
+/* UDP: one datagram plus peer JSON. Receives are serialized (one logical
+ * reader per listener). */
+typedef int32_t (*capsulad_fn_listener_recv)(
+    capsulad_handle listener, size_t max_len, uint32_t timeout_ms,
+    capsulad_buf *out_data, capsulad_buf *out_peer_json);
+/* UDP: one datagram to peer_json (required; listeners have no connected peer). */
+typedef int32_t (*capsulad_fn_listener_send)(
+    capsulad_handle listener, const uint8_t *peer_json, size_t peer_len,
+    const uint8_t *data, size_t len, uint32_t timeout_ms);
+typedef int32_t (*capsulad_fn_listener_info)(capsulad_handle listener,
+                                             capsulad_buf *out_json);
+/* Releases the listener; pending accept/recv/send return CANCELLED. */
+typedef int32_t (*capsulad_fn_listener_close)(capsulad_handle listener);
+
+/* mDNS through the daemon's Avahi responder. Request and response bodies are
+ * canonical protobuf JSON for capsulad.framework.v1.DiscoveryService (field
+ * names are passed through unchanged). Publish -> PublishServiceResponse
+ * JSON. Requires a connected supervised app client.
+ * Remote refusals are classified: gRPC InvalidArgument (3) returns
+ * CAPSULAD_STATUS_INVALID_ARGUMENT and NotFound (5) returns
+ * CAPSULAD_STATUS_NOT_FOUND; every other remote failure stays
+ * CAPSULAD_STATUS_GRPC. */
+typedef int32_t (*capsulad_fn_mdns_publish)(
+    capsulad_handle client, const uint8_t *request_json, size_t request_len,
+    uint32_t timeout_ms, capsulad_buf *out_json);
+/* Unpublish by publication id; no output. */
+typedef int32_t (*capsulad_fn_mdns_unpublish)(
+    capsulad_handle client, const char *publication_id,
+    size_t publication_id_len, uint32_t timeout_ms);
+/* Starts the server-streaming Browse call and sends the request. The returned
+ * handle is a normal call handle: read events with call_recv_json (each is a
+ * DiscoveredService), and use call_cancel/call_release. */
+typedef int32_t (*capsulad_fn_mdns_browse_open)(
+    capsulad_handle client, const uint8_t *request_json, size_t request_len,
+    uint32_t timeout_ms, capsulad_handle *out_call);
+
 /*
- * v1 function table. Frozen layout: fields are only appended in a future
- * minor version, never reordered or removed. struct_size lets bindings
- * detect appended fields.
+ * v1 function table. Frozen layout: fields are never reordered or removed.
+ * This pre-release tree is append-only at ABI 1.0: new entries are appended
+ * after the previous last field and struct_size lets bindings detect them.
  */
 typedef struct capsulad_api_v1 {
   uint32_t abi_major;
@@ -452,11 +602,32 @@ typedef struct capsulad_api_v1 {
   capsulad_fn_uuid_v4 uuid_v4;
   capsulad_fn_url_parse url_parse;
   capsulad_fn_http_cancel http_cancel;
+
+  /* Appended after http_cancel: streams, UDP, listeners and mDNS. */
+  capsulad_fn_tcp_open tcp_open;
+  capsulad_fn_stream_read stream_read;
+  capsulad_fn_stream_write stream_write;
+  capsulad_fn_stream_shutdown stream_shutdown;
+  capsulad_fn_stream_close stream_close;
+  capsulad_fn_stream_info stream_info;
+  capsulad_fn_udp_open udp_open;
+  capsulad_fn_udp_send udp_send;
+  capsulad_fn_udp_recv udp_recv;
+  capsulad_fn_udp_close udp_close;
+  capsulad_fn_listener_open listener_open;
+  capsulad_fn_listener_accept listener_accept;
+  capsulad_fn_listener_recv listener_recv;
+  capsulad_fn_listener_send listener_send;
+  capsulad_fn_listener_info listener_info;
+  capsulad_fn_listener_close listener_close;
+  capsulad_fn_mdns_publish mdns_publish;
+  capsulad_fn_mdns_unpublish mdns_unpublish;
+  capsulad_fn_mdns_browse_open mdns_browse_open;
 } capsulad_api;
 
 /* Stable v1 prefix: abi_major, abi_minor, struct_size. Any v1 table at least
- * this large is accepted by capsulad_get_api, including tables built against an
- * older minor with fewer function pointers. */
+ * this large is accepted by capsulad_get_api, including tables built from an
+ * earlier revision of this pre-release tree with fewer function pointers. */
 #define CAPSULAD_API_V1_MIN_SIZE ((size_t)offsetof(capsulad_api, client_connect))
 
 /* --- exported entry points ------------------------------------------------ */
@@ -478,7 +649,8 @@ CAPSULAD_EXPORT const capsulad_api *capsulad_api_v1(void);
  * - abi_major must be 1, otherwise CAPSULAD_STATUS_UNSUPPORTED_ABI with no write.
  * - out must be non-NULL and table_size >= CAPSULAD_API_V1_MIN_SIZE (the stable
  *   prefix through struct_size), otherwise CAPSULAD_STATUS_INVALID_ARGUMENT
- *   with no write. Tables built against a smaller v1 minor remain valid.
+ *   with no write. Tables built against an earlier revision of this pre-release
+ *   tree remain valid.
  * - Copies exactly min(table_size, capsulad_api_size()) bytes; never writes past
  *   table_size. `out->struct_size` reports the library's current full table
  *   size; keep the caller's table zero-initialized and require every field you

@@ -341,6 +341,21 @@ func scriptPath(appDir, entry string) (string, error) {
 	return resolved, nil
 }
 
+// withControlFD forwards the inherited control-socket fd number into the app
+// environment. The namespace helper receives the value in its own environment
+// and must re-export it because syscall.Exec replaces the environment.
+func withControlFD(env []string, fd string) []string {
+	if fd == "" {
+		return env
+	}
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "CAPSULAD_CONTROL_FD=") {
+			return env
+		}
+	}
+	return append(env, "CAPSULAD_CONTROL_FD="+fd)
+}
+
 // baseEnv is the environment every sandboxed app starts with. The timezone is
 // deliberately not forced: /etc/localtime is bind-mounted into the sandbox, and
 // a daemon-level TZ is passed through, so apps show the device's wall clock

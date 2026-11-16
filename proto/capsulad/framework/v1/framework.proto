@@ -1382,3 +1382,56 @@ message SharedAssetInfo {
   reserved "license", "attribution", "required_base_asset";
 }
 message ListAssetsResponse { repeated SharedAssetInfo assets = 1; }
+
+// -----------------------------------------------------------------------------
+// Local service discovery through the host's mDNS responder.
+//
+// The daemon publishes and browses on behalf of supervised apps; it never
+// opens the mDNS port itself. Avahi owns multicast DNS on the stock image.
+// Publish/Unpublish are scoped to the caller's supervised run and are removed
+// when that run exits. Browse is a server stream of resolved services. A build
+// without a responder returns FAILED_PRECONDITION or UNIMPLEMENTED, never a
+// false success.
+// -----------------------------------------------------------------------------
+service DiscoveryService {
+  rpc Publish(PublishServiceRequest) returns (PublishServiceResponse);
+  rpc Unpublish(UnpublishServiceRequest) returns (UnpublishServiceResponse);
+  rpc Browse(BrowseServicesRequest) returns (stream DiscoveredService);
+}
+
+message PublishServiceRequest {
+  string service_type = 1;    // "_snapcast._tcp", "_googlecast._tcp", "_airplay._tcp"
+  string instance_name = 2;   // display instance, <=63 UTF-8 bytes
+  uint32 port = 3;            // 1..65535
+  map<string,string> txt = 4; // <=16 records, <=1024 bytes total
+  string domain = 5;          // "" => "local"
+}
+message PublishServiceResponse {
+  string publication_id = 1;
+  string service_type = 2;
+  string instance_name = 3;
+  string domain = 4;
+  string host = 5;
+  uint32 port = 6;
+}
+message UnpublishServiceRequest { string publication_id = 1; }
+message UnpublishServiceResponse { bool removed = 1; }
+message BrowseServicesRequest {
+  string service_type = 1;
+  string domain = 2;
+}
+message DiscoveredService {
+  enum EventKind {
+    EVENT_KIND_UNSPECIFIED = 0;
+    EVENT_KIND_ADDED = 1;
+    EVENT_KIND_REMOVED = 2;
+  }
+  EventKind kind = 1;
+  string name = 2;
+  string service_type = 3;
+  string domain = 4;
+  string host = 5;
+  repeated string addresses = 6;
+  uint32 port = 7;
+  map<string,string> txt = 8;
+}

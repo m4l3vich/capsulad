@@ -199,15 +199,56 @@ overwriting a concurrent change.
 
 **Native SDK / ABI** — the shared `libcapsulad` runtime (Rust cdylib, C ABI v1) owns an app's
 transport: UDS gRPC, protobuf reflection, AppBus sessions, routed calls, the raw-PCM fast path,
-outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, and the
+outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, outbound TCP/TLS streams, UDP,
+daemon-mediated listeners, the mDNS calls, and the
 encoding/hash/random/URL primitives (base64, percent coding, SHA-256, getrandom, UUIDv4,
 absolute-URL parsing). Go and Rust bindings (`capsulad/sdk`, crate `capsulad`) and direct
 C/C++ consumers load it and never reimplement the transport; an app must not bundle its own
 `net/http`, `crypto/tls` or gRPC stack. The *ABI* is its stable C function-table contract —
 major/minor versions, `capsulad_get_api` negotiation, opaque handles, library-owned buffers,
 status codes and threading guarantees — where a major mismatch is an explicit error, not a
-best-effort load. New entry points are appended within ABI 1.0. The SDK/package version
-(`0.5`, also exported to apps as `CAPSULAD_SDK`) is separate from the ABI version.
+best-effort load. New entry points are appended within ABI 1.0 (pre-release); the stream, UDP,
+listener and mDNS surface plus `CAPSULAD_STATUS_UNSUPPORTED` follow the HTTP, remote-gRPC and
+primitive additions without changing the ABI identity. The table stays append-only at ABI 1.0
+until the first external consumer or release. The SDK/package version (`0.5`, also exported to apps as
+`CAPSULAD_SDK`) is separate from the ABI version.
+
+## Networking
+
+**Stream** — one outbound TCP connection with optional verified TLS, created by `tcp_open` (Go
+`OpenTCP`, Rust `Stream::open`) and released by `stream_close`; `listener_accept` also produces
+one. A stream has one logical reader, may report short writes, returns `END_OF_STREAM` on a
+clean remote close, and is half-closable by direction. It is a byte stream, not a message
+stream: framing is the app's protocol.
+
+**Datagram** — one UDP message, at most 65507 bytes, sent or received on a `udp_open` socket or a
+UDP listener. A `udp_open` socket takes both host and port or neither (connected or unconnected),
+binds an ephemeral local port only, and addresses its peer by IP literal — it is a reply socket,
+never a service on a fixed port, which is what a UDP listener is for. Datagrams are never
+reassembled, retransmitted or reordered by the SDK, and a short receive drops the remainder of
+that datagram.
+
+**Listener** — a bound TCP or UDP socket that the daemon allocated and passed to the app over
+the run's control channel (`CAPSULAD_CONTROL_FD`), because an app must never create or bind a
+listening socket itself. The daemon applies the address, port and backlog policy (reserved
+ports 5353 and the Web UI port, 16 listeners per run) and the app serves accepted streams or
+datagrams. There is no gRPC method that opens one, and a run without the control channel gets
+`UNSUPPORTED`.
+
+**Publication** — one live mDNS service instance registered through `DiscoveryService.Publish`
+(`mdns_publish`). It has an opaque publication id, is scoped to the calling run and is removed
+on unpublish, run exit and daemon shutdown. The responder may rename a colliding instance, and
+the advertisement is visible to the whole link, so a TXT record is never a secret.
+
+**Browse** — the server-streaming `DiscoveryService.Browse` call (or `mdns_browse_open`) that
+reports resolved services as `DiscoveredService` events: one `EVENT_KIND_ADDED` per resolved
+address and an `EVENT_KIND_REMOVED` when an instance disappears. Browsing is read-only and
+non-authoritative; results are untrusted network input.
+
+**Control channel** — the per-run inherited `AF_UNIX` `SOCK_SEQPACKET` descriptor whose number
+is in `CAPSULAD_CONTROL_FD` (normally 3). It carries listener allocation only: one JSON request,
+one reply, and the bound descriptor via `SCM_RIGHTS`. Apps never read, write, close or reuse it
+directly.
 
 ## Web, network and display settings
 

@@ -8,9 +8,29 @@ import (
 	"time"
 )
 
-// avahiServerRegistering is AVAHI_SERVER_REGISTERING; RUNNING is shared with
-// the manager.
-const avahiServerRegistering int32 = 1
+// Avahi's AVAHI_SERVER_* states; RUNNING is shared with the manager.
+const (
+	avahiServerInvalid     int32 = 0
+	avahiServerRegistering int32 = 1
+	avahiServerCollision   int32 = 3
+	avahiServerFailure     int32 = 4
+)
+
+// avahiResponderLostState reports whether one StateChanged notification means
+// the responder can no longer serve this process. RUNNING and REGISTERING are
+// the states a live responder passes through repeatedly — Avahi re-registers
+// while it re-probes the host name after a settings change, so a browse stream
+// must survive REGISTERING instead of treating it as the responder going away.
+// INVALID, COLLISION and FAILURE are terminal and end the stream; an
+// unrecognised state does not prove loss, so it is ignored as well.
+func avahiResponderLostState(state int32) bool {
+	switch state {
+	case avahiServerInvalid, avahiServerCollision, avahiServerFailure:
+		return true
+	default:
+		return false
+	}
+}
 
 // avahiRegisteringWait bounds how long an apply waits for D-Bus-activated
 // Avahi to finish registering. A variable so ordering tests do not sleep for

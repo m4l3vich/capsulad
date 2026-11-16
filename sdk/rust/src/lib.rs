@@ -17,7 +17,8 @@
 //! The loader resolves `capsulad_get_api`, zero-initializes a table, copies
 //! `min(binding_size, library_size)` bytes, and requires major 1, a
 //! `struct_size` covering every v1 field used here, and non-NULL required
-//! function pointers. A newer minor may append fields.
+//! function pointers. The pre-release 1.0 table may append fields; they are
+//! detected through `struct_size`.
 //!
 //! # Outbound networking and primitives
 //!
@@ -29,6 +30,19 @@
 //! encoding/crypto/URL primitives (`base64_*`, `percent_*`, `sha256`,
 //! `random_bytes`, `uuid_v4`, `parse_url`). Remote clients have no app bus:
 //! [`Client::bus`] and [`Client::start_routed`] fail with `INVALID_ARGUMENT`.
+//!
+//! # App networking (ABI 1.0, pre-release)
+//!
+//! [`Stream`] opens an outbound TCP or verified TLS connection with blocking
+//! [`Stream::read`]/[`Stream::write`]/[`Stream::shutdown`]/[`Stream::info`];
+//! [`UdpSocket`] covers connected and unconnected datagrams; [`Listener`] uses
+//! the daemon's inherited control channel to obtain an already-bound TCP or UDP
+//! socket (the app never binds one) and reports the actual port through
+//! [`Listener::info`]. [`Client::publish_mdns`], [`Client::unpublish_mdns`] and
+//! [`Client::browse_mdns`] expose the daemon's Avahi responder; [`Browse`] is a
+//! synchronous iterator of [`DiscoveredService`] events. Runtime capabilities
+//! that are missing surface as [`STATUS_UNSUPPORTED`] (`16`) rather than a
+//! silent fallback.
 //!
 //! # Build and smoke tests
 //!
@@ -66,6 +80,9 @@ mod client;
 mod error;
 mod grpc;
 mod http;
+mod listener;
+mod mdns;
+mod net;
 mod primitives;
 mod sys;
 
@@ -76,8 +93,11 @@ pub use client::Client;
 pub use error::{Error, Result};
 pub use grpc::RemoteOptions;
 pub use http::{HttpClient, HttpOptions, HttpRequest, HttpResponse};
+pub use listener::{Listener, ListenerInfo, ListenerOptions};
+pub use mdns::{Browse, DiscoveredService, MdnsPublication, MdnsService};
+pub use net::{PeerAddr, Shutdown, Stream, StreamInfo, TcpOptions, UdpOptions, UdpSocket};
 pub use primitives::{Url, BASE64_NO_PADDING, BASE64_STANDARD, BASE64_URL_SAFE};
-pub use sys::DEFAULT_SOCKET;
+pub use sys::{DEFAULT_SOCKET, STATUS_UNSUPPORTED};
 
 use std::env;
 use std::ffi::{c_char, CStr, OsStr};
@@ -168,7 +188,7 @@ impl Library {
 
         // Zero-initialize the caller table, then let the library copy
         // min(caller_size, library_size) bytes. `struct_size` reports the
-        // library's full table so appended minor fields are detectable.
+        // library's full table so appended fields are detectable.
         type GetApiFn = unsafe extern "C" fn(u32, usize, *mut sys::Api) -> i32;
         let mut slot = std::mem::MaybeUninit::<sys::Api>::zeroed();
         let status = {

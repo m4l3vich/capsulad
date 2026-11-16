@@ -1,7 +1,9 @@
 # Framework services
 
 Every framework method lives on the single local Unix socket (`CAPSULAD_SOCKET`, mounted at
-`/run/capsulad/hal.sock` inside a sandbox). There is no network listener and no per-app port.
+`/run/capsulad/hal.sock` inside a sandbox). There is no network gRPC listener and no per-app
+framework port. App-facing inbound TCP/UDP is a separate, daemon-allocated listener descriptor,
+not a service on this socket; see [network.md](network.md#daemon-mediated-listeners).
 Services are grouped by concern; all types named here are `capsulad.framework.v1` messages
 unless a fully qualified contract name is given.
 
@@ -42,6 +44,7 @@ only the daemon itself holds; a peer that merely shares the daemon PID (the Web 
 | `BluetoothMediaService` | full, peer address and name redacted |
 | `DiagnosticsService` | `WatchLogs` own app only; `GetSnapshot` administrator only |
 | `AssetService` | catalog only, never bytes |
+| `DiscoveryService` | `Publish`/`Unpublish`/`Browse` require a supervised app identity; publications are scoped to the caller's run |
 
 ## DeviceService
 
@@ -544,6 +547,64 @@ file from the mount named by `CAPSULAD_ASSETS`.
 
 See [assets.md](assets.md).
 
+## DiscoveryService
+
+mDNS publication and browsing through the daemon's Avahi responder. Avahi owns multicast DNS
+and port 5353; the daemon never binds it and an app never runs its own responder. All three
+methods require a supervised app identity verified from the connection — there is no
+administrator path in this contract. Field-level limits, publication lifetime and browse event
+shape are in [network.md](network.md#mdns-publication-and-browsing).
+
+| RPC | Shape | Access | Purpose |
+|---|---|---|---|
+| `Publish` | unary `PublishServiceResponse` | supervised app | Advertise one service instance. |
+| `Unpublish` | unary `UnpublishServiceResponse` | supervised app, own publication | Remove one registration. |
+| `Browse` | server stream `DiscoveredService` | supervised app | Resolved services of one type. |
+
+`PublishServiceRequest`:
+
+| Field | Type | Rule |
+|---|---|---|
+| `service_type` | string | `_name._tcp` or `_name._udp`, optionally with a domain suffix; the name starts with `_` and uses only letters, digits and hyphens. |
+| `instance_name` | string | Display instance, ≤63 UTF-8 bytes, no NUL. |
+| `port` | uint32 | `1..65535`. |
+| `txt` | map<string,string> | ≤16 records, ≤1024 bytes total; keys non-empty. |
+| `domain` | string | Empty means `local`; labels are lowercased. |
+
+`PublishServiceResponse` = `{publication_id, service_type, instance_name, domain, host, port}`.
+`host` is the responder's fully-qualified name; an app cannot choose it. Avahi may rename a
+colliding instance on the link, so the effective advertised name can differ from the requested
+one; the response reports the values you requested.
+
+`UnpublishServiceRequest` = `{publication_id}`; the response is `{removed}`. An unknown id, or
+one owned by another run, is `NOT_FOUND` — the daemon never reveals or removes another app's
+registration.
+
+`BrowseServicesRequest` = `{service_type, domain}`. Each `DiscoveredService` carries `kind`
+(`EVENT_KIND_ADDED` or `EVENT_KIND_REMOVED`), `name`, `service_type`, `domain`, `host`,
+`addresses[]`, `port` and `txt`. An `ADDED` event carries one resolved address; a `REMOVED`
+event names the instance and carries no address. The stream ends normally by closing it. One
+stream queues at most 64 events and drops the oldest (logged) when the consumer falls behind, so
+treat it as a convergent view and re-browse after a gap.
+
+Publications are removed on unpublish, run exit (including a crash) and daemon shutdown. A
+build or platform without a responder returns `FAILED_PRECONDITION` with the reason — never a
+false success. The simulator has no Avahi responder, so publish and browse are unsupported
+there.
+
+Errors: an invalid service type, instance, port or TXT set is `INVALID_ARGUMENT`; an unknown
+publication is `NOT_FOUND`; a missing responder or a responder that is not yet answering is
+`FAILED_PRECONDITION`; a responder lost during a browse stream is `UNAVAILABLE`; cancellation
+and deadline expiry are `CANCELED` and `DEADLINE_EXCEEDED`.
+
+### Daemon-mediated listeners are not a service
+
+Inbound TCP and UDP do not appear on this socket. An app obtains a listening socket from the
+daemon through the per-run control channel described in
+[network.md](network.md#daemon-mediated-listeners) (`CAPSULAD_CONTROL_FD`); the daemon binds it
+and passes the descriptor. There is no gRPC method that opens a listener, because the daemon
+must own the bind decision and the descriptor transfer is not a request/response message.
+
 ## Request examples
 
 These are canonical protobuf JSON payloads: lowerCamelCase names, enum **names**, base64
@@ -595,6 +656,23 @@ JSON spelling used inside `values`.
 
 // AssetService.ListAssets
 {"prefix": "sounds/"}
+
+// DiscoveryService.Publish: mDNS through the daemon's Avahi responder
+{"serviceType": "_example._tcp", "instanceName": "Capsula Demo", "port": 8080,
+ "txt": {"path": "/status"}, "domain": "local"}
+// → {"publicationId": "mdns_…", "serviceType": "_example._tcp",
+//    "instanceName": "Capsula Demo", "domain": "local",
+//    "host": "capsula.local", "port": 8080}
+
+// DiscoveryService.Unpublish
+{"publicationId": "mdns_…"}
+
+// DiscoveryService.Browse: server stream, one event per resolved address
+{"serviceType": "_example._tcp"}
+// → {"kind": "EVENT_KIND_ADDED", "name": "Capsula Demo",
+//    "serviceType": "_example._tcp", "domain": "local",
+//    "host": "capsula.local", "addresses": ["192.168.1.42"], "port": 8080,
+//    "txt": {"path": "/status"}}
 ```
 
 ## Calling conventions

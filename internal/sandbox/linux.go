@@ -302,6 +302,10 @@ func setupAndExec(spec execSpec) error {
 	if len(env) == 0 {
 		env = baseEnv()
 	}
+	// The daemon sets the control socket on the helper's own environment; the
+	// helper must forward the fd number into the app environment. The fd
+	// itself is inherited across syscall.Exec (it is not close-on-exec).
+	env = withControlFD(env, os.Getenv("CAPSULAD_CONTROL_FD"))
 	argv := make([]string, 0, len(spec.Args)+1)
 	argv = append(argv, spec.AppPath)
 	argv = append(argv, spec.Args...)

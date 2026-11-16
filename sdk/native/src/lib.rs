@@ -12,16 +12,21 @@ pub mod audio;
 pub mod bus;
 pub mod call;
 pub mod client;
+pub mod control;
 pub mod dynamic;
 pub mod ffi;
 pub mod grpc_remote;
 pub mod headers;
 pub mod http;
+pub mod listener;
+pub mod mdns;
 pub mod primitives;
 pub mod registry;
 pub mod runtime;
+pub mod stream;
 pub mod threads;
 pub mod tls;
+pub mod udp;
 
 #[cfg(unix)]
 pub fn runtime_monotonic_ns() -> u64 {

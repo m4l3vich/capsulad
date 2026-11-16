@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -139,6 +140,10 @@ type Supervisor struct {
 	restartPolicy func(appID string) bool
 	backoff       map[string]int
 	wg            sync.WaitGroup
+	// control prepares the per-run inherited control socket. It returns the
+	// child end to pass via ExtraFiles and an abort used when the process never
+	// starts. A nil hook means apps receive no control channel.
+	control func(runID, appID string) (*os.File, func(), error)
 
 	// startMu/stopping/startWG separate "a Start is in flight" from
 	// wg.Wait: Shutdown blocks new starts, waits for in-flight Start calls to
@@ -163,6 +168,21 @@ func (s *Supervisor) SetCallbacks(onState, onExit func(Run)) {
 	s.mu.Lock()
 	s.onState, s.onExit = onState, onExit
 	s.mu.Unlock()
+}
+
+// SetControlChannel installs the per-run control-socket factory. The daemon
+// uses it to serve listener allocation over an inherited socketpair. The
+// returned file becomes fd 3 and CAPSULAD_CONTROL_FD is set to 3.
+func (s *Supervisor) SetControlChannel(fn func(runID, appID string) (*os.File, func(), error)) {
+	s.mu.Lock()
+	s.control = fn
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) controlFactory() func(runID, appID string) (*os.File, func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.control
 }
 
 // SetRestartPolicy installs the daemon's selected-provider predicate. It is
@@ -215,7 +235,6 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 		"CAPSULAD_APP_ID="+m.ID,
 		"CAPSULAD_SDK="+version.SDKVersion,
 	)
-
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -224,8 +243,37 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 	if err != nil {
 		return nil, err
 	}
+	// The control socket is inherited as ExtraFiles[0] == fd 3. If it cannot be
+	// created the app simply has no channel and listener_open reports
+	// UNSUPPORTED; the run itself must still start. Create it after the pipes
+	// so a pipe error cannot leak the channel.
+	var (
+		controlChild *os.File
+		controlAbort func()
+	)
+	if factory := s.controlFactory(); factory != nil {
+		child, abort, err := factory(runID, m.ID)
+		if err != nil {
+			s.logs.Warnf("supervisor", m.ID, "control channel unavailable: %v", err)
+		} else {
+			controlChild, controlAbort = child, abort
+			fd := 3 + len(cmd.ExtraFiles)
+			cmd.ExtraFiles = append(cmd.ExtraFiles, child)
+			cmd.Env = append(cmd.Env, "CAPSULAD_CONTROL_FD="+strconv.Itoa(fd))
+		}
+	}
 	if err := cmd.Start(); err != nil {
+		if controlChild != nil {
+			_ = controlChild.Close()
+		}
+		if controlAbort != nil {
+			controlAbort()
+		}
 		return nil, fmt.Errorf("start %s: %w", m.ID, err)
+	}
+	// The child inherited the descriptor; the daemon copy is no longer needed.
+	if controlChild != nil {
+		_ = controlChild.Close()
 	}
 
 	run := &Run{

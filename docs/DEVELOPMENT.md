@@ -372,6 +372,7 @@ selection case and no backend for them, so any other `-platform` value fails wit
 ```sh
 make test          # root Go module, sdk/go, Rust binding, native crate, C++ example, both assistants
 make test-race     # root Go module with -race
+make test-sdk      # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia  # the apps/marusia module's tests from the repository root
 ```
 
@@ -387,6 +388,21 @@ go test -run 'TestDumbAssistant|TestSupervisor' ./internal/daemon
 cargo test --manifest-path sdk/native/Cargo.toml
 sdk/go/regenerate-abi.sh --check
 ```
+
+The networking surface has its own suites; every listener and peer is loopback and the mDNS
+responder is a fake, so none of them needs a device or a network:
+
+```sh
+cargo test --manifest-path sdk/native/Cargo.toml --test net   # TCP/TLS, UDP, listener fd, mDNS
+go test ./internal/appcontrol ./internal/discovery           # listener policy, normalize/manager
+go test -run 'TestDiscovery|TestRemoveRunPublications' ./internal/daemon
+go test -run 'TestControlChannel' ./internal/supervisor      # fd 3 + CAPSULAD_CONTROL_FD
+cd sdk/go && CGO_ENABLED=1 go test -run 'TestTCP|TestUDP|TestListener|TestMDNS|TestNetwork|TestTLS' ./...
+```
+
+The Go binding and native-crate suites need a host `libcapsulad` and its metadata, exactly like
+the other SDK tests: `make native` first, and `CAPSULAD_TEST_LIBRARY` for gated tests. The C ABI
+identity itself is pinned by `make check-sdk-abi`, which `make test-sdk` runs first.
 
 Standalone Go test commands on macOS need `-ldflags '-linkmode=external'`; the Makefile
 and app build scripts already handle it. Host daemon integration tests need a matching host

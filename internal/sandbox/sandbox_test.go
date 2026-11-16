@@ -37,3 +37,19 @@ func TestBaseEnvDoesNotForceUTC(t *testing.T) {
 		t.Fatal("baseEnv does not propagate the daemon TZ")
 	}
 }
+
+func TestWithControlFD(t *testing.T) {
+	env := []string{"PATH=/bin"}
+	if got := withControlFD(env, ""); len(got) != 1 {
+		t.Fatalf("empty fd changed env: %v", got)
+	}
+	got := withControlFD(env, "3")
+	if last := got[len(got)-1]; last != "CAPSULAD_CONTROL_FD=3" {
+		t.Fatalf("env = %v", got)
+	}
+	// An explicit entry is not duplicated.
+	again := withControlFD(got, "7")
+	if len(again) != len(got) {
+		t.Fatalf("duplicate control fd: %v", again)
+	}
+}

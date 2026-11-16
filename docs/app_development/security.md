@@ -51,12 +51,70 @@ development mode, not a security boundary.
 
 The framework socket is the only endpoint the app needs. There is no per-app socket, no network
 gRPC listener and no app-to-app socket. An app-to-app call travels over the caller's
-`AppBusService.Call` stream and is relayed to the target's existing `Connect` stream. Applications
-never listen; a listening socket is a contract violation even where the sandbox would permit it.
+`AppBusService.Call` stream and is relayed to the target's existing `Connect` stream.
+
+**An app must not create or bind its own listening socket.** A fixed inbound TCP or UDP port is
+available only through a listener the daemon allocated: `listener_open` performs the bind under
+policy and passes the listening descriptor over the run's control channel. An app's own
+`udp_open` socket binds an ephemeral port and receives replies to its own sends; it cannot
+expose a service. A listening socket created in the app process is a contract violation even
+where the sandbox would permit it — which it does in `uid` and `none` modes, where there is no
+network isolation at all. See [network.md](network.md#daemon-mediated-listeners).
 
 `-native-lib-dir`/`CAPSULAD_LIBRARY` point at the shared runtime. Apps must not bundle a copy of
 `libcapsulad` or an interpreter: the launcher mounts and names the platform runtime read-only, and
 the injected library path is the only supported way to load it.
+
+## Networking
+
+Egress and ingress have different rules.
+
+**Egress.** A native app reaches the network through the shared SDK: outbound HTTP/1.1, remote
+gRPC, TCP streams with optional TLS, UDP and the mDNS calls. There is no per-destination
+allowlist — the app's own code is the control — so never proxy another app's traffic and never
+treat network access as a way around identity checks. TLS is always verified (TLS 1.2 or newer;
+`system`, `webpki` or caller-supplied PEM roots); there is no insecure mode, no plaintext
+downgrade and no hostname-verification override. Do not bundle your own TLS, HTTP or gRPC stack.
+
+**Ingress.** An app must not create or bind a listening socket, join a multicast group, or
+enable broadcast. There are exactly two inbound paths: a daemon-allocated listener (TCP or UDP,
+with the bind decided by the daemon), and datagrams addressed to the ephemeral port of a
+`udp_open` socket, which is a reply socket rather than an exposed service. A fixed, known
+inbound port is only ever a listener.
+
+| Rule | Value |
+|---|---|
+| Bind address | A local unicast address: wildcard, loopback or an interface address. Multicast and broadcast are refused. |
+| Port | `0` (ephemeral) or `1024..65535`. 5353 and the configured Web UI port are refused. |
+| UDP socket port | Ephemeral only. A non-zero `udp_open` bind port is refused; use a UDP listener for a fixed port. |
+| Backlog | TCP only, 1..128 (default 64). |
+| Per-run cap | 16 listeners. |
+| Audit | Every allocation is logged with app, run, protocol, address and port. |
+| Exposure | A non-loopback bind is reachable from the LAN, not just the device. |
+
+`CAPSULAD_CONTROL_FD` is **reserved**: an inherited `AF_UNIX` `SOCK_SEQPACKET` descriptor that
+carries listener allocation and nothing else. Never read, write, close, duplicate over or reuse
+that number, and never treat it as a general-purpose channel. It is present whenever the
+supervisor could create the channel; if creation failed, the run still starts without it and
+every listener call returns `UNSUPPORTED` rather than falling back to a self-made socket. There
+is no API that creates a listening socket in the app process; doing it directly violates this
+contract even where the sandbox permits it, because `uid` and `none` modes have no network
+isolation.
+
+**mDNS.** The daemon's Avahi responder owns multicast DNS and port 5353. An app can neither
+bind it nor run its own responder, so advertisement and browsing go only through
+`DiscoveryService` — a raw UDP datagram the app sends to a multicast address is not a
+publication and reaches no responder. Publications are scoped to the calling run and removed on
+unpublish, run exit and daemon shutdown, so a crashed app leaves no advertisement. A publication
+is visible to the whole local link: it exposes the service type, instance name, port, TXT
+records and the device's mDNS host name. Never put a credential, token or internal identifier in
+a TXT record, and never publish a port you do not actually serve. Browse results are untrusted
+network input.
+
+The networking entry points are appended to ABI 1.0 in this pre-release tree; declare
+`[native_sdk] min_minor = 0` (or omit the requirement). A runtime that predates them has no
+stream, UDP, listener or mDNS entry points, and a listener call without a usable control
+channel returns `UNSUPPORTED` rather than creating anything.
 
 ## Identity and UIDs
 
@@ -86,8 +144,14 @@ confinement is implemented by identity checks on each method, not by hiding the 
 - Open, read or write physical hardware directly: LED controllers, display device nodes,
   `/dev/input`, audio devices, GPIO, the watchdog or any vendor character device. Publish output
   and take input through the framework services.
-- Open a listening socket, or attempt to receive a framework or app-to-app connection. Use the
-  injected `CAPSULAD_SOCKET` and the app bus.
+- Open a listening socket yourself, join a multicast group, or attempt to receive a framework or
+  app-to-app connection. A fixed inbound TCP or UDP port is only a listener the daemon allocated;
+  an app's own `udp_open` socket is ephemeral and carries replies, not a service. Use the
+  injected `CAPSULAD_SOCKET` and the app bus for everything else.
+- Read, write, close or reuse `CAPSULAD_CONTROL_FD`, or use it for anything but the SDK's
+  listener allocation.
+- Publish a credential or internal identifier in an mDNS TXT record, or advertise a service you
+  do not serve.
 - Read or update device settings, change master volume or microphone mute, force another app's
   capture, read diagnostics or retained logs, record or train wakewords, manage paired Bluetooth
   devices, or launch/stop apps.
@@ -195,10 +259,18 @@ administrative boundary.
 ## Checklist
 
 - Publish output and read input only through the framework; never touch device nodes.
-- Connect only to `CAPSULAD_SOCKET`; never listen.
+- Connect only to `CAPSULAD_SOCKET`; never create or bind a listening socket. Ask the daemon for
+  a listener through `listener_open`, and treat `CAPSULAD_CONTROL_FD` as untouchable.
 - Verify every setting you receive, including values that bypass the generated form.
-- Keep secrets in `text_masked` settings and never log them.
+- Keep secrets in `text_masked` settings and never log them; never put one in an mDNS TXT record.
+- Keep TLS verification at the default; never disable it, override `server_name` to bypass a
+  name mismatch, or ship a private CA when the system roots suffice.
+- Bind listeners to loopback or a specific interface address, and validate every accepted
+  connection and datagram as untrusted input.
+- Unpublish mDNS services and close streams, UDP sockets and listeners on every exit path;
+  process exit is the fallback, not the plan.
 - Handle `PERMISSION_DENIED` as final; do not probe other identities or run IDs.
 - Release every presentation, capture, audio stream and conversation on every exit path.
 - Do not rely on the simulator's sandbox mode as evidence about the device.
-- Build native binaries for the target ABI and declare the ABI requirement that matches it.
+- Build native binaries for the target ABI and declare the ABI requirement that matches it;
+  declare `min_minor = 0` (or omit it) when you use streams, UDP, listeners or mDNS.

@@ -147,6 +147,67 @@ int32_t capsulad_shim_uuid_v4(capsulad_buf *out, char *err, size_t err_len);
 int32_t capsulad_shim_url_parse(const char *url, size_t len, capsulad_buf *out_json,
                                 char *err, size_t err_len);
 
+/* Appended surface: streams, UDP, listeners and mDNS. */
+int32_t capsulad_shim_tcp_open(const char *host, size_t host_len, uint16_t port,
+                               const uint8_t *options_json, size_t options_len,
+                               uint32_t timeout_ms, capsulad_handle *out_stream,
+                               char *err, size_t err_len);
+int32_t capsulad_shim_stream_read(capsulad_handle stream, size_t max_len,
+                                  uint32_t timeout_ms, capsulad_buf *out_data,
+                                  char *err, size_t err_len);
+int32_t capsulad_shim_stream_write(capsulad_handle stream, const uint8_t *data,
+                                   size_t len, uint32_t timeout_ms,
+                                   size_t *out_written, char *err, size_t err_len);
+int32_t capsulad_shim_stream_shutdown(capsulad_handle stream, int32_t how,
+                                      char *err, size_t err_len);
+int32_t capsulad_shim_stream_close(capsulad_handle stream, char *err, size_t err_len);
+int32_t capsulad_shim_stream_info(capsulad_handle stream, capsulad_buf *out_json,
+                                  char *err, size_t err_len);
+int32_t capsulad_shim_udp_open(const char *host, size_t host_len, uint16_t port,
+                               const uint8_t *options_json, size_t options_len,
+                               uint32_t timeout_ms, capsulad_handle *out_udp,
+                               char *err, size_t err_len);
+int32_t capsulad_shim_udp_send(capsulad_handle udp, const uint8_t *peer_json,
+                               size_t peer_len, const uint8_t *data, size_t len,
+                               uint32_t timeout_ms, size_t *out_sent,
+                               char *err, size_t err_len);
+int32_t capsulad_shim_udp_recv(capsulad_handle udp, size_t max_len,
+                               uint32_t timeout_ms, capsulad_buf *out_data,
+                               capsulad_buf *out_peer_json, char *err, size_t err_len);
+int32_t capsulad_shim_udp_close(capsulad_handle udp, char *err, size_t err_len);
+int32_t capsulad_shim_listener_open(const uint8_t *options_json, size_t options_len,
+                                    uint32_t timeout_ms, capsulad_handle *out_listener,
+                                    capsulad_buf *out_info, char *err, size_t err_len);
+int32_t capsulad_shim_listener_accept(capsulad_handle listener, uint32_t timeout_ms,
+                                      capsulad_handle *out_stream,
+                                      capsulad_buf *out_peer_json,
+                                      char *err, size_t err_len);
+int32_t capsulad_shim_listener_recv(capsulad_handle listener, size_t max_len,
+                                    uint32_t timeout_ms, capsulad_buf *out_data,
+                                    capsulad_buf *out_peer_json,
+                                    char *err, size_t err_len);
+int32_t capsulad_shim_listener_send(capsulad_handle listener,
+                                    const uint8_t *peer_json, size_t peer_len,
+                                    const uint8_t *data, size_t len,
+                                    uint32_t timeout_ms, char *err, size_t err_len);
+int32_t capsulad_shim_listener_info(capsulad_handle listener, capsulad_buf *out_json,
+                                    char *err, size_t err_len);
+int32_t capsulad_shim_listener_close(capsulad_handle listener,
+                                     char *err, size_t err_len);
+int32_t capsulad_shim_mdns_publish(capsulad_handle client,
+                                   const uint8_t *request_json, size_t request_len,
+                                   uint32_t timeout_ms, capsulad_buf *out_json,
+                                   char *err, size_t err_len);
+int32_t capsulad_shim_mdns_unpublish(capsulad_handle client,
+                                     const char *publication_id,
+                                     size_t publication_id_len, uint32_t timeout_ms,
+                                     char *err, size_t err_len);
+int32_t capsulad_shim_mdns_browse_open(capsulad_handle client,
+                                       const uint8_t *request_json,
+                                       size_t request_len, uint32_t timeout_ms,
+                                       capsulad_handle *out_call,
+                                       char *err, size_t err_len);
+
 /* Fill the callback table with the Go-exported dispatchers. */
 void capsulad_shim_fill_callbacks(capsulad_bus_callbacks_v1 *out, uintptr_t user_data);
 

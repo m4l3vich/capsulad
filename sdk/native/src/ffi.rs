@@ -23,6 +23,9 @@ pub const INTERNAL: i32 = 14;
 /// A bounded buffer (request body, response body or header block) exceeded its
 /// configured cap. Appended to ABI v1 without changing the existing values.
 pub const TOO_LARGE: i32 = 15;
+/// The runtime lacks the capability (no control channel for listeners, no mDNS
+/// responder). Appended to the v1 table in this pre-release tree.
+pub const UNSUPPORTED: i32 = 16;
 
 /// Library-owned output buffer. Kept layout-identical to `capsulad_buf`.
 #[repr(C)]

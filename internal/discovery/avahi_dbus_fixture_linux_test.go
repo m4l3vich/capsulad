@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -50,7 +51,67 @@ type fixtureAvahi struct {
 	probing       chan struct{}
 	hostNameReads int
 	writes        []string
+	browsers      int
+	resolves      int
 	conn          *dbus.Conn
+}
+
+// fixtureBrowserPath is the ServiceBrowser object the fake hands out. The
+// fixture emits ItemNew/ItemRemove from it so the adapter's object-path filter
+// is exercised against a real bus.
+const fixtureBrowserPath = dbus.ObjectPath("/fixture/ServiceBrowser1")
+
+// fixtureBrowser backs the ServiceBrowser object path: only Free is a method,
+// the item notifications are signals emitted by the test.
+type fixtureBrowser struct {
+	freed chan struct{}
+}
+
+func (b *fixtureBrowser) Free() *dbus.Error {
+	select {
+	case b.freed <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// ServiceBrowserNew answers the adapter's browse setup and records how many
+// browser objects were created.
+func (f *fixtureAvahi) ServiceBrowserNew(iface int32, proto int32, typ string, domain string, flags uint32) (dbus.ObjectPath, *dbus.Error) {
+	f.mu.Lock()
+	f.browsers++
+	f.mu.Unlock()
+	return fixtureBrowserPath, nil
+}
+
+// ResolveService answers one browse resolution with fixed, verifiable content.
+func (f *fixtureAvahi) ResolveService(iface int32, proto int32, name string, typ string, domain string, aproto int32, flags uint32) (int32, int32, string, string, string, string, int32, string, uint16, [][]byte, int32, *dbus.Error) {
+	f.mu.Lock()
+	f.resolves++
+	f.mu.Unlock()
+	return iface, proto, name, typ, domain, "capsula", aproto, "192.0.2.10", 8009, [][]byte{[]byte("v=1")}, 0, nil
+}
+
+func (f *fixtureAvahi) resolveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resolves
+}
+
+func (f *fixtureAvahi) browserCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.browsers
+}
+
+// emitItem emits one ServiceBrowser item notification from the browser object
+// the adapter was handed.
+func (f *fixtureAvahi) emitItem(t *testing.T, member, name, typ, domain string) {
+	t.Helper()
+	if err := f.conn.Emit(fixtureBrowserPath, avahiServiceBrowserIface+"."+member,
+		int32(0), int32(0), name, typ, domain, uint32(0)); err != nil {
+		t.Fatalf("emit %s: %v", member, err)
+	}
 }
 
 func (f *fixtureAvahi) GetState() (int32, *dbus.Error) {
@@ -173,6 +234,21 @@ func fixtureStatus(t *testing.T, m Manager, hostname, advertised string, detail 
 	}
 }
 
+// fixtureEvent reads the next browse event within a bounded window.
+func fixtureEvent(t *testing.T, events <-chan Event) Event {
+	t.Helper()
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			t.Fatal("browse event channel closed while waiting for an event")
+		}
+		return ev
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for a browse event")
+		return Event{}
+	}
+}
+
 func fixtureWait(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -269,6 +345,72 @@ func TestAvahiDbusFixture(t *testing.T) {
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close monitor: %v", err)
 	}
+
+	// A live browse stream must survive the RUNNING → REGISTERING → RUNNING
+	// cycle a host-name re-apply produces, with its D-Bus matches intact. Only
+	// a terminal server state may end the stream.
+	browser := &fixtureBrowser{freed: make(chan struct{}, 1)}
+	if err := conn.Export(browser, fixtureBrowserPath, avahiServiceBrowserIface); err != nil {
+		t.Fatalf("export fake service browser: %v", err)
+	}
+	fake.setCurrent("capsula", stateRunning)
+	svc := OpenServices(nil, "linux")
+	t.Cleanup(func() { _ = svc.Close() })
+	br, err := svc.Browse(ctx, Query{Type: "_test._tcp"})
+	if err != nil {
+		t.Fatalf("Browse: %v", err)
+	}
+	if got := fake.browserCount(); got != 1 {
+		t.Fatalf("ServiceBrowserNew called %d times, want 1", got)
+	}
+	fake.emitItem(t, "ItemNew", "capsula-speaker", "_test._tcp", "local")
+	ev := fixtureEvent(t, br.Events())
+	if ev.Kind != EventAdded || ev.Name != "capsula-speaker" || ev.Host != "capsula" || ev.Port != 8009 {
+		t.Fatalf("browse event = %+v, want the resolved speaker", ev)
+	}
+	if len(ev.Addresses) != 1 || ev.Addresses[0] != "192.0.2.10" || ev.TXT["v"] != "1" {
+		t.Fatalf("resolved event = %+v, want address and TXT", ev)
+	}
+
+	// Avahi re-registers while it re-probes the changed host name. The stream
+	// and its matches stay up, so later item notifications still arrive.
+	fake.emit(t, avahiServerRegistering)
+	fixtureWait(t, "browse survives REGISTERING", func() bool { return br.Err() == nil })
+	fake.setCurrent("kitchen", stateRunning)
+	fake.emit(t, stateRunning)
+	fake.emitItem(t, "ItemNew", "kitchen-speaker", "_test._tcp", "local")
+	ev = fixtureEvent(t, br.Events())
+	if ev.Kind != EventAdded || ev.Name != "kitchen-speaker" {
+		t.Fatalf("post re-register event = %+v, want the new speaker", ev)
+	}
+	if err := br.Err(); err != nil {
+		t.Fatalf("REGISTERING ended the browse stream: %v", err)
+	}
+	fake.emitItem(t, "ItemRemove", "capsula-speaker", "_test._tcp", "local")
+	ev = fixtureEvent(t, br.Events())
+	if ev.Kind != EventRemoved || ev.Name != "capsula-speaker" {
+		t.Fatalf("removal event = %+v, want EventRemoved capsula-speaker", ev)
+	}
+
+	// A terminal state still ends the stream with the responder-lost error.
+	fake.setCurrent("capsula", avahiServerCollision)
+	fake.emit(t, avahiServerCollision)
+	fixtureWait(t, "browse ends on collision", func() bool { return br.Err() != nil })
+	if err := br.Err(); !errors.Is(err, ErrResponderLost) {
+		t.Fatalf("browse error = %v, want ErrResponderLost", err)
+	}
+	if _, open := <-br.Events(); open {
+		t.Fatal("browse event channel stayed open after a collision")
+	}
+	if err := br.Close(); err == nil || !errors.Is(err, ErrResponderLost) {
+		t.Fatalf("Close after collision = %v, want ErrResponderLost", err)
+	}
+	select {
+	case <-browser.freed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not free the ServiceBrowser object")
+	}
+	fake.setCurrent("capsula", stateRunning)
 
 	// A successful SetHostName may return while Avahi is probing the changed
 	// name (RUNNING → Set → REGISTERING → RUNNING). The fake signals the test

@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/appcontrol"
 	"capsulad/internal/assets"
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
@@ -115,6 +116,10 @@ type Config struct {
 	// and capsulad-native.json. Empty means the launcher resolves it next to the
 	// daemon binary (<daemon-dir>/lib, else <daemon-dir>/../lib).
 	NativeLibDir string
+	// DiscoveryServices overrides the platform mDNS service manager. Tests
+	// inject a fake; nil selects the Avahi-backed (or explicitly unsupported)
+	// manager for Platform.
+	DiscoveryServices discovery.ServiceManager
 }
 
 func DefaultConfig() Config {
@@ -177,6 +182,12 @@ type Daemon struct {
 	launcher   *sandbox.Launcher
 	bus        *bus.Bus
 	discovery  discovery.Manager
+	mdns       discovery.ServiceManager
+	appControl *appcontrol.Manager
+	// mdnsPubs tracks publications by app/run so an unpublish cannot remove
+	// another app's registration and run exit releases everything it owned.
+	mdnsMu     sync.Mutex
+	mdnsPubs   map[string]mdnsPublication
 	audio      *audio.Manager
 	input      *input.Manager
 	sysMedia   *systemMediaController
@@ -507,6 +518,15 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		DeviceSerial: d.hardwareSerial,
 	})
 	d.sup = supervisor.New(ctx, logs, clock, cfg.SocketPath, d.launcher)
+	d.appControl = appcontrol.New(logs, appcontrol.Policy{ReservedPorts: webUIPorts(cfg.WebUIAddr)})
+	d.sup.SetControlChannel(d.appControl.Channel)
+	d.mdns = cfg.DiscoveryServices
+	if d.mdns == nil {
+		// Cheap and lazy: Avahi is contacted only when an app publishes or
+		// browses. Simulator/other platforms get an explicit unsupported
+		// manager.
+		d.mdns = discovery.OpenServices(logs, cfg.Platform)
+	}
 	d.bus = bus.New(logs, func(runID string) (string, int, bool) {
 		run, ok := d.sup.Get(runID)
 		if !ok {
@@ -960,6 +980,12 @@ func (d *Daemon) shutdown() {
 		if d.discovery != nil {
 			_ = d.discovery.Close()
 		}
+		if d.mdns != nil {
+			_ = d.mdns.Close()
+		}
+		if d.appControl != nil {
+			d.appControl.Close()
+		}
 		d.bus.Close()
 		if d.wifiMgr != nil {
 			_ = d.wifiMgr.Close()
@@ -1215,4 +1241,22 @@ func (d *Daemon) wakeModelsProto() []*frameworkv1.WakewordModelInfo {
 		out = append(out, info)
 	}
 	return out
+}
+
+// webUIPorts returns the configured Web UI port as a listener reservation.
+// An unparseable or empty address reserves nothing; the daemon simply has no
+// Web UI listener to protect.
+func webUIPorts(addr string) []int {
+	if addr == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return nil
+	}
+	return []int{n}
 }

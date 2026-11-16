@@ -5,15 +5,17 @@ frameworks services. The library is a platform component: an app never bundles o
 
 | Layer | What it is | Use from |
 |---|---|---|
-| `libcapsulad` | The shared engine. Owns the daemon transport, the app bus, reflection, the audio fast path, outbound HTTP/1.1, remote gRPC and small primitives. Frozen C ABI v1. | any language that can call C |
+| `libcapsulad` | The shared engine. Owns the daemon transport, the app bus, reflection, the audio fast path, outbound HTTP/1.1, remote gRPC, outbound TCP/TLS streams, UDP, daemon-mediated listeners, mDNS calls and small primitives. Frozen C ABI v1 (1.0, pre-release). | any language that can call C |
 | Go binding | `capsulad/sdk/capsulad`, cgo over the C ABI | native Go apps |
 | Rust binding | crate `capsulad`, `libloading` over the C ABI | native Rust apps |
 | C / C++ | the header plus `dlopen`/`dlsym` | native C/C++ apps |
 | QuickJS host | the engine plus a JavaScript prelude exposing `capsulad.*` | `runtime = "quickjs"` |
 | MicroPython host | the engine plus a Python prelude exposing `import capsulad` | `runtime = "micropython"` |
 
-The daemon-to-app wire protocol may change together with the daemon; the C ABI is v1 and is
-frozen within that major version.
+The daemon-to-app wire protocol may change together with the daemon; the C ABI is v1 (1.0,
+pre-release) and is frozen within that major version. The stream, UDP, listener and mDNS entry
+points are appended to the table in this tree; a binding built against an earlier revision
+keeps working with its shorter table.
 
 ## The native SDK model
 
@@ -48,8 +50,10 @@ if (st != CAPSULAD_STATUS_OK) {
 
 Rules that hold for every binding:
 
-- `abi_major` must be `1`. A newer **minor** may append fields to the function table; fields
-  are never reordered or removed.
+- `abi_major` must be `1`. Fields are never reordered or removed; in this pre-release tree the
+  table is append-only at ABI 1.0, so new entry points extend it without changing the identity.
+  `capsulad_abi_minor()` reports the library's minor; an app that uses the networking surface
+  declares `[native_sdk] min_minor = 0` (or omits the requirement).
 - The table is copied up to `min(table_size, capsulad_api_size())` and never written past
   `table_size`. `out->struct_size` reports the library's full table size: keep your table
   zero-initialized and require every function you call to be within that size and non-NULL.
@@ -61,10 +65,14 @@ Rules that hold for every binding:
 The table covers: client connect/close, descriptor registration, client info, unary JSON and
 unary protobuf, call start (direct, routed and with metadata), send JSON/protobuf, half-close,
 recv JSON/protobuf, end, cancel, retain/release, call info/status, bus open/close/ready, bus
-notification of invocation and action results, the four audio functions, an outbound HTTP/1.1
-client (open/request/cancel/close), a remote gRPC client, encoding/crypto/URL primitives,
-`buf_free`, `last_error` and `handle_info`. The HTTP, remote gRPC and primitive pointers are appended after `handle_info`;
-a binding built against an older minor sees them as absent.
+notification of invocation and action results, the four audio functions, `buf_free`,
+`last_error`, `handle_info`, an outbound HTTP/1.1 client (open/request/cancel/close), a remote
+gRPC client, encoding/crypto/URL primitives, then — appended in that order — the networking
+surface: `tcp_open`, the six stream functions, the four UDP functions, the six listener
+functions and the three mDNS functions. Append order after `http_cancel` is fixed, so a newly
+added entry point can never shift an older pointer. The HTTP, remote gRPC, primitive and
+networking pointers are appended after `handle_info`; a binding built against an earlier
+revision sees them as absent (`capsulad_api_size()` is the authority, not a version check).
 
 ### Handles and lifetimes
 
@@ -72,18 +80,27 @@ a binding built against an older minor sees them as absent.
 |---|---|---|
 | client | `client_connect(socket, run_id, app_id, timeout_ms)` | `client_close` |
 | bus | `bus_open(client, callbacks)` | `bus_close` |
-| call | `call_start`, `call_start_routed`, `audio_capture_open`, `audio_playback_open`, or handed to `on_call` | `call_release` (or `call_end`/`call_cancel` on an outbound call) |
+| call | `call_start`, `call_start_routed`, `mdns_browse_open`, `audio_capture_open`, `audio_playback_open`, or handed to `on_call` | `call_release` (or `call_end`/`call_cancel` on an outbound call) |
+| stream | `tcp_open`, `listener_accept` | `stream_close` |
+| udp | `udp_open` | `udp_close` |
+| listener | `listener_open` | `listener_close` |
 
 - Handles are process-local integers. `0` is never a valid handle.
 - Handles are thread-safe. One call has **one logical reader**: only one thread may be inside
   `call_recv_*` for a given call at a time. Concurrent sends are allowed.
+- A stream, UDP socket or listener has **one logical reader** as well: one thread in
+  `stream_read`, `udp_recv`, `listener_accept` or `listener_recv` at a time. Writes are
+  serialized inside the engine; a second writer blocks rather than interleaving.
+- `stream_close`, `udp_close` and `listener_close` unblock a pending read, receive, accept or
+  write with `CANCELLED`; using a released handle is `NOT_FOUND` or `CLOSED`.
 - A call handle is reference-counted. Inbound calls arrive with one reference owned by the
   library and delivered to `on_call`; returning from `on_call` without ending the call ends it
   with `INTERNAL`. Use `call_retain` to keep working asynchronously, then `call_release`.
 - `call_cancel`, `call_release`, `bus_close` and `client_close` unblock a pending
   `call_recv_*` with `CANCELLED`.
-- `client_info`, `bus`, `call` and `call_status` each render a small JSON object; treat it as
-  diagnostics, not as a stable schema beyond the documented fields.
+- `client_info`, `bus`, `call`, `call_status`, `stream_info` and `listener_info` each render a
+  small JSON object; treat it as diagnostics, not as a stable schema beyond the documented
+  fields.
 
 Callbacks (`on_ready`, `on_disconnected`, `on_event`) are serialized per bus. `on_call` runs on
 one dedicated thread per inbound call, so a handler may block in `call_recv_*`. Callbacks must
@@ -119,7 +136,8 @@ with a remote error additionally carries the canonical gRPC code through `call_s
 | `CAPSULAD_STATUS_NOT_FOUND` | 12 | Unknown handle or unknown target. |
 | `CAPSULAD_STATUS_BUSY` | 13 | A bounded queue or the live-call budget is full. |
 | `CAPSULAD_STATUS_INTERNAL` | 14 | Engine invariant or an unexpected runtime failure. |
-| `CAPSULAD_STATUS_TOO_LARGE` | 15 | An HTTP body, header block or chunk exceeded its configured cap. |
+| `CAPSULAD_STATUS_TOO_LARGE` | 15 | An HTTP body, header block, chunk, read length or datagram above its configured cap. |
+| `CAPSULAD_STATUS_UNSUPPORTED` | 16 | The runtime has no usable `CAPSULAD_CONTROL_FD`, so daemon-mediated listeners are unavailable. Appended to the v1 status list in this pre-release tree. |
 
 `last_error()` returns the library's human-readable message for the last failure on the
 calling thread; it is diagnostic, not an error object.
@@ -135,6 +153,11 @@ calling thread; it is diagnostic, not an error object.
   no-op.
 - Routed calls default to a 30 s deadline and are capped at 5 minutes unless the caller passes
   a shorter timeout.
+- Stream, UDP and listener calls share one convention: `0` polls once, `0xFFFFFFFF` waits
+  indefinitely and any other value bounds that operation in milliseconds. A timeout returns
+  `TIMEOUT` and leaves the handle usable. `tcp_open` and `udp_open` treat `0` as the documented
+  30 s default because opening must complete or fail; `listener_open` treats `0` as its default
+  control budget. See [network.md](network.md#availability-and-abi).
 - Losing the framework connection fails every in-flight call with `UNAVAILABLE`. Calls are
   never replayed to a new process.
 
@@ -180,7 +203,7 @@ See [audio.md](audio.md) for the stream contract.
 ### HTTP, remote gRPC and primitives
 
 The same library also gives native apps outbound networking without bundling a TLS, HTTP or
-gRPC stack. Nothing below is available from the QuickJS or MicroPython hosts.
+gRPC stack. None of it is available from the QuickJS or MicroPython hosts.
 
 **HTTP/1.1** (`http_open`, `http_request`, `http_cancel`, `http_close`) is one request per call with verified
 TLS 1.2+, `Connection: close` and no automatic decompression. Options are a snake_case JSON
@@ -263,6 +286,110 @@ if (st == CAPSULAD_STATUS_OK) {
 }
 table.http_close(http);
 ```
+
+### Outbound TCP/TLS streams and UDP
+
+This pre-release tree appends outbound TCP with optional verified TLS and connected/unconnected
+UDP to the ABI 1.0 table. The complete contract — options, policy, limits, statuses and cleanup
+— is [network.md](network.md). Signatures:
+
+```c
+int32_t tcp_open(const char *host, size_t host_len, uint16_t port,
+                 const uint8_t *options_json, size_t options_len,
+                 uint32_t timeout_ms, capsulad_handle *out_stream);
+int32_t stream_read(capsulad_handle stream, size_t max_len, uint32_t timeout_ms,
+                    capsulad_buf *out_data);
+int32_t stream_write(capsulad_handle stream, const uint8_t *data, size_t len,
+                     uint32_t timeout_ms, size_t *out_written);
+int32_t stream_shutdown(capsulad_handle stream, int32_t how);
+int32_t stream_close(capsulad_handle stream);
+int32_t stream_info(capsulad_handle stream, capsulad_buf *out_json);
+
+int32_t udp_open(const char *host, size_t host_len, uint16_t port,
+                 const uint8_t *options_json, size_t options_len,
+                 uint32_t timeout_ms, capsulad_handle *out_udp);
+int32_t udp_send(capsulad_handle udp, const uint8_t *peer_json, size_t peer_len,
+                 const uint8_t *data, size_t len, uint32_t timeout_ms,
+                 size_t *out_sent);
+int32_t udp_recv(capsulad_handle udp, size_t max_len, uint32_t timeout_ms,
+                 capsulad_buf *out_data, capsulad_buf *out_peer_json);
+int32_t udp_close(capsulad_handle udp);
+```
+
+`tcp_open` options are `tls`, `roots`, `ca_pem`, `server_name` and `nodelay`; TLS always
+verifies a chain with TLS 1.2+ and there is no insecure mode. `stream_read` returns
+`END_OF_STREAM` on a clean remote close, `stream_write` may write fewer bytes than requested and
+rejects an empty buffer, and `max_len` 0 means 64 KiB with a 4 MiB cap. UDP datagrams are capped
+at 65507 bytes, `udp_send` names a peer unless the socket is connected, and a peer address must
+be an IP literal — peer JSON is not resolved. `udp_open` needs both host and port or neither,
+and binds an ephemeral local port only: a fixed inbound UDP port is a UDP listener, never a
+`udp_open` socket.
+
+Bindings: Go `OpenTCP`/`TCPStream` and `OpenUDP`/`UDPConn` with `TCPOptions`/`UDPOptions`
+(Rust `net::Stream`, `net::UdpSocket`, `TcpOptions`, `UdpOptions`). Complete examples are in
+[network.md](network.md#examples).
+
+### Daemon-mediated listeners
+
+An app never creates or binds a listening socket. `listener_open` asks the daemon over the
+inherited control channel and receives the already-bound descriptor:
+
+```c
+int32_t listener_open(const uint8_t *options_json, size_t options_len,
+                      uint32_t timeout_ms, capsulad_handle *out_listener,
+                      capsulad_buf *out_info);
+int32_t listener_accept(capsulad_handle listener, uint32_t timeout_ms,
+                        capsulad_handle *out_stream, capsulad_buf *out_peer_json);
+int32_t listener_recv(capsulad_handle listener, size_t max_len,
+                      uint32_t timeout_ms, capsulad_buf *out_data,
+                      capsulad_buf *out_peer_json);
+int32_t listener_send(capsulad_handle listener, const uint8_t *peer_json,
+                      size_t peer_len, const uint8_t *data, size_t len,
+                      uint32_t timeout_ms);
+int32_t listener_info(capsulad_handle listener, capsulad_buf *out_json);
+int32_t listener_close(capsulad_handle listener);
+```
+
+Options are `protocol` (`tcp`/`udp`), `bind`, `port` and `backlog`; `port` `0` is ephemeral,
+explicit ports must be `1024..65535`, and 5353 plus the configured Web UI port are refused.
+`out_info` carries the bound `{"protocol","address","port"}`. There are at most 16 listeners per
+run, and the daemon closes any un-taken listener and the control channel when the run ends.
+`CAPSULAD_CONTROL_FD` is a reserved inherited descriptor: never read, write, close or reuse it,
+and there is no other way to obtain a listener. Without the channel every listener call returns
+`UNSUPPORTED`. Bindings: Go `OpenListener`/`Listener` with `Accept`/`Receive`/`Send`/`Info`;
+Rust `listener::Listener` with the same operations.
+
+### mDNS discovery
+
+mDNS goes through the daemon's Avahi responder, not through the app:
+
+```c
+int32_t mdns_publish(capsulad_handle client, const uint8_t *request_json,
+                     size_t request_len, uint32_t timeout_ms,
+                     capsulad_buf *out_json);
+int32_t mdns_unpublish(capsulad_handle client, const char *publication_id,
+                       size_t publication_id_len, uint32_t timeout_ms);
+int32_t mdns_browse_open(capsulad_handle client, const uint8_t *request_json,
+                         size_t request_len, uint32_t timeout_ms,
+                         capsulad_handle *out_call);
+```
+
+Requests and responses are canonical protobuf JSON for
+`capsulad.framework.v1.DiscoveryService`. `Browse` returns a normal call handle: read each
+`DiscoveredService` with `call_recv_json` and finish with `call_release` or `call_cancel`.
+`Publish` and `Unpublish` release their internal call handle for you and map a remote
+`INVALID_ARGUMENT` to `CAPSULAD_STATUS_INVALID_ARGUMENT` and `NOT_FOUND` to
+`CAPSULAD_STATUS_NOT_FOUND`; every other non-OK gRPC status arrives as `GRPC` (8) with the reason
+in the message, so there is no `call_status` to read afterwards.
+Publications are scoped to the caller's run and removed on unpublish, run exit and daemon
+shutdown; a build with no responder ends the call with `FAILED_PRECONDITION` (surfaced as
+`GRPC`, never as a false success).
+Bindings: Go `Client.PublishMDNS`/`UnpublishMDNS`/`BrowseMDNS` with `MDNSService`,
+`MDNSPublication`, `MDNSEvent`; Rust `Client::publish_mdns`/`unpublish_mdns`/`browse_mdns` with
+`MdnsService`, `MdnsPublication`, `DiscoveredService`, `Browse`. Scripts use the framework call
+path (`capsulad.call` and `capsulad.stream`). Fields, access and errors are in
+[services.md](services.md#discoveryservice); the full publication and browse contract is in
+[network.md](network.md#mdns-publication-and-browsing).
 
 ## Go binding
 
@@ -414,6 +541,22 @@ returns its response. A request started after a cancelled one proceeds normally.
 (the native engine skips the wait only when it runs on a Tokio runtime thread; Go calls it from
 an application goroutine, so it waits). `*capsulad.StatusError` carries `NativeStatus` so callers can distinguish
 a native transport status (7/10/...) from the numerically overlapping canonical gRPC code.
+
+### Networking
+
+The binding wraps the appended ABI v1 networking surface; the contract is [network.md](network.md).
+
+| Call | Purpose |
+|---|---|
+| `OpenTCP(ctx, env, host, port, TCPOptions) (*TCPStream, error)` | Verified TLS when `TLS` is set. Only a `ctx` **deadline** bounds DNS + TCP + TLS; with no deadline the native 30 s default applies and cancelling the context does not abort the dial. |
+| `(*TCPStream) Read(ctx, p)`, `Write(ctx, p)`, `Shutdown(ShutdownWrite\|ShutdownRead\|ShutdownBoth)`, `Close()`, `Info()` | `Read` returns `io.EOF` on a clean close; `Write` may accept fewer bytes than `len(p)` and rejects empty input; `Close` unblocks I/O. Reads and writes wait forever when `ctx` has no deadline. |
+| `OpenUDP(ctx, env, host, port, UDPOptions) (*UDPConn, error)` | Connected only when host **and** port are both set; ephemeral local port only. `Send(ctx, *UDPAddr, data)` and `Receive(ctx, maxLen)`. |
+| `OpenListener(ctx, env, ListenerOptions) (*Listener, error)` | The daemon binds; `Accept(ctx) (*TCPStream, *UDPAddr, error)`, `Receive`, `Send`, `Info`, `Close`. |
+| `(*Client) PublishMDNS`, `UnpublishMDNS`, `BrowseMDNS` | Avahi-backed publication and browse; `BrowseMDNS` returns an iterator whose `Next` returns `io.EOF` at the end. |
+
+Networking errors are `*capsulad.StatusError`; when `NativeStatus` is true, `Code` is an ABI
+status (`10` timeout, `16` unsupported, …), not a gRPC code. `ErrClosed` means the handle was
+released.
 
 ### Complete native Go app
 
@@ -748,6 +891,17 @@ existing `Call` methods work, `Client::bus` and `Client::start_routed` fail with
 (`base64_encode`, `base64_decode`, `percent_encode`, `percent_decode`, `sha256`,
 `random_bytes`, `uuid_v4`, `parse_url`) live directly on `Library` and copy/free the native
 buffer once.
+
+### Networking
+
+The crate wraps the appended ABI v1 networking surface; the contract is [network.md](network.md).
+`net::Stream` (`open`, `read`, `write`, `shutdown`, `info`, `close`), `net::UdpSocket`
+(`open`, `send`, `recv`, `close`), `listener::Listener` (`open`, `accept`, `recv`, `send`,
+`info`, `close`) and `Client::publish_mdns`/`unpublish_mdns`/`browse_mdns` with `MdnsService`,
+`MdnsPublication`, `DiscoveredService` and `Browse`. `Stream::read` returns `Ok(None)` on a
+clean close and a timeout is an `Error` whose status leaves the handle usable; dropping a
+stream, socket or listener closes it. Option structs are `TcpOptions`, `UdpOptions` and
+`ListenerOptions`; `PeerAddr` is the datagram peer.
 
 ## C and C++
 
