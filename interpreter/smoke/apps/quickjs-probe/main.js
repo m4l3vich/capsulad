@@ -1,29 +1,29 @@
 "use strict";
 
 var TARGET = "org.example.micropython-smoke";
-var DEVICE = "capsula.framework.v1.DeviceService";
+var DEVICE = "capsulad.framework.v1.DeviceService";
 
-capsula.on("disconnect", function (event) {
-  capsula.log("SMOKE-DISCONNECT quickjs status=" + ((event && event.status) || 0) + " detail=" + ((event && event.detail) || ""));
+capsulad.on("disconnect", function (event) {
+  capsulad.log("SMOKE-DISCONNECT quickjs status=" + ((event && event.status) || 0) + " detail=" + ((event && event.detail) || ""));
 });
 
-capsula.on("invocation", function (event) {
-  capsula.log("SMOKE-INVOCATION quickjs " + (event && event.invocationId));
-  capsula.notifyInvocation(event.invocationId, true, "smoke probe");
+capsulad.on("invocation", function (event) {
+  capsulad.log("SMOKE-INVOCATION quickjs " + (event && event.invocationId));
+  capsulad.notifyInvocation(event.invocationId, true, "smoke probe");
 });
 
-capsula.start();
-capsula.log("SMOKE-READY quickjs app=" + capsula.env.appId);
+capsulad.start();
+capsulad.log("SMOKE-READY quickjs app=" + capsulad.env.appId);
 
-var device = capsula.call("capsula.framework.v1.DeviceService", "GetInfo", {});
-capsula.log("SMOKE-PUBLIC-API quickjs model=" + device.model);
+var device = capsulad.call("capsulad.framework.v1.DeviceService", "GetInfo", {});
+capsulad.log("SMOKE-PUBLIC-API quickjs model=" + device.model);
 
-var reply = capsula.routed(TARGET, DEVICE, "GetInfo", {}, 5000);
-capsula.log("SMOKE-ROUTED-OK quickjs " + JSON.stringify(reply));
+var reply = capsulad.routed(TARGET, DEVICE, "GetInfo", {}, 5000);
+capsulad.log("SMOKE-ROUTED-OK quickjs " + JSON.stringify(reply));
 
-var stream = capsula.routedStream(TARGET, DEVICE, "WatchResources", {}, 5000);
+var stream = capsulad.routedStream(TARGET, DEVICE, "WatchResources", {}, 5000);
 var first = stream.recv(5000);
 stream.cancel();
-capsula.log("SMOKE-CANCEL-CLIENT quickjs " + JSON.stringify(first));
+capsulad.log("SMOKE-CANCEL-CLIENT quickjs " + JSON.stringify(first));
 
-capsula.run();
+capsulad.run();

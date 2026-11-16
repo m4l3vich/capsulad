@@ -5,7 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
 // TestOperationAdmissionErrorsCorrelateRequestID covers a browser that occupies

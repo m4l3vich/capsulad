@@ -19,8 +19,10 @@ stop, settings, diagnostics, media listing, firmware inspection, display bring-u
 deployment-bundle application. It reaches the daemon over the same Unix socket as apps, with
 administrator identity.
 
-**Capsula Mini** — the supported physical target: an RK3308 speaker with a five-key panel, a 12-pixel
-RGB ring and a 30-cell segment display. Other backends emulate it or fail explicitly.
+**Capsula Mini** — the supported physical target: an RK3308 speaker with a five-key panel, a
+12-pixel RGB ring and a 30-cell segment display, running the stock Rockchip firmware. Its
+`rk3308-capsula-mini-rev4-stock` board profile is the only hardware configuration; the simulator
+emulates the same contracts, and Amlogic has no backend.
 
 **HAL** — hardware abstraction layer: the `internal/backend` interfaces through which the daemon
 drives displays, rings, input, audio, sensors and Bluetooth. It is not a separate process, and apps
@@ -28,16 +30,27 @@ never talk to a backend directly — they use framework services, and the backen
 diagnostics.
 
 **Framework** — the stable runtime contract presented to applications: the supervisor, the
-Unix-socket gRPC API (`capsula.framework.v1`), the app bus, presentation/capture routing, audio,
+Unix-socket gRPC API (`capsulad.framework.v1`), the app bus, presentation/capture routing, audio,
 input, settings and the application registry. "The framework" also means the daemon acting in that
 role; framework services are the only supported way for an app to affect the device.
 
 **Device settings** — daemon-wide typed settings (volume, brightness, timezone, hostname, provider
 defaults, Bluetooth policy, …) owned by `SettingsService`, distinct from an app's settings.
 
-**Target platform** — the backend family declared at startup (`simulator`, `rockchip-stock`, …). A
-backend advertises only the resources and capabilities it implements; unsupported platforms fail
-explicitly.
+**Target platform** — the backend family declared at startup: `simulator` or `rockchip-stock`
+(`rockchip` is accepted as an alias). Any other value, including `amlogic-stock` and
+`amlogic-alpine`, is rejected as an unknown platform. A backend advertises only the resources
+and capabilities it implements; unsupported platforms fail explicitly, and the historical
+`CAPSULA_MINI_AMLOGIC_*` wire enum values are reserved.
+
+**Board profile** — the inert data record in `internal/backend/profile` describing one
+supported configuration: model and SoC fallbacks, serial location, audio topology, LED and
+segment geometry, input paths, watchdog, stock Wi-Fi files, deployment budgets, architecture,
+memory envelope and brightness curve. It has no I/O, no interfaces and no build tags. The
+composition root selects it and passes values into generic packages; board paths and quirks
+live in `internal/backend/rockchip` and `deploy/rockchip-stock`, and hardware-agnostic
+packages such as `internal/wifi` must not import a profile. The supported profiles are
+Rockchip stock (`rk3308-capsula-mini-rev4-stock`) and the neutral simulator profile.
 
 **Sandbox mode** — the isolation level the daemon actually probed: `namespaces` (user+mount+PID,
 distinct UID), `mountns` (root mount namespace, distinct UID), `uid` (distinct UID only) or `none`
@@ -51,7 +64,7 @@ supervised native process, a QuickJS or MicroPython script, or a compiled-in sys
 output, capture input, expose interfaces and receive events only through the framework.
 
 **Built-in system app** — an application compiled into `capsulad`, with a normal `app_id` such as
-`capsula.clock` or `capsula.ring`: same registry entry, settings, run lifecycle, provider role and
+`capsulad.clock` or `capsulad.ring`: same registry entry, settings, run lifecycle, provider role and
 app-bus endpoints as an installed app, but no package directory, child process, install or uninstall.
 `system_app` in `InstalledApplication` is server-owned metadata, not inferred from the ID.
 
@@ -106,7 +119,7 @@ receive activations, never samples.
 ## Assets and resources
 
 **Asset store** — the read-only, daemon-owned directory `<data-dir>/assets`, mounted at `/assets` for
-apps and passed as `CAPSULA_ASSETS`. The directory is the catalog: every regular, non-symlink file
+apps and passed as `CAPSULAD_ASSETS`. The directory is the catalog: every regular, non-symlink file
 below the root is an asset, its ID is the slash-relative path and its canonical app path is
 `/assets/<id>`. The catalog is enumerated per call, so a new file is visible without a daemon restart;
 uploads are staged and renamed atomically; one file is capped at 32 MiB.
@@ -159,8 +172,8 @@ invocations, settings changes, actions, activations, release events and disconne
 gRPC service name, version, optional descriptor file and docs, discoverable through
 `AppInterfaceService` (`available` only when the selected run sent `AppReady`) and callable through
 `AppBusService.Call` — a name and a schema, not an endpoint. A *contract* is a published protobuf
-service and its documented behavior (framework contracts under `proto/capsula/framework/v1`,
-standard app contracts under `proto/capsula/contracts/`); "public" means callable through the normal
+service and its documented behavior (framework contracts under `proto/capsulad/framework/v1`,
+standard app contracts under `proto/capsulad/contracts/`); "public" means callable through the normal
 SDK/app-bus path without private daemon privileges.
 
 **Settings** — typed key/value state with declared defaults, choices and bounds. *Device settings* are
@@ -184,13 +197,17 @@ is the open/hello/start request.
 caller supplies the expected revision and the daemon rejects a stale writer instead of silently
 overwriting a concurrent change.
 
-**Native SDK / ABI** — the shared `libcapsula` runtime (Rust cdylib, C ABI v1) owns an app's
-transport: UDS gRPC, protobuf reflection, AppBus sessions, routed calls and the raw-PCM fast path. Go
-and Rust bindings (`capsula/sdk`, crate `capsula`) and direct C/C++ consumers load it and never
-reimplement the transport. The *ABI* is its stable C function-table contract — major/minor versions,
-`capsula_get_api` negotiation, opaque handles, library-owned buffers, status codes and threading
-guarantees — where a major mismatch is an explicit error, not a best-effort load. The SDK/package
-version (`0.5`) is separate from the ABI version.
+**Native SDK / ABI** — the shared `libcapsulad` runtime (Rust cdylib, C ABI v1) owns an app's
+transport: UDS gRPC, protobuf reflection, AppBus sessions, routed calls, the raw-PCM fast path,
+outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, and the
+encoding/hash/random/URL primitives (base64, percent coding, SHA-256, getrandom, UUIDv4,
+absolute-URL parsing). Go and Rust bindings (`capsulad/sdk`, crate `capsulad`) and direct
+C/C++ consumers load it and never reimplement the transport; an app must not bundle its own
+`net/http`, `crypto/tls` or gRPC stack. The *ABI* is its stable C function-table contract —
+major/minor versions, `capsulad_get_api` negotiation, opaque handles, library-owned buffers,
+status codes and threading guarantees — where a major mismatch is an explicit error, not a
+best-effort load. New entry points are appended within ABI 1.0. The SDK/package version
+(`0.5`, also exported to apps as `CAPSULAD_SDK`) is separate from the ABI version.
 
 ## Web, network and display settings
 
@@ -198,7 +215,9 @@ version (`0.5`) is separate from the ABI version.
 administrator client of the local gRPC API rather than a second privilege plane. A *live control* is
 one whose change reaches the daemon immediately after local validation, without waiting for the form's
 **Save**; invalid or unsubmitted text edits stay local, are never submitted by a neighbouring control and
-are never erased by a hardware or external update.
+are never erased by a hardware or external update. Settings → Bluetooth also edits the **advertised
+device name** through a pencil button and a validated modal: 1–248 UTF-8 bytes, trimmed, no control
+characters, written to BlueZ `Adapter1.Alias` without power-cycling the adapter.
 
 **Custom settings UI and settings bridge** — an app-supplied local HTML/JS asset in a sandboxed,
 opaque-origin iframe under the application settings page. Its only accepted output is validated
@@ -207,8 +226,10 @@ validates exact `event.source`, a per-frame random channel token, message size a
 patches through the revision-checked own-app settings path. It is not an AppBus proxy.
 
 **Captive portal / AP fallback** — the Wi-Fi access point raised when no known network joins within
-the bounded startup attempt, with SSID from the live Bluetooth adapter alias (saved host name only
-when Bluetooth has no name), WPA2 password `capsulad`, 2.4 GHz channel 1 at `192.168.4.1/24`,
+the bounded startup attempt, with SSID taken from the live Bluetooth adapter alias when it starts
+(shortened to the first 32 UTF-8 bytes on a rune boundary, because that is the SSID limit; the saved
+host name is only a fallback for a device without Bluetooth, and an empty answer fails the AP rather
+than inventing a name), WPA2 password `capsulad`, 2.4 GHz channel 1 at `192.168.4.1/24`,
 DHCP/DNS and a portal on port 80. The portal exposes only Wi-Fi scanning and connection so a network
 can be configured without administrator authentication, is isolated from the admin Web UI and its
 credentials, and the AP is torn down when a station connection succeeds.

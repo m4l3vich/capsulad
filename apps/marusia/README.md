@@ -21,7 +21,7 @@ A turn sends the following to the configured vendor endpoint:
 | Data | Where it goes | Why |
 |---|---|---|
 | Microphone PCM, 16 kHz mono, reframed into 80 ms chunks | the `Phrase/Speech` gRPC stream only | recognition; the attach body carries no audio |
-| SoC serial: the `serial` setting, else `CAPSULA_DEVICE_SERIAL`, framework `hardware_serial`, then `/proc/cpuinfo` | attach `serial`, gRPC `x-device-sn`, `DeviceInfo.serial` | device identity the vendor expects |
+| SoC serial: the `serial` setting, else `CAPSULAD_DEVICE_SERIAL`, framework `hardware_serial`, then `/proc/cpuinfo` | attach `serial`, gRPC `x-device-sn`, `DeviceInfo.serial` | device identity the vendor expects |
 | Device id: the `device_id` setting, else the framework's `DeviceService.GetInfo` `device_id`, else a per-process UUID | gRPC `x-device-id` | the identity the vendor expects |
 | Client version (`44.91` by default) | gRPC `x-device-ver`, `DeviceInfo.version` | client identity |
 | `xtoken_id` (the configured value, possibly empty) | attach body `{"serial", "with_secret", "xtoken_id"}` | provisioning credential; only used when no session is configured or readable |
@@ -33,9 +33,17 @@ The attach reply's account id is decoded for the log and is never sent, and
 `DeviceService.GetInfo` is a local framework call over the Unix socket, not
 egress; only the `device_id` it reports can be forwarded as the identity above.
 
-The reply path fetches the HTTPS URL from `CommandPlayUrl` with
+The reply path fetches the URL from `CommandPlayUrl` with
 `User-Agent: voice-agent/1`. That URL is chosen by the server; the app does not
-contact any other host.
+contact any other host. A vendor TTS URL carries its signature in the query
+string, so every log line and error reports it as `scheme://host/path` only —
+the query and the fragment never reach the log.
+
+The transport is TLS for every `https://` endpoint, which is four of the five
+recovered deployments. `test2` is plaintext `http://` in the vendor's own table;
+selecting it (or a custom `http://` base) sends the session and the `xtoken_id`
+without TLS, and the choice is logged as a warning at startup instead of being
+silently downgraded — see [Plaintext endpoints](#plaintext-endpoints).
 
 No vendor asset, model, animation frame or proprietary decoder is redistributed.
 The protobuf schemas under `proto/` are transcriptions of the descriptor set in the
@@ -63,7 +71,11 @@ wins:
 
 Credentials are never logged. `session_secret`, `xtoken_id` and `device_id` are
 declared `text_masked`, and the log names a source ("settings", "vendor session
-file", "attach") plus a truncated account id, never a secret.
+file", "attach") plus shortened identifiers — an 8-character account prefix and,
+on the reauth line, an 8-character session prefix — never the values
+themselves. The reply URL is shortened the same way: `scheme://host/path`, with
+the signed query and fragment stripped, in the completed-turn line and in every
+media error.
 
 A 401/403 from the service (gRPC `UNAUTHENTICATED`/`PERMISSION_DENIED`) drops the
 session once; the next activation re-resolves it in the order above, so a
@@ -84,13 +96,13 @@ session, and `xtoken_id` is a manufacturing credential this unit does not hold.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `endpoint` | `prod` | one of the five recovered deployments |
-| `endpoint_custom` | empty | overrides `endpoint`; `http(s)://host[:port]` with no path |
+| `endpoint` | `prod` | one of the five recovered deployments; `test2` is plaintext `http://` and triggers the startup warning |
+| `endpoint_custom` | empty | overrides `endpoint`; `http(s)://host[:port]` with no path; an `http://` base triggers the same warning |
 | `session_id` | empty | vendor session id; masked. Must be supplied together with `session_secret` |
 | `session_secret` | empty | vendor bearer secret; masked, never logged |
 | `session_file` | `/data/voice-agent/session.json` | best-effort fallback source; the sibling `device_settings.json` supplies `general.id` |
 | `xtoken_id` | empty | manufacturing/provisioning credential, masked; only used by the attach path, i.e. when no session exists |
-| `serial` | empty | optional override for the SoC serial; an explicit value wins over `CAPSULA_DEVICE_SERIAL`, framework `hardware_serial`, and `/proc/cpuinfo`. If none is available, `x-device-sn` is empty and the vendor rejects the turn with a message naming this setting |
+| `serial` | empty | optional override for the SoC serial; an explicit value wins over `CAPSULAD_DEVICE_SERIAL`, framework `hardware_serial`, and `/proc/cpuinfo`. If none is available, `x-device-sn` is empty and the vendor rejects the turn with a message naming this setting |
 | `device_id` | empty | stable `x-device-id`, masked; also the HTTP identity |
 | `audio_format` | `wave` | upload framing; `ogg_opus` is declared but refused |
 | `client_version` | `44.91` | advertised client/firmware version |
@@ -114,7 +126,7 @@ back to one UUID per process; restarting then changes the identity. The
 `device_id` setting always wins and is masked: the app never logs its value.
 
 The device serial is separate. It is resolved once per process in this order:
-a non-empty `serial` setting, `CAPSULA_DEVICE_SERIAL`, framework
+a non-empty `serial` setting, `CAPSULAD_DEVICE_SERIAL`, framework
 `DeviceService.GetInfo.hardware_serial`, then local `/proc/cpuinfo` (the same
 value the vendor agent sends). The selected source is logged once as
 `device serial source=settings`, `device serial source=env`,
@@ -125,6 +137,28 @@ framework field from JSON. If no source yields a serial, the request is still
 sent but the vendor rejects it; the turn then reports that the device serial
 is missing and names the `serial` setting instead of echoing the vendor error
 alone. The serial is never `device_id`.
+
+### Plaintext endpoints
+
+Four of the five recovered deployments are `https://`. `test2`
+(`http://voice-test2.ngx.openstack.go.devmail.ru`) is plaintext in the vendor's
+own endpoint table, and it is kept as an explicit operator test choice rather
+than removed or silently upgraded to TLS: upgrading would change where the
+request goes, and refusing it would hide the vendor's own test surface.
+
+The consequence is stated, once per process, instead of being implied. When the
+selected base URL is `http://` and a credential would be sent over it, the app
+logs:
+
+```
+marusia: WARN endpoint http://voice-test2.ngx.openstack.go.devmail.ru is plaintext http:// and the session is sent as an unencrypted bearer token; a passive observer on the path can read it. Use an https endpoint unless this is a deliberate test.
+```
+
+The same line names the `xtoken_id` attach body or the session file when that is
+the credential source. An `http://` base with no credential source at all logs
+nothing. The warning is emitted once per process: at startup when the initial
+settings select a plaintext endpoint, otherwise on the first settings push that
+does.
 
 ## Media formats
 
@@ -202,12 +236,45 @@ measuring a turn adds no copy, no extra pass and no blocking to capture. Below
 **-60 dBFS** the turn additionally logs `WARN` and reports **no audio**. A turn
 that uploaded no chunk at all says so explicitly instead of blaming the vendor.
 
+## Networking and build footprint
+
+The application links no TLS, HTTP or gRPC stack. `internal/vkclient` and
+`internal/media` define a small transport seam (HTTP `Do`, unary call, bidi
+stream) and their production implementation is the shared `libcapsulad` SDK:
+`capsulad.OpenHTTP` for the attach and media fetches, `capsulad.OpenGRPC` for
+`Phrase/Speech` and `ClientProbe/AuthReady`. Protobuf-go still marshals messages;
+grpc-go, net/http and crypto/tls appear only in `_test.go` files, which build a
+throwaway in-process TLS server over that same seam. The opt-in `marusia-probe`
+diagnostic uses the same native HTTP client. `go list -deps ./cmd/marusia` (and
+`./cmd/marusia-probe`) is the authoritative check.
+
+TLS is always verified. Production uses the system roots; the integration test
+passes its throwaway CA explicitly, which is also how an operator would trust a
+private deployment. No insecure switch exists.
+
+Proof recorded from this tree:
+
+```
+$ go list -deps ./cmd/marusia | grep -E 'google.golang.org/grpc|^net/http$|^crypto/tls$'
+# (no output)
+$ ls -l marusia-old marusia-new
+15875602  marusia-old   # HEAD: bundled grpc-go + net/http + crypto/tls
+ 6436386  marusia-new   # this tree: transport delegated to libcapsulad
+```
+
+A stripped release build of this tree is 4,249,810 bytes.
+
+The 9,439,216-byte (9.0 MiB / 9.44 MB) reduction — 6,436,386 vs 15,875,602, a
+59.4% smaller file — is the linked grpc-go/net-http/TLS machinery leaving the
+binary, not a compression change. The low-level security fixes added 17,376
+bytes over the pre-fix host build (6,419,010).
+
 ## Build and test
 
 ```
 cd apps/marusia && go test ./...
 cd apps/marusia && go vet ./...
-make marusia        # package beside build/apps/org.capsula.marusia/ as an archive
+make marusia        # package beside build/apps/org.capsulad.marusia/ as an archive
 make test-marusia   # the module's tests from the repository root
 ```
 
@@ -215,6 +282,16 @@ make test-marusia   # the module's tests from the repository root
 cross-compiling). No test contacts an external host: the protocol tests use
 in-process TLS listeners on loopback, and the turn tests use fake streams and
 players.
+
+One integration test drives the *production* native transport against those
+in-process servers (HTTP attach + gRPC probe + bidi speech). It is skipped
+unless a staged library is named, so an ordinary `go test` needs no Rust build:
+
+```
+make native   # from the repository root: stages build/lib/libcapsulad.1.dylib
+CAPSULAD_TEST_LIBRARY=$PWD/build/lib/libcapsulad.1.dylib \
+  go test ./internal/vkclient -run TestProductionSDKTransport -v
+```
 
 ### Live probe (opt-in, never part of `go test`)
 
@@ -228,7 +305,8 @@ MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV=/path/16k-mono.wav \
 ```
 
 It prints the init QoS, the chunk accounting, every `text_so_far`, every command,
-the `play_url`, and then the HTTP status, `Content-Type`, size and first bytes of
+the `play_url` (shortened to `scheme://host/path`, because the query is the
+signature), and then the HTTP status, `Content-Type`, size and first bytes of
 that URL. No credential is written to disk or to the log; the probe is refused
 outright without them. It is a diagnostic, not a test: it needs network egress and
 a live session.
@@ -243,7 +321,7 @@ docker run --rm --platform linux/arm64 --entrypoint bash \
   -v "$PWD":/repo -v "$HOME/go/pkg/mod":/gomodcache -v /tmp/gocache:/gocache \
   -v /etc/ssl/cert.pem:/etc/ssl/cert.pem:ro -e SSL_CERT_FILE=/etc/ssl/cert.pem \
   -e GOMODCACHE=/gomodcache -e GOCACHE=/gocache -e GOPATH=/gopath -e GOFLAGS=-mod=mod \
-  -w /repo/apps/marusia capsula-bullseye:3 \
+  -w /repo/apps/marusia capsulad-bullseye:3 \
   -lc 'export PATH=/usr/lib/go-1.24/bin:$PATH; go run ./cmd/marusia-probe'
 ```
 

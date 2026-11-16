@@ -2,35 +2,30 @@
 // HTTP session attach, the per-call gRPC metadata, the AuthReady probe and the
 // bidirectional Phrase/Speech stream.
 //
+// Every network operation goes through the Transport seam (transport.go). The
+// production adapter is the shared capsulad SDK, so this package links no
+// net/http, crypto/tls or grpc-go; tests inject an in-process adapter.
+//
 // Everything here is transcribed from the vendor binary's recovered descriptors
 // and string table (see README.md). No vendor code or asset is redistributed.
 package vkclient
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
-	"capsula/apps/marusia/internal/vkproto/clientprobepb"
-	"capsula/apps/marusia/internal/vkproto/servicepb"
+	"capsulad/apps/marusia/internal/redact"
+	"capsulad/apps/marusia/internal/vkproto/clientprobepb"
+	"capsulad/sdk/capsulad"
 )
 
 // Endpoints recovered from the vendor lookup table. prod is the shipped
@@ -88,26 +83,23 @@ type Config struct {
 	Session Session
 	// ClientVersion is sent as x-device-ver. Defaults to 44.91.
 	ClientVersion string
-	// HTTPClient performs the attach. Nil uses a client with a 15 s timeout.
-	HTTPClient *http.Client
-	// TLS overrides the gRPC client TLS configuration. Tests use it to trust an
-	// in-process certificate; production leaves it nil.
-	TLS *tls.Config
-	// DialOptions are appended to the gRPC dial options.
-	DialOptions []grpc.DialOption
+	// Transport replaces the production native adapter. Tests inject an
+	// in-process gRPC/HTTP transport; production leaves it nil. The Client owns
+	// the transport and closes it.
+	Transport Transport
 	// OnSession observes every successful attach.
 	OnSession func(Session)
 }
 
 // Client is one endpoint's HTTP attachment plus one gRPC channel.
 type Client struct {
-	cfg  Config
-	base *url.URL
+	cfg       Config
+	base      *url.URL
+	transport Transport
 
 	mu        sync.Mutex
 	session   Session
 	attachErr error
-	conn      *grpc.ClientConn
 	closed    bool
 }
 
@@ -120,10 +112,14 @@ func New(cfg Config) (*Client, error) {
 	if cfg.ClientVersion == "" {
 		cfg.ClientVersion = defaultClientVersion
 	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: attachTimeout}
+	transport := cfg.Transport
+	if transport == nil {
+		transport, err = NewSDKTransport(cfg.BaseURL, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
-	client := &Client{cfg: cfg, base: base, session: cfg.Session}
+	client := &Client{cfg: cfg, base: base, transport: transport, session: cfg.Session}
 	return client, nil
 }
 
@@ -136,20 +132,25 @@ func ParseBaseURL(raw string) (*url.URL, error) {
 		return nil, errors.New("vkclient: endpoint is empty")
 	}
 	u, err := url.Parse(text)
+	// The messages name the endpoint, and a rejected endpoint is echoed into the
+	// settings log: the URL is therefore shortened to scheme://host/path so a
+	// pasted query or fragment cannot leak. The parser's own error is reduced to
+	// its reason for the same reason.
+	safe := redact.URL(raw)
 	if err != nil {
-		return nil, fmt.Errorf("vkclient: endpoint %q: %w", raw, err)
+		return nil, fmt.Errorf("vkclient: endpoint %s: %s", safe, redact.ErrorText(err, raw))
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return nil, fmt.Errorf("vkclient: endpoint %q must use http:// or https://", raw)
+		return nil, fmt.Errorf("vkclient: endpoint %s must use http:// or https://", safe)
 	}
 	if u.Hostname() == "" {
-		return nil, fmt.Errorf("vkclient: endpoint %q has no host", raw)
+		return nil, fmt.Errorf("vkclient: endpoint %s has no host", safe)
 	}
 	if p := strings.TrimSuffix(u.Path, "/"); p != "" {
-		return nil, fmt.Errorf("vkclient: endpoint %q must not carry a path", raw)
+		return nil, fmt.Errorf("vkclient: endpoint %s must not carry a path", safe)
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("vkclient: endpoint %q must not carry a query or fragment", raw)
+		return nil, fmt.Errorf("vkclient: endpoint %s must not carry a query or fragment", safe)
 	}
 	u.Path = ""
 	return u, nil
@@ -206,32 +207,34 @@ func (c *Client) Attach(ctx context.Context) (Session, error) {
 		return Session{}, fmt.Errorf("vkclient: encode attach: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, attachTimeout)
-	defer cancel()
 	endpoint := *c.base
 	endpoint.Path = attachPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return Session{}, fmt.Errorf("vkclient: attach request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.cfg.HTTPClient.Do(req)
+	response, err := c.transport.Do(ctx, HTTPRequest{
+		Method: "POST",
+		URL:    endpoint.String(),
+		Header: map[string]string{
+			"Accept":       "application/json",
+			"Content-Type": "application/json",
+		},
+		Body: body,
+	}, attachTimeout)
 	if err != nil {
 		return Session{}, fmt.Errorf("vkclient: attach: %w", err)
 	}
-	defer resp.Body.Close()
-	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if readErr != nil {
-		return Session{}, fmt.Errorf("vkclient: read attach response: %w", readErr)
+	payload := response.Body
+	if len(payload) > 1<<20 {
+		return Session{}, errors.New("vkclient: attach response exceeds 1 MiB")
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	if response.StatusCode < 200 || response.StatusCode > 299 {
 		var rejection struct {
 			Code int `json:"code"`
 		}
 		_ = json.Unmarshal(payload, &rejection)
-		return Session{}, &AttachError{Status: resp.StatusCode, Body: strings.TrimSpace(string(payload)), Code: rejection.Code}
+		return Session{}, &AttachError{
+			Status: response.StatusCode,
+			Body:   strings.TrimSpace(string(payload)),
+			Code:   rejection.Code,
+		}
 	}
 
 	var decoded struct {
@@ -309,7 +312,7 @@ func (c *Client) Authorize(ctx context.Context) error {
 	if err == nil {
 		return nil
 	}
-	if IsCode(err, codes.Unauthenticated) || IsCode(err, codes.PermissionDenied) {
+	if IsCode(err, CodeUnauthenticated) || IsCode(err, CodePermissionDenied) {
 		return fmt.Errorf("vkclient: the service rejected the session; reload the vendor session "+
 			"file or configure session_id/session_secret: %w", err)
 	}
@@ -319,7 +322,7 @@ func (c *Client) Authorize(ctx context.Context) error {
 // serialHint makes a bare vendor "Invalid 'x-device-sn'" refusal actionable:
 // the service validates the SoC serial by name, so the operator must know that
 // the serial setting is the lever, not the vendor string alone. The wrapped
-// error keeps the original gRPC status for IsCode and the attach body for
+// error keeps the original status for IsCode and the attach body for
 // ProvisioningRequired.
 func (c *Client) serialHint(err error) error {
 	if !IsInvalidDeviceSN(err) {
@@ -328,7 +331,7 @@ func (c *Client) serialHint(err error) error {
 	if strings.TrimSpace(c.cfg.Serial) == "" {
 		return fmt.Errorf("vkclient: the device serial is missing; set the \"serial\" setting to the "+
 			"SoC serial the framework reports as hardware_serial (the launcher also exports it as "+
-			"CAPSULA_DEVICE_SERIAL; x-device-sn is empty): %w", err)
+			"CAPSULAD_DEVICE_SERIAL; x-device-sn is empty): %w", err)
 	}
 	return fmt.Errorf("vkclient: the device serial is wrong; set the \"serial\" setting to the SoC "+
 		"serial this device was provisioned with (the framework's hardware_serial): %w", err)
@@ -345,69 +348,12 @@ func IsInvalidDeviceSN(err error) bool {
 
 // probe runs the unary, both-messages-empty ClientProbe/AuthReady RPC.
 func (c *Client) probe(ctx context.Context) error {
-	conn, err := c.channel()
+	request, err := proto.Marshal(&clientprobepb.AuthReadyRequest{})
 	if err != nil {
-		return err
+		return fmt.Errorf("vkclient: encode probe: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	ctx = metadata.NewOutgoingContext(ctx, c.callMetadata())
-	_, err = servicepb.NewClientProbeClient(conn).AuthReady(ctx, &clientprobepb.AuthReadyRequest{})
+	_, err = c.transport.Unary(ctx, probeService, "AuthReady", c.callMetadata(), request, probeTimeout)
 	return err
-}
-
-// channel returns the shared gRPC connection, dialling once.
-func (c *Client) channel() (*grpc.ClientConn, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil, ErrClosed
-	}
-	if c.conn != nil {
-		return c.conn, nil
-	}
-	target, creds, err := c.transport()
-	if err != nil {
-		return nil, err
-	}
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
-	opts = append(opts, c.cfg.DialOptions...)
-	conn, err := grpc.NewClient(target, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("vkclient: dial %s: %w", target, err)
-	}
-	c.conn = conn
-	return conn, nil
-}
-
-// transport derives the gRPC target and credentials from the base URL. HTTPS
-// bases use TLS on the host's port (443 unless given); an HTTP base is plain
-// h2c, which only the test deployments offer.
-func (c *Client) transport() (string, credentials.TransportCredentials, error) {
-	host := c.base.Hostname()
-	port := c.base.Port()
-	if port == "" {
-		if c.base.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	target := net.JoinHostPort(host, port)
-	if c.base.Scheme == "http" {
-		return target, insecure.NewCredentials(), nil
-	}
-	tlsConfig := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
-	if c.cfg.TLS != nil {
-		tlsConfig = c.cfg.TLS.Clone()
-		if tlsConfig.ServerName == "" {
-			tlsConfig.ServerName = host
-		}
-		if tlsConfig.MinVersion == 0 {
-			tlsConfig.MinVersion = tls.VersionTLS12
-		}
-	}
-	return target, credentials.NewTLS(tlsConfig), nil
 }
 
 // callMetadata is rebuilt for every RPC: the request id must be fresh, and the
@@ -417,16 +363,16 @@ func (c *Client) transport() (string, credentials.TransportCredentials, error) {
 // advertised client version; x-device-sn is the SoC serial; x-device-id is the
 // persisted random id. An absent secret sends an empty value, which is what the
 // vendor does before an account is linked.
-func (c *Client) callMetadata() metadata.MD {
+func (c *Client) callMetadata() map[string]string {
 	session := c.Session()
-	return metadata.Pairs(
-		"x-session-id", session.SessionID,
-		"x-device-id", c.cfg.DeviceID,
-		"x-device-sn", c.cfg.Serial,
-		"x-device-ver", c.cfg.ClientVersion,
-		"x-client-request-id", NewUUID(),
-		"authorization", bearer(session.SessionSecret),
-	)
+	return map[string]string{
+		"x-session-id":        session.SessionID,
+		"x-device-id":         c.cfg.DeviceID,
+		"x-device-sn":         c.cfg.Serial,
+		"x-device-ver":        c.cfg.ClientVersion,
+		"x-client-request-id": NewUUID(),
+		"authorization":       bearer(session.SessionSecret),
+	}
 }
 
 func bearer(secret string) string {
@@ -436,29 +382,103 @@ func bearer(secret string) string {
 	return "Bearer " + secret
 }
 
-// Close releases the gRPC channel. It is idempotent.
+// Close releases the transport and every channel it owns. It is idempotent.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	conn := c.conn
-	c.conn = nil
-	c.closed = true
-	c.mu.Unlock()
-	if conn == nil {
+	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
-	return conn.Close()
+	c.closed = true
+	transport := c.transport
+	c.mu.Unlock()
+	if transport == nil {
+		return nil
+	}
+	return transport.Close()
 }
 
 // ErrClosed reports use of a closed client.
 var ErrClosed = errors.New("vkclient: client is closed")
 
+// Code is a canonical gRPC status code. The values match the gRPC numbering so
+// the numeric codes the native SDK reports map without a table, but this
+// package does not import grpc-go.
+type Code int32
+
+const (
+	CodeOK                 Code = 0
+	CodeCanceled           Code = 1
+	CodeUnknown            Code = 2
+	CodeInvalidArgument    Code = 3
+	CodeDeadlineExceeded   Code = 4
+	CodeNotFound           Code = 5
+	CodeAlreadyExists      Code = 6
+	CodePermissionDenied   Code = 7
+	CodeResourceExhausted  Code = 8
+	CodeFailedPrecondition Code = 9
+	CodeAborted            Code = 10
+	CodeOutOfRange         Code = 11
+	CodeUnimplemented      Code = 12
+	CodeInternal           Code = 13
+	CodeUnavailable        Code = 14
+	CodeDataLoss           Code = 15
+	CodeUnauthenticated    Code = 16
+)
+
+func (c Code) String() string {
+	switch c {
+	case CodeOK:
+		return "OK"
+	case CodeCanceled:
+		return "Canceled"
+	case CodeUnknown:
+		return "Unknown"
+	case CodeInvalidArgument:
+		return "InvalidArgument"
+	case CodeDeadlineExceeded:
+		return "DeadlineExceeded"
+	case CodeNotFound:
+		return "NotFound"
+	case CodeAlreadyExists:
+		return "AlreadyExists"
+	case CodePermissionDenied:
+		return "PermissionDenied"
+	case CodeResourceExhausted:
+		return "ResourceExhausted"
+	case CodeFailedPrecondition:
+		return "FailedPrecondition"
+	case CodeAborted:
+		return "Aborted"
+	case CodeOutOfRange:
+		return "OutOfRange"
+	case CodeUnimplemented:
+		return "Unimplemented"
+	case CodeInternal:
+		return "Internal"
+	case CodeUnavailable:
+		return "Unavailable"
+	case CodeDataLoss:
+		return "DataLoss"
+	case CodeUnauthenticated:
+		return "Unauthenticated"
+	default:
+		return fmt.Sprintf("Code(%d)", int32(c))
+	}
+}
+
 // NewUUID returns a fresh random RFC 4122 version 4 UUID in the lowercase
-// 8-4-4-4-12 form the vendor uses for x-client-request-id.
+// 8-4-4-4-12 form the vendor uses for x-client-request-id. It is produced by
+// the native SDK's getrandom-backed primitive.
 func NewUUID() string {
+	if uuid, err := capsulad.UUIDv4(); err == nil {
+		return uuid
+	}
+	// The native library is unavailable (a pure unit test, or an early failure
+	// before OpenHTTP/OpenGRPC). Keep the identifier fresh with the standard
+	// library rather than collapsing every request onto one id.
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand cannot fail on any supported platform; a zero UUID would
-		// collide, so fall back to a time-derived value rather than panic.
 		return "00000000-0000-4000-8000-000000000000"
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
@@ -471,7 +491,7 @@ func NewUUID() string {
 // StatusError is a non-OK gRPC status returned by a call or stream.
 type StatusError struct {
 	Op      string
-	Code    codes.Code
+	Code    Code
 	Message string
 }
 
@@ -482,29 +502,11 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("vkclient: %s: %s: %s", e.Op, e.Code, e.Message)
 }
 
-// IsCode reports whether err is a StatusError (or a raw gRPC status) with code.
-func IsCode(err error, code codes.Code) bool {
+// IsCode reports whether err is a StatusError with the given code.
+func IsCode(err error, code Code) bool {
 	if err == nil {
 		return false
 	}
 	var se *StatusError
-	if errors.As(err, &se) {
-		return se.Code == code
-	}
-	return status.Code(err) == code
-}
-
-// wrapStatus converts a gRPC status into a StatusError so callers do not need
-// the grpc/status package. io.EOF and context errors pass through unchanged.
-func wrapStatus(op string, err error) error {
-	if err == nil || errors.Is(err, io.EOF) {
-		return err
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if st, ok := status.FromError(err); ok {
-		return &StatusError{Op: op, Code: st.Code(), Message: st.Message()}
-	}
-	return err
+	return errors.As(err, &se) && se.Code == code
 }

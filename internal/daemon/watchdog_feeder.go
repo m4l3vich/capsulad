@@ -48,7 +48,7 @@ func handOffWatchdog(f *os.File, runDir string) error {
 	// A stale handback marker would make the feeder exit immediately.
 	_ = os.Remove(filepath.Join(runDir, feederHandback))
 	cmd := exec.Command("/bin/sh", "-c", feederScript,
-		"capsula-watchdog-feeder",
+		"capsulad-watchdog-feeder",
 		filepath.Join(runDir, feederPIDFile),
 		filepath.Join(runDir, feederHandback))
 	// ExtraFiles starts at fd 3, which is what the script writes to.

@@ -10,28 +10,47 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/settings"
 	"capsulad/internal/version"
 )
 
-// hardwareSerialPath is replaceable in tests; the daemon reads it only at startup.
-var hardwareSerialPath = "/proc/cpuinfo"
+// hardwareSerialPath and hardwareSerialFields are replaceable in tests; the
+// daemon reads them only at startup. Production values come from the device
+// profile.
+var (
+	hardwareSerialPath   string
+	hardwareSerialFields = profile.RK3308Rev4Stock.Serial.Fields
+)
 
 func readHardwareSerial() string {
-	serial, _ := parseHardwareSerial(hardwareSerialPath)
+	return readHardwareSerialAt(hardwareSerialPath, hardwareSerialFields)
+}
+
+func readHardwareSerialAt(path string, fields []string) string {
+	serial, _ := parseHardwareSerial(path, fields)
 	return serial
 }
 
-func parseHardwareSerial(path string) (string, error) {
+func parseHardwareSerial(path string, fields []string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		key, value, ok := strings.Cut(line, ":")
-		if ok && (strings.TrimSpace(key) == "Serial" || strings.TrimSpace(key) == "Serial Number") {
-			return strings.TrimSpace(value), nil
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		for _, field := range fields {
+			if key == field {
+				return strings.TrimSpace(value), nil
+			}
 		}
 	}
 	return "", nil

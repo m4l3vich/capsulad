@@ -2,8 +2,8 @@
 
 Development-only supervised apps that exercise the Capsula Mini's hardware and
 software surfaces through the public app-facing APIs only: the Go SDK
-(`capsula/sdk`, `capsula.Connect(ctx, capsula.FromEnv())`) or the QuickJS and
-MicroPython `capsula` host modules. They never read daemon internals and never
+(`capsulad/sdk`, `capsulad.Connect(ctx, capsulad.FromEnv())`) or the QuickJS and
+MicroPython `capsulad` host modules. They never read daemon internals and never
 open a private socket.
 
 | App | Runtime | What it proves |
@@ -36,7 +36,7 @@ dev.micropython-<version>.tar.gz
 ```
 
 The script requires the Go SDK (`sdk/go`) and a native runtime (`build/lib` with
-`libcapsula*` and `capsula-native.json`; `make native`, or `make`/`make release`, produces it)
+`libcapsulad*` and `capsulad-native.json`; `make native`, or `make`/`make release`, produces it)
 and fails with an actionable message when either is missing. Packaging uses
 `capsulad-cli app package` with the repository CLI; set
 `CAPSULAD_CLI=/path/to/capsulad-cli` to override the packager, which a cross build needs
@@ -119,9 +119,9 @@ they are installed and ready (`peers=2`); otherwise it reports them as
 ## Required artifacts
 
 - `sdk/go` (Go binding) and a working `go` toolchain with cgo for the native app.
-- Native runtime in `build/lib` (or `CAPSULA_NATIVE_LIB_DIR`): `libcapsula`,
-  `capsula-native.json`, and, for the script apps, `capsula-quickjs` and
-  `capsula-micropython` (`make interpreter`).
+- Native runtime in `build/lib` (or `CAPSULAD_NATIVE_LIB_DIR`): `libcapsulad`,
+  `capsulad-native.json`, and, for the script apps, `capsulad-quickjs` and
+  `capsulad-micropython` (`make interpreter`).
 - The daemon must run with that runtime directory (`-native-lib-dir`).
 
 ## Proof-level caveats

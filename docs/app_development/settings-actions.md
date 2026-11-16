@@ -250,28 +250,28 @@ The response also sends `Cache-Control: no-store`, `X-Content-Type-Options: nosn
 cookie. The wrapper injects the local UI kit CSS and the bridge bootstrap **before** the app's
 markup. The app supplies no external script or stylesheet URL.
 
-UI kit: wrap the content in `<main class="capsula-ui">` and use `card`, `stack`, `row`, `spread`,
+UI kit: wrap the content in `<main class="capsulad-ui">` and use `card`, `stack`, `row`, `spread`,
 `actions`, `field`, `check`, `pill` (`ok|warn|err`), `notice`, `mono`, `grow`, `wrap` and
 `sr-only`, plus the CSS variables (`--bg`, `--surface`, `--fg`, `--muted`, `--accent`, `--ok`,
 `--warn`, `--err`, `--radius`, `--sans`, `--mono`). Native `input`, `select`, `textarea`, `table`
 and the kit's form classes are styled automatically.
 
-### `capsula.settings-ui/1:` protocol
+### `capsulad.settings-ui/1:` protocol
 
-The injected bootstrap exposes `window.CapsulaUI`:
+The injected bootstrap exposes `window.CapsuladUI`:
 
 ```js
-CapsulaUI.apiVersion   // 1
-CapsulaUI.appId
-CapsulaUI.schema       // { settings: [...] } from the manifest
-CapsulaUI.revision     // current app-settings revision
-CapsulaUI.onState(fn)  // snapshot/state events
-CapsulaUI.onResult(fn) // patch results
-CapsulaUI.patch(changes) // [{key, valueJson}] or [{key, clear:true}]
-CapsulaUI.resize()
+CapsuladUI.apiVersion   // 1
+CapsuladUI.appId
+CapsuladUI.schema       // { settings: [...] } from the manifest
+CapsuladUI.revision     // current app-settings revision
+CapsuladUI.onState(fn)  // snapshot/state events
+CapsuladUI.onResult(fn) // patch results
+CapsuladUI.patch(changes) // [{key, valueJson}] or [{key, clear:true}]
+CapsuladUI.resize()
 ```
 
-Every message has a `type` prefixed with `capsula.settings-ui/1:` and a per-frame `channel`
+Every message has a `type` prefixed with `capsulad.settings-ui/1:` and a per-frame `channel`
 token.
 
 | Direction | Type | Payload |
@@ -319,7 +319,7 @@ host detects it instead.
 ```html
 <!doctype html>
 <html><body>
-<main class="capsula-ui"><div class="card stack">
+<main class="capsulad-ui"><div class="card stack">
   <div class="field"><label for="units">Units</label><select id="units"></select></div>
   <div class="field"><label for="refresh">Refresh interval (minutes)</label>
     <input id="refresh" type="number" min="1" max="240" step="1"></div>
@@ -330,7 +330,7 @@ host detects it instead.
   const refresh = document.getElementById('refresh');
   const status = document.getElementById('status');
 
-  CapsulaUI.onState((state) => {
+  CapsuladUI.onState((state) => {
     const choices = state.schema.settings.find((s) => s.key === 'units').choices;
     units.replaceChildren(...choices.map((c) => new Option(c.label, c.value)));
     const values = Object.fromEntries(state.values.map((v) => [v.key, v.valueJson]));
@@ -339,15 +339,15 @@ host detects it instead.
   });
 
   units.addEventListener('change', () =>
-    CapsulaUI.patch([{ key: 'units', valueJson: JSON.stringify(units.value) }]));
+    CapsuladUI.patch([{ key: 'units', valueJson: JSON.stringify(units.value) }]));
   refresh.addEventListener('change', () =>
-    CapsulaUI.patch([{ key: 'refresh_minutes', valueJson: String(Number(refresh.value)) }]));
+    CapsuladUI.patch([{ key: 'refresh_minutes', valueJson: String(Number(refresh.value)) }]));
 
-  CapsulaUI.onResult((result) => {
+  CapsuladUI.onResult((result) => {
     status.textContent = result.ok ? 'Saved.' : result.error;
     status.className = 'notice ' + (result.ok ? 'ok' : 'err');
   });
-  CapsulaUI.resize();
+  CapsuladUI.resize();
 </script>
 </body></html>
 ```

@@ -52,14 +52,14 @@ fi
 # never by name alone. The detached watchdog feeder started by this release is a
 # plain /bin/sh process that only writes to an inherited descriptor, so it never
 # matches on comm. A feeder left by an older release is a copy of the daemon
-# (its __capsula_watchdog_feeder subcommand), so it shares comm and has to be
+# (its __capsulad_watchdog_feeder subcommand), so it shares comm and has to be
 # excluded by its cmdline: killing it can reset the board once the timer is
 # armed.
 is_daemon() {
     [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
     [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "capsulad" ] || return 1
     case "$(tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null)" in
-    *__capsula_watchdog_feeder*) return 1 ;;
+    *__capsulad_watchdog_feeder*) return 1 ;;
     esac
     return 0
 }

@@ -226,33 +226,33 @@ func TestBuiltinRegistrationSurvivesRescanAndCannotBeUninstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Provides:   []string{"segment_display_provider"},
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 	}
 	if err := reg.RegisterBuiltin(&App{Manifest: m}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if !reg.IsBuiltin("capsula.clock") {
+	if !reg.IsBuiltin("capsulad.clock") {
 		t.Fatal("builtin not reported")
 	}
-	if app, ok := reg.Get("capsula.clock"); !ok || app.Manifest != m {
+	if app, ok := reg.Get("capsulad.clock"); !ok || app.Manifest != m {
 		t.Fatalf("get = %+v, %v", app, ok)
 	}
 	if err := reg.Rescan(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.Get("capsula.clock"); !ok {
+	if _, ok := reg.Get("capsulad.clock"); !ok {
 		t.Fatal("rescan dropped the builtin")
 	}
 	listed := false
 	for _, app := range reg.List() {
-		listed = listed || app.ID() == "capsula.clock"
+		listed = listed || app.ID() == "capsulad.clock"
 	}
 	if !listed {
 		t.Fatal("builtin is not listed")
 	}
-	if err := reg.Uninstall("capsula.clock"); err == nil {
+	if err := reg.Uninstall("capsulad.clock"); err == nil {
 		t.Fatal("builtin was uninstalled")
 	}
 	if err := reg.RegisterBuiltin(&App{Manifest: m}); err == nil {

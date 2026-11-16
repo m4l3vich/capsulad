@@ -34,7 +34,7 @@ func VendorMap() []int {
 // permutation included). Brightness is the preset-scale multiplier.
 func WriteRingPixels(path string, pixels []backend.RGB, brightness float64) error {
 	if path == "" {
-		path = "/dev/topleds"
+		path = DefaultConfig().LEDTopPath
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
@@ -59,7 +59,7 @@ func WriteRingPixels(path string, pixels []backend.RGB, brightness float64) erro
 // identify the physical channel order during bring-up.
 func WriteRawMultiCtrl(path string, values []byte) error {
 	if path == "" {
-		path = "/dev/led_multi_ctrl"
+		path = DefaultConfig().LEDMultiCtrlPath
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {

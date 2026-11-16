@@ -201,7 +201,7 @@ func TestFindA2DPTransportUsesConfiguredPathWithoutEndpointProperty(t *testing.T
 		},
 	}
 	b := &BlueZ{}
-	got, props := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", path)
+	got, props := b.findA2DPTransport(objs, "/org/capsulad/a2dp/sbc", path)
 	if got != path {
 		t.Fatalf("path = %q, want %q", got, path)
 	}
@@ -222,7 +222,7 @@ func TestFindA2DPTransportFallsBackToUUIDAndCodec(t *testing.T) {
 		},
 	}
 	b := &BlueZ{}
-	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", "")
+	got, _ := b.findA2DPTransport(objs, "/org/capsulad/a2dp/sbc", "")
 	if got != path {
 		t.Fatalf("path = %q, want %q", got, path)
 	}
@@ -241,7 +241,7 @@ func TestFindA2DPTransportSkipsOtherEndpoints(t *testing.T) {
 		},
 	}
 	b := &BlueZ{}
-	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", "")
+	got, _ := b.findA2DPTransport(objs, "/org/capsulad/a2dp/sbc", "")
 	if got != "" {
 		t.Fatalf("path = %q, want empty", got)
 	}
@@ -282,7 +282,7 @@ func TestFindA2DPTransportRejectsIdleStoredPath(t *testing.T) {
 		},
 	}
 	b := &BlueZ{}
-	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", stored)
+	got, _ := b.findA2DPTransport(objs, "/org/capsulad/a2dp/sbc", stored)
 	if got != active {
 		t.Fatalf("path = %q, want active %q", got, active)
 	}
@@ -300,7 +300,7 @@ func TestFindA2DPTransportReturnsNothingWhileIdle(t *testing.T) {
 		},
 	}
 	b := &BlueZ{}
-	got, _ := b.findA2DPTransport(objs, "/org/capsula/a2dp/sbc", path)
+	got, _ := b.findA2DPTransport(objs, "/org/capsulad/a2dp/sbc", path)
 	if got != "" {
 		t.Fatalf("path = %q, want empty while idle", got)
 	}

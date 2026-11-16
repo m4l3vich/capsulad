@@ -267,6 +267,7 @@ func testManager(t *testing.T, runner *fakeRunner) *linuxManager {
 		APAddress: "192.168.4.1", APPrefix: 24, PortalPort: 8080,
 		APPassword:       "capsulad",
 		StockConfigPaths: []string{},
+		AdoptStock:       true,
 		APName:           func(context.Context) (string, error) { return "Capsule-Test", nil },
 		StartupTimeout:   200 * time.Millisecond,
 		ConnectTimeout:   600 * time.Millisecond,

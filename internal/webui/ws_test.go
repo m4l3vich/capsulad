@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,8 +23,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
+	"capsulad/internal/bluetooth"
 	"capsulad/internal/manifest"
 	"capsulad/internal/registry"
 	"capsulad/internal/uichanges"
@@ -341,7 +343,7 @@ func TestLogoutClosesWebSocket(t *testing.T) {
 
 	token := csrfToken(t, c, env.ts.URL)
 	code, body, _ := doJSON(t, c, http.MethodPost, env.ts.URL+"/api/logout", nil,
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("logout: %d %v", code, body)
 	}
@@ -389,7 +391,7 @@ func TestSnapshotAndCommands(t *testing.T) {
 	if overview.GetSettingsRevision() != 5 {
 		t.Fatalf("settings revision = %d", overview.GetSettingsRevision())
 	}
-	if overview.GetSelectedProviders()["capsula.clock"] != true {
+	if overview.GetSelectedProviders()["capsulad.clock"] != true {
 		t.Fatalf("selected providers = %v", overview.GetSelectedProviders())
 	}
 
@@ -437,7 +439,7 @@ func TestSnapshotAndCommands(t *testing.T) {
 
 	// Clock command round-trips through the app's public clock contract.
 	conn.send(&webv1.ClientFrame{RequestId: 14, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
-		Op: &webv1.Command_Clock{Clock: &webv1.ClockCommand{AppId: "capsula.clock",
+		Op: &webv1.Command_Clock{Clock: &webv1.ClockCommand{AppId: "capsulad.clock",
 			Action: &webv1.ClockCommand_StopwatchStart{StopwatchStart: &webv1.Empty{}}}},
 	}}})
 	result = conn.waitResult(t, 14)
@@ -777,7 +779,7 @@ func TestOverviewListingCarriesAppActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = reg.RegisterBuiltin(&registry.App{Manifest: &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 		Actions: []manifest.Action{
 			{ID: "timer_start", Label: "Start timer"},
@@ -799,7 +801,7 @@ func TestOverviewListingCarriesAppActions(t *testing.T) {
 	var clock, player *webv1.AppView
 	for _, app := range apps {
 		switch app.GetAppId() {
-		case "capsula.clock":
+		case "capsulad.clock":
 			clock = app
 		case "org.example.player":
 			player = app
@@ -862,6 +864,141 @@ func TestOverviewHidesPairedAddressAndUnlaunchedProviders(t *testing.T) {
 	providers := overview.GetProviders()
 	if len(providers) != 1 || providers[0].GetAppId() != "org.example.player" {
 		t.Fatalf("providers = %v, want only the running player", providers)
+	}
+}
+
+// stubAdapterName records the names the browser asked for. The embedded
+// simulator supplies the rest of bluetooth.Manager, so the test observes the
+// same status the daemon would publish after a rename.
+type stubAdapterName struct {
+	*bluetooth.Memory
+	mu    sync.Mutex
+	names []string
+}
+
+func (s *stubAdapterName) SetAdapterName(ctx context.Context, name string) error {
+	s.mu.Lock()
+	s.names = append(s.names, name)
+	s.mu.Unlock()
+	return s.Memory.SetAdapterName(ctx, name)
+}
+
+func (s *stubAdapterName) calls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.names...)
+}
+
+// TestSetBluetoothAdapterName pins the administrator-only rename: the trimmed
+// name reaches the manager, the result carries the observed adapter status,
+// and an invalid name is refused without touching the adapter.
+func TestSetBluetoothAdapterName(t *testing.T) {
+	env := newTestEnv(t)
+	bt := &stubAdapterName{Memory: bluetooth.NewMemory()}
+	env.srv.Bluetooth = bt
+	conn, _, _ := connectSession(t, env)
+
+	command := func(reqID uint64, name string) *webv1.ClientFrame {
+		return &webv1.ClientFrame{RequestId: reqID, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
+			Op: &webv1.Command_Bluetooth{Bluetooth: &webv1.BluetoothCommand{
+				Action: &webv1.BluetoothCommand_SetAdapterName{SetAdapterName: &webv1.SetAdapterName{Name: name}},
+			}},
+		}}}
+	}
+
+	// The framework status path is authoritative: it carries the A2DP-readiness
+	// detail that the manager's own Status does not, and the browser must
+	// receive exactly that observed state.
+	env.back.mu.Lock()
+	env.back.btStatus = &frameworkv1.BluetoothStatus{
+		Present: true, Powered: true, IncomingConnections: true, Adapter: "hci0",
+		Name: "Kitchen Speaker", Detail: "BlueZ; audio profile is not advertised",
+	}
+	env.back.mu.Unlock()
+
+	conn.send(command(51, "  Kitchen Speaker  "))
+	result := conn.waitResult(t, 51).GetBluetooth()
+	if got := result.GetStatus().GetName(); got != "Kitchen Speaker" {
+		t.Fatalf("result status name = %q, want the observed name", got)
+	}
+	if !result.GetStatus().GetPresent() {
+		t.Fatalf("result status lost the adapter presence: %+v", result.GetStatus())
+	}
+	if got := result.GetStatus().GetDetail(); !strings.Contains(got, "audio profile is not advertised") {
+		t.Fatalf("result status lost the framework detail: %q", got)
+	}
+	if got, want := result.GetMessage(), "Device name changed to Kitchen Speaker"; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+	if calls := bt.calls(); len(calls) != 1 || calls[0] != "Kitchen Speaker" {
+		t.Fatalf("manager calls = %v, want the trimmed name", calls)
+	}
+
+	// Invalid names never reach the manager: empty, whitespace-only, a control
+	// character and one byte over the limit are all refused as invalid.
+	bad := []string{"", "   ", "bad\x00name", "line\nbreak", strings.Repeat("a", bluetooth.MaxAdapterNameBytes+1)}
+	for i, name := range bad {
+		reqID := uint64(52 + i)
+		conn.send(command(reqID, name))
+		for {
+			frame := conn.read()
+			if frame.GetRequestId() != reqID {
+				continue
+			}
+			e := frame.GetError()
+			if e == nil {
+				t.Fatalf("name %d was accepted", i)
+			}
+			if e.GetCode() != webv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+				t.Fatalf("name %d error = %v, want invalid argument", i, e)
+			}
+			break
+		}
+	}
+	if calls := bt.calls(); len(calls) != 1 {
+		t.Fatalf("invalid names reached the manager: %v", calls)
+	}
+
+	// A failed observed-status read is reported like the other adapter
+	// commands instead of returning a nil status with a success message.
+	env.back.mu.Lock()
+	env.back.btStatusErr = status.Error(codes.Unavailable, "bluetooth disappeared")
+	env.back.mu.Unlock()
+	conn.send(command(59, "Another name"))
+	for {
+		frame := conn.read()
+		if frame.GetRequestId() != 59 {
+			continue
+		}
+		e := frame.GetError()
+		if e == nil {
+			t.Fatal("rename succeeded despite an unreadable status")
+		}
+		if e.GetCode() != webv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			t.Fatalf("status read error = %v, want unavailable", e)
+		}
+		break
+	}
+	env.back.mu.Lock()
+	env.back.btStatusErr = nil
+	env.back.mu.Unlock()
+
+	// Without a manager the command is unavailable, never a nil dereference.
+	env.srv.Bluetooth = nil
+	conn.send(command(60, "Another name"))
+	for {
+		frame := conn.read()
+		if frame.GetRequestId() != 60 {
+			continue
+		}
+		e := frame.GetError()
+		if e == nil {
+			t.Fatal("rename without a Bluetooth manager was accepted")
+		}
+		if e.GetCode() != webv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			t.Fatalf("nil manager error = %v, want unavailable", e)
+		}
+		break
 	}
 }
 

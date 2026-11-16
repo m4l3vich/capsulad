@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"capsula/apps/marusia/internal/vkclient"
-	"capsula/sdk/capsula"
+	"capsulad/apps/marusia/internal/vkclient"
+	"capsulad/sdk/capsulad"
 )
 
 // Keys are the manifest setting keys, in one place.
@@ -85,7 +85,7 @@ func Default() Values {
 // Read decodes the framework's app-private settings snapshot. Unknown keys are
 // ignored; a malformed value is an error so the app can keep its last good
 // configuration instead of starting a turn with a wrong endpoint.
-func Read(changed *capsula.SettingsChanged) (Values, error) {
+func Read(changed *capsulad.SettingsChanged) (Values, error) {
 	values := Default()
 	if changed == nil {
 		return values, nil
@@ -231,6 +231,37 @@ func (c Config) HasSession() bool {
 // Provisioned reports whether attach can be attempted.
 func (c Config) Provisioned() bool { return strings.TrimSpace(c.XTokenID) != "" }
 
+// PlaintextWarning returns the one-line warning for a configuration whose
+// credential travels without TLS, or "" when every credential is protected or
+// none will be sent.
+//
+// The http:// endpoints are a deliberate operator test choice (test2 is
+// plaintext in the vendor's own table), so the endpoint is kept and its
+// consequence is stated instead of being silently downgraded. The base URL has
+// already been validated to carry no path, query or fragment, so it is safe to
+// name here.
+func PlaintextWarning(config Config) string {
+	base := strings.TrimSpace(config.BaseURL)
+	if !strings.HasPrefix(strings.ToLower(base), "http://") {
+		return ""
+	}
+	switch {
+	case config.HasSession():
+		return fmt.Sprintf("endpoint %s is plaintext http:// and the session is sent as an unencrypted "+
+			"bearer token; a passive observer on the path can read it. Use an https endpoint unless "+
+			"this is a deliberate test.", base)
+	case config.Provisioned():
+		return fmt.Sprintf("endpoint %s is plaintext http:// and the xtoken_id is sent in the attach "+
+			"body without TLS; a passive observer on the path can read it. Use an https endpoint unless "+
+			"this is a deliberate test.", base)
+	case strings.TrimSpace(config.SessionFile) != "":
+		return fmt.Sprintf("endpoint %s is plaintext http://; a session read from %s would be sent as an "+
+			"unencrypted bearer token. Use an https endpoint unless this is a deliberate test.",
+			base, strings.TrimSpace(config.SessionFile))
+	}
+	return ""
+}
+
 // Build validates the values and resolves the identity. The explicit serial
 // setting wins; an empty one falls back to the SoC serial, while an empty
 // device_id setting falls back to the framework device identity and then to a
@@ -268,7 +299,7 @@ func Build(values Values, fallback Fallback) (Config, []string, error) {
 	// The device serial is the one identity the service validates by name:
 	// x-device-sn must carry the SoC serial, not an invented placeholder.
 	// The explicit setting wins; otherwise the caller's resolved serial is
-	// used, which is CAPSULA_DEVICE_SERIAL, then framework hardware_serial,
+	// used, which is CAPSULAD_DEVICE_SERIAL, then framework hardware_serial,
 	// then a local /proc/cpuinfo read. There is deliberately no further
 	// fallback: a fabricated value is rejected by the service anyway.
 	serial := strings.TrimSpace(values.Serial)
@@ -282,7 +313,7 @@ func Build(values Values, fallback Fallback) (Config, []string, error) {
 		}
 	} else {
 		warnings = append(warnings, "the device serial is missing: set the "+KeySerial+" setting or have the "+
-			"launcher export CAPSULA_DEVICE_SERIAL (/proc/cpuinfo is unreadable in the stock sandbox); "+
+			"launcher export CAPSULAD_DEVICE_SERIAL (/proc/cpuinfo is unreadable in the stock sandbox); "+
 			"without it x-device-sn is empty and the service rejects the turn")
 	}
 

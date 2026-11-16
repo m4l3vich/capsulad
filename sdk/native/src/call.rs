@@ -27,7 +27,68 @@ pub static CALLS: Registry<CallInner> = Registry::new();
 // not fail a live audio call. 512 chunks is about 10 s of 20 ms microphone
 // frames and stays a bounded, small allocation.
 pub const EVENT_QUEUE: usize = 512;
+/// Total bytes allowed in the response backlog. The entry queue bounds the
+/// number of messages; this bounds their size, so a peer sending a few very
+/// large messages cannot grow memory without limit either. A reservation that
+/// would exceed it fails the call with `BUSY` instead of dropping a message.
+pub const EVENT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest single response message accepted from a remote gRPC channel.
+pub const REMOTE_MAX_DECODE_BYTES: usize = 4 * 1024 * 1024;
 pub const OUT_QUEUE: usize = 256;
+
+/// Bounded byte budget for the response backlog. `reserve` never blocks: it
+/// fails closed when the next message would exceed the cap.
+#[derive(Debug)]
+struct ByteBudget {
+    limit: usize,
+    used: AtomicUsize,
+}
+
+impl ByteBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+        }
+    }
+
+    fn reserve(&self, len: usize) -> bool {
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let next = match used.checked_add(len) {
+                Some(next) if next <= self.limit => next,
+                _ => return false,
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
+    }
+
+    /// Releases a reservation once. Saturating at zero keeps a double release
+    /// fail-closed (never a wrapped counter that looks empty).
+    fn release(&self, len: usize) {
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let next = used.saturating_sub(len);
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(actual) => used = actual,
+            }
+        }
+    }
+
+    fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+}
 
 /* ------------------------------------------------------------------ *
  * Raw gRPC codec: payload bytes stay opaque, no descriptor required.
@@ -156,6 +217,8 @@ pub struct OutboundCall {
     pub method: String,
     pub target_app_id: Option<String>,
     pub kind: i32,
+    /// Validated gRPC metadata applied to the stream's request head.
+    headers: Vec<(String, String)>,
     routed: bool,
     request_desc: Option<MessageDescriptor>,
     response_desc: Option<MessageDescriptor>,
@@ -169,6 +232,8 @@ pub struct OutboundCall {
     playback: Mutex<Option<PlaybackState>>,
     sequence: AtomicU64,
     timeout: Option<Duration>,
+    /// Byte budget for events queued for the consumer.
+    backlog: ByteBudget,
 }
 
 impl OutboundCall {
@@ -181,6 +246,7 @@ impl OutboundCall {
         request_desc: Option<MessageDescriptor>,
         response_desc: Option<MessageDescriptor>,
         timeout: Option<Duration>,
+        headers: Vec<(String, String)>,
     ) -> (
         Arc<Self>,
         tokio::sync::mpsc::Receiver<OutCommand>,
@@ -196,6 +262,7 @@ impl OutboundCall {
             method,
             target_app_id,
             kind,
+            headers,
             routed,
             request_desc,
             response_desc,
@@ -209,6 +276,7 @@ impl OutboundCall {
             playback: Mutex::new(None),
             sequence: AtomicU64::new(0),
             timeout,
+            backlog: ByteBudget::new(EVENT_QUEUE_BYTES),
         });
         (call, rx, event_tx)
     }
@@ -350,6 +418,9 @@ impl OutboundCall {
         };
         match event {
             Ok(OutEvent::Message(bytes)) => {
+                // The message left the backlog: return its reservation before
+                // any conversion can fail.
+                self.backlog.release(bytes.len());
                 if let Some(status) = self.final_status() {
                     if status.status == CANCELLED {
                         return Err(status.to_error());
@@ -416,6 +487,7 @@ impl OutboundCall {
             "method": self.method,
             "target_app_id": self.target_app_id.clone().unwrap_or_default(),
             "routed": self.routed,
+            "remote_url": self.client.remote_url.clone().unwrap_or_default(),
             "call_id": "",
             "grpc_code": status.as_ref().map(|s| s.code).unwrap_or(-1),
             "ended": self.is_finished(),
@@ -433,7 +505,7 @@ async fn run_call(
         return;
     };
     let path_string = if call.routed {
-        "/capsula.framework.v1.AppBusService/Call".to_string()
+        "/capsulad.framework.v1.AppBusService/Call".to_string()
     } else {
         format!("/{}/{}", call.service, call.method)
     };
@@ -455,14 +527,38 @@ async fn run_call(
     };
 
     let mut request = tonic::Request::new(request_stream);
-    if let Ok(value) = tonic::metadata::MetadataValue::try_from(call.client.run_id.as_str()) {
-        request.metadata_mut().insert("capsula-run-id", value);
+    if !call.client.run_id.is_empty() {
+        if let Ok(value) = tonic::metadata::MetadataValue::try_from(call.client.run_id.as_str()) {
+            request.metadata_mut().insert("capsulad-run-id", value);
+        }
+    }
+    for (name, header) in &call.headers {
+        let key = match tonic::metadata::MetadataKey::from_bytes(name.as_bytes()) {
+            Ok(key) => key,
+            Err(err) => {
+                finish_task(&call, &event_tx, INVALID_ARGUMENT, 3, err.to_string());
+                return;
+            }
+        };
+        let value = match tonic::metadata::MetadataValue::try_from(header.as_str()) {
+            Ok(value) => value,
+            Err(err) => {
+                finish_task(&call, &event_tx, INVALID_ARGUMENT, 3, err.to_string());
+                return;
+            }
+        };
+        request.metadata_mut().insert(key, value);
     }
     if let Some(timeout) = call.timeout {
         request.set_timeout(timeout);
     }
 
     let mut grpc = tonic::client::Grpc::new(call.client.channel.clone());
+    if call.client.is_remote() {
+        // A remote peer is untrusted: cap one decoded message so a single
+        // frame cannot allocate more than this before the byte budget applies.
+        grpc = grpc.max_decoding_message_size(REMOTE_MAX_DECODE_BYTES);
+    }
     if let Err(status) = grpc.ready().await {
         finish_task(&call, &event_tx, TRANSPORT, -1, status.to_string());
         return;
@@ -526,9 +622,27 @@ async fn run_call(
 }
 
 fn emit(call: &OutboundCall, tx: &SyncSender<OutEvent>, event: OutEvent) -> bool {
+    let reserved = match &event {
+        OutEvent::Message(bytes) => {
+            if !call.backlog.reserve(bytes.len()) {
+                call.mark_finished(
+                    BUSY,
+                    13,
+                    format!(
+                        "response backlog would exceed {EVENT_QUEUE_BYTES} bytes ({} queued); call failed to keep memory bounded",
+                        call.backlog.used()
+                    ),
+                );
+                return false;
+            }
+            bytes.len()
+        }
+        OutEvent::End(_) => 0,
+    };
     match tx.try_send(event) {
         Ok(()) => true,
         Err(TrySendError::Full(_)) => {
+            call.backlog.release(reserved);
             call.mark_finished(
                 BUSY,
                 13,
@@ -536,7 +650,10 @@ fn emit(call: &OutboundCall, tx: &SyncSender<OutEvent>, event: OutEvent) -> bool
             );
             false
         }
-        Err(TrySendError::Disconnected(_)) => false,
+        Err(TrySendError::Disconnected(_)) => {
+            call.backlog.release(reserved);
+            false
+        }
     }
 }
 
@@ -868,7 +985,8 @@ fn register_outbound(call: Arc<OutboundCall>) -> u64 {
 }
 
 /// Start a direct framework/registered-service call. Unknown services or
-/// methods are rejected here, before any stream exists.
+/// methods are rejected here, before any stream exists. Remote gRPC clients
+/// accept any service/method: the server owns the contract.
 pub fn start_direct(
     client: Arc<ClientInner>,
     service: &str,
@@ -876,27 +994,48 @@ pub fn start_direct(
     kind: i32,
     timeout: Option<Duration>,
 ) -> SdkResult<Arc<OutboundCall>> {
+    start_meta(client, service, method, kind, timeout, Vec::new())
+}
+
+/// Start a call with caller-supplied gRPC metadata. The metadata is validated
+/// by the ABI layer and applied to the stream's request head, so every message
+/// of the call carries it.
+pub fn start_meta(
+    client: Arc<ClientInner>,
+    service: &str,
+    method: &str,
+    kind: i32,
+    timeout: Option<Duration>,
+    headers: Vec<(String, String)>,
+) -> SdkResult<Arc<OutboundCall>> {
     client.ensure_open()?;
-    let method_desc =
-        client.with_pool(
-            |pool| match dynamic::resolve_method(pool, service, method) {
-                Ok(desc) => Ok(desc),
-                Err(err) => Err(err),
-            },
-        )?;
     if !(0..=3).contains(&kind) {
         return Err(SdkError::new(
             INVALID_ARGUMENT,
             "call kind must be UNARY, SERVER_STREAM, CLIENT_STREAM or BIDI",
         ));
     }
-    let expected = dynamic::expected_kind(&method_desc);
-    if kind != expected {
-        return Err(SdkError::new(
-            INVALID_ARGUMENT,
-            format!("{service}/{method} has streaming kind {expected}, caller requested {kind}"),
-        ));
-    }
+    let (request_desc, response_desc) = if client.is_remote() {
+        // The server owns the remote contract; use a registered descriptor for
+        // JSON convenience when available, otherwise stay raw.
+        match client.with_pool(|pool| dynamic::resolve_method(pool, service, method).ok()) {
+            Some(desc) => (Some(desc.input()), Some(desc.output())),
+            None => (None, None),
+        }
+    } else {
+        let method_desc =
+            client.with_pool(|pool| dynamic::resolve_method(pool, service, method))?;
+        let expected = dynamic::expected_kind(&method_desc);
+        if kind != expected {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                format!(
+                    "{service}/{method} has streaming kind {expected}, caller requested {kind}"
+                ),
+            ));
+        }
+        (Some(method_desc.input()), Some(method_desc.output()))
+    };
 
     let (call, rx, events) = OutboundCall::new(
         client,
@@ -904,9 +1043,10 @@ pub fn start_direct(
         method.to_string(),
         kind,
         None,
-        Some(method_desc.input()),
-        Some(method_desc.output()),
+        request_desc,
+        response_desc,
         timeout,
+        headers,
     );
     register_outbound(call.clone());
     OutboundCall::start_task(&call, rx, events);
@@ -923,6 +1063,12 @@ pub fn start_routed(
     timeout: Option<Duration>,
 ) -> SdkResult<Arc<OutboundCall>> {
     client.ensure_open()?;
+    if client.is_remote() {
+        return Err(SdkError::new(
+            INVALID_ARGUMENT,
+            "routed calls need an app bus; the client is a remote gRPC channel",
+        ));
+    }
     if target_app_id.is_empty() {
         return Err(SdkError::new(
             INVALID_ARGUMENT,
@@ -948,6 +1094,7 @@ pub fn start_routed(
         request_desc,
         response_desc,
         timeout,
+        Vec::new(),
     );
     let timeout_ms = timeout
         .map(|duration| duration.as_millis().min(u32::MAX as u128) as u32)
@@ -963,4 +1110,38 @@ pub fn start_routed(
     register_outbound(call.clone());
     OutboundCall::start_task(&call, rx, events);
     Ok(call)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_budget_reserves_releases_and_fails_closed() {
+        let budget = ByteBudget::new(1000);
+        assert!(budget.reserve(600));
+        assert_eq!(budget.used(), 600);
+        assert!(budget.reserve(400));
+        assert_eq!(budget.used(), 1000);
+        assert!(!budget.reserve(1), "the cap is inclusive");
+        assert_eq!(budget.used(), 1000, "a failed reserve changes nothing");
+        budget.release(600);
+        assert_eq!(budget.used(), 400);
+        assert!(budget.reserve(600));
+        budget.release(1000);
+        assert_eq!(budget.used(), 0);
+        // A double release saturates instead of wrapping the counter.
+        budget.release(1);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn byte_budget_rejects_oversized_messages() {
+        let budget = ByteBudget::new(EVENT_QUEUE_BYTES);
+        assert!(!budget.reserve(EVENT_QUEUE_BYTES + 1));
+        assert!(!budget.reserve(usize::MAX));
+        assert_eq!(budget.used(), 0);
+        assert!(budget.reserve(EVENT_QUEUE_BYTES));
+        assert!(!budget.reserve(1));
+    }
 }

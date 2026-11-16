@@ -50,13 +50,13 @@ func TestDaemonPIDConnectionIsAdministratorNotBuiltin(t *testing.T) {
 	// The Web UI's real call shape: an administrator reading another app's
 	// state. Before the PID fallback excluded virtual runs this was a
 	// cross-application denial against the first registered built-in.
-	if err := d.requireAppScope(admin, "org.capsula.marusia"); err != nil {
+	if err := d.requireAppScope(admin, "org.capsulad.marusia"); err != nil {
 		t.Fatalf("administrator app scope refused: %v", err)
 	}
 
 	// A built-in identity still needs both halves: its stable run ID and the
 	// per-boot token. The daemon PID alone proves nothing.
-	spoofed := metadata.NewIncomingContext(admin, metadata.Pairs("capsula-run-id", d.SystemAppRunID(clockAppID)))
+	spoofed := metadata.NewIncomingContext(admin, metadata.Pairs("capsulad-run-id", d.SystemAppRunID(clockAppID)))
 	if appID, runID, ok := d.callerIdentity(spoofed); ok {
 		t.Fatalf("untokened built-in claim accepted: app=%q run=%q", appID, runID)
 	}
@@ -100,13 +100,13 @@ func TestSupervisedSocketPIDResolvesItsOwnRun(t *testing.T) {
 // an app identity. A supervised run keeps its real child PID.
 func TestVirtualRunReportsNoChildPID(t *testing.T) {
 	builtin := runProto(supervisor.Run{
-		RunID: "builtin:capsula.clock", AppID: "capsula.clock",
+		RunID: "builtin:capsulad.clock", AppID: "capsulad.clock",
 		PID: os.Getpid(), State: supervisor.Ready, Virtual: true,
 	})
 	if builtin.GetPid() != 0 {
 		t.Fatalf("virtual run pid = %d, want 0 (no child process)", builtin.GetPid())
 	}
-	if builtin.GetRunId() != "builtin:capsula.clock" || builtin.GetAppId() != "capsula.clock" {
+	if builtin.GetRunId() != "builtin:capsulad.clock" || builtin.GetAppId() != "capsulad.clock" {
 		t.Fatalf("virtual run identity = %+v", builtin)
 	}
 

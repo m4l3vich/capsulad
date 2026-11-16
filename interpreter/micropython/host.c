@@ -2,7 +2,7 @@
  * MicroPython app host.
  *
  * A real MicroPython runtime is embedded through the upstream embed port. The
- * capsula module is injected into the loaded-module table before the SDK
+ * capsulad module is injected into the loaded-module table before the SDK
  * prelude runs, so package scripts import it like a normal built-in module.
  */
 #include <errno.h>
@@ -20,7 +20,7 @@
 #include "py/stackctrl.h"
 #include "port/micropython_embed.h"
 
-#include "capsula_host.h"
+#include "capsulad_host.h"
 
 #include "sdk_prelude.h"
 
@@ -28,11 +28,11 @@
 #define HEAP_BYTES (4u * 1024u * 1024u)
 
 static uint64_t gc_heap[HEAP_BYTES / sizeof(uint64_t)];
-static capsula_host host;
+static capsulad_host host;
 
-/* Declared by modcapsula.c. */
-void capsula_module_set_host(capsula_host *host);
-void capsula_module_init(void);
+/* Declared by modcapsulad.c. */
+void capsulad_module_set_host(capsulad_host *host);
+void capsulad_module_init(void);
 
 static int exec_source(const char *name, const char *source, size_t length) {
   nlr_buf_t nlr;
@@ -89,9 +89,9 @@ int main(int argc, char **argv) {
   }
   if (argc < 2) {
     fprintf(stderr,
-            "usage: capsula-micropython SCRIPT.py\n"
-            "environment: CAPSULA_SOCKET, CAPSULA_RUN_ID, CAPSULA_APP_ID,\n"
-            "             CAPSULA_LIBRARY, CAPSULA_APP_DIR\n");
+            "usage: capsulad-micropython SCRIPT.py\n"
+            "environment: CAPSULAD_SOCKET, CAPSULAD_RUN_ID, CAPSULAD_APP_ID,\n"
+            "             CAPSULAD_LIBRARY, CAPSULAD_APP_DIR\n");
     return 2;
   }
 
@@ -99,57 +99,57 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--check") == 0) {
     int stack_top = 0;
     mp_embed_init(&gc_heap[0], sizeof(gc_heap), &stack_top);
-    capsula_module_set_host(NULL);
-    capsula_module_init();
-    int ok = exec_source("<capsula-sdk>", sdk_prelude,
+    capsulad_module_set_host(NULL);
+    capsulad_module_init();
+    int ok = exec_source("<capsulad-sdk>", sdk_prelude,
                          strlen(sdk_prelude)) == 0;
     mp_embed_deinit();
     if (ok) {
-      printf("capsula-micropython: SDK prelude compiled\n");
+      printf("capsulad-micropython: SDK prelude compiled\n");
       return 0;
     }
     return 1;
   }
-  if (capsula_host_load(&host, err, sizeof(err)) != 0) {
-    fprintf(stderr, "capsula-micropython: %s\n", err);
+  if (capsulad_host_load(&host, err, sizeof(err)) != 0) {
+    fprintf(stderr, "capsulad-micropython: %s\n", err);
     return 1;
   }
-  if (capsula_host_connect(&host, 10000, err, sizeof(err)) != 0) {
-    fprintf(stderr, "capsula-micropython: %s\n", err);
+  if (capsulad_host_connect(&host, 10000, err, sizeof(err)) != 0) {
+    fprintf(stderr, "capsulad-micropython: %s\n", err);
     return 1;
   }
 
   size_t script_len = 0;
   char *script = read_file(argv[1], &script_len);
   if (script == NULL) {
-    fprintf(stderr, "capsula-micropython: cannot read %s: %s\n", argv[1],
+    fprintf(stderr, "capsulad-micropython: cannot read %s: %s\n", argv[1],
             strerror(errno));
-    capsula_host_close(&host);
+    capsulad_host_close(&host);
     return 1;
   }
 
   int stack_top = 0;
   mp_embed_init(&gc_heap[0], sizeof(gc_heap), &stack_top);
-  capsula_module_set_host(&host);
-  capsula_module_init();
+  capsulad_module_set_host(&host);
+  capsulad_module_init();
 
   int exit_code = 0;
-  if (exec_source("<capsula-sdk>", sdk_prelude, strlen(sdk_prelude)) != 0) {
-    fprintf(stderr, "capsula-micropython: SDK prelude failed\n");
+  if (exec_source("<capsulad-sdk>", sdk_prelude, strlen(sdk_prelude)) != 0) {
+    fprintf(stderr, "capsulad-micropython: SDK prelude failed\n");
     exit_code = 1;
   } else if (exec_source(argv[1], script, script_len) != 0) {
-    fprintf(stderr, "capsula-micropython: %s failed\n", argv[1]);
+    fprintf(stderr, "capsulad-micropython: %s failed\n", argv[1]);
     exit_code = 1;
-  } else if (!capsula_host_bus_ready(&host)) {
+  } else if (!capsulad_host_bus_ready(&host)) {
     fprintf(stderr,
-            "capsula-micropython: script exited without a ready app bus; "
-            "call capsula.start() before returning\n");
+            "capsulad-micropython: script exited without a ready app bus; "
+            "call capsulad.start() before returning\n");
     exit_code = 1;
   } else {
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {
       mp_obj_t module =
-          mp_import_name(qstr_from_str("capsula"), mp_const_none,
+          mp_import_name(qstr_from_str("capsulad"), mp_const_none,
                          MP_OBJ_NEW_SMALL_INT(0));
       mp_obj_t run = mp_load_attr(module, qstr_from_str("run"));
       mp_call_function_0(run);
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  capsula_host_close(&host);
+  capsulad_host_close(&host);
   mp_embed_deinit();
   free(script);
   return exit_code;

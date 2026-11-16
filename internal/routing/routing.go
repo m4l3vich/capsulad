@@ -20,7 +20,7 @@ import (
 
 // SystemAppID owns framework fallback and overlay presentations. It is not an
 // installed application and cannot be launched or configured.
-const SystemAppID = "capsula.system"
+const SystemAppID = "capsulad.system"
 
 type TouchMode int
 

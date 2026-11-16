@@ -18,6 +18,9 @@ pub struct ClientInner {
     pub run_id: String,
     pub app_id: String,
     pub channel: Channel,
+    /// Set for a remote gRPC channel: the validated origin. Remote clients
+    /// carry no run id and have no app bus.
+    pub remote_url: Option<String>,
     pool: RwLock<DescriptorPool>,
     pub closed: AtomicBool,
     pub call_children: Mutex<HashSet<u64>>,
@@ -26,16 +29,41 @@ pub struct ClientInner {
 
 impl ClientInner {
     pub fn new(socket: String, run_id: String, app_id: String, channel: Channel) -> Arc<Self> {
+        Self::build(socket, run_id, app_id, channel, None)
+    }
+
+    pub fn new_remote(remote_url: String, channel: Channel) -> Arc<Self> {
+        Self::build(
+            String::new(),
+            String::new(),
+            String::new(),
+            channel,
+            Some(remote_url),
+        )
+    }
+
+    fn build(
+        socket: String,
+        run_id: String,
+        app_id: String,
+        channel: Channel,
+        remote_url: Option<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             socket,
             run_id,
             app_id,
             channel,
+            remote_url,
             pool: RwLock::new(BASE_POOL.clone()),
             closed: AtomicBool::new(false),
             call_children: Mutex::new(HashSet::new()),
             bus_children: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote_url.is_some()
     }
 
     pub fn ensure_open(&self) -> SdkResult<()> {

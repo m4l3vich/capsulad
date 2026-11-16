@@ -10,7 +10,7 @@
 package optionspb
 
 import (
-	clientpb "capsula/apps/marusia/internal/vkproto/clientpb"
+	clientpb "capsulad/apps/marusia/internal/vkproto/clientpb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"

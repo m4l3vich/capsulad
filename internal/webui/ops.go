@@ -15,21 +15,23 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
+	"capsulad/internal/bluetooth"
 	"capsulad/internal/settings"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
 )
 
 const (
-	errInvalid   = webv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT
-	errNotFound  = webv1.ErrorCode_ERROR_CODE_NOT_FOUND
-	errConflict  = webv1.ErrorCode_ERROR_CODE_CONFLICT
-	errForbidden = webv1.ErrorCode_ERROR_CODE_FORBIDDEN
-	errInternal  = webv1.ErrorCode_ERROR_CODE_INTERNAL
+	errInvalid     = webv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT
+	errNotFound    = webv1.ErrorCode_ERROR_CODE_NOT_FOUND
+	errConflict    = webv1.ErrorCode_ERROR_CODE_CONFLICT
+	errForbidden   = webv1.ErrorCode_ERROR_CODE_FORBIDDEN
+	errInternal    = webv1.ErrorCode_ERROR_CODE_INTERNAL
+	errUnavailable = webv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 )
 
 const (
@@ -568,6 +570,40 @@ func (s *Server) opBluetooth(c *wsConn, reqID uint64, cmd *webv1.BluetoothComman
 		} else {
 			message = "Bluetooth incoming connections disabled"
 		}
+	case *webv1.BluetoothCommand_SetAdapterName:
+		// The advertised name is administrator-only: this browser command is
+		// the whole surface, and it validates here as well so a bad name is
+		// refused with a typed error instead of reaching BlueZ.
+		name, err := bluetooth.ValidateAdapterName(action.SetAdapterName.GetName())
+		if err != nil {
+			c.sendError(reqID, errInvalid, "Device name must be 1 to 248 bytes with no control characters.")
+			return
+		}
+		if s.Bluetooth == nil {
+			c.sendError(reqID, errUnavailable, "Bluetooth is unavailable on this platform")
+			return
+		}
+		if err := s.Bluetooth.SetAdapterName(ctx, name); err != nil {
+			if errors.Is(err, bluetooth.ErrInvalidName) {
+				c.sendError(reqID, errInvalid, "Device name must be 1 to 248 bytes with no control characters.")
+				return
+			}
+			if errors.Is(err, bluetooth.ErrUnavailable) {
+				c.sendError(reqID, errUnavailable, "Bluetooth is unavailable on this platform")
+				return
+			}
+			c.sendError(reqID, classifyError(err), rpcMessage(err))
+			return
+		}
+		// Read the observed status through the framework, exactly like the
+		// toggle commands: only that path adds the A2DP-readiness detail.
+		st, err := sys.GetBluetoothStatus(ctx, &frameworkv1.GetBluetoothStatusRequest{})
+		if err != nil {
+			c.sendError(reqID, classifyError(err), rpcMessage(err))
+			return
+		}
+		status = st
+		message = "Device name changed to " + name
 	case *webv1.BluetoothCommand_Unpair:
 		deviceID := strings.TrimSpace(action.Unpair.GetDeviceId())
 		if deviceID == "" {

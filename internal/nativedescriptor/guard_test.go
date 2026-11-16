@@ -8,14 +8,14 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 )
 
 // embeddedDescriptor is the file sdk/native/src/dynamic.rs embeds with
 // include_bytes!. The native runtime decodes every JSON reply against it.
-const embeddedDescriptor = "../../sdk/native/descriptors/capsula-framework.protoset"
+const embeddedDescriptor = "../../sdk/native/descriptors/capsulad-framework.protoset"
 
-const frameworkProto = "capsula/framework/v1/framework.proto"
+const frameworkProto = "capsulad/framework/v1/framework.proto"
 
 // readEmbeddedFile returns the framework file as committed to sdk/native.
 func readEmbeddedFile(t *testing.T) *descriptorpb.FileDescriptorProto {
@@ -85,11 +85,11 @@ func missingFields(generated, embedded *descriptorpb.FileDescriptorProto) []stri
 
 // TestEmbeddedFrameworkDescriptorCoversGeneratedFields fails when the embedded
 // script is stale. It compares the generated Go descriptor with the committed
-// file; it cannot detect that the deployed libcapsula still embeds an older
+// file; it cannot detect that the deployed libcapsulad still embeds an older
 // copy, which is why sdk/native/README.md requires a rebuild after
 // regenerating.
 func TestEmbeddedFrameworkDescriptorCoversGeneratedFields(t *testing.T) {
-	generated := protodesc.ToFileDescriptorProto(frameworkv1.File_capsula_framework_v1_framework_proto)
+	generated := protodesc.ToFileDescriptorProto(frameworkv1.File_capsulad_framework_v1_framework_proto)
 	embedded := readEmbeddedFile(t)
 
 	if missing := missingFields(generated, embedded); len(missing) > 0 {
@@ -109,7 +109,7 @@ func TestEmbeddedFrameworkDescriptorCoversGeneratedFields(t *testing.T) {
 // field removed from the generated descriptor is reported. It runs against an
 // in-memory copy, so no committed file is reverted to demonstrate the failure.
 func TestDescriptorGuardDetectsMissingField(t *testing.T) {
-	generated := protodesc.ToFileDescriptorProto(frameworkv1.File_capsula_framework_v1_framework_proto)
+	generated := protodesc.ToFileDescriptorProto(frameworkv1.File_capsulad_framework_v1_framework_proto)
 	embedded := readEmbeddedFile(t)
 
 	stale := proto.Clone(embedded).(*descriptorpb.FileDescriptorProto)

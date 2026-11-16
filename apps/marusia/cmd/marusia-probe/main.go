@@ -25,13 +25,14 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"capsula/apps/marusia/internal/vkclient"
-	"capsula/apps/marusia/internal/vkproto/clientpb"
+	"capsulad/apps/marusia/internal/redact"
+	"capsulad/apps/marusia/internal/vkclient"
+	"capsulad/apps/marusia/internal/vkproto/clientpb"
+	"capsulad/sdk/capsulad"
 )
 
 func env(key, fallback string) string {
@@ -74,7 +75,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	log.Printf("probe: endpoint=%s session=%s… pcm=%d bytes", base, short(sessionID), len(pcm))
+	log.Printf("probe: endpoint=%s session=%s pcm=%d bytes", base, redact.SessionID(sessionID), len(pcm))
 	if err := client.Authorize(ctx); err != nil {
 		log.Fatalf("probe: authorize: %v", err)
 	}
@@ -128,7 +129,7 @@ func main() {
 					result.commands = append(result.commands, command.Kind.String())
 					if command.URL != "" {
 						result.playURL = command.URL
-						log.Printf("probe: command %s url=%s", command.Kind, command.URL)
+						log.Printf("probe: command %s url=%s", command.Kind, redact.URL(command.URL))
 						continue
 					}
 					log.Printf("probe: command %s text=%q event=%q", command.Kind, command.Text, command.Event)
@@ -165,7 +166,7 @@ func main() {
 	}
 
 	log.Printf("probe: RESULT text=%q finish=%q commands=%v play_url=%q",
-		result.text, result.finish, result.commands, result.playURL)
+		result.text, result.finish, result.commands, redact.URL(result.playURL))
 	if result.playURL == "" {
 		log.Printf("probe: no play_url; the TTS media type could not be observed")
 		return
@@ -173,38 +174,39 @@ func main() {
 	fetch(result.playURL)
 }
 
+// fetch reports the TTS media header through the same native HTTP client the
+// app uses, so the probe exercises production egress rather than a second
+// stack.
 func fetch(rawURL string) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	client, err := capsulad.OpenHTTP(capsulad.FromEnv(), capsulad.HTTPOptions{
+		Roots:           "system",
+		UserAgent:       "voice-agent/1",
+		MaxBody:         1 << 20,
+		FollowRedirects: 4,
+		ConnectTimeout:  20 * time.Second,
+		ReadTimeout:     30 * time.Second,
+	})
 	if err != nil {
-		log.Printf("probe: media request: %v", err)
+		log.Printf("probe: media client: %v", err)
 		return
 	}
-	req.Header.Set("User-Agent", "voice-agent/1")
-	resp, err := client.Do(req)
+	defer client.Close()
+	resp, err := client.Do(context.Background(), capsulad.HTTPRequest{
+		Method:  "GET",
+		URL:     rawURL,
+		Timeout: 30 * time.Second,
+	})
 	if err != nil {
-		log.Printf("probe: media fetch: %v", err)
+		// The native error may quote the signed request URL.
+		log.Printf("probe: media fetch %s: %s", redact.URL(rawURL), redact.ErrorText(err, rawURL))
 		return
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		log.Printf("probe: media read: %v", err)
-		return
-	}
-	head := body
+	head := resp.Body
 	if len(head) > 32 {
 		head = head[:32]
 	}
 	log.Printf("probe: MEDIA status=%d content_type=%q bytes=%d first=%s",
-		resp.StatusCode, resp.Header.Get("Content-Type"), len(body), hex.EncodeToString(head))
-}
-
-func short(value string) string {
-	if len(value) <= 8 {
-		return "…"
-	}
-	return value[:8]
+		resp.StatusCode, resp.Header["content-type"], len(resp.Body), hex.EncodeToString(head))
 }
 
 // readWAV returns the data chunk of a 16 kHz mono 16-bit PCM WAV.

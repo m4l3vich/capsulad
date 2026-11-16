@@ -22,7 +22,7 @@ import (
 
 const (
 	bluezAgentManager = "org.bluez.AgentManager1"
-	pairingAgentPath  = dbus.ObjectPath("/org/capsula/agent1")
+	pairingAgentPath  = dbus.ObjectPath("/org/capsulad/agent1")
 	pairingAgentCaps  = "NoInputNoOutput"
 )
 

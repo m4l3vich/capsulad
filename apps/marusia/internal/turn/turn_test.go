@@ -12,9 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc/codes"
-
-	"capsula/apps/marusia/internal/vkclient"
+	"capsulad/apps/marusia/internal/vkclient"
 )
 
 type fakeEndpoint struct {
@@ -342,6 +340,45 @@ func TestTurnPlayerFailureIsActionable(t *testing.T) {
 	}
 }
 
+// TestTurnPlayerFailureDropsTheSignedQuery covers the Detail that main logs:
+// the vendor signs the reply URL in its query string, so neither the Detail's
+// copy of the URL nor an error that quotes it may carry the signature. The
+// Player still receives the signed URL, because that is what fetches the audio.
+func TestTurnPlayerFailureDropsTheSignedQuery(t *testing.T) {
+	const signed = "https://tts.example/broken.wav?X-Amz-Signature=deadbeef&X-Amz-Credential=secret"
+	var stream *fakeStream
+	stream = newFakeStream(func() {
+		for _, event := range playingFrames(signed) {
+			stream.events <- event
+		}
+	})
+	chunks := make(chan []byte, 4)
+	chunks <- loudFrame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	player := &fakePlayer{err: errors.New("media: fetch " + signed + ": HTTP 403")}
+	result := Run(ctx, Options{
+		Endpoint:   &fakeEndpoint{stream: stream},
+		Chunks:     chunks,
+		Player:     player,
+		EndSilence: 40 * time.Millisecond,
+	})
+	if result.Outcome != Failed {
+		t.Fatalf("outcome = %v (%s)", result.Outcome, result.Detail)
+	}
+	if !strings.Contains(result.Detail, "https://tts.example/broken.wav") {
+		t.Fatalf("detail must name the reply host and path: %q", result.Detail)
+	}
+	for _, secret := range []string{"deadbeef", "X-Amz-Signature", "X-Amz-Credential", "?"} {
+		if strings.Contains(result.Detail, secret) {
+			t.Fatalf("detail leaked %q: %q", secret, result.Detail)
+		}
+	}
+	if player.url != signed {
+		t.Fatalf("the player must receive the signed URL, got %q", player.url)
+	}
+}
+
 func TestTurnHoldToTalkReleaseEndsCapture(t *testing.T) {
 	var stream *fakeStream
 	stream = newFakeStream(func() {
@@ -630,7 +667,7 @@ func TestTurnReportsNoAnswerInsteadOfSuccess(t *testing.T) {
 func TestTurnMarksRejectedCredentials(t *testing.T) {
 	result := Run(context.Background(), Options{
 		Endpoint: &fakeEndpoint{authErr: &vkclient.StatusError{
-			Op: "probe", Code: codes.Unauthenticated, Message: "session expired",
+			Op: "probe", Code: vkclient.CodeUnauthenticated, Message: "session expired",
 		}},
 		Chunks: make(chan []byte),
 	})

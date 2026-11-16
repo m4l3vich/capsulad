@@ -1,6 +1,6 @@
-//! Self-contained declarations for the Capsula shared-engine C ABI v1.
+//! Self-contained declarations for the Capsulad shared-engine C ABI v1.
 //!
-//! The layout mirrors `sdk/native/include/capsula/capsula.h` exactly. Nothing
+//! The layout mirrors `sdk/native/include/capsulad/capsulad.h` exactly. Nothing
 //! here links or includes native sources: the table is copied from the loaded
 //! shared object and validated (major, size, struct_size) before use.
 //!
@@ -35,6 +35,7 @@ pub const STATUS_CANCELLED: i32 = 11;
 pub const STATUS_NOT_FOUND: i32 = 12;
 pub const STATUS_BUSY: i32 = 13;
 pub const STATUS_INTERNAL: i32 = 14;
+pub const STATUS_TOO_LARGE: i32 = 15;
 
 pub const EVENT_UNKNOWN: i32 = 0;
 pub const EVENT_INVOCATION: i32 = 1;
@@ -241,6 +242,46 @@ pub type BufFreeFn = unsafe extern "C" fn(Buf) -> i32;
 pub type LastErrorFn = unsafe extern "C" fn() -> *const c_char;
 pub type HandleInfoFn = unsafe extern "C" fn(u64, *mut Buf) -> i32;
 
+// Appended v1 surface.
+pub type HttpOpenFn = unsafe extern "C" fn(*const u8, usize, u32, *mut u64) -> i32;
+pub type HttpCloseFn = unsafe extern "C" fn(u64) -> i32;
+pub type HttpRequestFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    *const c_char,
+    usize,
+    *const c_char,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    u32,
+    *mut i32,
+    *mut Buf,
+    *mut Buf,
+) -> i32;
+pub type GrpcOpenFn =
+    unsafe extern "C" fn(*const c_char, usize, *const u8, usize, u32, *mut u64) -> i32;
+pub type CallStartMetaFn = unsafe extern "C" fn(
+    u64,
+    *const c_char,
+    usize,
+    *const c_char,
+    usize,
+    i32,
+    u32,
+    *const u8,
+    usize,
+    *mut u64,
+) -> i32;
+pub type Base64Fn = unsafe extern "C" fn(*const u8, usize, i32, *mut Buf) -> i32;
+pub type PrimitiveFn = unsafe extern "C" fn(*const u8, usize, *mut Buf) -> i32;
+pub type RandomBytesFn = unsafe extern "C" fn(*mut u8, usize) -> i32;
+pub type UuidV4Fn = unsafe extern "C" fn(*mut Buf) -> i32;
+pub type UrlParseFn = unsafe extern "C" fn(*const c_char, usize, *mut Buf) -> i32;
+pub type HttpCancelFn = unsafe extern "C" fn(u64, u64) -> i32;
+
 /// Function table. Field order is frozen by ABI v1; future minors only append.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -285,6 +326,22 @@ pub struct Api {
     pub buf_free: BufFreeFn,
     pub last_error: LastErrorFn,
     pub handle_info: HandleInfoFn,
+
+    // Appended in v1: HTTP, remote gRPC and primitives.
+    pub http_open: HttpOpenFn,
+    pub http_close: HttpCloseFn,
+    pub http_request: HttpRequestFn,
+    pub grpc_open: GrpcOpenFn,
+    pub call_start_meta: CallStartMetaFn,
+    pub base64_encode: Base64Fn,
+    pub base64_decode: Base64Fn,
+    pub percent_encode: PrimitiveFn,
+    pub percent_decode: PrimitiveFn,
+    pub sha256: PrimitiveFn,
+    pub random_bytes: RandomBytesFn,
+    pub uuid_v4: UuidV4Fn,
+    pub url_parse: UrlParseFn,
+    pub http_cancel: HttpCancelFn,
 }
 
 /// Bytes this binding was compiled against. A native table must be at least
@@ -300,7 +357,7 @@ impl Api {
             std::mem::size_of::<F>() == std::mem::size_of::<usize>()
                 && unsafe { std::mem::transmute_copy::<F, usize>(&field) } != 0
         }
-        let required: [(&str, bool); 32] = [
+        let required: [(&str, bool); 46] = [
             ("client_connect", set(self.client_connect)),
             ("client_close", set(self.client_close)),
             (
@@ -336,6 +393,20 @@ impl Api {
             ("buf_free", set(self.buf_free)),
             ("last_error", set(self.last_error)),
             ("handle_info", set(self.handle_info)),
+            ("http_open", set(self.http_open)),
+            ("http_close", set(self.http_close)),
+            ("http_request", set(self.http_request)),
+            ("grpc_open", set(self.grpc_open)),
+            ("call_start_meta", set(self.call_start_meta)),
+            ("base64_encode", set(self.base64_encode)),
+            ("base64_decode", set(self.base64_decode)),
+            ("percent_encode", set(self.percent_encode)),
+            ("percent_decode", set(self.percent_decode)),
+            ("sha256", set(self.sha256)),
+            ("random_bytes", set(self.random_bytes)),
+            ("uuid_v4", set(self.uuid_v4)),
+            ("url_parse", set(self.url_parse)),
+            ("http_cancel", set(self.http_cancel)),
         ];
         for (name, present) in required {
             if !present {
@@ -405,6 +476,7 @@ mod tests {
         assert_eq!(STATUS_NOT_FOUND, 12);
         assert_eq!(STATUS_BUSY, 13);
         assert_eq!(STATUS_INTERNAL, 14);
+        assert_eq!(STATUS_TOO_LARGE, 15);
 
         assert_eq!(EVENT_UNKNOWN, 0);
         assert_eq!(EVENT_INVOCATION, 1);
@@ -468,7 +540,21 @@ mod tests {
             assert_eq!(offset(p, addr_of!((*p).buf_free)), 248);
             assert_eq!(offset(p, addr_of!((*p).last_error)), 256);
             assert_eq!(offset(p, addr_of!((*p).handle_info)), 264);
+            assert_eq!(offset(p, addr_of!((*p).http_open)), 272);
+            assert_eq!(offset(p, addr_of!((*p).http_close)), 280);
+            assert_eq!(offset(p, addr_of!((*p).http_request)), 288);
+            assert_eq!(offset(p, addr_of!((*p).grpc_open)), 296);
+            assert_eq!(offset(p, addr_of!((*p).call_start_meta)), 304);
+            assert_eq!(offset(p, addr_of!((*p).base64_encode)), 312);
+            assert_eq!(offset(p, addr_of!((*p).base64_decode)), 320);
+            assert_eq!(offset(p, addr_of!((*p).percent_encode)), 328);
+            assert_eq!(offset(p, addr_of!((*p).percent_decode)), 336);
+            assert_eq!(offset(p, addr_of!((*p).sha256)), 344);
+            assert_eq!(offset(p, addr_of!((*p).random_bytes)), 352);
+            assert_eq!(offset(p, addr_of!((*p).uuid_v4)), 360);
+            assert_eq!(offset(p, addr_of!((*p).url_parse)), 368);
+            assert_eq!(offset(p, addr_of!((*p).http_cancel)), 376);
         }
-        assert_eq!(TABLE_SIZE, 272);
+        assert_eq!(TABLE_SIZE, 384);
     }
 }

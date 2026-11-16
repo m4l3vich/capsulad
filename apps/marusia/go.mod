@@ -1,14 +1,14 @@
-module capsula/apps/marusia
+module capsulad/apps/marusia
 
 go 1.22.5
 
 require (
-	capsula/sdk v0.0.0
+	capsulad/sdk v0.0.0
 	google.golang.org/grpc v1.67.1
 	google.golang.org/protobuf v1.35.1
 )
 
-replace capsula/sdk => ../../sdk/go
+replace capsulad/sdk => ../../sdk/go
 
 require (
 	golang.org/x/net v0.28.0 // indirect

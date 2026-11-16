@@ -1,11 +1,11 @@
-"""Capsula MicroPython SDK.
+"""Capsulad MicroPython SDK.
 
-The host injects the C module ``capsula`` (thin libcapsula ABI primitives) and
+The host injects the C module ``capsulad`` (thin libcapsulad ABI primitives) and
 executes this prelude before the package script. The public surface mirrors the
 QuickJS SDK: start/run/on/call/stream/routed plus notification helpers.
 """
 
-import capsula as _c
+import capsulad as _c
 
 
 # MicroPython's embed port has no filesystem/open support, so this SDK carries
@@ -336,7 +336,7 @@ def start(timeout=10000):
 def run():
     global _finished
     if not _started:
-        raise RuntimeError("capsula.start() must be called first")
+        raise RuntimeError("capsulad.start() must be called first")
     if _finished:
         return {"status": _c._disconnect_status(), "detail": _c._disconnect_detail()}
     try:
@@ -474,7 +474,7 @@ env = _c._env()
 WAIT_FOREVER = 0xFFFFFFFF
 
 # The prelude executes in __main__, so publish the public surface on the
-# injected capsula module that app scripts import.
+# injected capsulad module that app scripts import.
 _c.Call = Call
 _c.on = on
 _c.start = start

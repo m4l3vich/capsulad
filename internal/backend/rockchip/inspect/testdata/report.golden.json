@@ -1,0 +1,71 @@
+{
+  "root": "\u003cROOT\u003e",
+  "model": "Capsula-mini (RK3308, from stock image metadata)",
+  "soc": "Rockchip RK3308",
+  "firmware": "Capsula Stock 1.0",
+  "vendor_daemons": [
+    "voice-agent",
+    "sysmon"
+  ],
+  "init_scripts": [
+    "S50mic-enable",
+    "S99btctl.sh"
+  ],
+  "pulse_sinks": [
+    "master"
+  ],
+  "pulse_sources": [
+    "speex"
+  ],
+  "device_nodes": [
+    "/dev/led_multi_ctrl",
+    "/dev/topleds (referenced by voice-agent)"
+  ],
+  "mic_enable_gpio": 21,
+  "ring_pixels": 12,
+  "display_leds": 30,
+  "subsystems": [
+    {
+      "Subsystem": "ring",
+      "BackendID": "rockchip.vendor.topleds.ws2812b",
+      "Status": "PARTIAL",
+      "Detail": "12 RGB pixels via the 36-channel WS2812B chain on /dev/topleds; ioctl ABI recovered from voice-agent, hardware validation pending"
+    },
+    {
+      "Subsystem": "segment",
+      "BackendID": "rockchip.vendor.led_multi_ctrl",
+      "Status": "PARTIAL",
+      "Detail": "30 monochrome LEDs (4x7 segments plus colon) via the IS31FL3236 on /dev/led_multi_ctrl; ioctl ABI recovered from voice-agent, hardware validation pending"
+    },
+    {
+      "Subsystem": "audio",
+      "BackendID": "rockchip.pulseaudio",
+      "Status": "PARTIAL",
+      "Detail": "pacat/parec available; master sink and speex source from device.pa"
+    },
+    {
+      "Subsystem": "touch",
+      "BackendID": "rockchip.evdev",
+      "Status": "PARTIAL",
+      "Detail": "evdev input under /dev/input; raw coordinate availability must be probed"
+    },
+    {
+      "Subsystem": "wakeword",
+      "BackendID": "rockchip.vendor",
+      "Status": "UNVERIFIED",
+      "Detail": "stock voice-agent model exists; no documented engine ABI"
+    },
+    {
+      "Subsystem": "mic_gate",
+      "BackendID": "rockchip.gpio",
+      "Status": "PARTIAL",
+      "Detail": "microphone enable GPIO 21 per S50mic-enable"
+    }
+  ],
+  "evidence": [
+    "kernel from boot partition: Linux 4.4.167 aarch64 (Buildroot)",
+    "PulseAudio system mode with virtual sinks for alarm/ring/call/purr and processed microphone sources",
+    "vendor LED animations: 12 RGB ring pixels",
+    "vendor LED animations: 30 monochrome display LEDs"
+  ]
+}

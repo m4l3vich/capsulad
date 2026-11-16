@@ -65,7 +65,7 @@ func TestLaunchEnvCarriesHardwareSerial(t *testing.T) {
 	d := newSerialDaemon(t, "processor\t: 0\nSerial\t\t: 11bfcbc5d63d55fc\n")
 	found := false
 	for _, entry := range nativeLaunchEnv(t, d) {
-		if entry == "CAPSULA_DEVICE_SERIAL=11bfcbc5d63d55fc" {
+		if entry == "CAPSULAD_DEVICE_SERIAL=11bfcbc5d63d55fc" {
 			found = true
 		}
 	}
@@ -77,7 +77,7 @@ func TestLaunchEnvCarriesHardwareSerial(t *testing.T) {
 func TestLaunchEnvOmitsUnknownHardwareSerial(t *testing.T) {
 	d := newSerialDaemon(t, "processor\t: 0\nHardware\t: Rockchip\n")
 	for _, entry := range nativeLaunchEnv(t, d) {
-		if strings.HasPrefix(entry, "CAPSULA_DEVICE_SERIAL=") {
+		if strings.HasPrefix(entry, "CAPSULAD_DEVICE_SERIAL=") {
 			t.Fatalf("an unknown serial must not be exported: %q", entry)
 		}
 	}

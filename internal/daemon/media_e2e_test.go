@@ -12,13 +12,13 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/bluetooth"
 )
 
 const (
-	mediaService  = "capsula.contracts.media.v1.MediaPlayerService"
+	mediaService  = "capsulad.contracts.media.v1.MediaPlayerService"
 	mediaFixture  = "test.media"
 	mediaManifest = `
 id = "test.media"
@@ -37,7 +37,7 @@ architecture = "aarch64"
 abi = "linux-musl"
 
 [[interfaces]]
-service = "capsula.contracts.media.v1.MediaPlayerService"
+service = "capsulad.contracts.media.v1.MediaPlayerService"
 version = "1.0.0"
 descriptor = "schemas/media.protoset"
 `
@@ -67,7 +67,7 @@ func mediaDescriptorSet(t *testing.T) []byte {
 	t.Helper()
 	set := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
-			protodesc.ToFileDescriptorProto(mediav1.File_capsula_contracts_media_v1_media_proto),
+			protodesc.ToFileDescriptorProto(mediav1.File_capsulad_contracts_media_v1_media_proto),
 		},
 	}
 	data, err := proto.Marshal(set)

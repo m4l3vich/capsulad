@@ -34,6 +34,7 @@ import (
 	"sync"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/profile"
 )
 
 type Config struct {
@@ -44,8 +45,33 @@ type Config struct {
 	// wakeword/microphone source.
 	AudioSink   string
 	AudioSource string
+	// AudioPlaybackFormat and AudioCaptureFormat are the PCM formats the
+	// firmware clients negotiate. The profile supplies them.
+	AudioPlaybackFormat backend.AudioFormat
+	AudioCaptureFormat  backend.AudioFormat
 	// MicEnableGPIO is the sysfs GPIO number used by S50mic-enable.
 	MicEnableGPIO int
+	// Model/SoC/kernel fallbacks are reported when the corresponding probe
+	// cannot read the device.
+	ModelFallback  string
+	SoC            string
+	SoCMatch       string
+	KernelFallback string
+	// LED geometry and device paths come from the profile.
+	LEDTopPath           string
+	LEDMultiCtrlPath     string
+	LEDSysfsClassDir     string
+	LEDWS2812Channels    int
+	LEDWS2812Pixels      int
+	LEDMultiCtrlChannels int
+	LEDSegmentDigits     int
+	LEDSegmentsPerDigit  int
+	LEDGamma             float64
+	// InputEventDir and InputEventPrefix locate evdev nodes; the keymap
+	// selector is the gpio-keys device-tree compatible string.
+	InputEventDir         string
+	InputEventPrefix      string
+	InputKeymapCompatible string
 	// Warnf and Infof receive backend diagnostics so the daemon can route them
 	// into its log bus (rotated log file and Web UI). Both are optional: a nil
 	// hook discards the message, so a Config built for offline inspection or a
@@ -55,9 +81,34 @@ type Config struct {
 	Infof func(format string, args ...any)
 }
 
-func DefaultConfig() Config {
-	return Config{AudioSink: "master", AudioSource: "speex", MicEnableGPIO: 21}
+// ConfigFor builds the Rockchip backend configuration from a device profile.
+func ConfigFor(p profile.Profile) Config {
+	return Config{
+		AudioSink:             p.Audio.Sink,
+		AudioSource:           p.Audio.Source,
+		AudioPlaybackFormat:   backend.AudioFormat{Format: backend.SampleFormat(p.Audio.PlaybackFormat), RateHz: p.Audio.PlaybackRateHz, Channels: p.Audio.PlaybackChannels},
+		AudioCaptureFormat:    backend.AudioFormat{Format: backend.SampleFormat(p.Audio.CaptureFormat), RateHz: p.Audio.CaptureRateHz, Channels: p.Audio.CaptureChannels},
+		MicEnableGPIO:         p.Audio.MicEnableGPIO,
+		ModelFallback:         p.Model.ModelFallback,
+		SoC:                   p.Model.SoC,
+		SoCMatch:              p.Model.SoCMatch,
+		KernelFallback:        p.Model.KernelFallback,
+		LEDTopPath:            p.LED.TopLEDsPath,
+		LEDMultiCtrlPath:      p.LED.MultiCtrlPath,
+		LEDSysfsClassDir:      p.LED.SysfsClassDir,
+		LEDWS2812Channels:     p.LED.WS2812Channels,
+		LEDWS2812Pixels:       p.LED.WS2812Pixels,
+		LEDMultiCtrlChannels:  p.LED.MultiCtrlChannels,
+		LEDSegmentDigits:      p.LED.SegmentDigits,
+		LEDSegmentsPerDigit:   p.LED.SegmentsPerDigit,
+		LEDGamma:              p.LED.Gamma,
+		InputEventDir:         p.Input.EventDir,
+		InputEventPrefix:      p.Input.EventPrefix,
+		InputKeymapCompatible: p.Input.KeymapCompatible,
+	}
 }
+
+func DefaultConfig() Config { return ConfigFor(profile.RK3308Rev4Stock) }
 
 type Backend struct {
 	cfg     Config
@@ -71,18 +122,73 @@ type Backend struct {
 }
 
 func New(cfg Config) (*Backend, error) {
+	def := DefaultConfig()
 	if cfg.AudioSink == "" {
-		cfg.AudioSink = "master"
+		cfg.AudioSink = def.AudioSink
 	}
 	if cfg.AudioSource == "" {
-		cfg.AudioSource = "speex"
+		cfg.AudioSource = def.AudioSource
+	}
+	if cfg.AudioPlaybackFormat.RateHz <= 0 || cfg.AudioPlaybackFormat.Channels <= 0 {
+		cfg.AudioPlaybackFormat = def.AudioPlaybackFormat
+	}
+	if cfg.AudioCaptureFormat.RateHz <= 0 || cfg.AudioCaptureFormat.Channels <= 0 {
+		cfg.AudioCaptureFormat = def.AudioCaptureFormat
 	}
 	if cfg.MicEnableGPIO <= 0 {
-		cfg.MicEnableGPIO = DefaultConfig().MicEnableGPIO
+		cfg.MicEnableGPIO = def.MicEnableGPIO
+	}
+	if cfg.ModelFallback == "" {
+		cfg.ModelFallback = def.ModelFallback
+	}
+	if cfg.SoC == "" {
+		cfg.SoC = def.SoC
+	}
+	if cfg.SoCMatch == "" {
+		cfg.SoCMatch = def.SoCMatch
+	}
+	if cfg.KernelFallback == "" {
+		cfg.KernelFallback = def.KernelFallback
+	}
+	if cfg.LEDTopPath == "" {
+		cfg.LEDTopPath = def.LEDTopPath
+	}
+	if cfg.LEDMultiCtrlPath == "" {
+		cfg.LEDMultiCtrlPath = def.LEDMultiCtrlPath
+	}
+	if cfg.LEDSysfsClassDir == "" {
+		cfg.LEDSysfsClassDir = def.LEDSysfsClassDir
+	}
+	if cfg.LEDWS2812Channels <= 0 {
+		cfg.LEDWS2812Channels = def.LEDWS2812Channels
+	}
+	if cfg.LEDWS2812Pixels <= 0 {
+		cfg.LEDWS2812Pixels = def.LEDWS2812Pixels
+	}
+	if cfg.LEDMultiCtrlChannels <= 0 {
+		cfg.LEDMultiCtrlChannels = def.LEDMultiCtrlChannels
+	}
+	if cfg.LEDSegmentDigits <= 0 {
+		cfg.LEDSegmentDigits = def.LEDSegmentDigits
+	}
+	if cfg.LEDSegmentsPerDigit <= 0 {
+		cfg.LEDSegmentsPerDigit = def.LEDSegmentsPerDigit
+	}
+	if cfg.LEDGamma <= 0 {
+		cfg.LEDGamma = def.LEDGamma
+	}
+	if cfg.InputEventDir == "" {
+		cfg.InputEventDir = def.InputEventDir
+	}
+	if cfg.InputEventPrefix == "" {
+		cfg.InputEventPrefix = def.InputEventPrefix
+	}
+	if cfg.InputKeymapCompatible == "" {
+		cfg.InputKeymapCompatible = def.InputKeymapCompatible
 	}
 	// S50mic-enable is the authoritative source for the gate GPIO on this
 	// firmware; an explicit non-default Config value still wins.
-	if gpio, ok := probeMicEnableGPIO(cfg.RootPrefix); ok && cfg.MicEnableGPIO == DefaultConfig().MicEnableGPIO {
+	if gpio, ok := probeMicEnableGPIO(cfg.RootPrefix); ok && cfg.MicEnableGPIO == def.MicEnableGPIO {
 		cfg.MicEnableGPIO = gpio
 	}
 	b := &Backend{cfg: cfg}
@@ -91,13 +197,13 @@ func New(cfg Config) (*Backend, error) {
 	// The live device tree is authoritative. When it is unavailable (offline
 	// inspection or an unusual boot), the observed vendor geometry is used so
 	// an existing char device is still driven with the recovered ABI.
-	if dt.Ring == nil && nodeExists(cfg.RootPrefix, "/dev/topleds") {
-		dt.Ring = &ws2812RingNode{DeviceName: "topleds", Channels: ws2812ChannelCount}
+	if dt.Ring == nil && nodeExists(cfg.RootPrefix, cfg.LEDTopPath) {
+		dt.Ring = &ws2812RingNode{DeviceName: filepath.Base(cfg.LEDTopPath), Channels: cfg.LEDWS2812Channels}
 	}
-	if dt.Segment == nil && nodeExists(cfg.RootPrefix, "/dev/led_multi_ctrl") {
-		dt.Segment = &multiCtrlNode{Cells: multiCtrlCellCount}
+	if dt.Segment == nil && nodeExists(cfg.RootPrefix, cfg.LEDMultiCtrlPath) {
+		dt.Segment = &multiCtrlNode{Cells: cfg.LEDMultiCtrlChannels}
 	}
-	ringLEDs, monoLEDs := probeSysfsLEDs(cfg.RootPrefix)
+	ringLEDs, monoLEDs := probeSysfsLEDs(cfg.RootPrefix, cfg.LEDSysfsClassDir, cfg.LEDWS2812Pixels, cfg.LEDMultiCtrlChannels)
 
 	var ringErr error
 	if dt.Ring != nil {
@@ -105,11 +211,11 @@ func New(cfg Config) (*Backend, error) {
 			b.ring = ring
 			channels := dt.Ring.Channels
 			if channels <= 0 {
-				channels = ws2812ChannelCount
+				channels = cfg.LEDWS2812Channels
 			}
 			b.caps = append(b.caps, backend.SubsystemStatus{
 				Subsystem: "ring", BackendID: "rockchip.vendor.topleds.ws2812b", Status: backend.Partial,
-				Detail: fmt.Sprintf("%d-channel WS2812B chain (/dev/topleds) driven as %d RGB pixels; ioctl ABI recovered from the stock voice-agent, hardware validation pending", channels, channels/3),
+				Detail: fmt.Sprintf("%d-channel WS2812B chain (%s) driven as %d RGB pixels; ioctl ABI recovered from the stock voice-agent, hardware validation pending", channels, cfg.LEDTopPath, channels/3),
 			})
 		} else {
 			ringErr = err
@@ -131,7 +237,7 @@ func New(cfg Config) (*Backend, error) {
 		if dt.Ring != nil {
 			pixels := dt.Ring.Channels / 3
 			if pixels <= 0 {
-				pixels = ws2812PixelCount
+				pixels = cfg.LEDWS2812Pixels
 			}
 			b.ring = &unverifiedRing{pixels: pixels}
 			b.caps = append(b.caps, backend.SubsystemStatus{
@@ -149,31 +255,31 @@ func New(cfg Config) (*Backend, error) {
 			b.seg = seg
 			cells := dt.Segment.Cells
 			if cells <= 0 {
-				cells = multiCtrlCellCount
+				cells = cfg.LEDMultiCtrlChannels
 			}
 			b.caps = append(b.caps, backend.SubsystemStatus{
 				Subsystem: "segment", BackendID: "rockchip.vendor.led_multi_ctrl", Status: backend.Partial,
-				Detail: fmt.Sprintf("%d-channel monochrome display (/dev/led_multi_ctrl, IS31FL3236) as 4x7 segments plus colon; ioctl ABI recovered from the stock voice-agent, hardware validation pending", cells),
+				Detail: fmt.Sprintf("%d-channel monochrome display (%s, IS31FL3236) as %dx%d segments plus colon; ioctl ABI recovered from the stock voice-agent, hardware validation pending", cells, cfg.LEDMultiCtrlPath, cfg.LEDSegmentDigits, cfg.LEDSegmentsPerDigit),
 			})
 		} else {
 			segmentErr = err
 		}
 	}
-	if b.seg == nil && len(monoLEDs) >= 7 {
+	if b.seg == nil && len(monoLEDs) >= cfg.LEDSegmentsPerDigit {
 		if cfg.RootPrefix == "" {
 			for _, led := range monoLEDs {
 				claimSysfsLED(led)
 			}
 		}
-		b.seg = &sysfsSegment{leds: monoLEDs}
+		b.seg = &sysfsSegment{leds: monoLEDs, digits: cfg.LEDSegmentDigits, segmentsPerDigit: cfg.LEDSegmentsPerDigit, colonChannels: cfg.LEDMultiCtrlChannels}
 		b.caps = append(b.caps, backend.SubsystemStatus{
 			Subsystem: "segment", BackendID: "rockchip.sysfs.led", Status: backend.Partial,
-			Detail: fmt.Sprintf("%d monochrome LED class devices mapped as 4x7 segments plus colon", len(monoLEDs)),
+			Detail: fmt.Sprintf("%d monochrome LED class devices mapped as %dx%d segments plus colon", len(monoLEDs), cfg.LEDSegmentDigits, cfg.LEDSegmentsPerDigit),
 		})
 	}
 	if b.seg == nil {
 		if dt.Segment != nil {
-			b.seg = &unverifiedSegment{cells: segmentDigitCount}
+			b.seg = &unverifiedSegment{cells: cfg.LEDSegmentDigits, segmentsPerDigit: cfg.LEDSegmentsPerDigit}
 			b.caps = append(b.caps, backend.SubsystemStatus{
 				Subsystem: "segment", BackendID: "rockchip.vendor.led_multi_ctrl", Status: backend.Unverified,
 				Detail: fmt.Sprintf("IS31FL3236 display present but not driven (%v); frames are kept in memory for diagnostics", segmentErr),
@@ -207,7 +313,7 @@ func New(cfg Config) (*Backend, error) {
 		}
 	}
 
-	if t := probeEvdev(cfg.RootPrefix, probeKeyMap(cfg.RootPrefix)); t != nil {
+	if t := probeEvdev(cfg, probeKeyMap(cfg.RootPrefix, cfg.InputKeymapCompatible)); t != nil {
 		b.touch = t
 		caps := t.Caps()
 		status := backend.Partial
@@ -277,11 +383,11 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 		model = readTrim(b.cfg.RootPrefix + "/sys/firmware/devicetree/base/model")
 	}
 	if model == "" {
-		model = "Capsula Mini Rockchip (model probe unavailable)"
+		model = b.cfg.ModelFallback
 	}
 	kernel := readTrim(b.cfg.RootPrefix + "/proc/version")
 	if kernel == "" {
-		kernel = "unknown"
+		kernel = b.cfg.KernelFallback
 	}
 	firmware := ""
 	if f, err := os.Open(b.cfg.RootPrefix + "/etc/os-release"); err == nil {
@@ -293,8 +399,8 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 		}
 		f.Close()
 	}
-	soc := "Rockchip RK3308"
-	if !strings.Contains(strings.ToLower(model), "rk3308") && model != "" {
+	soc := b.cfg.SoC
+	if !strings.Contains(strings.ToLower(model), b.cfg.SoCMatch) && model != "" {
 		soc = model
 	}
 	bootID := readTrim(b.cfg.RootPrefix + "/proc/sys/kernel/random/boot_id")
@@ -401,24 +507,27 @@ func (r *sysfsRing) WriteRing(f backend.RingFrame) error {
 }
 
 type sysfsSegment struct {
-	mu   sync.Mutex
-	leds []string
+	mu               sync.Mutex
+	leds             []string
+	digits           int
+	segmentsPerDigit int
+	colonChannels    int
 }
 
 func (s *sysfsSegment) Caps() backend.SegmentCaps {
-	return backend.SegmentCaps{DigitCount: 4, SupportsColon: len(s.leds) >= 30, SupportsDecimal: false, SegmentsPerDigit: 7}
+	return backend.SegmentCaps{DigitCount: s.digits, SupportsColon: len(s.leds) >= s.colonChannels, SupportsDecimal: false, SegmentsPerDigit: s.segmentsPerDigit}
 }
 func (s *sysfsSegment) ResourceID() string { return "display.segment.front" }
 func (s *sysfsSegment) WriteSegment(f backend.SegmentFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for cell := 0; cell < 4; cell++ {
+	for cell := range s.digits {
 		var mask uint16
 		if cell < len(f.Cells) {
 			mask = f.Cells[cell]
 		}
-		for seg := 0; seg < 7; seg++ {
-			idx := cell*7 + seg
+		for seg := range s.segmentsPerDigit {
+			idx := cell*s.segmentsPerDigit + seg
 			if idx >= len(s.leds) {
 				break
 			}
@@ -432,12 +541,12 @@ func (s *sysfsSegment) WriteSegment(f backend.SegmentFrame) error {
 			}
 		}
 	}
-	if len(s.leds) >= 30 {
+	if len(s.leds) >= s.colonChannels {
 		v := "0"
 		if f.Colon {
 			v = strconv.Itoa(int(f.Brightness * 255))
 		}
-		for _, idx := range []int{28, 29} {
+		for _, idx := range []int{s.digits * s.segmentsPerDigit, s.digits*s.segmentsPerDigit + 1} {
 			_ = os.WriteFile(filepath.Join(s.leds[idx], "brightness"), []byte(v), 0o644)
 		}
 	}
@@ -470,8 +579,8 @@ func splitNumericSuffix(s string) (string, int) {
 // probeSysfsLEDs enumerates /sys/class/leds. Devices exposing multi_intensity
 // are treated as RGB pixels; the rest as monochrome display LEDs. Ordering is
 // natural by channel number, which matches the firmware's ledN declaration.
-func probeSysfsLEDs(prefix string) (ring, mono []string) {
-	entries, err := os.ReadDir(prefix + "/sys/class/leds")
+func probeSysfsLEDs(prefix, classDir string, ringCap, monoCap int) (ring, mono []string) {
+	entries, err := os.ReadDir(filepath.Join(prefix, classDir))
 	if err != nil {
 		return nil, nil
 	}
@@ -481,7 +590,7 @@ func probeSysfsLEDs(prefix string) (ring, mono []string) {
 	}
 	sort.Slice(names, func(i, j int) bool { return naturalLess(names[i], names[j]) })
 	for _, name := range names {
-		dir := filepath.Join(prefix, "/sys/class/leds", name)
+		dir := filepath.Join(prefix, classDir, name)
 		if _, err := os.Stat(filepath.Join(dir, "multi_intensity")); err == nil {
 			ring = append(ring, dir)
 			continue
@@ -496,11 +605,11 @@ func probeSysfsLEDs(prefix string) (ring, mono []string) {
 			mono = append(mono, dir)
 		}
 	}
-	if len(ring) > 12 {
-		ring = ring[:12]
+	if ringCap > 0 && len(ring) > ringCap {
+		ring = ring[:ringCap]
 	}
-	if len(mono) > 30 {
-		mono = mono[:30]
+	if monoCap > 0 && len(mono) > monoCap {
+		mono = mono[:monoCap]
 	}
 	return ring, mono
 }
@@ -525,13 +634,14 @@ func (r *unverifiedRing) WriteRing(f backend.RingFrame) error {
 }
 
 type unverifiedSegment struct {
-	mu    sync.Mutex
-	cells int
-	last  backend.SegmentFrame
+	mu               sync.Mutex
+	cells            int
+	segmentsPerDigit int
+	last             backend.SegmentFrame
 }
 
 func (s *unverifiedSegment) Caps() backend.SegmentCaps {
-	return backend.SegmentCaps{DigitCount: s.cells, SupportsColon: true, SupportsDecimal: false, SegmentsPerDigit: 7}
+	return backend.SegmentCaps{DigitCount: s.cells, SupportsColon: true, SupportsDecimal: false, SegmentsPerDigit: s.segmentsPerDigit}
 }
 func (s *unverifiedSegment) ResourceID() string { return "display.segment.front" }
 func (s *unverifiedSegment) WriteSegment(f backend.SegmentFrame) error {

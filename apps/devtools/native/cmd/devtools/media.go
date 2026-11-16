@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 const (
@@ -40,7 +40,7 @@ func (a *devApp) stepAudio(ctx context.Context, gen uint64) stepResult {
 	if err := pres.Ring(indication); err != nil {
 		return classify("write indication frame", err)
 	}
-	capture, err := a.client.OpenCapture(ctx, ring.ResourceID, pres.ID(), capsula.CaptureModeUnspecified)
+	capture, err := a.client.OpenCapture(ctx, ring.ResourceID, pres.ID(), capsulad.CaptureModeUnspecified)
 	if err != nil {
 		return classify("open indication capture", err)
 	}
@@ -168,7 +168,7 @@ func (a *devApp) playTone(ctx context.Context, gen uint64) (string, error) {
 	)
 	pcm := tonePCM(rate, channels, 300*time.Millisecond, 440, 0.2)
 	chunkBytes := rate * channels * 2 * toneChunkMS / 1000
-	playback, err := a.client.OpenPlayback(ctx, outputEndpoint, capsula.DefaultAudioFormat(), "")
+	playback, err := a.client.OpenPlayback(ctx, outputEndpoint, capsulad.DefaultAudioFormat(), "")
 	if err != nil {
 		return "", err
 	}
@@ -226,13 +226,13 @@ func pcmPeak(pcm []byte) int {
 	return peak
 }
 
-func indicationPattern(pixels int) []capsula.RGB {
-	frame := make([]capsula.RGB, pixels)
+func indicationPattern(pixels int) []capsulad.RGB {
+	frame := make([]capsulad.RGB, pixels)
 	for i := range frame {
-		frame[i] = capsula.RGB{G: 32, B: 32}
+		frame[i] = capsulad.RGB{G: 32, B: 32}
 	}
 	if pixels > 0 {
-		frame[0] = capsula.RGB{G: 64, B: 64}
+		frame[0] = capsulad.RGB{G: 64, B: 64}
 	}
 	return frame
 }
@@ -241,7 +241,7 @@ func indicationPattern(pixels int) []capsula.RGB {
 
 type inputMode struct {
 	name   string
-	mode   capsula.CaptureMode
+	mode   capsulad.CaptureMode
 	window time.Duration
 }
 
@@ -257,9 +257,9 @@ func (a *devApp) stepInput(ctx context.Context, gen uint64) stepResult {
 	if touch == nil || !touch.Available {
 		return unsupported("resource %s is not available on this backend", touchResource)
 	}
-	modes := []inputMode{{"partial", capsula.CaptureModePartialGestures, 2500 * time.Millisecond}}
+	modes := []inputMode{{"partial", capsulad.CaptureModePartialGestures, 2500 * time.Millisecond}}
 	if touch.Touch == nil || touch.Touch.FullPanel || touch.Touch.FullRaw {
-		modes = append(modes, inputMode{"full", capsula.CaptureModeFullRaw, 2500 * time.Millisecond})
+		modes = append(modes, inputMode{"full", capsulad.CaptureModeFullRaw, 2500 * time.Millisecond})
 	} else {
 		log.Printf("devtools: input gen=%d mode=full status=unsupported detail=%q",
 			gen, "backend does not advertise a full-panel stream")
@@ -379,12 +379,12 @@ func maskHex(cells []uint16) string {
 	return strings.Join(parts, ",")
 }
 
-func ringPattern(pixels int) []capsula.RGB {
-	frame := make([]capsula.RGB, pixels)
+func ringPattern(pixels int) []capsulad.RGB {
+	frame := make([]capsulad.RGB, pixels)
 	last := float64(max(pixels-1, 1))
 	for i := range frame {
 		position := float64(i) / last
-		frame[i] = capsula.RGB{
+		frame[i] = capsulad.RGB{
 			R: uint8(16 * (position + 1) / 2),
 			G: uint8(64 + 128*position),
 			B: uint8(128 + 96*position),
@@ -393,7 +393,7 @@ func ringPattern(pixels int) []capsula.RGB {
 	return frame
 }
 
-func rgbSummary(pixels []capsula.RGB) string {
+func rgbSummary(pixels []capsulad.RGB) string {
 	if len(pixels) == 0 {
 		return "(none)"
 	}

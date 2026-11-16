@@ -156,7 +156,7 @@ ERROR-level lines and kept wakeword enabled with the microphone unmuted.
    setup are submitted — saved recordings from other setups are never mixed in. The selection
    survives a reload in the tab; a new setup clears the selection, not the saved WAV files.
 3. The browser starts training with the typed `train` command on the authenticated, same-origin
-   `capsula.web.v1` binary WebSocket and displays streamed stage/fraction/log frames, the terminal
+   `capsulad.web.v1` binary WebSocket and displays streamed stage/fraction/log frames, the terminal
    refusal or the installed certificate. Audio,
    embeddings, augmentation, fitting and quality checks stay on the device. Dismissing or cancelling
    sends `CancelTraining`; dismissing during a take aborts the in-flight record through

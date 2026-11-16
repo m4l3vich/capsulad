@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 	"capsulad/internal/grpcpeer"
@@ -41,7 +41,7 @@ func (d *Daemon) callerIdentity(ctx context.Context) (appID, runID string, ok bo
 		return "", "", false
 	}
 	if md, found := metadata.FromIncomingContext(ctx); found {
-		if vals := md.Get("capsula-run-id"); len(vals) > 0 {
+		if vals := md.Get("capsulad-run-id"); len(vals) > 0 {
 			runID = vals[0]
 			run, found := d.sup.Get(runID)
 			if !found {

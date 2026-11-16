@@ -1,10 +1,10 @@
 /*
- * Capsula settings bridge (version 1), injected into every settings document.
+ * Capsulad settings bridge (version 1), injected into every settings document.
  *
  * This script is trusted host code running in an opaque-origin frame. It:
  *  - accepts exactly one init message from window.parent and locks the
  *    per-frame channel token;
- *  - exposes window.CapsulaUI with state/result listeners and a patch method
+ *  - exposes window.CapsuladUI with state/result listeners and a patch method
  *    that can only request setting-value changes;
  *  - reports its content height for embedding.
  *
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const PREFIX = 'capsula.settings-ui/1:';
+  const PREFIX = 'capsulad.settings-ui/1:';
   const stateListeners = new Set();
   const resultListeners = new Set();
   let channel = null;
@@ -33,7 +33,7 @@
 
   function dispatch(list, value) {
     for (const fn of list) {
-      try { fn(value); } catch (err) { console.error('CapsulaUI listener failed', err); }
+      try { fn(value); } catch (err) { console.error('CapsuladUI listener failed', err); }
     }
   }
 
@@ -103,5 +103,5 @@
     new ResizeObserver(() => api.resize()).observe(document.documentElement);
   }
 
-  window.CapsulaUI = api;
+  window.CapsuladUI = api;
 })();

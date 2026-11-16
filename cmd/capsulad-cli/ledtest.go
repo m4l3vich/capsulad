@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/backend/rockchip"
 )
 
@@ -26,9 +27,10 @@ type ledFrame struct {
 // channel order can be calibrated. It is a bring-up tool: it writes raw
 // per-channel brightness and never goes through routing or presets.
 func runLEDTest(args []string, jsonOut bool) error {
+	led := profile.RK3308Rev4Stock.LED
 	fs := flag.NewFlagSet("platform ledtest", flag.ContinueOnError)
 	ring := fs.Bool("ring", false, "drive the WS2812B ring instead of the segment display")
-	path := fs.String("path", "", "vendor device (default /dev/led_multi_ctrl, or /dev/topleds with -ring)")
+	path := fs.String("path", "", fmt.Sprintf("vendor device (default %s, or %s with -ring)", led.DefaultPath, led.TopLEDsPath))
 	color := fs.String("color", "255,0,0", "ring color as R,G,B")
 	level := fs.Float64("level", 1, "ring brightness multiplier, 0-1")
 	channels := fs.String("channels", "", "channels to light, e.g. 0-6,28,29 (blank clears)")
@@ -37,7 +39,7 @@ func runLEDTest(args []string, jsonOut bool) error {
 	hold := fs.Duration("hold", 4*time.Second, "how long a static pattern stays on")
 	sweep := fs.Bool("sweep", false, "light one channel at a time from -from to -to")
 	from := fs.Int("from", 0, "first channel for -sweep")
-	to := fs.Int("to", 29, "last channel for -sweep")
+	to := fs.Int("to", led.MultiCtrlChannels-1, "last channel for -sweep")
 	step := fs.Duration("step", 1500*time.Millisecond, "dwell per channel for -sweep")
 	gap := fs.Duration("gap", 500*time.Millisecond, "dark gap per channel for -sweep")
 	jsonPath := fs.String("json", "", "replay a vendor *_digits.json animation")
@@ -51,18 +53,18 @@ func runLEDTest(args []string, jsonOut bool) error {
 
 	if *path == "" {
 		if *ring {
-			*path = "/dev/topleds"
+			*path = led.TopLEDsPath
 		} else {
-			*path = "/dev/led_multi_ctrl"
+			*path = led.DefaultPath
 		}
 	}
 	rgb, err := parseRGB(*color)
 	if err != nil {
 		return err
 	}
-	count := 30
+	count := led.MultiCtrlChannels
 	if *ring {
-		count = 12
+		count = led.WS2812Pixels
 	}
 	clearRing := func() error { return rockchip.WriteRingPixels(*path, nil, 1) }
 	clear := func() {

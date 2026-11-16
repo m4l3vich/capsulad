@@ -258,7 +258,7 @@ runtime = "native"
 path = "bin/clockface"
 architecture = "aarch64"
 abi = "linux-gnu"
-sdk = "1.0"
+sdk = "0.5"
 
 [native_sdk]
 abi_major = 1

@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"capsulad/internal/backend/profile"
 )
 
 // Simulator is a complete in-memory backend used by capsulad's development
@@ -32,7 +34,7 @@ func NewSimulator(opts SimulatorOptions) *Simulator {
 			Model:    model,
 			SoC:      "virtual",
 			Kernel:   "simulator",
-			Firmware: "capsula-simulator",
+			Firmware: "capsulad-simulator",
 			Platform: PlatformSimulator,
 		},
 		segment: newSimSegment(),
@@ -99,7 +101,8 @@ type simSegment struct {
 }
 
 func newSimSegment() *simSegment {
-	return &simSegment{caps: SegmentCaps{DigitCount: 4, SupportsColon: true, SupportsDecimal: true, SegmentsPerDigit: 7}}
+	p := profile.Simulator.LED
+	return &simSegment{caps: SegmentCaps{DigitCount: p.SegmentDigits, SupportsColon: true, SupportsDecimal: true, SegmentsPerDigit: p.SegmentsPerDigit}}
 }
 
 func (s *simSegment) Caps() SegmentCaps  { return s.caps }
@@ -127,7 +130,7 @@ type simRing struct {
 }
 
 func newSimRing() *simRing {
-	return &simRing{caps: RingCaps{PixelCount: 12, SupportsRGB: true}}
+	return &simRing{caps: RingCaps{PixelCount: profile.Simulator.LED.WS2812Pixels, SupportsRGB: true}}
 }
 
 func (r *simRing) Caps() RingCaps     { return r.caps }
@@ -162,10 +165,12 @@ func newSimAudio() *simAudio {
 }
 
 func (a *simAudio) PlaybackFormat() AudioFormat {
-	return AudioFormat{Format: S16LE, RateHz: 48000, Channels: 2}
+	p := profile.Simulator.Audio
+	return AudioFormat{Format: SampleFormat(p.PlaybackFormat), RateHz: p.PlaybackRateHz, Channels: p.PlaybackChannels}
 }
 func (a *simAudio) CaptureFormat() AudioFormat {
-	return AudioFormat{Format: S16LE, RateHz: 16000, Channels: 1}
+	p := profile.Simulator.Audio
+	return AudioFormat{Format: SampleFormat(p.CaptureFormat), RateHz: p.CaptureRateHz, Channels: p.CaptureChannels}
 }
 func (a *simAudio) OpenOutput() (Sink, error) {
 	a.mu.Lock()

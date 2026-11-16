@@ -1,20 +1,20 @@
-"""Development MicroPython probe over the public ``capsula`` host module.
+"""Development MicroPython probe over the public ``capsulad`` host module.
 
 The echo contract is descriptor-less: the handler speaks protobuf field 1 (a
 string). No filesystem, private socket or daemon internals are used.
 """
 
-import capsula
+import capsulad
 
-CONFIG = "capsula.framework.v1.ApplicationConfigurationService"
-DEVICE = "capsula.framework.v1.DeviceService"
-AUDIO = "capsula.framework.v1.AudioService"
-PRESENTATION = "capsula.framework.v1.PresentationService"
+CONFIG = "capsulad.framework.v1.ApplicationConfigurationService"
+DEVICE = "capsulad.framework.v1.DeviceService"
+AUDIO = "capsulad.framework.v1.AudioService"
+PRESENTATION = "capsulad.framework.v1.PresentationService"
 RING = "light.ring.main"
 
 
 def log(message):
-    capsula.log("devtools-micropython: " + str(message))
+    capsulad.log("devtools-micropython: " + str(message))
 
 
 def encode_text(text):
@@ -49,11 +49,11 @@ def decode_text(data):
 
 def probe_state(label):
     try:
-        info = capsula.call(DEVICE, "GetInfo", {}, 5000)
-        audio = capsula.call(AUDIO, "GetAudioState", {}, 5000)
-        presets = capsula.call(PRESENTATION, "ListPresets", {"resourceId": RING}, 5000)
+        info = capsulad.call(DEVICE, "GetInfo", {}, 5000)
+        audio = capsulad.call(AUDIO, "GetAudioState", {}, 5000)
+        presets = capsulad.call(PRESENTATION, "ListPresets", {"resourceId": RING}, 5000)
         log("state %s app=%s run=%s sdk=%s model=%s daemon=%s platform=%s volume=%s muted=%s ring_presets=%d" % (
-            label, capsula.env["appId"], capsula.env["runId"], capsula.env["sdk"],
+            label, capsulad.env["appId"], capsulad.env["runId"], capsulad.env["sdk"],
             info.get("model", ""), info.get("daemonVersion", ""),
             info.get("targetPlatform") or "unspecified",
             audio.get("masterVolume", 0), audio.get("microphoneMuted", False),
@@ -64,14 +64,14 @@ def probe_state(label):
 
 def bump_runs(label):
     try:
-        snap = capsula.call(CONFIG, "Get", {"appId": capsula.env["appId"]}, 5000)
+        snap = capsulad.call(CONFIG, "Get", {"appId": capsulad.env["appId"]}, 5000)
         runs = 0
         for value in snap.get("values") or []:
             if value.get("key") == "runs" and value.get("hasValue"):
                 runs = int(value.get("valueJson") or 0)
         nxt = runs + 1
-        updated = capsula.call(CONFIG, "Update", {
-            "appId": capsula.env["appId"],
+        updated = capsulad.call(CONFIG, "Update", {
+            "appId": capsulad.env["appId"],
             "expectedRevision": snap.get("revision", 0),
             "changes": [{"key": "runs", "valueJson": str(nxt)}],
         }, 5000)
@@ -84,7 +84,7 @@ def bump_runs(label):
 def heartbeat(beats):
     """Read WatchResources until `beats` one-second quiet intervals elapse."""
     try:
-        stream = capsula.stream(DEVICE, "WatchResources", {}, 30000)
+        stream = capsulad.stream(DEVICE, "WatchResources", {}, 30000)
     except Exception as err:
         log("heartbeat unavailable: %s" % err)
         return
@@ -124,7 +124,7 @@ def on_invocation(event):
     log("invocation %s step=%s" % (event.get("invocationId", "?"), step))
     probe_state("invocation")
     bump_runs("invocation")
-    capsula.notify_invocation(event.get("invocationId"), True, "micropython devtools handled " + step)
+    capsulad.notify_invocation(event.get("invocationId"), True, "micropython devtools handled " + step)
 
 
 def on_settings(event):
@@ -135,7 +135,7 @@ def on_action(event):
     event = event or {}
     log("action %s" % event.get("actionId", "?"))
     probe_state("action")
-    capsula.notify_action(event.get("actionInvocationId"), True, "probe logged framework state")
+    capsulad.notify_action(event.get("actionInvocationId"), True, "probe logged framework state")
 
 
 def on_call(call):
@@ -160,24 +160,24 @@ def on_call(call):
 
 
 def startup():
-    capsula.start()
+    capsulad.start()
     log("ready app=%s run=%s sdk=%s" % (
-        capsula.env["appId"], capsula.env["runId"], capsula.env["sdk"]))
+        capsulad.env["appId"], capsulad.env["runId"], capsulad.env["sdk"]))
     probe_state("startup")
     bump_runs("startup")
     try:
-        triggered = capsula.call(CONFIG, "TriggerAction", {
-            "appId": capsula.env["appId"], "actionId": "probe",
+        triggered = capsulad.call(CONFIG, "TriggerAction", {
+            "appId": capsulad.env["appId"], "actionId": "probe",
         }, 5000)
         log("action triggered id=%s" % triggered.get("actionInvocationId", "?"))
     except Exception as err:
         log("action trigger failed: %s" % err)
     heartbeat(3)
-    capsula.run()
+    capsulad.run()
 
 
-capsula.on("invocation", on_invocation)
-capsula.on("settings_changed", on_settings)
-capsula.on("action", on_action)
-capsula.on("call", on_call)
+capsulad.on("invocation", on_invocation)
+capsulad.on("settings_changed", on_settings)
+capsulad.on("action", on_action)
+capsulad.on("call", on_call)
 startup()

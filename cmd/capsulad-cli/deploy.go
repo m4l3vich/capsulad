@@ -22,19 +22,22 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/artifact"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 	"capsulad/internal/registry"
 	"capsulad/internal/sandbox"
 )
 
-const (
-	defaultInitScript = "/etc/init.d/S99btctl.sh"
-	daemonBinaryName  = "capsulad"
-	cliBinaryName     = "capsulad-cli"
-	bootHookName      = "S99btctl.sh"
+// The deployment contract (boot service, bundle limits and free-space floors)
+// comes from the device profile.
+var (
+	deployProfile = profile.RK3308Rev4Stock.Deploy
+
+	defaultInitScript = deployProfile.InitScript
+	bootHookName      = deployProfile.BootHookName
 
 	// The detached watchdog feeder publishes its pid under run/ and watches a
 	// handback marker there. A pid file that names the shell feeder means the
@@ -43,30 +46,34 @@ const (
 	watchdogFeederPID = "watchdog.feeder"
 	watchdogHandback  = "watchdog.handback"
 	shellFeederMarker = "shell"
+
+	daemonBinaryName = "capsulad"
+	cliBinaryName    = "capsulad-cli"
+
+	// extractionRatio estimates the unpacked size of a bundle archive as a
+	// multiple of its compressed size. Deploy bundles are Go binaries, which
+	// compress to roughly half their size.
+	extractionRatio = deployProfile.ExtractionRatio
+
+	// stagingReserve is free space kept available on the staging filesystem
+	// besides the extracted bundle: the compressed backup of the replaced
+	// daemon is ~24.7 MiB for the profile's daemon binary, so the reserve is
+	// that plus a margin.
+	stagingReserve = deployProfile.StagingReserveBytes
+
+	// dataReserve is free space kept on the data filesystem besides the binary
+	// writes themselves, for the package staging directories and lib/.
+	dataReserve = deployProfile.DataReserveBytes
 )
 
 // bundleLimits bound a deployment bundle supplied by an operator, possibly
 // from external media. The archive is unpacked into the staging tree, which
-// lives outside the 78.5 MiB data partition.
+// lives outside the data partition.
 var bundleLimits = artifact.Limits{
-	MaxFileBytes:  64 << 20,
-	MaxTotalBytes: 128 << 20,
-	MaxEntries:    8192,
+	MaxFileBytes:  int64(deployProfile.BundleMaxFileBytes),
+	MaxTotalBytes: int64(deployProfile.BundleMaxTotalBytes),
+	MaxEntries:    deployProfile.BundleMaxEntries,
 }
-
-// extractionRatio estimates the unpacked size of a bundle archive as a
-// multiple of its compressed size. Deploy bundles are Go binaries, which
-// compress to roughly half their size.
-const extractionRatio = 2
-
-// stagingReserve is free space kept available on the staging filesystem
-// besides the extracted bundle: the compressed backup of the replaced daemon
-// is ~24.7 MiB for the 40 MiB binary, so the reserve is that plus a margin.
-const stagingReserve = 26 << 20
-
-// dataReserve is free space kept on the data filesystem besides the binary
-// writes themselves, for the package staging directories and lib/.
-const dataReserve = 8 << 20
 
 // deployment is one validated bundle plus the state needed to apply it.
 type deployment struct {
@@ -126,12 +133,12 @@ PATH is a bundle directory or a .tar.gz containing:
 
 Only those top-level entries are meaningful; anything else is reported and
 ignored. The bundle is staged under -staging (default: the temporary
-directory), never inside <data-dir>: the 78.5 MiB data partition cannot hold a
+directory), never inside <data-dir>: the %.1f MiB data partition cannot hold a
 second copy of the daemon while the installed one is still there. Nothing is
 written outside <data-dir> except the boot hook bundled at boot/%s.
 
 Flags:
-`, bootHookName, bootHookName)
+`, bootHookName, deployProfile.DataPartitionMiB, bootHookName)
 		fs.PrintDefaults()
 	}
 	positional, err := parseSubcommandFlags(fs, args)
@@ -351,7 +358,7 @@ func checkExtractionSpace(dir string, archiveBytes int64) error {
 	}
 	extracted := uint64(0)
 	if archiveBytes > 0 {
-		extracted = uint64(archiveBytes) * extractionRatio
+		extracted = uint64(archiveBytes) * uint64(extractionRatio)
 	}
 	// Only the extracted tree and the compressed backup live in staging; the
 	// operator's archive stays where it was.
@@ -1232,7 +1239,7 @@ func (d *deployment) rollback(activated []activation, cause error) error {
 //     so an unchanged 4 MiB library costs no free space at all;
 //   - the loader's ABI layout is rebuilt as relative links from the metadata
 //     that was just installed, because the bundle carries the library as one
-//     regular file. libcapsula.so -> libcapsula.so.1 -> libcapsula.so.1.0.0
+//     regular file. libcapsulad.so -> libcapsulad.so.1 -> libcapsulad.so.1.0.0
 //     therefore survives a redeploy instead of becoming three copies of it.
 //
 // Each file is written to a temporary name and renamed so the loader never
@@ -1345,8 +1352,8 @@ func sameContents(a, b string) (bool, error) {
 }
 
 // syncRuntimeLayout recreates the loader's ABI layout for the runtime that was
-// just installed: the metadata names the library (libcapsula.so.1, or
-// libcapsula.1.dylib on macOS), the installed regular files name the real one,
+// just installed: the metadata names the library (libcapsulad.so.1, or
+// libcapsulad.1.dylib on macOS), the installed regular files name the real one,
 // and the two link names the loader and the linker expect are created beside
 // them as relative links. A runtime without metadata, or one whose metadata
 // names a library nothing installed, is left alone: a partial runtime is the
@@ -1429,8 +1436,8 @@ func readRuntimeMetadata(dir string) (*sandbox.RuntimeInfo, error) {
 
 // runtimeLibraryName returns the regular file in the bundle that the
 // metadata's library name stands for: the versioned file beside it
-// (libcapsula.so.1.0.0 for libcapsula.so.1), or the name itself when the
-// platform keeps the real file under it (libcapsula.1.dylib). Only the bundle
+// (libcapsulad.so.1.0.0 for libcapsulad.so.1), or the name itself when the
+// platform keeps the real file under it (libcapsulad.1.dylib). Only the bundle
 // is consulted, so a stale installed library cannot make an incomplete bundle
 // synthesize links to the wrong runtime. An empty result means the bundle has
 // no matching regular library, which leaves the links alone.
@@ -1456,7 +1463,7 @@ func runtimeLibraryName(dir, library string) (string, error) {
 }
 
 // runtimeShortName returns the linker name beside a versioned library:
-// libcapsula.so.1 -> libcapsula.so, libcapsula.1.dylib -> libcapsula.dylib.
+// libcapsulad.so.1 -> libcapsulad.so, libcapsulad.1.dylib -> libcapsulad.dylib.
 // A name without a numeric version has no second link.
 func runtimeShortName(library string) string {
 	if i := strings.Index(library, ".so."); i > 0 && isVersion(library[i+len(".so."):]) {
@@ -1789,7 +1796,7 @@ func requireBootService(script string) error {
 // verifyDaemonBinary proves the file executes here and reports itself as
 // capsulad. A broken or wrong-architecture binary fails before activation.
 // The probe runs with a minimal environment: the bundle binary executes as
-// root, so the operator's environment (credentials, CAPSULA_* overrides,
+// root, so the operator's environment (credentials, CAPSULAD_* overrides,
 // language state) must not reach it.
 func verifyDaemonBinary(path string) error {
 	env, cleanup := probeEnv()
@@ -1813,7 +1820,7 @@ func verifyDaemonBinary(path string) error {
 // HOME points at an empty temporary directory so the probe cannot read or
 // write operator configuration.
 func probeEnv() ([]string, func()) {
-	home, err := os.MkdirTemp("", "capsula-probe-")
+	home, err := os.MkdirTemp("", "capsulad-probe-")
 	cleanup := func() {}
 	if err == nil {
 		cleanup = func() { _ = os.RemoveAll(home) }
@@ -1834,12 +1841,12 @@ func probeEnv() ([]string, func()) {
 func bootServiceEnv(dataDir string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CAPSULA_DATA_DIR=") {
+		if strings.HasPrefix(kv, "CAPSULAD_DATA_DIR=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	return append(env, "CAPSULA_DATA_DIR="+dataDir)
+	return append(env, "CAPSULAD_DATA_DIR="+dataDir)
 }
 
 // stopViaBootService stops the daemon through the boot hook. Stopping first

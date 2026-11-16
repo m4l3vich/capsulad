@@ -82,7 +82,7 @@ func TestPasswordAndAPIKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(token, "capsula_") || info.Prefix == "" {
+	if !strings.HasPrefix(token, "capsulad_") || info.Prefix == "" {
 		t.Fatalf("unexpected key: %q %+v", token, info)
 	}
 	if !store.VerifyAPIKey(token) || store.VerifyAPIKey(token+"x") || store.VerifyAPIKey("") {

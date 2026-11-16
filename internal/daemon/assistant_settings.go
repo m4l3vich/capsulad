@@ -11,8 +11,8 @@ import (
 	"capsulad/internal/assets"
 )
 
-// orgCapsulaDumbAssistantID is the optional first-party assistant package.
-const orgCapsulaDumbAssistantID = "org.capsula.dumbassistant"
+// orgCapsuladDumbAssistantID is the optional first-party assistant package.
+const orgCapsuladDumbAssistantID = "org.capsulad.dumbassistant"
 
 const (
 	assistantMaxDelayMS    = 60000
@@ -25,7 +25,7 @@ const (
 // instead of only being logged by the running app. The grammar mirrors
 // apps/dumbassistant's parseDelay/resolveReplyAsset so both layers agree.
 func (d *Daemon) registerAssistantSettingsValidator() {
-	d.RegisterAppSettingsValidator(orgCapsulaDumbAssistantID, func(values map[string]json.RawMessage) error {
+	d.RegisterAppSettingsValidator(orgCapsuladDumbAssistantID, func(values map[string]json.RawMessage) error {
 		if raw, ok := values[assistantDelayKey]; ok {
 			var text string
 			if err := json.Unmarshal(raw, &text); err != nil {

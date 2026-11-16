@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 	"capsulad/internal/ids"

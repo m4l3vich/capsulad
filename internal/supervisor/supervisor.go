@@ -210,10 +210,10 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 		return nil, err
 	}
 	cmd.Env = append(cmd.Env,
-		"CAPSULA_SOCKET="+s.sock,
-		"CAPSULA_RUN_ID="+runID,
-		"CAPSULA_APP_ID="+m.ID,
-		"CAPSULA_SDK="+version.SDKVersion,
+		"CAPSULAD_SOCKET="+s.sock,
+		"CAPSULAD_RUN_ID="+runID,
+		"CAPSULAD_APP_ID="+m.ID,
+		"CAPSULAD_SDK="+version.SDKVersion,
 	)
 
 	stdout, err := cmd.StdoutPipe()

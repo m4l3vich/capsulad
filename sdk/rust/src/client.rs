@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::bus::{Bus, BusHandler};
 use crate::call::{Call, CallKind};
 use crate::error::{self, Error, Result};
+use crate::grpc::RemoteOptions;
 use crate::sys::{self, Buf};
 use crate::{
     check_status, os_bytes, status_error, str_bytes, take_buf, timeout_ms, Inner, Library,
@@ -25,7 +26,7 @@ pub struct Client {
 
 impl Client {
     /// Opens a client. `run_id` is mandatory and is sent as the
-    /// `capsula-run-id` metadata on every RPC. `timeout` of `None` (or zero)
+    /// `capsulad-run-id` metadata on every RPC. `timeout` of `None` (or zero)
     /// uses the native 10-second connect default.
     pub fn connect(
         library: &Library,
@@ -71,19 +72,19 @@ impl Client {
         })
     }
 
-    /// Uses `CAPSULA_SOCKET`, `CAPSULA_RUN_ID` and `CAPSULA_APP_ID` from the
+    /// Uses `CAPSULAD_SOCKET`, `CAPSULAD_RUN_ID` and `CAPSULAD_APP_ID` from the
     /// supervised environment.
     pub fn from_env(library: &Library) -> Result<Self> {
-        let socket = std::env::var_os("CAPSULA_SOCKET")
+        let socket = std::env::var_os("CAPSULAD_SOCKET")
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| std::ffi::OsString::from(sys::DEFAULT_SOCKET));
-        let run_id = std::env::var("CAPSULA_RUN_ID").map_err(|_| {
+        let run_id = std::env::var("CAPSULAD_RUN_ID").map_err(|_| {
             Error::local(
                 error::CODE_INVALID_ARGUMENT,
-                "CAPSULA_RUN_ID is not set; start the app through capsulad",
+                "CAPSULAD_RUN_ID is not set; start the app through capsulad",
             )
         })?;
-        let app_id = std::env::var("CAPSULA_APP_ID").ok();
+        let app_id = std::env::var("CAPSULAD_APP_ID").ok();
         Self::connect(library, socket, &run_id, app_id.as_deref(), None)
     }
 
@@ -97,6 +98,88 @@ impl Client {
 
     pub fn app_id(&self) -> Option<&str> {
         self.app_id.as_deref()
+    }
+
+    /// Opens a remote gRPC channel to an origin (`https://host[:port]` or
+    /// `http://host[:port]`). https verifies TLS with ALPN h2; http uses h2c
+    /// prior knowledge. The returned client has no run id and no app bus.
+    pub fn open_remote(
+        library: &Library,
+        url: &str,
+        options: &RemoteOptions,
+        timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let encoded = options.encode()?;
+        let mut handle = 0u64;
+        let status = unsafe {
+            (library.inner.api.grpc_open)(
+                url.as_ptr().cast(),
+                url.len(),
+                encoded.as_ptr(),
+                encoded.len(),
+                timeout_ms(timeout),
+                &mut handle,
+            )
+        };
+        check_status(&library.inner, status, "grpc_open")?;
+        if handle == 0 {
+            return Err(Error::local(
+                sys::STATUS_INTERNAL,
+                "grpc_open returned a zero handle",
+            ));
+        }
+        Ok(Self {
+            inner: library.inner.clone(),
+            handle,
+            run_id: String::new(),
+            app_id: None,
+        })
+    }
+
+    /// Starts a call with caller-supplied gRPC metadata. Names are lowercased
+    /// and validated by the native library; invalid metadata is
+    /// `INVALID_ARGUMENT`.
+    pub fn start_call_meta(
+        &self,
+        service: &str,
+        method: &str,
+        kind: CallKind,
+        headers: &[(&str, &str)],
+        timeout: Option<Duration>,
+    ) -> Result<Call> {
+        let service = str_bytes(service);
+        let method = str_bytes(method);
+        let mut map = serde_json::Map::new();
+        for (name, value) in headers {
+            map.insert(
+                (*name).to_string(),
+                serde_json::Value::String((*value).to_string()),
+            );
+        }
+        let encoded = serde_json::Value::Object(map).to_string();
+        let mut handle = 0u64;
+        let status = unsafe {
+            (self.inner.api.call_start_meta)(
+                self.handle,
+                service.as_ptr().cast(),
+                service.len(),
+                method.as_ptr().cast(),
+                method.len(),
+                kind as i32,
+                timeout_ms(timeout),
+                encoded.as_ptr(),
+                encoded.len(),
+                &mut handle,
+            )
+        };
+        check_status(&self.inner, status, "call_start_meta")?;
+        if handle == 0 {
+            return Err(Error::local(
+                sys::STATUS_INTERNAL,
+                "call_start_meta returned a zero handle",
+            ));
+        }
+        Ok(Call::from_handle(self.inner.clone(), handle))
     }
 
     /// Registers a serialized `google.protobuf.FileDescriptorSet` for custom

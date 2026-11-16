@@ -331,7 +331,7 @@ onUnmounted(() => {
             <div class="card-body gap-4 p-5">
               <div class="flex flex-wrap items-start justify-between gap-2">
                 <h2 class="card-title text-base">Secure certificate</h2>
-                <a href="/api/cert.pem" download="capsula-server.crt" class="btn btn-sm btn-outline">Download certificate</a>
+                <a href="/api/cert.pem" download="capsulad-server.crt" class="btn btn-sm btn-outline">Download certificate</a>
               </div>
 
               <p class="text-sm text-base-content/70">

@@ -1,25 +1,25 @@
-"""Runnable MicroPython Capsula app.
+"""Runnable MicroPython Capsulad app.
 
-The host embeds the real MicroPython runtime; `capsula` is the injected module
-over the public libcapsula ABI.
+The host embeds the real MicroPython runtime; `capsulad` is the injected module
+over the public libcapsulad ABI.
 """
 
-import capsula
+import capsulad
 
 
 def on_invocation(event):
-    capsula.log("sample: invocation %s" % (event or {}).get("invocationId"))
-    capsula.notify_invocation((event or {}).get("invocationId"), True, "sample accepted")
+    capsulad.log("sample: invocation %s" % (event or {}).get("invocationId"))
+    capsulad.notify_invocation((event or {}).get("invocationId"), True, "sample accepted")
 
 
 def on_settings(event):
-    capsula.log("sample: settings revision %s" % (event or {}).get("revision"))
+    capsulad.log("sample: settings revision %s" % (event or {}).get("revision"))
 
 
 def on_action(event):
     event = event or {}
-    capsula.log("sample: action %s" % event.get("actionId"))
-    capsula.notify_action(event.get("actionInvocationId"), True, "greeted")
+    capsulad.log("sample: action %s" % event.get("actionId"))
+    capsulad.notify_action(event.get("actionInvocationId"), True, "greeted")
 
 
 def on_call(call):
@@ -32,15 +32,15 @@ def on_call(call):
     call.end(0, "ok")
 
 
-capsula.on("invocation", on_invocation)
-capsula.on("settings_changed", on_settings)
-capsula.on("action", on_action)
-capsula.on("call", on_call)
+capsulad.on("invocation", on_invocation)
+capsulad.on("settings_changed", on_settings)
+capsulad.on("action", on_action)
+capsulad.on("call", on_call)
 
-capsula.start()
-capsula.log("sample: READY app=" + capsula.env["appId"])
+capsulad.start()
+capsulad.log("sample: READY app=" + capsulad.env["appId"])
 
-device = capsula.call("capsula.framework.v1.DeviceService", "GetInfo", {})
-capsula.log("sample: framework API model=" + device.get("model", ""))
+device = capsulad.call("capsulad.framework.v1.DeviceService", "GetInfo", {})
+capsulad.log("sample: framework API model=" + device.get("model", ""))
 
-capsula.run()
+capsulad.run()

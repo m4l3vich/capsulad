@@ -151,9 +151,6 @@ func newLinuxManager(cfg Config, iface string) (*linuxManager, error) {
 		}
 	}
 	stockConfigs := cfg.StockConfigPaths
-	if stockConfigs == nil {
-		stockConfigs = stockConfigPaths
-	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	m := &linuxManager{
 		cfg: cfg, iface: iface, tools: tools, store: store,
@@ -584,7 +581,7 @@ func (m *linuxManager) waitScanResults(ctx context.Context, timeout time.Duratio
 func (m *linuxManager) startStation(ctx context.Context) error {
 	m.ensureIfaceUp(ctx)
 	m.stopStation()
-	m.terminateExistingSupplicant(ctx)
+	m.stopStockSupplicants(ctx)
 	m.mu.Lock()
 	known := append([]storedNetwork(nil), m.known...)
 	m.mu.Unlock()
@@ -642,7 +639,7 @@ func (m *linuxManager) startAP(ctx context.Context) error {
 		return err
 	}
 	m.stopStation()
-	m.terminateExistingSupplicant(ctx)
+	m.stopStockSupplicants(ctx)
 	m.ensureIfaceUp(ctx)
 	if m.tools.dhcpcd != "" {
 		// A station DHCP client must not keep leasing the interface while it is
@@ -1048,6 +1045,16 @@ func (m *linuxManager) run(ctx context.Context, timeout time.Duration, name stri
 	return m.cfg.Runner.Run(runCtx, name, args...)
 }
 
+// stopStockSupplicants terminates control sockets left by the stock firmware.
+// Adoption is opt-in: a caller that does not adopt the stock configuration
+// must also leave its supplicant untouched.
+func (m *linuxManager) stopStockSupplicants(ctx context.Context) {
+	if !m.cfg.AdoptStock {
+		return
+	}
+	m.terminateExistingSupplicant(ctx)
+}
+
 func (m *linuxManager) terminateExistingSupplicant(ctx context.Context) {
 	for _, dir := range m.ctrlDirs() {
 		out, err := m.run(ctx, 2*time.Second, m.tools.cli, "-p", dir, "-i", m.iface, "ping")
@@ -1072,10 +1079,10 @@ func (m *linuxManager) terminateExistingSupplicant(ctx context.Context) {
 }
 
 func (m *linuxManager) restoreStockSupplicant(ctx context.Context) error {
-	if m.tools.supplicant == "" {
+	if m.tools.supplicant == "" || m.cfg.RestoreConfigPath == "" {
 		return ErrUnsupported
 	}
-	if _, err := m.run(ctx, 5*time.Second, m.tools.supplicant, "-B", "-i", m.iface, "-c", "/etc/wpa_supplicant.conf", "-s"); err != nil {
+	if _, err := m.run(ctx, 5*time.Second, m.tools.supplicant, "-B", "-i", m.iface, "-c", m.cfg.RestoreConfigPath, "-s"); err != nil {
 		// The child's output may echo a user-managed stock config, so report
 		// only the failed action.
 		return fmt.Errorf("stock wpa_supplicant did not start")
@@ -1115,12 +1122,38 @@ func (m *linuxManager) ensureIfaceUp(ctx context.Context) {
 
 func (m *linuxManager) ctrlDir() string { return filepath.Join(m.cfg.RunDir, "wpa") }
 
-func (m *linuxManager) ctrlDirs() []string {
-	return []string{
-		m.ctrlDir(),
-		"/var/run/wpa_supplicant",
-		"/run/wpa_supplicant",
+// genericSupplicantCtrlDirs are standard Linux wpa_supplicant control
+// locations, not board identity. Board-specific extras come from Config.
+var genericSupplicantCtrlDirs = []string{"/var/run/wpa_supplicant", "/run/wpa_supplicant"}
+
+func (m *linuxManager) stockCtrlDirs() []string {
+	dirs := append([]string(nil), genericSupplicantCtrlDirs...)
+	for _, dir := range m.cfg.StockCtrlDirs {
+		if dir == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range dirs {
+			if existing == dir {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			dirs = append(dirs, dir)
+		}
 	}
+	return dirs
+}
+
+func (m *linuxManager) ctrlDirs() []string {
+	dirs := []string{m.ctrlDir()}
+	for _, dir := range m.stockCtrlDirs() {
+		if dir != m.ctrlDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 func ensureCtrlDir(dir string) error {

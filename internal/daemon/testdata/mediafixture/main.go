@@ -15,19 +15,19 @@ import (
 	"sync"
 	"syscall"
 
-	"capsula/sdk/capsula"
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	"capsulad/sdk/capsulad"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	service       = "capsula.contracts.media.v1.MediaPlayerService"
+	service       = "capsulad.contracts.media.v1.MediaPlayerService"
 	localPlayerID = "local.player"
 	btPlayerID    = "bluetooth"
 )
 
 type provider struct {
-	client *capsula.Client
+	client *capsulad.Client
 	ctx    context.Context
 
 	mu       sync.Mutex
@@ -35,13 +35,13 @@ type provider struct {
 	started  bool
 	revision uint64
 	changed  chan struct{}
-	bt       *capsula.BluetoothMediaState
+	bt       *capsulad.BluetoothMediaState
 
 	tracks []string
 	track  int
 }
 
-func newProvider(ctx context.Context, client *capsula.Client) *provider {
+func newProvider(ctx context.Context, client *capsulad.Client) *provider {
 	return &provider{
 		ctx: ctx, client: client, changed: make(chan struct{}),
 		tracks: []string{"Aurora", "Borealis", "Cirrus"},
@@ -211,7 +211,7 @@ func (p *provider) startBluetooth(ctx context.Context) {
 	}()
 }
 
-func (p *provider) bluetoothCommand(ctx context.Context, cmd capsula.BluetoothMediaCommand) *mediav1.PlayerCommandResult {
+func (p *provider) bluetoothCommand(ctx context.Context, cmd capsulad.BluetoothMediaCommand) *mediav1.PlayerCommandResult {
 	p.mu.Lock()
 	present := p.bt != nil && p.bt.Present
 	p.mu.Unlock()
@@ -226,7 +226,7 @@ func (p *provider) bluetoothCommand(ctx context.Context, cmd capsula.BluetoothMe
 
 // playerRequest reads the optional unary request (player_id) from a routed
 // call. An absent request defaults to the local player.
-func playerRequest(call *capsula.ServerCall) *mediav1.PlayerRequest {
+func playerRequest(call *capsulad.ServerCall) *mediav1.PlayerRequest {
 	data, err := call.Recv()
 	if err != nil {
 		return &mediav1.PlayerRequest{}
@@ -247,46 +247,46 @@ func marshal(msg proto.Message) []byte {
 	return data
 }
 
-func (p *provider) register(client *capsula.Client) {
-	client.Handle(service, "ListPlayers", func(ctx context.Context, call *capsula.ServerCall) {
+func (p *provider) register(client *capsulad.Client) {
+	client.Handle(service, "ListPlayers", func(ctx context.Context, call *capsulad.ServerCall) {
 		_ = call.Send(marshal(&mediav1.ListPlayersResponse{Players: p.statuses()}))
 	})
-	client.Handle(service, "GetStatus", func(ctx context.Context, call *capsula.ServerCall) {
+	client.Handle(service, "GetStatus", func(ctx context.Context, call *capsulad.ServerCall) {
 		req := playerRequest(call)
 		_ = call.Send(marshal(p.status(req.GetPlayerId())))
 	})
 	client.Handle(service, "WatchPlayers", p.watch)
-	client.Handle(service, "Play", func(ctx context.Context, call *capsula.ServerCall) {
+	client.Handle(service, "Play", func(ctx context.Context, call *capsulad.ServerCall) {
 		req := playerRequest(call)
 		if req.GetPlayerId() == btPlayerID {
-			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaPlay)))
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsulad.BluetoothMediaPlay)))
 			return
 		}
 		p.play()
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "playing"}))
 	})
-	client.Handle(service, "Pause", func(ctx context.Context, call *capsula.ServerCall) {
+	client.Handle(service, "Pause", func(ctx context.Context, call *capsulad.ServerCall) {
 		req := playerRequest(call)
 		if req.GetPlayerId() == btPlayerID {
-			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaPause)))
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsulad.BluetoothMediaPause)))
 			return
 		}
 		p.pause()
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "paused"}))
 	})
-	client.Handle(service, "SkipNext", func(ctx context.Context, call *capsula.ServerCall) {
+	client.Handle(service, "SkipNext", func(ctx context.Context, call *capsulad.ServerCall) {
 		req := playerRequest(call)
 		if req.GetPlayerId() == btPlayerID {
-			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaNext)))
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsulad.BluetoothMediaNext)))
 			return
 		}
 		p.skip(1)
 		_ = call.Send(marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: "next"}))
 	})
-	client.Handle(service, "SkipPrevious", func(ctx context.Context, call *capsula.ServerCall) {
+	client.Handle(service, "SkipPrevious", func(ctx context.Context, call *capsulad.ServerCall) {
 		req := playerRequest(call)
 		if req.GetPlayerId() == btPlayerID {
-			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsula.BluetoothMediaPrevious)))
+			_ = call.Send(marshal(p.bluetoothCommand(ctx, capsulad.BluetoothMediaPrevious)))
 			return
 		}
 		p.skip(-1)
@@ -296,7 +296,7 @@ func (p *provider) register(client *capsula.Client) {
 
 // watch emits the required snapshot first, then updates. A Bluetooth player
 // that disappears is reported as PlayerRemoved.
-func (p *provider) watch(ctx context.Context, call *capsula.ServerCall) {
+func (p *provider) watch(ctx context.Context, call *capsulad.ServerCall) {
 	first := true
 	lastBluetooth := false
 	for {
@@ -343,11 +343,11 @@ func (p *provider) watch(ctx context.Context, call *capsula.ServerCall) {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	env := capsula.FromEnv()
+	env := capsulad.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	client, err := capsula.Connect(ctx, env)
+	client, err := capsulad.Connect(ctx, env)
 	if err != nil {
 		log.Fatalf("mediafixture: connect: %v", err)
 	}
@@ -356,9 +356,9 @@ func main() {
 	p := newProvider(ctx, client)
 	p.register(client)
 	ready := make(chan struct{}, 1)
-	client.SetHandlers(capsula.Handlers{
+	client.SetHandlers(capsulad.Handlers{
 		Ready: func() { ready <- struct{}{} },
-		Invocation: func(ctx context.Context, inv *capsula.LaunchInvocation) {
+		Invocation: func(ctx context.Context, inv *capsulad.LaunchInvocation) {
 			_ = client.NotifyInvocationResult(inv.ID, true, "media fixture is running")
 		},
 	})

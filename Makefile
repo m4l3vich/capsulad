@@ -71,7 +71,7 @@ endif
 
 NATIVE_DIR ?= sdk/native
 NATIVE_MANIFEST ?= $(NATIVE_DIR)/Cargo.toml
-NATIVE_HEADER ?= $(NATIVE_DIR)/include/capsula/capsula.h
+NATIVE_HEADER ?= $(NATIVE_DIR)/include/capsulad/capsulad.h
 
 # An explicit Rust target is required when GOOS/GOARCH is not the host, because
 # Cargo would otherwise silently build the host library. The Capsula Mini is
@@ -85,13 +85,13 @@ NATIVE_CARGO_TARGET = $(if $(NATIVE_TARGET),--target $(NATIVE_TARGET),)
 NATIVE_METADATA_SCRIPT ?= $(NATIVE_DIR)/emit-runtime-metadata.sh
 
 ifeq ($(GOOS),darwin)
-NATIVE_SOURCE := libcapsula.dylib
-NATIVE_LIBRARY := libcapsula.1.dylib
-NATIVE_METADATA_LIBRARY := libcapsula.1.dylib
+NATIVE_SOURCE := libcapsulad.dylib
+NATIVE_LIBRARY := libcapsulad.1.dylib
+NATIVE_METADATA_LIBRARY := libcapsulad.1.dylib
 else
-NATIVE_SOURCE := libcapsula.so
-NATIVE_LIBRARY := libcapsula.so.1.0.0
-NATIVE_METADATA_LIBRARY := libcapsula.so.1
+NATIVE_SOURCE := libcapsulad.so
+NATIVE_LIBRARY := libcapsulad.so.1.0.0
+NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
 .PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia clean
@@ -137,7 +137,7 @@ capsulad-cli-host:
 # boot/S99btctl.sh. App artifacts are produced and packaged by the app build
 # targets (`make dumbassistant`, `make devapps`); assembly only copies the
 # ready-made .tar.gz files, so nothing is ever packaged for or on the device.
-# Native runtime symlinks are rebuilt from capsula-native.json during deploy;
+# Native runtime symlinks are rebuilt from capsulad-native.json during deploy;
 # the bundle carries only the regular runtime files so its tarball is extractable.
 deploy-bundle: capsulad capsulad-cli native
 	rm -rf $(DEPLOYDIR) $(DEPLOY_TARBALL)
@@ -147,7 +147,7 @@ deploy-bundle: capsulad capsulad-cli native
 	@for f in $(LIBDIR)/*; do \
 		if [ -f "$$f" ] && [ ! -L "$$f" ]; then cp "$$f" $(DEPLOYDIR)/lib/; fi; \
 	done
-	cp -R $(INCLUDEDIR)/capsula $(DEPLOYDIR)/lib/include/
+	cp -R $(INCLUDEDIR)/capsulad $(DEPLOYDIR)/lib/include/
 	cp deploy/rockchip-stock/S99btctl.sh $(DEPLOYDIR)/boot/S99btctl.sh
 	@set -e; \
 	bundle_app() { \
@@ -167,7 +167,7 @@ deploy-bundle: capsulad capsulad-cli native
 	for d in $(APPDIR)/*/; do \
 		[ -f "$$d/manifest.toml" ] || continue; \
 		id=$$(basename "$$d"); \
-		bundle_app "$$id" "$(APPDIR)" "$${id#org.capsula.}"; \
+		bundle_app "$$id" "$(APPDIR)" "$${id#org.capsulad.}"; \
 	done; \
 	if [ "$(BUNDLE_DEVAPPS)" = "1" ]; then \
 		staged=; \
@@ -196,7 +196,7 @@ devapps:
 web:
 	cd web && npm ci && npm run build
 
-# The Go SDK is its own module; it exposes the thin binding over libcapsula.
+# The Go SDK is its own module; it exposes the thin binding over libcapsulad.
 # It uses cgo, so a cross build also needs a matching C toolchain.
 sdk: sdk-go sdk-rust
 
@@ -221,27 +221,29 @@ native:
 		darwin:*linux*|linux:*darwin*) \
 			echo "error: GOOS=$(GOOS) does not match NATIVE_TARGET=$(NATIVE_TARGET)" >&2; exit 1;; \
 	esac
-	mkdir -p $(LIBDIR) $(INCLUDEDIR)/capsula
-	rm -f $(LIBDIR)/libcapsula.so $(LIBDIR)/libcapsula.so.1 $(LIBDIR)/libcapsula.so.1.0.0 $(LIBDIR)/libcapsula.dylib $(LIBDIR)/libcapsula.1.dylib $(LIBDIR)/capsula-native.json $(INCLUDEDIR)/capsula.h $(INCLUDEDIR)/capsula/capsula.h
+	mkdir -p $(LIBDIR) $(INCLUDEDIR)/capsulad
 	$(CARGO) build --locked --manifest-path $(NATIVE_MANIFEST) $(NATIVE_CARGO_MODE) $(NATIVE_CARGO_TARGET)
 	@test -f $(NATIVE_OUTDIR)/$(NATIVE_SOURCE) || { \
 		echo "error: Cargo did not produce $(NATIVE_OUTDIR)/$(NATIVE_SOURCE)." >&2; \
 		echo "       Install the Rust target and linker, or set NATIVE_TARGET for the intended ABI." >&2; \
 		exit 1; \
 	}
+	@# Clean the previous staging only after the build succeeded: a failed
+	@# cross build must not remove the installed host runtime.
+	rm -f $(LIBDIR)/libcapsulad.so $(LIBDIR)/libcapsulad.so.1 $(LIBDIR)/libcapsulad.so.1.0.0 $(LIBDIR)/libcapsulad.dylib $(LIBDIR)/libcapsulad.1.dylib $(LIBDIR)/capsulad-native.json $(INCLUDEDIR)/capsulad.h $(INCLUDEDIR)/capsulad/capsulad.h
 ifeq ($(GOOS),darwin)
 	cp $(NATIVE_OUTDIR)/$(NATIVE_SOURCE) $(LIBDIR)/$(NATIVE_LIBRARY)
-	ln -sfn $(NATIVE_LIBRARY) $(LIBDIR)/libcapsula.dylib
+	ln -sfn $(NATIVE_LIBRARY) $(LIBDIR)/libcapsulad.dylib
 else
 	cp $(NATIVE_OUTDIR)/$(NATIVE_SOURCE) $(LIBDIR)/$(NATIVE_LIBRARY)
-	ln -sfn $(NATIVE_LIBRARY) $(LIBDIR)/libcapsula.so.1
-	ln -sfn libcapsula.so.1 $(LIBDIR)/libcapsula.so
+	ln -sfn $(NATIVE_LIBRARY) $(LIBDIR)/libcapsulad.so.1
+	ln -sfn libcapsulad.so.1 $(LIBDIR)/libcapsulad.so
 endif
-	cp $(NATIVE_HEADER) $(INCLUDEDIR)/capsula/capsula.h
-	sh $(NATIVE_METADATA_SCRIPT) $(LIBDIR)/capsula-native.json $(NATIVE_METADATA_LIBRARY)
+	cp $(NATIVE_HEADER) $(INCLUDEDIR)/capsulad/capsulad.h
+	sh $(NATIVE_METADATA_SCRIPT) $(LIBDIR)/capsulad-native.json $(NATIVE_METADATA_LIBRARY)
 
 # Script runtimes. Optional because they build third-party engines from
-# pinned sources; stage the hosts beside libcapsula so the launcher can find
+# pinned sources; stage the hosts beside libcapsulad so the launcher can find
 # them. QUICKJS_SRC/MICROPYTHON_SRC may point at already extracted pinned trees.
 interpreter:
 	sh interpreter/build.sh
@@ -257,24 +259,24 @@ interpreter-micropython:
 # build host; the staged package directory and its <id>-<version>.tar.gz land
 # side by side in $(APPDIR), and that archive is what a bundle carries.
 dumbassistant: $(PACKAGER_TARGET)
-	rm -rf $(APPDIR)/org.capsula.dumbassistant
-	mkdir -p $(APPDIR)/org.capsula.dumbassistant/assets
-	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsula.dumbassistant/dumbassistant ./cmd/dumbassistant
-	cp apps/dumbassistant/manifest.toml $(APPDIR)/org.capsula.dumbassistant/manifest.toml
-	cp -R apps/dumbassistant/assets/. $(APPDIR)/org.capsula.dumbassistant/assets/
-	@rm -f $(APPDIR)/org.capsula.dumbassistant-*.tar.gz
-	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsula.dumbassistant
+	rm -rf $(APPDIR)/org.capsulad.dumbassistant
+	mkdir -p $(APPDIR)/org.capsulad.dumbassistant/assets
+	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.dumbassistant/dumbassistant ./cmd/dumbassistant
+	cp apps/dumbassistant/manifest.toml $(APPDIR)/org.capsulad.dumbassistant/manifest.toml
+	cp -R apps/dumbassistant/assets/. $(APPDIR)/org.capsulad.dumbassistant/assets/
+	@rm -f $(APPDIR)/org.capsulad.dumbassistant-*.tar.gz
+	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.dumbassistant
 
 # Marusia is the second optional first-party app. It has no packaged assets:
 # the reply is a TTS URL fetched at turn time. The staged package directory and
 # its <id>-<version>.tar.gz land side by side in $(APPDIR).
 marusia: $(PACKAGER_TARGET)
-	rm -rf $(APPDIR)/org.capsula.marusia
-	mkdir -p $(APPDIR)/org.capsula.marusia
-	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsula.marusia/marusia ./cmd/marusia
-	cp apps/marusia/manifest.toml $(APPDIR)/org.capsula.marusia/manifest.toml
-	@rm -f $(APPDIR)/org.capsula.marusia-*.tar.gz
-	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsula.marusia
+	rm -rf $(APPDIR)/org.capsulad.marusia
+	mkdir -p $(APPDIR)/org.capsulad.marusia
+	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.marusia/marusia ./cmd/marusia
+	cp apps/marusia/manifest.toml $(APPDIR)/org.capsulad.marusia/manifest.toml
+	@rm -f $(APPDIR)/org.capsulad.marusia-*.tar.gz
+	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.marusia
 
 # `make test` runs every module that ships in this repository: the root Go
 # module, both nested Go modules, the Rust binding and the native crate (the
@@ -295,7 +297,7 @@ test-sdk: check-sdk-abi
 	$(CARGO) test --locked --manifest-path sdk/rust/Cargo.toml $(NATIVE_CARGO_MODE) $(NATIVE_CARGO_TARGET)
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST) $(NATIVE_CARGO_MODE) $(NATIVE_CARGO_TARGET)
 	mkdir -p $(BINDIR)
-	$(CXX) -std=c++17 -pthread -I $(NATIVE_DIR)/include sdk/cpp/example.cpp -o $(BINDIR)/capsula-cpp-example $(CXX_DL)
+	$(CXX) -std=c++17 -pthread -I $(NATIVE_DIR)/include sdk/cpp/example.cpp -o $(BINDIR)/capsulad-cpp-example $(CXX_DL)
 
 check-sdk-abi:
 	sh sdk/go/regenerate-abi.sh --check

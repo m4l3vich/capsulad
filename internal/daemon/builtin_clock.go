@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/dcron"
 	"capsulad/internal/presets"

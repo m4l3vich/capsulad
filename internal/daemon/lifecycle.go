@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/ids"
 	"capsulad/internal/manifest"
@@ -101,10 +101,17 @@ func (d *Daemon) compatible(m *manifest.Manifest) error {
 		return fmt.Errorf("runtime %s has no runner for this target", m.Entrypoint.Runtime)
 	}
 	arch := m.Entrypoint.Architecture
-	if arch != "aarch64" && arch != "arm64" {
-		return fmt.Errorf("package architecture %q is not executable on this aarch64 target", arch)
+	archOK := false
+	for _, accepted := range d.profile().Architecture.Accepted {
+		if arch == accepted {
+			archOK = true
+			break
+		}
 	}
-	if !strings.Contains(m.Entrypoint.ABI, "linux") {
+	if !archOK {
+		return fmt.Errorf("package architecture %q is not executable on this %s target", arch, d.profile().Architecture.Target)
+	}
+	if !strings.Contains(m.Entrypoint.ABI, d.profile().Architecture.ABIContains) {
 		return fmt.Errorf("package ABI %q is not a Linux ABI", m.Entrypoint.ABI)
 	}
 	return nil

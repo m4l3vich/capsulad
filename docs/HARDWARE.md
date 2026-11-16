@@ -24,6 +24,26 @@ Partition layout of the stock image (`_capsula-mini-rockchip-backup/`) — start
 270752/2048, `security` 272800/8192, `userdata` 280992/166463. `capsulad-cli platform inspect -root
 DIR` reads an extracted firmware tree offline.
 
+## Supported configuration and the profile boundary
+
+`internal/backend/profile` holds the device description as inert data: model/SoC fallbacks, serial
+source, PulseAudio sink/source and PCM formats, microphone GPIO, LED device paths and geometry,
+input directories, watchdog path/timeout/status id, stock Wi-Fi files, deployment budgets, vendor
+processes, architecture/ABI acceptance, memory envelope and the ambient brightness curve. It has no
+I/O and no interfaces.
+
+Generic packages (daemon, Wi-Fi, audio, CLI) consume those values through their existing `Config`
+structs. `internal/backend/rockchip` keeps device knowledge that is not a knob: recovered ioctls,
+the measured ring channel permutation and segment calibration map. The simulator is a sibling
+backend with the neutral `profile.Simulator` profile, which deliberately has no device paths, stock
+supplicant files, vendor processes or watchdog opener.
+
+| Selection | Backend | Status |
+|---|---|---|
+| `-platform simulator` (default) | in-memory simulator | supported |
+| `-platform rockchip-stock` (alias `rockchip`) | RK3308 stock backend | supported; unvalidated vendor paths report `PARTIAL`/`UNVERIFIED` |
+| `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE` | none | wire enum values only; defined but unsupported/reserved. No internal platform constant, selection branch or backend exists |
+
 ## Displays and LED ring
 
 The boot image's DTB describes two LED controllers:
@@ -495,7 +515,7 @@ and falls back to `in_illuminance_raw` or the i2c-driver paths (unit `lux-raw`).
   mode. It never claims isolation it did not obtain.
 - Vendor daemons may hold PulseAudio, evdev or LED nodes. Capability status and diagnostics are the
   source of truth; no parity across Mini variants is claimed.
-- A native app maps `libcapsula.so.1` (ABI 1.0) from `/capsula/lib` and reaches `APP_READY`; static
+- A native app maps `libcapsulad.so.1` (ABI 1.0) from `/capsulad/lib` and reaches `APP_READY`; static
   Go app packages need no libraries, and other Rust binaries need a matching libc and loader.
 
 ## Device probe results
@@ -548,7 +568,7 @@ contract:
   process running a copy of the daemon would keep the old binary's inode alive on `/data` after
   the daemon exits, which leaves no room to stage a 40 MiB replacement on the 78.5 MiB partition.
   Its pid file (`run/watchdog.feeder`) records `<pid> shell`; a feeder left by an older release is
-  a daemon copy (`__capsula_watchdog_feeder`) and is asked to hand the timer back through
+  a daemon copy (`__capsulad_watchdog_feeder`) and is asked to hand the timer back through
   `run/watchdog.handback` before its binary is replaced.
 - A crash or OOM kill of `capsulad` leaves nobody feeding, so the board resets. That is the
   intended fail-safe: the supervisor owns the timer and its death returns the device to a known
@@ -584,7 +604,7 @@ only in auto mode; a manual brightness of 0 is an explicit off. The 5 % level is
 visible; its physical result in a dark room is not measured (optical gate).
 
 The built-in clock system app takes the timezone from the daemon's device timezone unless the
-`capsula.clock` app-configuration `timezone` key overrides it; the sandbox does not force `TZ=UTC`,
+`capsulad.clock` app-configuration `timezone` key overrides it; the sandbox does not force `TZ=UTC`,
 and `/etc/localtime` and `/usr/share/zoneinfo` are bind-mounted so a scripted or native app can
 resolve zones.
 

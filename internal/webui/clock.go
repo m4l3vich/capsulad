@@ -7,8 +7,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
 // The compiled-in clock app publishes the standard ClockService contract; the
@@ -19,8 +19,8 @@ import (
 // AppBus.
 
 const (
-	clockAppID      = "capsula.clock"
-	clockServiceAPI = "capsula.contracts.clock.v1.ClockService"
+	clockAppID      = "capsulad.clock"
+	clockServiceAPI = "capsulad.contracts.clock.v1.ClockService"
 )
 
 // findClockService returns the standard service name used by the clock page.

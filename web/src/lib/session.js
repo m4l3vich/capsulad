@@ -93,7 +93,7 @@ export async function loadSession() {
 }
 
 function jsonHeaders() {
-  return { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Capsula-CSRF': session.csrf }
+  return { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Capsulad-CSRF': session.csrf }
 }
 
 async function readError(resp) {

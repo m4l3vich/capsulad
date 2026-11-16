@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
 	"capsulad/internal/dcron"
 	"capsulad/internal/settings"
 )

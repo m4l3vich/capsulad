@@ -23,12 +23,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 const (
-	deviceService     = "capsula.framework.v1.DeviceService"
-	configService     = "capsula.framework.v1.ApplicationConfigurationService"
+	deviceService     = "capsulad.framework.v1.DeviceService"
+	configService     = "capsulad.framework.v1.ApplicationConfigurationService"
 	echoService       = "dev.devtools.v1.DevToolsService"
 	scriptEchoService = "dev.devtools.v1.ScriptEcho"
 	segmentResource   = "display.segment.front"
@@ -71,7 +71,7 @@ func errorResult(format string, args ...any) stepResult {
 
 type devApp struct {
 	ctx            context.Context
-	client         *capsula.Client
+	client         *capsulad.Client
 	appID, runID   string
 	echoJSON       bool
 	queue          chan stepRequest
@@ -82,10 +82,10 @@ type devApp struct {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	env := capsula.FromEnv()
+	env := capsulad.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	client, err := capsula.Connect(ctx, env)
+	client, err := capsulad.Connect(ctx, env)
 	if err != nil {
 		log.Fatalf("devtools: connect: %v", err)
 	}
@@ -95,12 +95,12 @@ func main() {
 		queue: make(chan stepRequest, queueDepth),
 	}
 	a.registerEcho()
-	client.SetHandlers(capsula.Handlers{
+	client.SetHandlers(capsulad.Handlers{
 		Ready: func() {
 			log.Printf("devtools: ready app=%s run=%s sdk=%s echo=%s",
 				env.AppID, env.RunID, env.SDK, a.echoMode())
 		},
-		Invocation: func(_ context.Context, inv *capsula.LaunchInvocation) {
+		Invocation: func(_ context.Context, inv *capsulad.LaunchInvocation) {
 			step := invokeStep(inv)
 			log.Printf("devtools: invocation id=%s step=%s", inv.ID, step)
 			if !validStep(step) {
@@ -112,7 +112,7 @@ func main() {
 				_ = client.NotifyInvocationResult(inv.ID, false, "step queue is full")
 			}
 		},
-		Action: func(_ context.Context, act *capsula.ActionInvoked) {
+		Action: func(_ context.Context, act *capsulad.ActionInvoked) {
 			log.Printf("devtools: action id=%s action=%s", act.ID, act.ActionID)
 			if !validStep(act.ActionID) {
 				_ = client.NotifyActionResult(act.ID, false, "unknown action")
@@ -122,7 +122,7 @@ func main() {
 				_ = client.NotifyActionResult(act.ID, false, "step queue is full")
 			}
 		},
-		Settings: func(s *capsula.SettingsChanged) {
+		Settings: func(s *capsulad.SettingsChanged) {
 			log.Printf("devtools: settings-changed revision=%d note=%q", s.Revision, settingFromEvent(s, "note"))
 		},
 		Disconnected: func(err error) { log.Printf("devtools: disconnected: %v", err) },
@@ -258,7 +258,7 @@ func validStep(step string) bool {
 
 // invokeStep reads the manifest-typed "step" argument; empty runs the full
 // self-test, so `capsulad-cli app start dev.hardware` is useful on its own.
-func invokeStep(inv *capsula.LaunchInvocation) string {
+func invokeStep(inv *capsulad.LaunchInvocation) string {
 	if inv != nil {
 		for _, arg := range inv.Arguments {
 			if arg.Name == "step" {
@@ -277,7 +277,7 @@ func classify(op string, err error) stepResult {
 	if err == nil {
 		return okResult("%s", op)
 	}
-	var status *capsula.StatusError
+	var status *capsulad.StatusError
 	if errors.As(err, &status) {
 		switch status.Code {
 		case 5, 9, 12, 14: // NotFound, FailedPrecondition, Unimplemented, Unavailable
@@ -302,7 +302,7 @@ func wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func settingFromEvent(s *capsula.SettingsChanged, key string) string {
+func settingFromEvent(s *capsulad.SettingsChanged, key string) string {
 	for _, value := range s.Values {
 		if value.Key == key {
 			return value.ValueJSON
@@ -340,7 +340,7 @@ func (a *devApp) registerEcho() {
 	a.client.Handle(echoService, "Echo", a.handleEchoJSON)
 }
 
-func (a *devApp) handleEchoJSON(_ context.Context, call *capsula.ServerCall) {
+func (a *devApp) handleEchoJSON(_ context.Context, call *capsulad.ServerCall) {
 	for {
 		var req echoRequest
 		if err := call.RecvJSON(&req); err != nil {
@@ -358,7 +358,7 @@ func (a *devApp) handleEchoJSON(_ context.Context, call *capsula.ServerCall) {
 	}
 }
 
-func (a *devApp) handleEchoRaw(_ context.Context, call *capsula.ServerCall) {
+func (a *devApp) handleEchoRaw(_ context.Context, call *capsulad.ServerCall) {
 	for {
 		payload, err := call.Recv()
 		if err == io.EOF {

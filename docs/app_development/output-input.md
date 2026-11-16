@@ -114,7 +114,7 @@ Selection rules for display and ring, in priority order:
    content is skipped; an older ready capture stays selected.
 2. With no eligible capture, the configured default app's baseline presentation wins. Only the
    default app's earliest eligible presentation is used as its baseline.
-3. With no default, a ready framework fallback presentation owned by `capsula.system` wins (for
+3. With no default, a ready framework fallback presentation owned by `capsulad.system` wins (for
    example a volume overlay).
 4. Otherwise nothing is selected (`selected_app_id` empty) and the resource is dark.
 

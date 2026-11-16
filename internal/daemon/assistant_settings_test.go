@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/assets"
 )
 
@@ -86,7 +86,7 @@ func TestValidateAssistantAssetAgainstStore(t *testing.T) {
 		"/etc/passwd", "../escape.wav", "audio/../../escape.wav", "audio//reply.wav",
 		`audio\replies\reply.wav`, "audio/replies/reply.wav\x00",
 		"audio/replies/missing.wav", "audio/replies/notes.txt", "audio/folder.wav",
-		"link.wav", ".capsula-upload-123",
+		"link.wav", ".capsulad-upload-123",
 	} {
 		if err := d.validateAssistantAsset(value); err == nil {
 			t.Fatalf("validateAssistantAsset(%q) was accepted", value)

@@ -8,10 +8,10 @@ a system app. Nothing installs, starts or selects it automatically.
 
 ## Runtime and requirements
 
-The app is a standalone Go module (`capsula/apps/dumbassistant`) that depends only
-on the `capsula/sdk/capsula` Go SDK, with no daemon, gRPC or protobuf imports. The
-SDK loads the shared engine `libcapsula` through cgo; the launcher injects
-`CAPSULA_LIBRARY` and the package contains no copy of the library.
+The app is a standalone Go module (`capsulad/apps/dumbassistant`) that depends only
+on the `capsulad/sdk/capsulad` Go SDK, with no daemon, gRPC or protobuf imports. The
+SDK loads the shared engine `libcapsulad` through cgo; the launcher injects
+`CAPSULAD_LIBRARY` and the package contains no copy of the library.
 
 The manifest declares:
 
@@ -49,7 +49,7 @@ so the Web UI shows the error instead of silently accepting it.
 ### Reply asset rule
 
 The shared store is a plain directory (`<data-dir>/assets`, exposed read-only as
-`/assets` and named by `CAPSULA_ASSETS`). There is no asset manifest and no
+`/assets` and named by `CAPSULAD_ASSETS`). There is no asset manifest and no
 registration step: any regular file under the root is an asset, addressed by its
 slash-relative path.
 
@@ -72,16 +72,16 @@ copy them into the store directly; only the daemon's admin API writes it.
 From the repository root:
 
 ```sh
-make dumbassistant      # package directory + build/apps/org.capsula.dumbassistant-<version>.tar.gz
+make dumbassistant      # package directory + build/apps/org.capsulad.dumbassistant-<version>.tar.gz
 ```
 
 That target builds the Go module with cgo, copies `manifest.toml` and
-`assets/reply.wav`, stages `build/apps/org.capsula.dumbassistant`, and packages it on
+`assets/reply.wav`, stages `build/apps/org.capsulad.dumbassistant`, and packages it on
 the build host with `capsulad-cli app package` into
-`build/apps/org.capsula.dumbassistant-<version>.tar.gz`. Standalone,
+`build/apps/org.capsulad.dumbassistant-<version>.tar.gz`. Standalone,
 `make build` here writes the package directory, `make` or `make package` also writes
 the archive beside it, and `make test` runs the unit tests; the module resolves the
-SDK through `replace capsula/sdk => ../../sdk/go`. A cross build packages with the
+SDK through `replace capsulad/sdk => ../../sdk/go`. A cross build packages with the
 host-executable `build/bin/capsulad-cli-host` (`make capsulad-cli-host` in the
 repository root), because the cross-target CLI cannot run on the build host.
 
@@ -94,7 +94,7 @@ make package GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc CGO_ENABLED=1
 ```
 
 `make package` builds the directory and writes
-`../../build/apps/org.capsula.dumbassistant-<version>.tar.gz` beside it, using the
+`../../build/apps/org.capsulad.dumbassistant-<version>.tar.gz` beside it, using the
 host-executable CLI (`make capsulad-cli-host` in the repository root). Build in an arm64
 Bullseye container when no suitable cross toolchain is installed, and check the result imports
 no symbol newer than `GLIBC_2.33`.
@@ -103,9 +103,9 @@ no symbol newer than `GLIBC_2.33`.
 
 ```sh
 capsulad-cli -data-dir build/demo app install \
-  build/apps/org.capsula.dumbassistant-<version>.tar.gz
+  build/apps/org.capsulad.dumbassistant-<version>.tar.gz
 capsulad-cli -data-dir build/demo app list
-capsulad-cli -data-dir build/demo app runs org.capsula.dumbassistant
+capsulad-cli -data-dir build/demo app runs org.capsulad.dumbassistant
 ```
 
 `make dumbassistant` already produced that archive on the build host, so the device

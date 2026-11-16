@@ -3,7 +3,7 @@ package daemon
 import (
 	"encoding/json"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/manifest"
 	"capsulad/internal/registry"
 	"capsulad/internal/settings"
@@ -17,13 +17,13 @@ import (
 // package, and their runtime is the daemon itself.
 //
 // They publish standard clock and ring contracts under
-// proto/capsula/contracts. Those services are advertised through
+// proto/capsulad/contracts. Those services are advertised through
 // AppInterfaceService and reachable by any supervised app via the normal app
 // bus, exactly like an installed app's declared interface. Their settings,
 // actions and hardware gestures remain the primary product surface.
 const (
-	clockAppID = "capsula.clock"
-	ringAppID  = "capsula.ring"
+	clockAppID = "capsulad.clock"
+	ringAppID  = "capsulad.ring"
 
 	// Settings namespaces are the app IDs themselves. Kept as named constants
 	// because persisted settings refer to them.

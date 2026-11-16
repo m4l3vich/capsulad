@@ -24,7 +24,7 @@ import (
 
 const (
 	a2dpSinkUUID   = "0000110b-0000-1000-8000-00805f9b34fb"
-	a2dpEndpointID = dbus.ObjectPath("/org/capsula/a2dp/sbc")
+	a2dpEndpointID = dbus.ObjectPath("/org/capsulad/a2dp/sbc")
 )
 
 // SBC capability bits (A2DP section 4.3.2). The media codec capabilities of an

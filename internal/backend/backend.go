@@ -1,5 +1,5 @@
 // Package backend defines the hardware abstraction implemented per target
-// platform (simulator, Rockchip stock, Amlogic stock, Amlogic Alpine).
+// platform (simulator, Rockchip stock).
 //
 // Backends own physical devices. They never implement routing or presentation
 // semantics: the framework renders built-in presets into frames and writes
@@ -20,8 +20,6 @@ type Platform string
 const (
 	PlatformSimulator     Platform = "simulator"
 	PlatformRockchipStock Platform = "CAPSULA_MINI_ROCKCHIP_STOCK"
-	PlatformAmlogicStock  Platform = "CAPSULA_MINI_AMLOGIC_STOCK"
-	PlatformAmlogicAlpine Platform = "CAPSULA_MINI_AMLOGIC_ALPINE"
 )
 
 type Status string

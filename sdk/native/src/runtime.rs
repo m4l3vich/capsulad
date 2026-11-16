@@ -11,10 +11,10 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(2)
-        .thread_name("capsula-native")
+        .thread_name("capsulad-native")
         .enable_all()
         .build()
-        .expect("capsula native: failed to build Tokio runtime")
+        .expect("capsulad native: failed to build Tokio runtime")
 });
 
 /// One bounded runtime for the whole process. Created on first use, never per

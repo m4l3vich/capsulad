@@ -5,7 +5,7 @@ syntax = "proto3";
 
 package dev.devtools.v1;
 
-option go_package = "capsula/apps/devtools/gen/devtools/v1";
+option go_package = "capsulad/apps/devtools/gen/devtools/v1";
 
 message EchoRequest {
   string text = 1;

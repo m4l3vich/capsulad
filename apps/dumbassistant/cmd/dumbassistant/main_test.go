@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 func testWAV(t *testing.T, format uint16, channels, rate, bits int, pcm []byte) []byte {
@@ -50,7 +50,7 @@ func TestParseWAV(t *testing.T) {
 	if got.format.SampleRateHz != 48000 || got.format.Channels != 2 {
 		t.Fatalf("format = %d Hz/%d ch", got.format.SampleRateHz, got.format.Channels)
 	}
-	if got.format.SampleFormat != capsula.SampleFormatPCM16LE {
+	if got.format.SampleFormat != capsulad.SampleFormatPCM16LE {
 		t.Fatalf("sample format = %s, want PCM16LE", got.format.SampleFormat)
 	}
 	if got.bytesPerFrame != 4 || got.frames() != 2 {
@@ -357,9 +357,9 @@ func TestApplySettings(t *testing.T) {
 			replyPath: path, clip: base,
 		},
 	}
-	a.applySettings(&capsula.SettingsChanged{
+	a.applySettings(&capsulad.SettingsChanged{
 		Revision: 7,
-		Values: []capsula.SettingValue{
+		Values: []capsulad.SettingValue{
 			{Key: "delay", ValueJSON: `"200-1500"`},
 			{Key: "reply_asset", ValueJSON: `"audio/alt.wav"`},
 		},
@@ -375,9 +375,9 @@ func TestApplySettings(t *testing.T) {
 	}
 	other := a.settings.clip
 
-	a.applySettings(&capsula.SettingsChanged{
+	a.applySettings(&capsulad.SettingsChanged{
 		Revision: 8,
-		Values: []capsula.SettingValue{
+		Values: []capsulad.SettingValue{
 			{Key: "delay", ValueJSON: `"1500-200"`},
 			{Key: "reply_asset", ValueJSON: `"../etc/passwd"`},
 			{Key: "delay", ValueJSON: `123`},
@@ -390,17 +390,17 @@ func TestApplySettings(t *testing.T) {
 		t.Fatalf("invalid asset replaced settings: %+v", a.settings)
 	}
 
-	a.applySettings(&capsula.SettingsChanged{
+	a.applySettings(&capsulad.SettingsChanged{
 		Revision: 9,
-		Values:   []capsula.SettingValue{{Key: "reply_asset", ValueJSON: `"audio/bad.txt"`}},
+		Values:   []capsulad.SettingValue{{Key: "reply_asset", ValueJSON: `"audio/bad.txt"`}},
 	})
 	if a.settings.clip != other || a.settings.replyPath != filepath.Join(store, "audio", "alt.wav") {
 		t.Fatalf("unsupported asset replaced settings: %+v", a.settings)
 	}
 
-	a.applySettings(&capsula.SettingsChanged{
+	a.applySettings(&capsulad.SettingsChanged{
 		Revision: 10,
-		Values: []capsula.SettingValue{
+		Values: []capsulad.SettingValue{
 			{Key: "delay", ValueJSON: `""`},
 			{Key: "reply_asset", ValueJSON: `""`},
 		},
@@ -465,7 +465,7 @@ func TestIsPreroll(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isPreroll(tc.item, &capsula.AudioChunk{MonotonicTimeNS: tc.ns}); got != tc.want {
+			if got := isPreroll(tc.item, &capsulad.AudioChunk{MonotonicTimeNS: tc.ns}); got != tc.want {
 				t.Fatalf("isPreroll(activation=%d, chunk=%d) = %v, want %v",
 					tc.item.activationNS, tc.ns, got, tc.want)
 			}
@@ -489,7 +489,7 @@ func TestReleaseHandling(t *testing.T) {
 	// A release can arrive before its queued activation becomes the active
 	// turn; it must be remembered and applied exactly once.
 	queued := &turn{activationID: "queued", release: make(chan struct{})}
-	a.releaseInput(&capsula.InputReleased{ActivationID: "queued"})
+	a.releaseInput(&capsulad.InputReleased{ActivationID: "queued"})
 	if a.pendingRelease != "queued" {
 		t.Fatalf("pending release = %q, want queued", a.pendingRelease)
 	}
@@ -508,7 +508,7 @@ func TestReleaseHandling(t *testing.T) {
 	// belongs to a turn that is still waiting in the queue.
 	active := &turn{activationID: "active", release: make(chan struct{})}
 	a.setActive(active)
-	a.releaseInput(&capsula.InputReleased{ActivationID: "other"})
+	a.releaseInput(&capsulad.InputReleased{ActivationID: "other"})
 	if signalled(active) {
 		t.Fatal("release for another activation ended the active turn")
 	}
@@ -517,7 +517,7 @@ func TestReleaseHandling(t *testing.T) {
 	}
 
 	// Releasing the active turn signals it immediately and clears it.
-	a.releaseInput(&capsula.InputReleased{ActivationID: "active"})
+	a.releaseInput(&capsulad.InputReleased{ActivationID: "active"})
 	if !signalled(active) {
 		t.Fatal("release did not signal the active turn")
 	}
@@ -532,14 +532,14 @@ func TestReleaseHandling(t *testing.T) {
 
 func TestEmptyActivationIdentityIgnored(t *testing.T) {
 	a := &assistant{queue: make(chan reply, 1)}
-	a.enqueue(&capsula.Activation{})
+	a.enqueue(&capsulad.Activation{})
 	select {
 	case item := <-a.queue:
 		t.Fatalf("activation without an id was queued: %+v", item)
 	default:
 	}
 
-	a.releaseInput(&capsula.InputReleased{})
+	a.releaseInput(&capsulad.InputReleased{})
 	if a.pendingRelease != "" {
 		t.Fatalf("release without an id became pending: %q", a.pendingRelease)
 	}
@@ -593,7 +593,7 @@ func TestEarlyPrerollExcludesActivationSpeech(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := earlyPreroll(tc.item, &capsula.AudioChunk{MonotonicTimeNS: tc.ns})
+			got := earlyPreroll(tc.item, &capsulad.AudioChunk{MonotonicTimeNS: tc.ns})
 			if got != tc.want {
 				t.Fatalf("earlyPreroll(%d, %d) = %v, want %v", tc.item.activationNS, tc.ns, got, tc.want)
 			}

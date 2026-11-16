@@ -58,7 +58,7 @@ test('a refused subscription stays an inline error and leaves the socket open', 
   const env = openTransport()
   try {
     const errors = []
-    const off = socket.subscribe(Topic.TOPIC_APPLICATION, 'org.capsula.marusia', {
+    const off = socket.subscribe(Topic.TOPIC_APPLICATION, 'org.capsulad.marusia', {
       onSnapshot() {},
       onError(err) { errors.push(err) },
       onResync() {}
@@ -93,7 +93,7 @@ test('a refused subscription stays an inline error and leaves the socket open', 
 test('a refused command rejects only its own promise', async () => {
   const env = openTransport()
   try {
-    const pending = socket.request({ stop: { appId: 'capsula.ring', runId: 'builtin:capsula.ring' } })
+    const pending = socket.request({ stop: { appId: 'capsulad.ring', runId: 'builtin:capsulad.ring' } })
     const command = env.transport.sent.at(-1)
     assert.ok(command?.command, 'the command reached the transport')
 

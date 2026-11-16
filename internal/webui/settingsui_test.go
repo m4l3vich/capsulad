@@ -82,7 +82,7 @@ func TestSettingsUIHandlerServesSandboxedDocument(t *testing.T) {
 		t.Fatalf("cache = %q", headers.Get("Cache-Control"))
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"capsula-ui-kit", "capsula-ui-bridge", "id=\"app-marker\"", "default-src 'none'"} {
+	for _, want := range []string{"capsulad-ui-kit", "capsulad-ui-bridge", "id=\"app-marker\"", "default-src 'none'"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q", want)
 		}
@@ -135,7 +135,7 @@ func TestSettingsUIHandlerServesBuiltin(t *testing.T) {
 	}
 	srv := &Server{Apps: reg, Logs: logs}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetPathValue("appID", "capsula.clock")
+	req.SetPathValue("appID", "capsulad.clock")
 	rec := httptest.NewRecorder()
 	srv.appSettingsUI(rec, req)
 	if rec.Code != http.StatusOK {
@@ -147,7 +147,7 @@ func TestSettingsUIHandlerServesBuiltin(t *testing.T) {
 }
 func builtinSettingsUIManifest() *manifest.Manifest {
 	return &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 		Settings:   []manifest.Setting{{Key: "alarms", Label: "Alarms", Type: "text"}},
 		SettingsUI: &manifest.SettingsUI{HTML: "clock.html"},

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/ids"
@@ -73,7 +73,7 @@ func TestBluetoothAdminSurface(t *testing.T) {
 	}
 
 	// Paired-device management is local-admin only.
-	appCtx := metadata.AppendToOutgoingContext(ctx, "capsula-run-id", "run_fake")
+	appCtx := metadata.AppendToOutgoingContext(ctx, "capsulad-run-id", "run_fake")
 	if _, err := client.ListPairedDevices(appCtx, &frameworkv1.ListPairedDevicesRequest{}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("app caller listed paired devices: %v", err)
 	}

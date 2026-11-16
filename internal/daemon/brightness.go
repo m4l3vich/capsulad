@@ -4,7 +4,8 @@ import (
 	"math"
 	"time"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/settings"
 )
 
@@ -13,68 +14,49 @@ import (
 // The vendor's light handler (0x27ca68, firmware 03104B1D40E15C55) maps lux to a
 // brightness percentage:
 //
-//	lux < 5          -> 0
-//	lux > 32768      -> 100
-//	otherwise        -> trunc(log(0.75 + 0.05*lux) * 19.9375), clamped to [5, 95]
+//	lux < MinLux         -> 0
+//	lux > MaxLux         -> 100
+//	otherwise            -> trunc(log(Bias + Lambda*lux) * Scale), clamped to [Floor, Ceiling]
 //
 // and only re-applies when the result differs from the last applied value by
-// more than 5 points. The measured output at 7.4 lux was 14/255 (5.5 %), which
-// this reproduces (5 % floor). The separate pow(x,4) curve in
-// ClockBrightnessCalc is not the clock brightness.
-const (
-	stockBrightnessScale    = 19.9375 // 0x419f806b
-	stockBrightnessLambda   = 0.05    // 0x3d4ccccd
-	stockBrightnessBias     = 0.75
-	stockBrightnessFloor    = 5.0
-	stockBrightnessCeil     = 95.0
-	stockBrightnessDeadband = 0.05
-	stockBrightnessMinLux   = 5.0
-	stockBrightnessMaxLux   = 32768.0
-	// autoBrightnessFloor is the lowest level an auto-managed display is
-	// allowed to reach. The stock curve reports 0 below 5 lux, which turns an
-	// enabled automatic display completely dark; the framework keeps it
-	// perceptibly lit while preserving a manual brightness of 0 as "off".
-	autoBrightnessFloor = 0.05
-	autoBrightnessPoll  = time.Second
-	// brightnessTick paces the fade so a change looks like the vendor's
-	// animated transition rather than a jump.
-	brightnessTick     = 100 * time.Millisecond
-	brightnessAnimStep = 0.06
-)
+// more than Deadband. The measured output at 7.4 lux was 14/255 (5.5 %), which
+// the profile reproduces (5 % floor). The separate pow(x,4) curve in
+// ClockBrightnessCalc is not the clock brightness. Every value comes from the
+// device profile.
 
 // ambientBrightness returns the stock brightness fraction for a lux reading.
-func ambientBrightness(lux float64) float64 {
+func ambientBrightness(curve profile.Brightness, lux float64) float64 {
 	if math.IsNaN(lux) || lux < 0 {
 		lux = 0
 	}
 	switch {
-	case lux < stockBrightnessMinLux:
+	case lux < curve.MinLux:
 		return 0
-	case lux > stockBrightnessMaxLux:
+	case lux > curve.MaxLux:
 		return 1
 	}
-	pct := math.Trunc(math.Log(stockBrightnessBias+stockBrightnessLambda*lux) * stockBrightnessScale)
-	pct = math.Max(stockBrightnessFloor, math.Min(stockBrightnessCeil, pct))
+	pct := math.Trunc(math.Log(curve.Bias+curve.Lambda*lux) * curve.Scale)
+	pct = math.Max(curve.Floor, math.Min(curve.Ceiling, pct))
 	return pct / 100
 }
 
 // autoBrightness maps one ambient sample to an auto-managed level. A malformed
 // sample (NaN, an infinity, or a negative illuminance from a transient read) is
 // reported as invalid so the caller keeps the last good target instead of
-// treating it as darkness. Valid levels are floored at autoBrightnessFloor:
-// an enabled automatic display must never blank, even at 0 lux.
-func autoBrightness(lux float64) (float64, bool) {
+// treating it as darkness. Valid levels are floored at AutoFloor: an enabled
+// automatic display must never blank, even at 0 lux.
+func autoBrightness(curve profile.Brightness, lux float64) (float64, bool) {
 	if math.IsNaN(lux) || math.IsInf(lux, 0) || lux < 0 {
 		return 0, false
 	}
-	return math.Max(autoBrightnessFloor, ambientBrightness(lux)), true
+	return math.Max(curve.AutoFloor, ambientBrightness(curve, lux)), true
 }
 
 // clampAutoBrightness keeps every auto path above the visible floor, including
 // the window before the first valid sensor sample and persisted 0 values.
-func clampAutoBrightness(v float64) float64 {
-	if math.IsNaN(v) || math.IsInf(v, -1) || v < autoBrightnessFloor {
-		return autoBrightnessFloor
+func clampAutoBrightness(curve profile.Brightness, v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, -1) || v < curve.AutoFloor {
+		return curve.AutoFloor
 	}
 	if v > 1 {
 		return 1
@@ -124,21 +106,22 @@ func (d *Daemon) resetAutoLevels(prev, next *settings.UserSettings) {
 // bool reports whether a value exists at all, so callers can keep their own
 // default for unknown resources.
 func (d *Daemon) effectiveBrightness(resourceID string) (float64, bool) {
+	curve := d.profile().Brightness
 	values := d.user.Get().Values
 	if values.BrightnessMode[resourceID] == settings.BrightnessAuto {
 		d.autoMu.Lock()
 		lvl, ok := d.autoLvl[resourceID]
 		d.autoMu.Unlock()
 		if ok {
-			return clampAutoBrightness(lvl), true
+			return clampAutoBrightness(curve, lvl), true
 		}
 		// No valid sample yet: an enabled automatic display still must not
 		// blank, so a persisted manual 0 is treated as the visible floor.
 		v, ok := values.DisplayBrightness[resourceID]
 		if !ok {
-			return autoBrightnessFloor, true
+			return curve.AutoFloor, true
 		}
-		return clampAutoBrightness(v), true
+		return clampAutoBrightness(curve, v), true
 	}
 	v, ok := values.DisplayBrightness[resourceID]
 	return v, ok
@@ -147,6 +130,7 @@ func (d *Daemon) effectiveBrightness(resourceID string) (float64, bool) {
 // autoBrightnessLoop samples the ambient sensor once a second and animates the
 // auto-managed resources toward the stock curve.
 func (d *Daemon) autoBrightnessLoop() {
+	curve := d.profile().Brightness
 	sensors := d.dev.Sensors()
 	haveSensor := false
 	if sensors != nil {
@@ -157,7 +141,7 @@ func (d *Daemon) autoBrightnessLoop() {
 			}
 		}
 	}
-	tick := time.NewTicker(brightnessTick)
+	tick := time.NewTicker(curve.Tick)
 	defer tick.Stop()
 	lastSample := time.Time{}
 	targets := map[string]float64{}
@@ -169,11 +153,11 @@ func (d *Daemon) autoBrightnessLoop() {
 		case <-tick.C:
 		}
 		values := d.user.Get().Values
-		if time.Since(lastSample) >= autoBrightnessPoll {
+		if time.Since(lastSample) >= curve.PollInterval {
 			lastSample = time.Now()
 			if haveSensor {
 				if lux, ok := sensors.Read("sensor.ambient_light"); ok {
-					target, valid := autoBrightness(lux)
+					target, valid := autoBrightness(curve, lux)
 					if !valid {
 						// ParseFloat accepts "nan"/"inf" and a sensor can return
 						// a transient negative; none of those mean darkness.
@@ -190,7 +174,7 @@ func (d *Daemon) autoBrightnessLoop() {
 						prev, known := targets[info.ResourceId]
 						// Stock only re-applies when the calculated value moves by
 						// more than five percentage points.
-						if known && math.Abs(prev-target) <= stockBrightnessDeadband {
+						if known && math.Abs(prev-target) <= curve.Deadband {
 							continue
 						}
 						targets[info.ResourceId] = target
@@ -211,7 +195,7 @@ func (d *Daemon) autoBrightnessLoop() {
 			if !ok {
 				current = target // the first sample applies immediately
 			}
-			d.autoLvl[id] = stepToward(current, target, brightnessAnimStep)
+			d.autoLvl[id] = stepToward(current, target, curve.AnimationStep)
 		}
 		d.autoMu.Unlock()
 	}

@@ -6,17 +6,17 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
 // The built-in ring app's standard RingService is read over the public binary
 // protobuf app-bus wire. Effects and palettes are selected through the app's
 // normal typed settings; this read-only card shows what the real app is
 // rendering.
-const ringServiceAPI = "capsula.contracts.ring.v1.RingService"
+const ringServiceAPI = "capsulad.contracts.ring.v1.RingService"
 
-const ringAppID = "capsula.ring"
+const ringAppID = "capsulad.ring"
 
 func findRingService() (string, error) {
 	return ringv1.RingService_ServiceDesc.ServiceName, nil

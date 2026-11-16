@@ -1,4 +1,4 @@
-APP_ID := org.capsula.dumbassistant
+APP_ID := org.capsulad.dumbassistant
 OUT ?= ../../build/apps/$(APP_ID)
 ARTIFACT_DIR := $(dir $(OUT))
 GO ?= go
@@ -49,7 +49,7 @@ build:
 	cp assets/reply.wav $(OUT)/assets/reply.wav
 
 # package writes the installable artifact beside the package directory:
-# <artifact-dir>/org.capsula.dumbassistant-<version>.tar.gz. The version comes
+# <artifact-dir>/org.capsulad.dumbassistant-<version>.tar.gz. The version comes
 # from manifest.toml, so no version is repeated here.
 package: build
 	@test -x "$(CLI)" || { \

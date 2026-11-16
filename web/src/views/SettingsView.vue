@@ -44,11 +44,30 @@ const resourceTimers = { display: null, ring: null }
 const busy = ref('')
 const btOverride = ref(null)
 const unpairTarget = ref(null)
+// The advertised name dialog keeps its own draft: an incoming overview or
+// settings snapshot must never overwrite what the administrator is typing.
+const adapterNameOpen = ref(false)
+const adapterNameDraft = ref('')
+const adapterNameError = ref('')
+const adapterNameSaving = ref(false)
+// BlueZ/HCI advertises at most 248 UTF-8 bytes; the daemon validates the same
+// rule, and this copy exists only to keep Save disabled before the round trip.
+const ADAPTER_NAME_MAX_BYTES = 248
 
 const values = computed(() => data.value?.values || {})
 const apps = computed(() => data.value?.apps || [])
 const ambient = computed(() => Boolean(data.value?.ambientAvailable))
 const btStatus = computed(() => btOverride.value || data.value?.bluetooth || null)
+const adapterNameBytes = computed(() =>
+  new TextEncoder().encode(adapterNameDraft.value.trim()).length
+)
+const adapterNameValid = computed(() => {
+  const name = adapterNameDraft.value.trim()
+  if (!name || adapterNameBytes.value > ADAPTER_NAME_MAX_BYTES) return false
+  // Same control-character refusal as the daemon: NUL and friends would be
+  // mangled by BlueZ's alias and the provisioning AP SSID.
+  return !/[\u0000-\u001f\u007f-\u009f]/.test(name)
+})
 const pairedDevices = computed(() => overviewData.value?.pairedDevices || [])
 // What the speaker answers to on the network: the advertised name already
 // carries its `.local` suffix. Without one, only the saved hostname is honest;
@@ -418,6 +437,48 @@ async function confirmUnpair() {
   }
 }
 
+function openAdapterName() {
+  if (!btStatus.value?.present || busy.value) return
+  adapterNameDraft.value = btStatus.value?.name || ''
+  adapterNameError.value = ''
+  adapterNameOpen.value = true
+}
+
+function closeAdapterName() {
+  adapterNameOpen.value = false
+  adapterNameDraft.value = ''
+  adapterNameError.value = ''
+}
+
+async function saveAdapterName() {
+  if (adapterNameSaving.value) return
+  const name = adapterNameDraft.value.trim()
+  if (!adapterNameValid.value) {
+    adapterNameError.value = `Use 1 to ${ADAPTER_NAME_MAX_BYTES} bytes with no control characters.`
+    return
+  }
+  adapterNameSaving.value = true
+  busy.value = 'bluetooth'
+  adapterNameError.value = ''
+  try {
+    const result = await socket.request({ bluetooth: { setAdapterName: { name } } })
+    // The result carries the adapter state the manager observed after the
+    // write; adopt exactly that, never the draft.
+    if (result?.bluetooth?.status) btOverride.value = result.bluetooth.status
+    const shown = result?.bluetooth?.status?.name || name
+    adapterNameOpen.value = false
+    adapterNameDraft.value = ''
+    notify.success(`Device name changed to ${shown}.`)
+  } catch (err) {
+    // Keep the dialog open so the administrator can correct the name.
+    adapterNameError.value = err.message || 'The device name was not changed.'
+    notify.error(adapterNameError.value)
+  } finally {
+    adapterNameSaving.value = false
+    busy.value = ''
+  }
+}
+
 // ---- Startup and hostname -------------------------------------------------
 
 function toggleStartup(event) {
@@ -473,7 +534,7 @@ const sections = [
     id: 'bluetooth',
     icon: 'bluetooth',
     title: 'Bluetooth',
-    keywords: ['bluetooth', 'pair', 'unpair', 'discoverable', 'incoming', 'speaker']
+    keywords: ['bluetooth', 'pair', 'unpair', 'discoverable', 'incoming', 'speaker', 'name', 'rename']
   },
   {
     id: 'wifi',
@@ -791,7 +852,23 @@ function jumpTo(id) {
               <Icon size="20px" class="text-base-content/60">bluetooth</Icon>
               <h2 class="text-lg font-semibold">Bluetooth</h2>
             </div>
-            <p v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</p>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-sm font-medium">Device name</span>
+              <span class="flex min-w-0 items-center gap-1">
+                <span class="truncate font-mono text-xs text-base-content/60">
+                  {{ btStatus?.name || '—' }}
+                </span>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm btn-square"
+                  aria-label="Change Bluetooth device name"
+                  :disabled="!btStatus?.present || !!busy"
+                  @click="openAdapterName"
+                >
+                  <Icon size="18px">edit</Icon>
+                </button>
+              </span>
+            </div>
           </div>
 
           <div class="flex flex-col gap-3">
@@ -933,6 +1010,48 @@ function jumpTo(id) {
         </div>
       </section>
     </template>
+
+    <ModalDialog
+      v-if="adapterNameOpen"
+      title="Change device name"
+      max-width="max-w-md"
+      @close="closeAdapterName"
+    >
+      <form class="flex flex-col gap-3" @submit.prevent="saveAdapterName">
+        <label class="flex flex-col gap-1.5 text-sm">
+          <span class="font-medium">Device name</span>
+          <input
+            v-model="adapterNameDraft"
+            type="text"
+            class="input input-bordered w-full"
+            maxlength="248"
+            autocomplete="off"
+            spellcheck="false"
+            autofocus
+            aria-label="Bluetooth device name"
+            aria-describedby="bluetooth-name-help"
+            :aria-invalid="adapterNameError ? 'true' : 'false'"
+          />
+        </label>
+        <p id="bluetooth-name-help" class="text-xs text-base-content/60">
+          Shown to nearby devices when pairing and in their Bluetooth menu.
+          <span class="tabular-nums">{{ adapterNameBytes }} / {{ ADAPTER_NAME_MAX_BYTES }} bytes</span>
+        </p>
+        <p v-if="adapterNameError" class="text-sm text-error" role="alert">{{ adapterNameError }}</p>
+        <div class="modal-action m-0">
+          <button type="button" class="btn btn-ghost" @click="closeAdapterName">Cancel</button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            :disabled="adapterNameSaving || !adapterNameValid"
+            :aria-busy="adapterNameSaving ? 'true' : 'false'"
+          >
+            <span v-if="adapterNameSaving" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+            Save
+          </button>
+        </div>
+      </form>
+    </ModalDialog>
 
     <ModalDialog v-if="unpairTarget" title="Unpair device" @close="unpairTarget = null">
       <p class="text-sm">

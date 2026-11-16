@@ -20,8 +20,11 @@ pub const CANCELLED: i32 = 11;
 pub const NOT_FOUND: i32 = 12;
 pub const BUSY: i32 = 13;
 pub const INTERNAL: i32 = 14;
+/// A bounded buffer (request body, response body or header block) exceeded its
+/// configured cap. Appended to ABI v1 without changing the existing values.
+pub const TOO_LARGE: i32 = 15;
 
-/// Library-owned output buffer. Kept layout-identical to `capsula_buf`.
+/// Library-owned output buffer. Kept layout-identical to `capsulad_buf`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Buf {
@@ -99,7 +102,7 @@ pub fn guard(f: impl FnOnce() -> i32) -> i32 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(status) => status,
         Err(_) => {
-            set_last_error("capsula native: caught internal panic");
+            set_last_error("capsulad native: caught internal panic");
             INTERNAL
         }
     }
@@ -155,7 +158,7 @@ pub unsafe fn input_str<'a>(ptr: *const c_char, len: usize) -> SdkResult<&'a str
 ///   always equals `bytes.len()`, so the sentinel is never counted in `len`.
 ///
 /// For JSON/UTF-8 outputs the sentinel is the C string terminator promised by
-/// `capsula.h` (`data[len] == 0`); for raw PCM the sentinel is padding outside
+/// `capsulad.h` (`data[len] == 0`); for raw PCM the sentinel is padding outside
 /// the payload and `len` stays the exact sample byte count.
 pub fn alloc_buf(bytes: Vec<u8>) -> Buf {
     if bytes.is_empty() {
@@ -206,7 +209,7 @@ pub unsafe fn free_buf(buf: Buf) -> SdkResult<()> {
     Ok(())
 }
 
-/// Mirrors `capsula_pcm_format` in the public header.
+/// Mirrors `capsulad_pcm_format` in the public header.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PcmFormat {
@@ -216,7 +219,7 @@ pub struct PcmFormat {
     pub reserved: u32,
 }
 
-/// Mirrors `capsula_pcm_event` in the public header.
+/// Mirrors `capsulad_pcm_event` in the public header.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PcmEvent {
@@ -267,7 +270,7 @@ mod tests {
 
     #[test]
     fn string_buffer_excludes_nul_from_len() {
-        let value = "capsula \u{1F680} hello";
+        let value = "capsulad \u{1F680} hello";
         let buf = alloc_string(value);
         assert_eq!(buf.len, value.len());
         assert_eq!(payload_at(buf), value.as_bytes().to_vec());
@@ -298,7 +301,10 @@ mod tests {
     fn free_rejects_impossible_lengths_without_dereferencing() {
         let dangling = std::ptr::NonNull::<u8>::dangling().as_ptr();
         for len in [0, usize::MAX, isize::MAX as usize] {
-            let buf = Buf { data: dangling, len };
+            let buf = Buf {
+                data: dangling,
+                len,
+            };
             let err = unsafe { free_buf(buf) }.expect_err("impossible length must be rejected");
             assert_eq!(err.status, INVALID_ARGUMENT);
         }

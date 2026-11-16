@@ -14,9 +14,20 @@ export async function fetchWifi() {
   return snap.wifi
 }
 
+// A command resolves with the whole Result. Its `wifi` field is a WifiResult
+// { message, wifi: WifiView }, so helpers must unwrap the nested view: callers
+// adopt a WifiView (revision, knownNetworks, scanResults) exactly like the
+// snapshot path does. A missing view is a protocol violation, never an empty
+// view, so a broken contract fails loudly instead of rendering "no networks".
+function wifiView(result, command) {
+  const view = result?.wifi?.wifi
+  if (!view) throw new Error(`malformed Wi-Fi ${command} response: missing WifiView`)
+  return view
+}
+
 export async function scanWifi() {
   const result = await socket.request({ wifi: { scan: {} } }, { timeout: 40000 })
-  return result.wifi
+  return wifiView(result, 'scan')
 }
 
 export async function connectWifi({ ssid, passphrase, security }) {
@@ -24,10 +35,10 @@ export async function connectWifi({ ssid, passphrase, security }) {
     { wifi: { connect: { ssid, passphrase, security } } },
     { timeout: 60000 }
   )
-  return result.wifi
+  return wifiView(result, 'connect')
 }
 
 export async function forgetWifi(ssid) {
   const result = await socket.request({ wifi: { forget: { ssid } } }, { timeout: 30000 })
-  return result.wifi
+  return wifiView(result, 'forget')
 }

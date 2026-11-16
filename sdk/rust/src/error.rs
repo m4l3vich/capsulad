@@ -1,7 +1,7 @@
 //! Error type shared by every fallible operation.
 //!
-//! The shared library reports a `capsula_status`; gRPC failures additionally
-//! carry the canonical gRPC code through `capsula_call_status`. Both are kept
+//! The shared library reports a `capsulad_status`; gRPC failures additionally
+//! carry the canonical gRPC code through `capsulad_call_status`. Both are kept
 //! so callers can branch on the transport outcome without parsing strings.
 
 use std::fmt;
@@ -11,7 +11,7 @@ pub const CODE_LOAD: i32 = -1;
 pub const CODE_ABI: i32 = -2;
 pub const CODE_INVALID_ARGUMENT: i32 = -5;
 
-/// An error returned by the Capsula shared engine or by this binding.
+/// An error returned by the Capsulad shared engine or by this binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     status: i32,
@@ -20,7 +20,7 @@ pub struct Error {
 }
 
 impl Error {
-    /// Error carrying a native `capsula_status` and no gRPC code.
+    /// Error carrying a native `capsulad_status` and no gRPC code.
     pub fn from_status(status: i32, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -43,7 +43,7 @@ impl Error {
         Self::from_status(status, message)
     }
 
-    /// Native `capsula_status` value (`0` is never stored).
+    /// Native `capsulad_status` value (`0` is never stored).
     pub fn status(&self) -> i32 {
         self.status
     }

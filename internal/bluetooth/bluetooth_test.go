@@ -1405,3 +1405,103 @@ func TestAbsoluteVolumeGraceWindowKeepsTheRequest(t *testing.T) {
 		t.Fatalf("pending level = %d ok=%v after an early peer report", level, ok)
 	}
 }
+
+// TestValidateAdapterName pins the single name rule shared by the manager and
+// the Web UI: trimmed, 1..248 UTF-8 bytes, no control characters.
+func TestValidateAdapterName(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+		ok    bool
+	}{
+		{name: "plain", input: "Living Room", want: "Living Room", ok: true},
+		{name: "trimmed", input: "  Living Room  ", want: "Living Room", ok: true},
+		{name: "unicode", input: "Кухня", want: "Кухня", ok: true},
+		{name: "248 bytes", input: strings.Repeat("a", 248), want: strings.Repeat("a", 248), ok: true},
+		{name: "249 bytes", input: strings.Repeat("a", 249)},
+		{name: "248 utf-8 bytes", input: strings.Repeat("ж", 124), want: strings.Repeat("ж", 124), ok: true},
+		{name: "250 utf-8 bytes", input: strings.Repeat("ж", 125)},
+		{name: "empty", input: ""},
+		{name: "whitespace only", input: " \t\n "},
+		{name: "nul", input: "bad\x00name"},
+		{name: "newline", input: "line\nbreak"},
+		{name: "escape", input: "bell\x1b"},
+		{name: "delete", input: "del\u007f"},
+		{name: "invalid utf-8", input: "bad\xffname"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ValidateAdapterName(tc.input)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("ValidateAdapterName(%q) = %v", tc.input, err)
+				}
+				if got != tc.want {
+					t.Fatalf("ValidateAdapterName(%q) = %q, want %q", tc.input, got, tc.want)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidName) {
+				t.Fatalf("ValidateAdapterName(%q) error = %v, want ErrInvalidName", tc.input, err)
+			}
+			if got != "" {
+				t.Fatalf("rejected name returned %q", got)
+			}
+		})
+	}
+}
+
+// TestMemorySetAdapterName pins the simulator side: the trimmed name becomes
+// the advertised status, the revision advances and a watcher is told the
+// adapter changed; a refused name leaves the state untouched.
+func TestMemorySetAdapterName(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewMemory()
+	events := m.Watch(ctx)
+
+	m.mu.Lock()
+	before := m.revision
+	m.mu.Unlock()
+
+	if err := m.SetAdapterName(ctx, "  Kitchen Speaker  "); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Name != "Kitchen Speaker" {
+		t.Fatalf("status name = %q, want the trimmed name", status.Name)
+	}
+	m.mu.Lock()
+	after := m.revision
+	m.mu.Unlock()
+	if after <= before {
+		t.Fatalf("revision did not advance: %d -> %d", before, after)
+	}
+	select {
+	case ev := <-events:
+		if ev.Kind != EventAdapter {
+			t.Fatalf("rename event = %+v, want EventAdapter", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rename published no event")
+	}
+
+	for _, bad := range []string{"", "   ", "bad\x00name", strings.Repeat("a", 249)} {
+		if err := m.SetAdapterName(ctx, bad); !errors.Is(err, ErrInvalidName) {
+			t.Fatalf("SetAdapterName(%q) error = %v, want ErrInvalidName", bad, err)
+		}
+	}
+	status, _ = m.Status(ctx)
+	if status.Name != "Kitchen Speaker" {
+		t.Fatalf("a refused name changed the adapter: %q", status.Name)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("a refused name published %+v", ev)
+	default:
+	}
+}

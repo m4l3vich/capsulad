@@ -34,16 +34,13 @@ func (d *Daemon) supersedeVendor() {
 }
 
 // supersedeNames resolves the configured policy: "off" disables takeover,
-// "auto" targets the known stock stack, otherwise a comma-separated list.
+// "auto" targets the profile's vendor stack, otherwise a comma-separated list.
 func (d *Daemon) supersedeNames() []string {
 	switch strings.TrimSpace(strings.ToLower(d.cfg.Supersede)) {
 	case "off", "none":
 		return nil
 	case "", "auto":
-		if strings.Contains(d.cfg.Platform, "-stock") {
-			return []string{"sysmon", "voice-agent"}
-		}
-		return nil
+		return append([]string(nil), d.profile().VendorProcesses...)
 	}
 	var out []string
 	for _, name := range strings.Split(d.cfg.Supersede, ",") {
@@ -68,10 +65,13 @@ func (d *Daemon) stopVendor(names []string) {
 			_ = syscall.Kill(p.PID, syscall.SIGKILL)
 		}
 	}
-	for _, p := range watchdogHolders() {
-		d.logs.Infof("daemon", "", "superseding %s pid=%d (holds /dev/watchdog)", p.Name, p.PID)
-		_ = syscall.Kill(p.PID, syscall.SIGTERM)
-		time.Sleep(150 * time.Millisecond)
+	watchdogPath := d.profile().Watchdog.Path
+	if watchdogPath != "" {
+		for _, p := range watchdogHolders(watchdogPath) {
+			d.logs.Infof("daemon", "", "superseding %s pid=%d (holds %s)", p.Name, p.PID, watchdogPath)
+			_ = syscall.Kill(p.PID, syscall.SIGTERM)
+			time.Sleep(150 * time.Millisecond)
+		}
 	}
 }
 
@@ -136,8 +136,9 @@ func findVendor(names []string) []vendorProcess {
 	return out
 }
 
-// watchdogHolders lists processes holding /dev/watchdog (and its aliases).
-func watchdogHolders() []vendorProcess {
+// watchdogHolders lists processes holding the configured watchdog device (and
+// its aliases).
+func watchdogHolders(watchdogPath string) []vendorProcess {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
@@ -159,7 +160,7 @@ func watchdogHolders() []vendorProcess {
 			if err != nil {
 				continue
 			}
-			if strings.HasPrefix(link, "/dev/watchdog") {
+			if strings.HasPrefix(link, watchdogPath) {
 				holds = true
 				break
 			}

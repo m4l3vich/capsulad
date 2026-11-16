@@ -29,8 +29,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/assets"
+	"capsulad/internal/bluetooth"
 	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"
 	"capsulad/internal/registry"
@@ -47,7 +48,7 @@ import (
 //go:embed all:dist
 var distFS embed.FS
 
-const mediaService = "capsula.contracts.media.v1.MediaPlayerService"
+const mediaService = "capsulad.contracts.media.v1.MediaPlayerService"
 
 type Server struct {
 	Addr     string
@@ -71,6 +72,11 @@ type Server struct {
 	// Wifi is the shared station/provisioning controller. Optional: a daemon
 	// without Wi-Fi still serves a snapshot explaining unavailability.
 	Wifi wifi.Controller
+	// Bluetooth is the daemon's adapter manager. It is used only for the
+	// administrator-only advertised-name change, which deliberately has no
+	// framework/app RPC; the other adapter commands stay on SystemService.
+	// Optional so a focused test can omit it and get an unavailable error.
+	Bluetooth bluetooth.Manager
 	// Wakeword reads the daemon-owned bounded detection history. Optional so
 	// focused tests render an empty recent-detections list.
 	Wakeword wakewordSource
@@ -189,7 +195,7 @@ func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 		// Every browser mutation proves same-origin intent and the session's
 		// CSRF token, not just POST. Only form-encoded bodies are parsed here:
 		// a raw body (an asset upload) is left unread for its handler, and its
-		// CSRF proof arrives in the X-Capsula-CSRF header.
+		// CSRF proof arrives in the X-Capsulad-CSRF header.
 		if isMutatingMethod(r.Method) {
 			if isFormBody(r) {
 				if err := r.ParseForm(); err != nil {
@@ -291,7 +297,7 @@ func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
 		}
 		token = hex.EncodeToString(b[:])
 		http.SetCookie(w, &http.Cookie{
-			Name: "capsula_csrf", Value: token, Path: "/",
+			Name: "capsulad_csrf", Value: token, Path: "/",
 			HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 		})
 	}
@@ -300,7 +306,7 @@ func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
 
 func csrfFrom(cookies []*http.Cookie) string {
 	for _, c := range cookies {
-		if c.Name == "capsula_csrf" {
+		if c.Name == "capsulad_csrf" {
 			return c.Value
 		}
 	}
@@ -309,7 +315,7 @@ func csrfFrom(cookies []*http.Cookie) string {
 
 func (s *Server) checkCSRF(r *http.Request) bool {
 	want := csrfFrom(r.Cookies())
-	got := r.Header.Get("X-Capsula-CSRF")
+	got := r.Header.Get("X-Capsulad-CSRF")
 	if got == "" {
 		got = r.PostFormValue("csrf")
 	}
@@ -485,7 +491,7 @@ func (s *Server) certPEM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="capsula-server.crt"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="capsulad-server.crt"`)
 	_, _ = w.Write(pem)
 }
 

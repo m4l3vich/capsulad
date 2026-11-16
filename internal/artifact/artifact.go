@@ -1,4 +1,4 @@
-// Package artifact reads, validates and writes Capsula application packages.
+// Package artifact reads, validates and writes Capsulad application packages.
 //
 // The package format is pinned: a gzip-compressed tar (or an equivalent
 // directory) with manifest.toml at the archive root, relative slash-separated
@@ -84,7 +84,7 @@ func Open(src string) (*Package, error) {
 
 // OpenLimit is Open with an explicit size budget.
 func OpenLimit(src string, limits Limits) (*Package, error) {
-	parent, err := os.MkdirTemp("", "capsula-package-")
+	parent, err := os.MkdirTemp("", "capsulad-package-")
 	if err != nil {
 		return nil, err
 	}

@@ -24,11 +24,11 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/assets"
 	"capsulad/internal/audio"
 	"capsulad/internal/backend"
-	"capsulad/internal/backend/rockchip"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/bus"
 	"capsulad/internal/discovery"
@@ -53,7 +53,22 @@ import (
 	"capsulad/internal/wifi"
 )
 
+// BackendFactory constructs a hardware backend from a device profile. The log
+// hooks are optional; a nil hook discards the message.
+type BackendFactory func(profile.Profile, func(format string, args ...any), func(format string, args ...any)) (backend.Backend, error)
+
 type Config struct {
+	// Profile is the device description selected by the composition root. A
+	// nil profile means the neutral simulator profile.
+	Profile *profile.Profile
+	// NewBackend constructs the hardware backend for the selected profile.
+	// The daemon passes its diagnostic hooks so backend messages reach the
+	// rotated daemon log and the Web UI; nil selects the simulator.
+	NewBackend BackendFactory
+	// WatchdogOpen opens the hardware liveness timer. The composition root
+	// supplies the platform implementation; nil disables the supervisor.
+	WatchdogOpen func(path string) (backend.Watchdog, error)
+
 	Platform        string
 	DataDir         string
 	RunDir          string
@@ -96,16 +111,18 @@ type Config struct {
 	// stops the stock assistant stack on stock platforms, "off" leaves it
 	// running, any other value is a comma-separated process list.
 	Supersede string
-	// NativeLibDir is the host directory holding the shared libcapsula runtime
-	// and capsula-native.json. Empty means the launcher resolves it next to the
+	// NativeLibDir is the host directory holding the shared libcapsulad runtime
+	// and capsulad-native.json. Empty means the launcher resolves it next to the
 	// daemon binary (<daemon-dir>/lib, else <daemon-dir>/../lib).
 	NativeLibDir string
 }
 
 func DefaultConfig() Config {
-	base := ".capsula"
+	base := ".capsulad"
 	run := filepath.Join(base, "run")
+	sim := profile.Simulator
 	return Config{
+		Profile:        &sim,
 		Platform:       "simulator",
 		DataDir:        base,
 		RunDir:         run,
@@ -115,9 +132,9 @@ func DefaultConfig() Config {
 		AssetsDir:      filepath.Join(base, "assets"),
 		SandboxMode:    "auto",
 		SandboxUIDBase: 20000,
-		MemLimitMB:     80,
+		MemLimitMB:     sim.Memory.HeapLimitMB,
 		Watchdog:       "auto",
-		DeviceModel:    "Capsula Mini (simulator)",
+		DeviceModel:    sim.Model.ModelFallback,
 	}
 }
 
@@ -268,21 +285,38 @@ type invocationRecord struct {
 	Detail     string
 }
 
-// New constructs the daemon and probes hardware. Nothing is started until Run.
 // applyMemoryBudget keeps the Go heap inside the device budget: the soft limit
-// makes the GC work harder instead of letting the kernel kill the daemon.
-func applyMemoryBudget(cfg Config) {
+// makes the GC work harder instead of letting the kernel kill the daemon. The
+// limit itself stays a Config value because -mem-limit-mb 0 must disable it;
+// the profile supplies the CLI default and the GC target.
+func applyMemoryBudget(cfg Config, prof *profile.Profile) {
 	if cfg.MemLimitMB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemLimitMB) << 20)
 	}
-	debug.SetGCPercent(50)
+	debug.SetGCPercent(prof.Memory.GCPercent)
+}
+
+// profileOrDefault resolves the device profile. The composition root normally
+// sets it; tests and embedders that only name a platform get the matching
+// profile.
+func profileOrDefault(p *profile.Profile, platform string) *profile.Profile {
+	if p != nil {
+		return p
+	}
+	if platform == "rockchip-stock" || platform == "rockchip" {
+		v := profile.RK3308Rev4Stock
+		return &v
+	}
+	v := profile.Simulator
+	return &v
 }
 
 func New(parent context.Context, cfg Config) (*Daemon, error) {
-	applyMemoryBudget(cfg)
 	if cfg.Platform == "" {
 		cfg.Platform = "simulator"
 	}
+	cfg.Profile = profileOrDefault(cfg.Profile, cfg.Platform)
+	applyMemoryBudget(cfg, cfg.Profile)
 	if cfg.DataDir == "" {
 		cfg.DataDir = DefaultConfig().DataDir
 	}
@@ -347,9 +381,17 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		cancel()
 		return nil, err
 	}
+	serialPath := hardwareSerialPath
+	serialFields := cfg.Profile.Serial.Fields
+	if cfg.Profile.Serial.Path != "" {
+		serialPath = cfg.Profile.Serial.Path
+	}
+	if len(serialFields) == 0 {
+		serialFields = hardwareSerialFields
+	}
 	d := &Daemon{
 		cfg: cfg, ctx: ctx, cancel: cancel, clock: clock, logs: logs, bootID: ids.New("boot"),
-		hardwareSerial: readHardwareSerial(),
+		hardwareSerial: readHardwareSerialAt(serialPath, serialFields),
 		internalToken:  internalToken,
 		prov:           map[string]provenance.Result{},
 		invocations:    map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
@@ -364,29 +406,27 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	case "simulator", "":
 		d.dev = backend.NewSimulator(backend.SimulatorOptions{DeviceID: cfg.DeviceID, Model: cfg.DeviceModel})
 	case "rockchip-stock", "rockchip":
+		if cfg.NewBackend == nil {
+			logs.Close()
+			cancel()
+			return nil, fmt.Errorf("platform %q has no backend factory", cfg.Platform)
+		}
 		// Backend audio diagnostics must reach the same rotated log and Web UI
 		// as the rest of the daemon; the backend itself never writes to the
 		// process logger.
-		rcCfg := rockchip.DefaultConfig()
-		rcCfg.Warnf = func(format string, args ...any) { logs.Warnf("audio", "", format, args...) }
-		rcCfg.Infof = func(format string, args ...any) { logs.Infof("audio", "", format, args...) }
-		dev, err := rockchip.New(rcCfg)
+		dev, err := cfg.NewBackend(*cfg.Profile,
+			func(format string, args ...any) { logs.Warnf("audio", "", format, args...) },
+			func(format string, args ...any) { logs.Infof("audio", "", format, args...) })
 		if err != nil {
 			logs.Close()
 			cancel()
 			return nil, err
 		}
 		d.dev = dev
-	case "amlogic-stock", "amlogic-alpine":
-		// Amlogic targets are in scope for the framework but this build has no
-		// probed backend for them. Refuse to pretend a simulator is hardware.
-		logs.Close()
-		cancel()
-		return nil, fmt.Errorf("platform %q is not implemented yet: no Amlogic stock/Alpine backend has been probed on hardware", cfg.Platform)
 	default:
 		logs.Close()
 		cancel()
-		return nil, fmt.Errorf("unknown platform %q (simulator, rockchip-stock, amlogic-stock, amlogic-alpine)", cfg.Platform)
+		return nil, fmt.Errorf("unknown platform %q (simulator, rockchip-stock)", cfg.Platform)
 	}
 
 	if cfg.Platform == "simulator" {
@@ -416,7 +456,11 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		d.wifiMgr = wifi.NewSimulator(wifi.SimulatorOptions{Detail: "the simulator has no Wi-Fi radio"})
 	} else if manager, err := wifi.Open(wifi.Config{
 		DataDir: cfg.DataDir, RunDir: cfg.RunDir, Logs: logs, APName: d.wifiAPName,
-		OnChange: func() { d.uiChanges.Publish(uichanges.Wifi) },
+		StockConfigPaths:  cfg.Profile.Wifi.StockConfigPaths,
+		StockCtrlDirs:     cfg.Profile.Wifi.StockCtrlDirs,
+		RestoreConfigPath: cfg.Profile.Wifi.RestoreConfigPath,
+		AdoptStock:        cfg.Profile.Wifi.AdoptStock,
+		OnChange:          func() { d.uiChanges.Publish(uichanges.Wifi) },
 	}); err != nil {
 		logs.Warnf("wifi", "", "unavailable: %v", err)
 		d.wifiMgr = wifi.NewSimulator(wifi.SimulatorOptions{Detail: err.Error()})
@@ -486,6 +530,11 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.registerAssistantSettingsValidator()
 
 	d.audio = audio.NewManager(ctx, clock, logs, d.dev.Audio(), audio.Options{
+		OutputFormat: backend.AudioFormat{
+			Format:   backend.SampleFormat(cfg.Profile.Audio.PlaybackFormat),
+			RateHz:   cfg.Profile.Audio.PlaybackRateHz,
+			Channels: cfg.Profile.Audio.PlaybackChannels,
+		},
 		IndicationActive: d.indicationActive,
 		IndicationCue:    d.audibleMicIndication,
 		WatchdogGraceMS:  5000,
@@ -517,7 +566,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.startWakewordEngine()
 
 	d.autoLvl = map[string]float64{}
-	d.wd = newWatchdogSupervisor(cfg.RunDir, logs, cfg.Watchdog)
+	d.wd = newWatchdogSupervisor(cfg.RunDir, logs, cfg.Watchdog, cfg.Profile.Watchdog, cfg.WatchdogOpen)
 
 	if err := d.audio.Start(); err != nil {
 		logs.Warnf("daemon", "", "audio service unavailable: %v", err)
@@ -661,6 +710,16 @@ func (d *Daemon) writePIDFile() {
 	d.pidPath = path
 }
 
+// profile returns the selected device profile; a Daemon built directly in a
+// test without one behaves as the simulator.
+func (d *Daemon) profile() *profile.Profile {
+	if d.cfg.Profile != nil {
+		return d.cfg.Profile
+	}
+	v := profile.Simulator
+	return &v
+}
+
 // Run starts servers, boot applications and background loops; it blocks until
 // the context is cancelled or a fatal server error occurs.
 func (d *Daemon) Run() error {
@@ -698,6 +757,7 @@ func (d *Daemon) Run() error {
 			web.Apps = d.reg
 			web.Assets = d.assets
 			web.Wifi = d.wifiMgr
+			web.Bluetooth = d.bt
 			web.Wakeword = d.wake
 			d.web = web
 			go func() {
@@ -786,7 +846,7 @@ func (d *Daemon) localClientConn() *grpc.ClientConn {
 // internalTokenKey carries the daemon's per-boot internal-caller proof. Only
 // conns created by localClientConn attach it; it is not a user credential and
 // is never written to disk or logs.
-const internalTokenKey = "capsula-internal-token"
+const internalTokenKey = "capsulad-internal-token"
 
 type internalTokenAuth struct{ token string }
 
@@ -1030,10 +1090,6 @@ func (d *Daemon) platformProto() frameworkv1.TargetPlatform {
 		return frameworkv1.TargetPlatform_TARGET_PLATFORM_UNSPECIFIED
 	case backend.PlatformRockchipStock:
 		return frameworkv1.TargetPlatform_CAPSULA_MINI_ROCKCHIP_STOCK
-	case backend.PlatformAmlogicStock:
-		return frameworkv1.TargetPlatform_CAPSULA_MINI_AMLOGIC_STOCK
-	case backend.PlatformAmlogicAlpine:
-		return frameworkv1.TargetPlatform_CAPSULA_MINI_AMLOGIC_ALPINE
 	default:
 		return frameworkv1.TargetPlatform_TARGET_PLATFORM_UNSPECIFIED
 	}
@@ -1053,7 +1109,7 @@ func (d *Daemon) deviceInfo(bootID string) *frameworkv1.DeviceInfo {
 			Status: backendStatusProto(cap.Status), Detail: cap.Detail,
 		})
 	}
-	if d.wd != nil {
+	if d.wd != nil && d.profile().Watchdog.StatusID != "" {
 		st := d.wd.State()
 		status := backend.Unavailable
 		switch {
@@ -1067,7 +1123,7 @@ func (d *Daemon) deviceInfo(bootID string) *frameworkv1.DeviceInfo {
 			detail = fmt.Sprintf("%s armed, timeout %s; framework keeps the hardware timer alive instead of the vendor agent", st.path, st.timeout)
 		}
 		out.SubsystemBackends = append(out.SubsystemBackends, &frameworkv1.BackendAvailability{
-			Subsystem: "watchdog", BackendId: "rockchip.syswatchdog",
+			Subsystem: "watchdog", BackendId: d.profile().Watchdog.StatusID,
 			Status: backendStatusProto(status), Detail: detail,
 		})
 	}

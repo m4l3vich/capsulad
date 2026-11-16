@@ -10,8 +10,8 @@
 package phrasepb
 
 import (
-	commandspb "capsula/apps/marusia/internal/vkproto/commandspb"
-	optionspb "capsula/apps/marusia/internal/vkproto/optionspb"
+	commandspb "capsulad/apps/marusia/internal/vkproto/commandspb"
+	optionspb "capsulad/apps/marusia/internal/vkproto/optionspb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"

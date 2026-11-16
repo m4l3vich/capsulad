@@ -11,15 +11,13 @@ import (
 	"golang.org/x/sys/unix"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/profile"
 )
 
 // Generic Linux watchdog ioctls (include/uapi/linux/watchdog.h).
 const (
 	wdioKeepalive  = 0x80045705 // _IOR('W', 5, int)
 	wdioGetTimeout = 0x80045707 // _IOR('W', 7, int)
-	// watchdogDefaultTimeout is used when the driver refuses to report its
-	// armed timeout; the DesignWare watchdog on this firmware arms at 30 s.
-	watchdogDefaultTimeout = 30 * time.Second
 )
 
 // SysWatchdog is the RK3308 DesignWare /dev/watchdog. The vendor voice-agent
@@ -38,13 +36,13 @@ type SysWatchdog struct {
 // device starts the timer, so the caller must Feed it or Close it.
 func OpenWatchdog(path string) (*SysWatchdog, error) {
 	if path == "" {
-		path = "/dev/watchdog"
+		path = profile.RK3308Rev4Stock.Watchdog.Path
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return nil, err
 	}
-	w := &SysWatchdog{f: f, to: watchdogDefaultTimeout}
+	w := &SysWatchdog{f: f, to: profile.RK3308Rev4Stock.Watchdog.DefaultTimeout}
 	if secs, err := unix.IoctlGetInt(int(f.Fd()), wdioGetTimeout); err == nil && secs > 0 {
 		w.to = time.Duration(secs) * time.Second
 	}

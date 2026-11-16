@@ -4,9 +4,9 @@ Three public contracts are shared vocabulary between apps:
 
 | Contract | Service | Exposed by |
 |---|---|---|
-| Clock | `capsula.contracts.clock.v1.ClockService` | built-in app `capsula.clock` |
-| Ring | `capsula.contracts.ring.v1.RingService` | built-in app `capsula.ring` |
-| Media | `capsula.contracts.media.v1.MediaPlayerService` | any app that declares it; the daemon's Web UI also lists the connected Bluetooth source, which is framework-owned and has no app id |
+| Clock | `capsulad.contracts.clock.v1.ClockService` | built-in app `capsulad.clock` |
+| Ring | `capsulad.contracts.ring.v1.RingService` | built-in app `capsulad.ring` |
+| Media | `capsulad.contracts.media.v1.MediaPlayerService` | any app that declares it; the daemon's Web UI also lists the connected Bluetooth source, which is framework-owned and has no app id |
 
 They are ordinary app interfaces. There is no private path, no special token and no second
 socket: a caller targets the app ID through `AppBusService.Call`, with the same deadlines,
@@ -16,8 +16,8 @@ caller.
 Calling a standard contract:
 
 ```text
-target_app_id = "capsula.clock"
-grpc_service  = "capsula.contracts.clock.v1.ClockService"
+target_app_id = "capsulad.clock"
+grpc_service  = "capsulad.contracts.clock.v1.ClockService"
 rpc_name      = "GetState"
 request       = serialized GetStateRequest (empty message)
 ```
@@ -26,8 +26,8 @@ request       = serialized GetStateRequest (empty message)
 // Go: raw protobuf is always available, even without a descriptor.
 // Call is (ctx, targetAppID, service, rpc, requestBytes, timeout); the last
 // argument is a time.Duration budget, 0 for no deadline beyond the context.
-reply, err := client.Call(ctx, "capsula.clock",
-    "capsula.contracts.clock.v1.ClockService", "GetState", nil, 5*time.Second)
+reply, err := client.Call(ctx, "capsulad.clock",
+    "capsulad.contracts.clock.v1.ClockService", "GetState", nil, 5*time.Second)
 if err != nil {
     log.Fatal(err)
 }
@@ -37,9 +37,9 @@ _ = reply // unmarshal into your generated GetStateResponse
 ```js
 // QuickJS: the contract descriptors are part of the framework descriptor set,
 // so the JSON path works without registering anything.
-var state = capsula.routed("capsula.clock",
-  "capsula.contracts.clock.v1.ClockService", "GetState", {}, 5000);
-capsula.log("local time " + state.localTimeRfc3339);
+var state = capsulad.routed("capsulad.clock",
+  "capsulad.contracts.clock.v1.ClockService", "GetState", {}, 5000);
+capsulad.log("local time " + state.localTimeRfc3339);
 ```
 
 The three contract services are present in the framework's embedded descriptor set, so JSON
@@ -50,7 +50,7 @@ Discover them at runtime through `AppInterfaceService.ListInterfaces` and
 
 ## Clock
 
-`capsula.contracts.clock.v1.ClockService`, target app `capsula.clock`.
+`capsulad.contracts.clock.v1.ClockService`, target app `capsulad.clock`.
 
 Product rules:
 
@@ -166,8 +166,8 @@ The setting `alarm_labels` is a JSON object mapping each stable identity to a di
 // Ask for the next full snapshot; WatchState re-sends one after every change.
 // CallJSON is (ctx, targetAppID, service, rpc, request, response, timeout).
 var state map[string]any
-if err := client.CallJSON(ctx, "capsula.clock",
-    "capsula.contracts.clock.v1.ClockService", "GetState", nil, &state,
+if err := client.CallJSON(ctx, "capsulad.clock",
+    "capsulad.contracts.clock.v1.ClockService", "GetState", nil, &state,
     5*time.Second); err != nil {
     log.Fatal(err)
 }
@@ -178,7 +178,7 @@ fields it does not understand. Do not poll faster than `WatchState` sends; snaps
 
 ## Ring
 
-`capsula.contracts.ring.v1.RingService`, target app `capsula.ring`.
+`capsulad.contracts.ring.v1.RingService`, target app `capsulad.ring`.
 
 The ring still renders its baseline through normal presentation/capture routing. These RPCs
 read and change its declared settings; they never touch routing ownership, so changing settings
@@ -241,7 +241,7 @@ rotation rather than invented hues.
 ### Consuming the ring
 
 ```js
-var state = capsula.routed("capsula.ring", "capsula.contracts.ring.v1.RingService",
+var state = capsulad.routed("capsulad.ring", "capsulad.contracts.ring.v1.RingService",
                            "GetState", {}, 5000);
 if (!state.active) {
   // the ring is outside its active window; do not assume it is lit
@@ -253,7 +253,7 @@ device-level service, not another app's private configuration.
 
 ## Media
 
-`capsula.contracts.media.v1.MediaPlayerService`. This is an app-provided contract: the provider
+`capsulad.contracts.media.v1.MediaPlayerService`. This is an app-provided contract: the provider
 implements it and declares it, and consumers call it through the provider's app ID. No
 application is bundled with the daemon and no app id is reserved for media: a speaker with a
 connected phone has no media app at all.
@@ -303,7 +303,7 @@ Declare the interface in the manifest and add the provide hint so administrators
 provides = ["media_player"]
 
 [[interfaces]]
-service = "capsula.contracts.media.v1.MediaPlayerService"
+service = "capsulad.contracts.media.v1.MediaPlayerService"
 version = "v1"
 descriptor = "descriptors/media.protoset"   # optional: copy of the contract descriptor
 ```
@@ -329,7 +329,7 @@ var players struct {
     } `json:"players"`
 }
 if err := client.CallJSON(ctx, "org.example.player",
-    "capsula.contracts.media.v1.MediaPlayerService", "ListPlayers", nil, &players,
+    "capsulad.contracts.media.v1.MediaPlayerService", "ListPlayers", nil, &players,
     5*time.Second); err != nil {
     log.Fatal(err)
 }

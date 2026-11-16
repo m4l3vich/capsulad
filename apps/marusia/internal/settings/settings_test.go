@@ -6,15 +6,15 @@ import (
 	"strings"
 	"testing"
 
-	"capsula/apps/marusia/internal/vkclient"
-	"capsula/sdk/capsula"
+	"capsulad/apps/marusia/internal/vkclient"
+	"capsulad/sdk/capsulad"
 )
 
-func snapshot(values map[string]string) *capsula.SettingsChanged {
-	changed := &capsula.SettingsChanged{Revision: 1}
+func snapshot(values map[string]string) *capsulad.SettingsChanged {
+	changed := &capsulad.SettingsChanged{Revision: 1}
 	for key, value := range values {
 		encoded := `"` + value + `"`
-		changed.Values = append(changed.Values, capsula.SettingValue{Key: key, ValueJSON: encoded})
+		changed.Values = append(changed.Values, capsulad.SettingValue{Key: key, ValueJSON: encoded})
 	}
 	return changed
 }
@@ -35,7 +35,7 @@ func TestReadAppliesDefaults(t *testing.T) {
 }
 
 func TestReadRejectsMalformedJSON(t *testing.T) {
-	changed := &capsula.SettingsChanged{Values: []capsula.SettingValue{
+	changed := &capsulad.SettingsChanged{Values: []capsulad.SettingValue{
 		{Key: KeyEndpoint, ValueJSON: `{not a string}`},
 	}}
 	if _, err := Read(changed); err == nil {
@@ -43,7 +43,7 @@ func TestReadRejectsMalformedJSON(t *testing.T) {
 	}
 
 	// A malformed masked value must not be echoed back through the error.
-	secret := &capsula.SettingsChanged{Values: []capsula.SettingValue{
+	secret := &capsulad.SettingsChanged{Values: []capsulad.SettingValue{
 		{Key: KeySessionSecret, ValueJSON: `leaked-secret-value`},
 	}}
 	_, err := Read(secret)
@@ -277,5 +277,72 @@ func TestBuildRequiresCompleteSessionPair(t *testing.T) {
 	}
 	if config.SessionFile != "" {
 		t.Fatalf("session file = %q, want empty", config.SessionFile)
+	}
+}
+
+// TestPlaintextWarningOnCredentialCarryingEndpoints pins the decision behind
+// the one startup warning: a plaintext base is kept (test2 is a deliberate
+// operator test choice) but it is never silent when a credential would travel
+// over it.
+func TestPlaintextWarningOnCredentialCarryingEndpoints(t *testing.T) {
+	file := "/data/voice-agent/session.json"
+	cases := []struct {
+		name    string
+		config  Config
+		want    string // a substring the warning must carry; "" means no warning
+		notWant string
+	}{
+		{
+			name:   "https with a configured session is silent",
+			config: Config{BaseURL: "https://vc.go.mail.ru", SessionID: "sid", SessionSecret: "secret"},
+		},
+		{
+			name:   "plaintext without any credential source is silent",
+			config: Config{BaseURL: "http://voice-test2.example"},
+		},
+		{
+			name:    "plaintext with a configured session names the bearer token",
+			config:  Config{BaseURL: "http://voice-test2.example", SessionID: "sid", SessionSecret: "secret"},
+			want:    "unencrypted bearer token",
+			notWant: "secret",
+		},
+		{
+			name:    "plaintext with an xtoken names the attach body",
+			config:  Config{BaseURL: "http://voice-test2.example", XTokenID: "TOKEN-VALUE"},
+			want:    "xtoken_id is sent in the attach body",
+			notWant: "TOKEN-VALUE",
+		},
+		{
+			name:    "plaintext with only a session file warns about the eventual session",
+			config:  Config{BaseURL: "http://voice-test2.example", SessionFile: file},
+			want:    file,
+			notWant: "session_id",
+		},
+		{
+			name:   "uppercase scheme is still plaintext",
+			config: Config{BaseURL: "HTTP://voice-test2.example", SessionID: "sid", SessionSecret: "s"},
+			// The base is echoed as written; only the scheme test is normalised.
+			want: "unencrypted bearer token",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			warning := PlaintextWarning(tc.config)
+			if tc.want == "" {
+				if warning != "" {
+					t.Fatalf("warning = %q, want none", warning)
+				}
+				return
+			}
+			if !strings.Contains(warning, tc.want) {
+				t.Fatalf("warning = %q, want it to mention %q", warning, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(warning, tc.notWant) {
+				t.Fatalf("warning = %q leaked %q", warning, tc.notWant)
+			}
+			if !strings.Contains(warning, tc.config.BaseURL) {
+				t.Fatalf("warning = %q, want the endpoint named", warning)
+			}
+		})
 	}
 }

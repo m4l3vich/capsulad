@@ -10,9 +10,9 @@ use crate::bus::{self, Callbacks};
 use crate::call::{self, CallInner, CALLS};
 use crate::client::{ClientInner, CLIENTS};
 use crate::ffi::{
-    self, alloc_buf, alloc_json, guard, input_bytes, input_str, set_error, write_out, Buf,
-    PcmEvent, PcmFormat, SdkError, SdkResult, BUSY, INVALID_ARGUMENT, INVALID_MESSAGE, NOT_FOUND,
-    OK,
+    self, alloc_buf, alloc_json, alloc_string, guard, input_bytes, input_str, set_error, write_out,
+    Buf, PcmEvent, PcmFormat, SdkError, SdkResult, BUSY, INVALID_ARGUMENT, INVALID_MESSAGE,
+    NOT_FOUND, OK,
 };
 
 pub const ABI_MAJOR: u32 = 1;
@@ -20,7 +20,7 @@ pub const ABI_MINOR: u32 = 0;
 pub const VERSION: &str = "1.0.0";
 
 #[repr(C)]
-pub struct CapsulaApi {
+pub struct CapsuladApi {
     pub abi_major: u32,
     pub abi_minor: u32,
     pub struct_size: usize,
@@ -132,6 +132,49 @@ pub struct CapsulaApi {
     pub buf_free: unsafe extern "C" fn(Buf) -> i32,
     pub last_error: unsafe extern "C" fn() -> *const c_char,
     pub handle_info: unsafe extern "C" fn(u64, *mut Buf) -> i32,
+
+    // --- appended in ABI v1 (never reordered) -------------------------------
+    pub http_open: unsafe extern "C" fn(*const u8, usize, u32, *mut u64) -> i32,
+    pub http_close: unsafe extern "C" fn(u64) -> i32,
+    pub http_request: unsafe extern "C" fn(
+        u64,
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const u8,
+        usize,
+        *const u8,
+        usize,
+        u32,
+        *mut i32,
+        *mut Buf,
+        *mut Buf,
+    ) -> i32,
+    pub grpc_open:
+        unsafe extern "C" fn(*const c_char, usize, *const u8, usize, u32, *mut u64) -> i32,
+    pub call_start_meta: unsafe extern "C" fn(
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        i32,
+        u32,
+        *const u8,
+        usize,
+        *mut u64,
+    ) -> i32,
+    pub base64_encode: unsafe extern "C" fn(*const u8, usize, i32, *mut Buf) -> i32,
+    pub base64_decode: unsafe extern "C" fn(*const u8, usize, i32, *mut Buf) -> i32,
+    pub percent_encode: unsafe extern "C" fn(*const u8, usize, *mut Buf) -> i32,
+    pub percent_decode: unsafe extern "C" fn(*const u8, usize, *mut Buf) -> i32,
+    pub sha256: unsafe extern "C" fn(*const u8, usize, *mut Buf) -> i32,
+    pub random_bytes: unsafe extern "C" fn(*mut u8, usize) -> i32,
+    pub uuid_v4: unsafe extern "C" fn(*mut Buf) -> i32,
+    pub url_parse: unsafe extern "C" fn(*const c_char, usize, *mut Buf) -> i32,
+    pub http_cancel: unsafe extern "C" fn(u64, u64) -> i32,
 }
 
 #[repr(C)]
@@ -177,6 +220,7 @@ fn client_info_json(client: &ClientInner) -> Vec<u8> {
         "socket": client.socket,
         "run_id": client.run_id,
         "app_id": client.app_id,
+        "remote_url": client.remote_url.clone().unwrap_or_default(),
         "abi_major": ABI_MAJOR,
         "abi_minor": ABI_MINOR,
     });
@@ -762,6 +806,265 @@ unsafe extern "C" fn c_audio_playback_control(call: u64, command: i32) -> i32 {
 }
 
 /* ------------------------------------------------------------------ *
+ * HTTP client
+ * ------------------------------------------------------------------ */
+
+unsafe extern "C" fn c_http_open(
+    options_json: *const u8,
+    options_len: usize,
+    timeout_ms: u32,
+    out_http: *mut u64,
+) -> i32 {
+    run(|| {
+        let options = input_bytes(options_json, options_len)?;
+        if out_http.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_http"));
+        }
+        // Opening reads CA files only; no network is touched, so timeout_ms is
+        // accepted for symmetry with the other open calls and ignored.
+        let _ = timeout_ms;
+        let handle = crate::http::open(options)?;
+        write_out(out_http, handle)
+    })
+}
+
+unsafe extern "C" fn c_http_close(handle: u64) -> i32 {
+    run(|| crate::http::close(handle))
+}
+
+unsafe extern "C" fn c_http_cancel(handle: u64, request_id: u64) -> i32 {
+    run(|| crate::http::cancel(handle, request_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn c_http_request(
+    handle: u64,
+    request_id: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers_json: *const u8,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+    timeout_ms: u32,
+    out_status_code: *mut i32,
+    out_headers_json: *mut Buf,
+    out_body: *mut Buf,
+) -> i32 {
+    run(|| {
+        let client = crate::http::HTTP_CLIENTS
+            .get(handle)
+            .ok_or_else(|| SdkError::new(NOT_FOUND, "unknown http handle"))?;
+        if out_status_code.is_null() || out_headers_json.is_null() || out_body.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "http request needs non-null status/header/body outputs",
+            ));
+        }
+        let method = input_str(method, method_len)?.to_string();
+        let url = input_str(url, url_len)?.to_string();
+        let headers =
+            crate::headers::parse_string_map(input_bytes(headers_json, headers_len)?, "headers")?;
+        let body = input_bytes(body, body_len)?.to_vec();
+        let timeout = call::deadline_to_duration(timeout_ms);
+        let response = crate::runtime::runtime().block_on(crate::http::request(
+            client,
+            request_id,
+            crate::http::HttpRequest {
+                method,
+                url,
+                headers,
+                body,
+            },
+            timeout,
+        ))?;
+        write_out(out_status_code, response.status)?;
+        write_out(out_headers_json, alloc_json(response.headers_json))?;
+        write_out(out_body, alloc_buf(response.body))?;
+        Ok(())
+    })
+}
+
+/* ------------------------------------------------------------------ *
+ * Remote gRPC
+ * ------------------------------------------------------------------ */
+
+unsafe extern "C" fn c_grpc_open(
+    url: *const c_char,
+    url_len: usize,
+    options_json: *const u8,
+    options_len: usize,
+    timeout_ms: u32,
+    out_client: *mut u64,
+) -> i32 {
+    run(|| {
+        let url = input_str(url, url_len)?;
+        let options_bytes = input_bytes(options_json, options_len)?;
+        if out_client.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_client"));
+        }
+        let mut options = crate::grpc_remote::GrpcOptions::parse(options_bytes)?;
+        if timeout_ms != 0 {
+            options.connect_timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
+        }
+        let origin = crate::primitives::parse_origin(url)?;
+        let channel =
+            crate::runtime::runtime().block_on(crate::grpc_remote::connect(url, &options))?;
+        let client = ClientInner::new_remote(origin.origin(), channel);
+        let handle = CLIENTS.insert(client);
+        write_out(out_client, handle)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn c_call_start_meta(
+    handle: u64,
+    service: *const c_char,
+    service_len: usize,
+    method: *const c_char,
+    method_len: usize,
+    kind: i32,
+    timeout_ms: u32,
+    headers_json: *const u8,
+    headers_len: usize,
+    out_call: *mut u64,
+) -> i32 {
+    run(|| {
+        let c = client(handle)?;
+        let service = input_str(service, service_len)?;
+        let method = input_str(method, method_len)?;
+        if out_call.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null out_call"));
+        }
+        let headers = crate::headers::validate_grpc(crate::headers::parse_string_map(
+            input_bytes(headers_json, headers_len)?,
+            "metadata",
+        )?)?;
+        let call = call::start_meta(
+            c,
+            service,
+            method,
+            kind,
+            call::deadline_to_duration(timeout_ms),
+            headers,
+        )?;
+        write_out(
+            out_call,
+            call.handle.load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        Ok(())
+    })
+}
+
+/* ------------------------------------------------------------------ *
+ * Primitives
+ * ------------------------------------------------------------------ */
+
+unsafe extern "C" fn c_base64_encode(
+    data: *const u8,
+    len: usize,
+    flags: i32,
+    out: *mut Buf,
+) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let encoded = crate::primitives::base64_encode(bytes, flags)?;
+        write_out(out, alloc_json(encoded))
+    })
+}
+
+unsafe extern "C" fn c_base64_decode(
+    data: *const u8,
+    len: usize,
+    flags: i32,
+    out: *mut Buf,
+) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let decoded = crate::primitives::base64_decode(bytes, flags)?;
+        write_out(out, alloc_buf(decoded))
+    })
+}
+
+unsafe extern "C" fn c_percent_encode(data: *const u8, len: usize, out: *mut Buf) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        write_out(out, alloc_json(crate::primitives::percent_encode(bytes)))
+    })
+}
+
+unsafe extern "C" fn c_percent_decode(data: *const u8, len: usize, out: *mut Buf) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let decoded = crate::primitives::percent_decode(bytes)?;
+        write_out(out, alloc_buf(decoded))
+    })
+}
+
+unsafe extern "C" fn c_sha256(data: *const u8, len: usize, out: *mut Buf) -> i32 {
+    run(|| {
+        let bytes = input_bytes(data, len)?;
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        write_out(out, alloc_buf(crate::primitives::sha256(bytes)))
+    })
+}
+
+unsafe extern "C" fn c_random_bytes(out: *mut u8, len: usize) -> i32 {
+    run(|| {
+        if len == 0 {
+            return Ok(());
+        }
+        if out.is_null() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "null random output pointer with non-zero length",
+            ));
+        }
+        let slice = std::slice::from_raw_parts_mut(out, len);
+        crate::primitives::random_bytes(slice)
+    })
+}
+
+unsafe extern "C" fn c_uuid_v4(out: *mut Buf) -> i32 {
+    run(|| {
+        if out.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let uuid = crate::primitives::uuid_v4()?;
+        write_out(out, alloc_string(uuid))
+    })
+}
+
+unsafe extern "C" fn c_url_parse(url: *const c_char, len: usize, out_json: *mut Buf) -> i32 {
+    run(|| {
+        let url = input_str(url, len)?;
+        if out_json.is_null() {
+            return Err(SdkError::new(INVALID_ARGUMENT, "null output buffer"));
+        }
+        let parsed = crate::primitives::parse_url(url)?;
+        let bytes = serde_json::to_vec(&parsed.to_json())
+            .map_err(|err| SdkError::new(ffi::INTERNAL, err.to_string()))?;
+        write_out(out_json, alloc_json(bytes))
+    })
+}
+
+/* ------------------------------------------------------------------ *
  * Misc
  * ------------------------------------------------------------------ */
 
@@ -790,6 +1093,10 @@ unsafe extern "C" fn c_handle_info(handle: u64, out: *mut Buf) -> i32 {
             write_out(out, alloc_json(bus))?;
             return Ok(());
         }
+        if let Some(http) = crate::http::HTTP_CLIENTS.get(handle) {
+            write_out(out, alloc_json(http.info_json()))?;
+            return Ok(());
+        }
         Err(SdkError::new(NOT_FOUND, "unknown handle"))
     })
 }
@@ -798,10 +1105,10 @@ unsafe extern "C" fn c_handle_info(handle: u64, out: *mut Buf) -> i32 {
  * Static table and exported symbols
  * ------------------------------------------------------------------ */
 
-pub static API: CapsulaApi = CapsulaApi {
+pub static API: CapsuladApi = CapsuladApi {
     abi_major: ABI_MAJOR,
     abi_minor: ABI_MINOR,
-    struct_size: size_of::<CapsulaApi>(),
+    struct_size: size_of::<CapsuladApi>(),
     client_connect: c_client_connect,
     client_close: c_client_close,
     client_register_descriptors: c_client_register_descriptors,
@@ -834,37 +1141,55 @@ pub static API: CapsulaApi = CapsulaApi {
     buf_free: c_buf_free,
     last_error: c_last_error,
     handle_info: c_handle_info,
+    http_open: c_http_open,
+    http_close: c_http_close,
+    http_request: c_http_request,
+    grpc_open: c_grpc_open,
+    call_start_meta: c_call_start_meta,
+    base64_encode: c_base64_encode,
+    base64_decode: c_base64_decode,
+    percent_encode: c_percent_encode,
+    percent_decode: c_percent_decode,
+    sha256: c_sha256,
+    random_bytes: c_random_bytes,
+    uuid_v4: c_uuid_v4,
+    url_parse: c_url_parse,
+    http_cancel: c_http_cancel,
 };
 
 #[no_mangle]
-pub extern "C" fn capsula_api_size() -> usize {
-    size_of::<CapsulaApi>()
+pub extern "C" fn capsulad_api_size() -> usize {
+    size_of::<CapsuladApi>()
 }
 
 #[no_mangle]
-pub extern "C" fn capsula_abi_major() -> u32 {
+pub extern "C" fn capsulad_abi_major() -> u32 {
     ABI_MAJOR
 }
 
 #[no_mangle]
-pub extern "C" fn capsula_abi_minor() -> u32 {
+pub extern "C" fn capsulad_abi_minor() -> u32 {
     ABI_MINOR
 }
 
 #[no_mangle]
-pub extern "C" fn capsula_version() -> *const c_char {
+pub extern "C" fn capsulad_version() -> *const c_char {
     c"1.0.0".as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn capsula_api_v1() -> *const CapsulaApi {
+pub extern "C" fn capsulad_api_v1() -> *const CapsuladApi {
     &API
 }
 
-const API_MIN_SIZE: usize = std::mem::offset_of!(CapsulaApi, client_connect);
+const API_MIN_SIZE: usize = std::mem::offset_of!(CapsuladApi, client_connect);
 
 #[no_mangle]
-pub extern "C" fn capsula_get_api(abi_major: u32, table_size: usize, out: *mut CapsulaApi) -> i32 {
+pub extern "C" fn capsulad_get_api(
+    abi_major: u32,
+    table_size: usize,
+    out: *mut CapsuladApi,
+) -> i32 {
     if abi_major != ABI_MAJOR {
         set_error(&SdkError::new(
             ffi::UNSUPPORTED_ABI,
@@ -875,14 +1200,14 @@ pub extern "C" fn capsula_get_api(abi_major: u32, table_size: usize, out: *mut C
     if out.is_null() || table_size < API_MIN_SIZE {
         set_error(&SdkError::new(
             INVALID_ARGUMENT,
-            format!("capsula_get_api needs a non-null table of at least {API_MIN_SIZE} bytes"),
+            format!("capsulad_get_api needs a non-null table of at least {API_MIN_SIZE} bytes"),
         ));
         return INVALID_ARGUMENT;
     }
-    let copy_len = table_size.min(size_of::<CapsulaApi>());
+    let copy_len = table_size.min(size_of::<CapsuladApi>());
     unsafe {
         ptr::copy_nonoverlapping(
-            &API as *const CapsulaApi as *const u8,
+            &API as *const CapsuladApi as *const u8,
             out as *mut u8,
             copy_len,
         );
@@ -898,9 +1223,9 @@ mod tests {
     fn api_prefix_is_stable_and_bounded() {
         assert_eq!(API_MIN_SIZE, 4 + 4 + size_of::<usize>());
         assert!(API.struct_size > API_MIN_SIZE);
-        assert_eq!(capsula_abi_major(), 1);
-        assert_eq!(capsula_abi_minor(), 0);
-        assert!(!capsula_api_v1().is_null());
+        assert_eq!(capsulad_abi_major(), 1);
+        assert_eq!(capsulad_abi_minor(), 0);
+        assert!(!capsulad_api_v1().is_null());
     }
 
     #[repr(align(8))]
@@ -909,23 +1234,23 @@ mod tests {
     #[test]
     fn small_prefix_is_accepted_without_touching_tail() {
         let mut backing = Aligned([0xABu8; 64]);
-        let out = backing.0.as_mut_ptr() as *mut CapsulaApi;
-        let status = capsula_get_api(1, API_MIN_SIZE, out);
+        let out = backing.0.as_mut_ptr() as *mut CapsuladApi;
+        let status = capsulad_get_api(1, API_MIN_SIZE, out);
         assert_eq!(status, OK);
         // Prefix was written; bytes beyond the requested prefix are untouched.
         assert_eq!(backing.0[API_MIN_SIZE..], [0xABu8; 64][API_MIN_SIZE..]);
         unsafe {
             assert_eq!((*out).abi_major, 1);
             assert_eq!((*out).abi_minor, 0);
-            assert_eq!((*out).struct_size, size_of::<CapsulaApi>());
+            assert_eq!((*out).struct_size, size_of::<CapsuladApi>());
         }
     }
 
     #[test]
     fn unsupported_major_writes_nothing() {
         let mut backing = Aligned([0u8; 64]);
-        let out = backing.0.as_mut_ptr() as *mut CapsulaApi;
-        let status = capsula_get_api(2, 64, out);
+        let out = backing.0.as_mut_ptr() as *mut CapsuladApi;
+        let status = capsulad_get_api(2, 64, out);
         assert_eq!(status, ffi::UNSUPPORTED_ABI);
         assert_eq!(backing.0, [0u8; 64]);
     }

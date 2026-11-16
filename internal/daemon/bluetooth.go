@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/bluetooth"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/presentations"
@@ -967,7 +967,7 @@ func (d *Daemon) publishUI(topic uichanges.Topic) {
 // for private app-bus targets); a compiled-in system app always sends its run
 // ID and is therefore rejected like any other app.
 func (d *Daemon) requireAdministrativeCaller(ctx context.Context, detail string) error {
-	if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get("capsula-run-id")) > 0 {
+	if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get("capsulad-run-id")) > 0 {
 		return status.Error(codes.PermissionDenied, detail)
 	}
 	if creds := grpcpeer.FromContext(ctx); creds.OK {

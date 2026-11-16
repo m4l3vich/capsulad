@@ -13,9 +13,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 	"capsulad/internal/appui"
 	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"

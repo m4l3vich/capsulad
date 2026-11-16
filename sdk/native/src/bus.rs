@@ -164,7 +164,7 @@ pub fn open(client: Arc<ClientInner>, callbacks: Callbacks) -> SdkResult<u64> {
 
     let dispatch_bus = bus.clone();
     let dispatch_join = std::thread::Builder::new()
-        .name("capsula-bus-dispatch".into())
+        .name("capsulad-bus-dispatch".into())
         .spawn(move || dispatch_loop(dispatch_bus, dispatch_rx))
         .map_err(|e| SdkError::new(INTERNAL, format!("cannot start bus dispatch: {e}")))?;
     *bus.dispatch_join.lock().unwrap() = Some(dispatch_join);
@@ -186,7 +186,7 @@ pub fn open(client: Arc<ClientInner>, callbacks: Callbacks) -> SdkResult<u64> {
         let weak = Arc::downgrade(&bus);
         let jobs = bus.jobs.clone();
         let join = std::thread::Builder::new()
-            .name(format!("capsula-bus-worker-{index}"))
+            .name(format!("capsulad-bus-worker-{index}"))
             .spawn(move || worker_loop(weak, jobs))
             .map_err(|e| SdkError::new(INTERNAL, format!("cannot start bus worker: {e}")))?;
         bus.workers.lock().unwrap().push(join);
@@ -213,9 +213,9 @@ async fn bus_transport(
     };
     let mut request = tonic::Request::new(request_stream);
     if let Ok(value) = tonic::metadata::MetadataValue::try_from(run_id.as_str()) {
-        request.metadata_mut().insert("capsula-run-id", value);
+        request.metadata_mut().insert("capsulad-run-id", value);
     }
-    let path: http::uri::PathAndQuery = match "/capsula.framework.v1.AppBusService/Connect".parse()
+    let path: http::uri::PathAndQuery = match "/capsulad.framework.v1.AppBusService/Connect".parse()
     {
         Ok(path) => path,
         Err(err) => {
@@ -698,6 +698,12 @@ pub fn open_for_handle(client: u64, callbacks: Callbacks) -> SdkResult<u64> {
     let client = crate::client::CLIENTS
         .get(client)
         .ok_or_else(|| SdkError::new(NOT_FOUND, "unknown client handle"))?;
+    if client.is_remote() {
+        return Err(SdkError::new(
+            INVALID_ARGUMENT,
+            "the app bus is only available on a supervised client, not a remote gRPC channel",
+        ));
+    }
     open(client, callbacks)
 }
 

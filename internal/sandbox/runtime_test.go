@@ -73,7 +73,7 @@ func TestDefaultLibraryDirPrefersRuntimeBesideBinary(t *testing.T) {
 	if err := os.MkdirAll(lib, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeRuntime(t, lib, `{"abi_major":1,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, lib, `{"abi_major":1,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	wantLib, err := filepath.EvalSymlinks(lib)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestDefaultLibraryDirPrefersRuntimeBesideBinary(t *testing.T) {
 	if err := os.MkdirAll(installedLib, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeRuntime(t, installedLib, `{"abi_major":1,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, installedLib, `{"abi_major":1,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	wantInstalled, err := filepath.EvalSymlinks(installedLib)
 	if err != nil {
 		t.Fatal(err)
@@ -103,53 +103,53 @@ func TestDefaultLibraryDirPrefersRuntimeBesideBinary(t *testing.T) {
 
 func TestLocateRuntimeRequiresMetadata(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, "", "libcapsula.so.1")
+	writeRuntime(t, dir, "", "libcapsulad.so.1")
 	_, err := LocateRuntime(dir)
 	if err == nil || !strings.Contains(err.Error(), RuntimeMetadataFile) {
 		t.Fatalf("missing metadata error = %v, want mention of %s", err, RuntimeMetadataFile)
 	}
 
 	// Legacy metadata still carrying the removed capability list must load.
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":2,"capabilities":["audio","events"],"library":"libcapsula.so.1"}`)
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":2,"capabilities":["audio","events"],"library":"libcapsulad.so.1"}`)
 	rt, err := LocateRuntime(dir)
 	if err != nil {
 		t.Fatalf("valid metadata: %v", err)
 	}
-	if rt.ABIMajor != 1 || rt.ABIMinor != 2 || !rt.Metadata || rt.File != "libcapsula.so.1" {
+	if rt.ABIMajor != 1 || rt.ABIMinor != 2 || !rt.Metadata || rt.File != "libcapsulad.so.1" {
 		t.Fatalf("runtime = %+v", rt)
 	}
 }
 
 func TestLocateRuntimeRejectsTraversalAndEscapingSymlinks(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"library":"../capsula-native.json"}`)
+	writeRuntime(t, dir, `{"abi_major":1,"library":"../capsulad-native.json"}`)
 	if _, err := LocateRuntime(dir); err == nil || !strings.Contains(err.Error(), "not a file inside") {
 		t.Fatalf("traversal error = %v", err)
 	}
 
 	outside := t.TempDir()
-	target := filepath.Join(outside, "libcapsula.so.1")
+	target := filepath.Join(outside, "libcapsulad.so.1")
 	if err := os.WriteFile(target, []byte("outside"), 0o555); err != nil {
 		t.Fatal(err)
 	}
 	linkDir := t.TempDir()
-	if err := os.Symlink(target, filepath.Join(linkDir, "libcapsula.so.1")); err != nil {
+	if err := os.Symlink(target, filepath.Join(linkDir, "libcapsulad.so.1")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	writeRuntime(t, linkDir, `{"abi_major":1,"library":"libcapsula.so.1"}`)
+	writeRuntime(t, linkDir, `{"abi_major":1,"library":"libcapsulad.so.1"}`)
 	if _, err := LocateRuntime(linkDir); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("escaping library error = %v", err)
 	}
 
 	metaDir := t.TempDir()
 	metaTarget := filepath.Join(outside, RuntimeMetadataFile)
-	if err := os.WriteFile(metaTarget, []byte(`{"abi_major":1,"library":"libcapsula.so.1"}`), 0o444); err != nil {
+	if err := os.WriteFile(metaTarget, []byte(`{"abi_major":1,"library":"libcapsulad.so.1"}`), 0o444); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(metaTarget, filepath.Join(metaDir, RuntimeMetadataFile)); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	writeRuntime(t, metaDir, "", "libcapsula.so.1")
+	writeRuntime(t, metaDir, "", "libcapsulad.so.1")
 	if _, err := LocateRuntime(metaDir); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("escaping metadata error = %v", err)
 	}
@@ -172,7 +172,7 @@ func TestCheckRequirement(t *testing.T) {
 }
 
 func TestLibraryEnvModes(t *testing.T) {
-	rt := &Runtime{Dir: "/opt/capsula/lib", File: "libcapsula.so.1"}
+	rt := &Runtime{Dir: "/opt/capsulad/lib", File: "libcapsulad.so.1"}
 	wantLoader := "LD_LIBRARY_PATH"
 	if runtime.GOOS == "darwin" {
 		wantLoader = "DYLD_LIBRARY_PATH"
@@ -180,9 +180,9 @@ func TestLibraryEnvModes(t *testing.T) {
 
 	host := strings.Join(LibraryEnv("none", rt), "\n")
 	for _, want := range []string{
-		"CAPSULA_LIBRARY=/opt/capsula/lib/libcapsula.so.1",
-		"CAPSULA_LIBRARY_DIR=/opt/capsula/lib",
-		wantLoader + "=/opt/capsula/lib",
+		"CAPSULAD_LIBRARY=/opt/capsulad/lib/libcapsulad.so.1",
+		"CAPSULAD_LIBRARY_DIR=/opt/capsulad/lib",
+		wantLoader + "=/opt/capsulad/lib",
 	} {
 		if !strings.Contains(host, want) {
 			t.Fatalf("host env missing %q:\n%s", want, host)
@@ -191,8 +191,8 @@ func TestLibraryEnvModes(t *testing.T) {
 
 	ns := strings.Join(LibraryEnv("namespaces", rt), "\n")
 	for _, want := range []string{
-		"CAPSULA_LIBRARY=" + NamespaceLibraryDir + "/libcapsula.so.1",
-		"CAPSULA_LIBRARY_DIR=" + NamespaceLibraryDir,
+		"CAPSULAD_LIBRARY=" + NamespaceLibraryDir + "/libcapsulad.so.1",
+		"CAPSULAD_LIBRARY_DIR=" + NamespaceLibraryDir,
 		wantLoader + "=" + NamespaceLibraryDir,
 	} {
 		if !strings.Contains(ns, want) {
@@ -249,7 +249,7 @@ func TestCommandCarriesDeviceSerialInNamespaceAndHostModes(t *testing.T) {
 					break
 				}
 			}
-			if !containsEnv(env, "CAPSULA_DEVICE_SERIAL=11bfcbc5d63d55fc") {
+			if !containsEnv(env, "CAPSULAD_DEVICE_SERIAL=11bfcbc5d63d55fc") {
 				t.Fatalf("mode %s launch does not carry device serial: %v", mode, env)
 			}
 		})
@@ -273,7 +273,7 @@ func TestSpecJSONCarriesDeviceSerial(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
 		t.Fatalf("decode spec: %v", err)
 	}
-	if !containsEnv(spec.Env, "CAPSULA_DEVICE_SERIAL=11bfcbc5d63d55fc") {
+	if !containsEnv(spec.Env, "CAPSULAD_DEVICE_SERIAL=11bfcbc5d63d55fc") {
 		t.Fatalf("helper spec env lacks the device serial: %v", spec.Env)
 	}
 }
@@ -285,7 +285,7 @@ func TestCommandOmitsUnknownDeviceSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command: %v", err)
 	}
-	if containsEnv(cmd.Env, "CAPSULA_DEVICE_SERIAL=") {
+	if containsEnv(cmd.Env, "CAPSULAD_DEVICE_SERIAL=") {
 		t.Fatalf("unknown device serial must be omitted: %v", cmd.Env)
 	}
 }
@@ -307,7 +307,7 @@ func TestCommandStaticAppWithoutRuntime(t *testing.T) {
 		t.Fatalf("static app without runtime: %v", err)
 	}
 	for _, entry := range cmd.Env {
-		if strings.HasPrefix(entry, "CAPSULA_LIBRARY") || strings.Contains(entry, "LIBRARY_PATH") {
+		if strings.HasPrefix(entry, "CAPSULAD_LIBRARY") || strings.Contains(entry, "LIBRARY_PATH") {
 			t.Fatalf("static app received runtime env %q", entry)
 		}
 	}
@@ -322,7 +322,7 @@ func TestCommandRequiredRuntimeMissingOrIncompatible(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":2,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":2,"abi_minor":0,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	l2 := New(Config{Mode: "none", LibraryDir: dir})
 	l2.setMode("none", "test")
 	if _, err := l2.Command(m, m.Dir, "run1", m.ID); err == nil || !strings.Contains(err.Error(), "major 1") {
@@ -333,7 +333,7 @@ func TestCommandRequiredRuntimeMissingOrIncompatible(t *testing.T) {
 func TestCommandCompatibleRuntimeSetsEnvironment(t *testing.T) {
 	l, m := nativeApp(t)
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":3,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":3,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	l.cfg.LibraryDir = dir
 	m.NativeSDK = &manifest.NativeSDK{ABIMajor: 1, MinMinor: 1}
 	cmd, err := l.Command(m, m.Dir, "run1", m.ID)
@@ -345,8 +345,8 @@ func TestCommandCompatibleRuntimeSetsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(env, "CAPSULA_LIBRARY="+filepath.Join(canonical, "libcapsula.so.1")) {
-		t.Fatalf("CAPSULA_LIBRARY missing from env:\n%s", env)
+	if !strings.Contains(env, "CAPSULAD_LIBRARY="+filepath.Join(canonical, "libcapsulad.so.1")) {
+		t.Fatalf("CAPSULAD_LIBRARY missing from env:\n%s", env)
 	}
 }
 
@@ -359,7 +359,7 @@ func writeExecutable(t *testing.T, dir, name, body string) {
 
 func TestRuntimeDiscoversInstalledInterpreters(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\necho 'quickjs-ng 0.18.0'\n")
 	if err := os.WriteFile(filepath.Join(dir, InterpreterMicroPython), []byte("not executable"), 0o644); err != nil {
 		t.Fatal(err)
@@ -418,11 +418,11 @@ func TestRuntimeStatusIsHonestWithoutRuntime(t *testing.T) {
 
 func TestCommandScriptRuntime(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\nexit 0\n")
 
 	appDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(appDir, "main.js"), []byte("capsula.start()\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(appDir, "main.js"), []byte("capsulad.start()\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	m := &manifest.Manifest{
@@ -452,9 +452,9 @@ func TestCommandScriptRuntime(t *testing.T) {
 	}
 	env := strings.Join(cmd.Env, "\n")
 	for _, want := range []string{
-		"CAPSULA_LIBRARY=" + filepath.Join(canonical, "libcapsula.so.1"),
-		"CAPSULA_APP_DIR=" + appDir,
-		"CAPSULA_INTERPRETER=" + wantHost,
+		"CAPSULAD_LIBRARY=" + filepath.Join(canonical, "libcapsulad.so.1"),
+		"CAPSULAD_APP_DIR=" + appDir,
+		"CAPSULAD_INTERPRETER=" + wantHost,
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("script env missing %q:\n%s", want, env)
@@ -464,7 +464,7 @@ func TestCommandScriptRuntime(t *testing.T) {
 
 func TestCommandScriptRuntimeMissingHost(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	appDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(appDir, "main.py"), []byte("pass\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -482,11 +482,11 @@ func TestCommandScriptRuntimeMissingHost(t *testing.T) {
 
 func TestCommandScriptRejectsEntrypointEscape(t *testing.T) {
 	dir := t.TempDir()
-	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, "libcapsula.so.1")
+	writeRuntime(t, dir, `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, "libcapsulad.so.1")
 	writeExecutable(t, dir, InterpreterQuickJS, "#!/bin/sh\nexit 0\n")
 
 	outside := filepath.Join(t.TempDir(), "main.js")
-	if err := os.WriteFile(outside, []byte("capsula.start()\n"), 0o644); err != nil {
+	if err := os.WriteFile(outside, []byte("capsulad.start()\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	appDir := t.TempDir()
@@ -507,7 +507,7 @@ func TestCommandScriptRejectsEntrypointEscape(t *testing.T) {
 func TestSpecJSONCarriesInterpreterExecPathAndArgs(t *testing.T) {
 	l := New(Config{Mode: "namespaces", SocketPath: "/run/hal.sock", LibraryDir: "/rt", SandboxRoot: t.TempDir()})
 	l.setMode("namespaces", "test")
-	raw, err := l.specJSON("/apps/demo", "/capsula/lib/capsula-quickjs", []string{"/app/main.js"}, "run1", "org.example.demo", "namespaces", nil, "/rt")
+	raw, err := l.specJSON("/apps/demo", "/capsulad/lib/capsulad-quickjs", []string{"/app/main.js"}, "run1", "org.example.demo", "namespaces", nil, "/rt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestSpecJSONCarriesInterpreterExecPathAndArgs(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.AppPath != "/capsula/lib/capsula-quickjs" {
+	if spec.AppPath != "/capsulad/lib/capsulad-quickjs" {
 		t.Fatalf("spec app path = %q", spec.AppPath)
 	}
 	if len(spec.Args) != 1 || spec.Args[0] != "/app/main.js" {

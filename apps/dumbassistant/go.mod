@@ -1,7 +1,7 @@
-module capsula/apps/dumbassistant
+module capsulad/apps/dumbassistant
 
 go 1.22.5
 
-require capsula/sdk v0.0.0
+require capsulad/sdk v0.0.0
 
-replace capsula/sdk => ../../sdk/go
+replace capsulad/sdk => ../../sdk/go

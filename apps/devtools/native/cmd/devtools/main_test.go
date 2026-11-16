@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 func TestSegmentMasks(t *testing.T) {
@@ -33,7 +33,7 @@ func TestRingPattern(t *testing.T) {
 		t.Fatalf("pixels = %d, want 12", len(frame))
 	}
 	for i, pixel := range frame {
-		if pixel == (capsula.RGB{}) {
+		if pixel == (capsulad.RGB{}) {
 			t.Fatalf("pixel %d is black; a known pattern must be visible", i)
 		}
 	}
@@ -80,7 +80,7 @@ func TestInvokeStep(t *testing.T) {
 	if got := invokeStep(nil); got != "selftest" {
 		t.Fatalf("nil invocation = %q", got)
 	}
-	inv := &capsula.LaunchInvocation{Arguments: []capsula.LaunchArgument{
+	inv := &capsulad.LaunchInvocation{Arguments: []capsulad.LaunchArgument{
 		{Name: "other", Value: "ignored"},
 		{Name: "step", Value: " Audio "},
 	}}

@@ -2,19 +2,19 @@
 //! events, and echoes inbound routed calls (raw protobuf) back to the caller.
 //!
 //! ```sh
-//! CAPSULA_LIBRARY=/path/libcapsula.1.dylib \
-//! CAPSULA_SOCKET=/tmp/capsulad.sock CAPSULA_RUN_ID=run-... \
+//! CAPSULAD_LIBRARY=/path/libcapsulad.1.dylib \
+//! CAPSULAD_SOCKET=/tmp/capsulad.sock CAPSULAD_RUN_ID=run-... \
 //! cargo run --example smoke_bus
 //! ```
 //!
-//! Runs for up to `CAPSULA_TIMEOUT_MS` (default 30 s) or until the bus closes.
+//! Runs for up to `CAPSULAD_TIMEOUT_MS` (default 30 s) or until the bus closes.
 
 use std::env;
 use std::error::Error;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use capsula::{BusEvent, BusHandler, CallInfo, InboundCall, Library};
+use capsulad::{BusEvent, BusHandler, CallInfo, InboundCall, Library};
 
 struct Handler {
     closed: mpsc::Sender<()>,
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     bus.ready(Some(Duration::from_secs(5)))?;
     eprintln!("bus: open on {}", library.path().display());
 
-    let wait = env::var("CAPSULA_TIMEOUT_MS")
+    let wait = env::var("CAPSULAD_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)

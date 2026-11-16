@@ -19,9 +19,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 )
 
 // The compiled-in clock and ring apps are ordinary public AppBus targets. A
@@ -279,7 +279,7 @@ func mustProto(t *testing.T, msg proto.Message) []byte {
 // the current host artifact, not a test double.
 func TestBuiltinNativeSDKJSONBoundary(t *testing.T) {
 	libDir := nativeLibDir(t)
-	if _, err := os.Stat(filepath.Join(libDir, "capsula-native.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(libDir, "capsulad-native.json")); err != nil {
 		t.Skipf("host native runtime unavailable in %s: %v", libDir, err)
 	}
 	cc, err := exec.LookPath("cc")
@@ -314,8 +314,8 @@ func TestBuiltinNativeSDKJSONBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(appDir, "contracts.protoset"),
-		nativeWireDescriptorSet(t, clockv1.File_capsula_contracts_clock_v1_clock_proto,
-			ringv1.File_capsula_contracts_ring_v1_ring_proto), 0o644); err != nil {
+		nativeWireDescriptorSet(t, clockv1.File_capsulad_contracts_clock_v1_clock_proto,
+			ringv1.File_capsulad_contracts_ring_v1_ring_proto), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -545,9 +545,9 @@ const nativeWireProbeSource = `
 #include <string.h>
 #include <unistd.h>
 
-#include "capsula/capsula.h"
+#include "capsulad/capsulad.h"
 
-static capsula_api api;
+static capsulad_api api;
 static FILE *result;
 
 static void emit(const char *fmt, ...) {
@@ -576,7 +576,7 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-static void free_buf(capsula_buf *buf) {
+static void free_buf(capsulad_buf *buf) {
     if (buf->data != NULL) {
         api.buf_free(*buf);
         buf->data = NULL;
@@ -584,18 +584,18 @@ static void free_buf(capsula_buf *buf) {
     }
 }
 
-static int32_t begin_call(capsula_handle client, const char *app,
+static int32_t begin_call(capsulad_handle client, const char *app,
                           const char *service, const char *method,
-                          capsula_handle *out) {
+                          capsulad_handle *out) {
     *out = 0;
     return api.call_start_routed(client, app, strlen(app),
                                  service, strlen(service),
                                  method, strlen(method), 5000, out);
 }
 
-static void unary(capsula_handle client, const char *label, const char *app,
+static void unary(capsulad_handle client, const char *label, const char *app,
                   const char *service, const char *method, const char *request) {
-    capsula_handle call = 0;
+    capsulad_handle call = 0;
     int32_t start = begin_call(client, app, service, method, &call);
     if (start != 0) {
         emit("%s status=-1 grpc=-1 detail=start:%s", label, api.last_error());
@@ -603,10 +603,10 @@ static void unary(capsula_handle client, const char *label, const char *app,
     }
     int32_t send = api.call_send_json(call, (const uint8_t *)request, strlen(request));
     int32_t half = api.call_half_close(call);
-    capsula_buf body = {0};
+    capsulad_buf body = {0};
     int32_t recv = api.call_recv_json(call, 5000, &body);
     int32_t grpc = 0;
-    capsula_buf detail = {0};
+    capsulad_buf detail = {0};
     api.call_status(call, &grpc, &detail);
     if (send != 0 || half != 0 || recv != 0) {
         emit("%s status=%d grpc=%d detail=send:%d half:%d recv:%d %.*s",
@@ -625,34 +625,34 @@ static void unary(capsula_handle client, const char *label, const char *app,
 /* A boot-time app may race the daemon's builtin starts. Retry only the
  * transient "not running/not ready" statuses so a real failure is reported by
  * the following assertion instead of being hidden here. */
-static void wait_ready(capsula_handle client, const char *app,
+static void wait_ready(capsulad_handle client, const char *app,
                        const char *service, const char *method,
                        const char *request) {
     for (int attempt = 0; attempt < 100; attempt++) {
-        capsula_handle call = 0;
+        capsulad_handle call = 0;
         if (begin_call(client, app, service, method, &call) != 0) {
             usleep(100000);
             continue;
         }
         int32_t send = api.call_send_json(call, (const uint8_t *)request, strlen(request));
         int32_t half = api.call_half_close(call);
-        capsula_buf body = {0};
+        capsulad_buf body = {0};
         int32_t recv = api.call_recv_json(call, 1000, &body);
         int32_t grpc = 0;
-        capsula_buf detail = {0};
+        capsulad_buf detail = {0};
         api.call_status(call, &grpc, &detail);
         free_buf(&body);
         free_buf(&detail);
         api.call_release(call);
         if (send == 0 && half == 0 && recv == 0) return;
-        if (recv != CAPSULA_STATUS_GRPC || (grpc != 9 && grpc != 14)) return;
+        if (recv != CAPSULAD_STATUS_GRPC || (grpc != 9 && grpc != 14)) return;
         usleep(100000);
     }
 }
 
-static void watch_first(capsula_handle client, const char *app,
+static void watch_first(capsulad_handle client, const char *app,
                         const char *service, const char *method) {
-    capsula_handle call = 0;
+    capsulad_handle call = 0;
     int32_t start = begin_call(client, app, service, method, &call);
     if (start != 0) {
         emit("WATCH status=-1 grpc=-1 detail=start:%s", api.last_error());
@@ -660,10 +660,10 @@ static void watch_first(capsula_handle client, const char *app,
     }
     int32_t send = api.call_send_json(call, (const uint8_t *)"{}", 2);
     int32_t half = api.call_half_close(call);
-    capsula_buf body = {0};
+    capsulad_buf body = {0};
     int32_t recv = api.call_recv_json(call, 5000, &body);
     int32_t grpc = 0;
-    capsula_buf detail = {0};
+    capsulad_buf detail = {0};
     api.call_status(call, &grpc, &detail);
     if (send != 0 || half != 0 || recv != 0) {
         emit("WATCH status=%d grpc=%d detail=send:%d half:%d recv:%d %.*s",
@@ -695,12 +695,12 @@ int main(void) {
     result = fopen("native-wire-result.tmp", "w");
     if (result == NULL) return 2;
 
-    const char *lib = getenv("CAPSULA_LIBRARY");
-    const char *sock = getenv("CAPSULA_SOCKET");
-    const char *run = getenv("CAPSULA_RUN_ID");
-    const char *app = getenv("CAPSULA_APP_ID");
+    const char *lib = getenv("CAPSULAD_LIBRARY");
+    const char *sock = getenv("CAPSULAD_SOCKET");
+    const char *run = getenv("CAPSULAD_RUN_ID");
+    const char *app = getenv("CAPSULAD_APP_ID");
     if (lib == NULL || sock == NULL || run == NULL || app == NULL) {
-        emit("ENV status=-1 detail=missing CAPSULA_* environment");
+        emit("ENV status=-1 detail=missing CAPSULAD_* environment");
         return finish(1);
     }
 
@@ -709,20 +709,20 @@ int main(void) {
         emit("DLOPEN status=-1 detail=%s", dlerror());
         return finish(1);
     }
-    size_t (*api_size)(void) = (size_t (*)(void))dlsym(handle, "capsula_api_size");
-    int32_t (*get_api)(uint32_t, size_t, capsula_api *) =
-        (int32_t (*)(uint32_t, size_t, capsula_api *))dlsym(handle, "capsula_get_api");
+    size_t (*api_size)(void) = (size_t (*)(void))dlsym(handle, "capsulad_api_size");
+    int32_t (*get_api)(uint32_t, size_t, capsulad_api *) =
+        (int32_t (*)(uint32_t, size_t, capsulad_api *))dlsym(handle, "capsulad_get_api");
     if (api_size == NULL || get_api == NULL) {
         emit("ABI status=-1 detail=missing exports");
         return finish(1);
     }
     memset(&api, 0, sizeof api);
-    if (get_api(CAPSULA_ABI_MAJOR, sizeof api, &api) != 0) {
+    if (get_api(CAPSULAD_ABI_MAJOR, sizeof api, &api) != 0) {
         emit("ABI status=-1 detail=get_api rejected");
         return finish(1);
     }
 
-    capsula_handle client = 0;
+    capsulad_handle client = 0;
     int32_t connect = -1;
     for (int attempt = 0; attempt < 100; attempt++) {
         connect = api.client_connect(sock, strlen(sock), run, strlen(run),
@@ -750,10 +750,10 @@ int main(void) {
         }
     }
 
-    const char *clock_app = "capsula.clock";
-    const char *clock_service = "capsula.contracts.clock.v1.ClockService";
-    const char *ring_app = "capsula.ring";
-    const char *ring_service = "capsula.contracts.ring.v1.RingService";
+    const char *clock_app = "capsulad.clock";
+    const char *clock_service = "capsulad.contracts.clock.v1.ClockService";
+    const char *ring_app = "capsulad.ring";
+    const char *ring_service = "capsulad.contracts.ring.v1.RingService";
     const char *dismiss = "{\"alertId\":\"native-wire-none\"}";
 
     wait_ready(client, clock_app, clock_service, "DismissAlert", dismiss);

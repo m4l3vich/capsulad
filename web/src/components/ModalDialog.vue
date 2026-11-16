@@ -12,7 +12,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 const dialog = ref(null)
-const titleId = `capsula-dialog-${Math.random().toString(36).slice(2, 10)}`
+const titleId = `capsulad-dialog-${Math.random().toString(36).slice(2, 10)}`
 
 onMounted(() => {
   dialog.value?.showModal()

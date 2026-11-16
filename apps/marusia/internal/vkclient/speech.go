@@ -7,14 +7,12 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
-	"capsula/apps/marusia/internal/vkproto/clientpb"
-	commandspb "capsula/apps/marusia/internal/vkproto/commandspb"
-	"capsula/apps/marusia/internal/vkproto/optionspb"
-	"capsula/apps/marusia/internal/vkproto/phrasepb"
-	"capsula/apps/marusia/internal/vkproto/servicepb"
+	"capsulad/apps/marusia/internal/vkproto/clientpb"
+	commandspb "capsulad/apps/marusia/internal/vkproto/commandspb"
+	"capsulad/apps/marusia/internal/vkproto/optionspb"
+	"capsulad/apps/marusia/internal/vkproto/phrasepb"
 )
 
 const (
@@ -256,9 +254,9 @@ type Command struct {
 
 // Speech is one bidirectional Phrase/Speech stream. Send, EOS, Abort and
 // Recv may be called from different goroutines: sends are serialized here and
-// gRPC reads are owned by the caller's Recv loop.
+// stream reads are owned by the caller's Recv loop.
 type Speech struct {
-	stream servicepb.Phrase_SpeechClient
+	stream Stream
 	cancel context.CancelFunc
 	op     string
 
@@ -277,25 +275,22 @@ func (c *Client) OpenSpeech(ctx context.Context, opts SpeechOptions) (*Speech, e
 	if opts.Format == FormatOggOpus {
 		return nil, fmt.Errorf("%w: this build has no Opus encoder", ErrUnsupportedFormat)
 	}
-	conn, err := c.channel()
-	if err != nil {
-		return nil, err
-	}
 	streamCtx, cancel := context.WithCancel(ctx)
-	streamCtx = metadata.NewOutgoingContext(streamCtx, c.callMetadata())
-	stream, err := servicepb.NewPhraseClient(conn).Speech(streamCtx)
+	stream, err := c.transport.NewStream(streamCtx, phraseService, "Speech",
+		c.callMetadata(), CallBidi, 0)
 	if err != nil {
 		cancel()
-		return nil, wrapStatus("speech open", err)
+		return nil, err
 	}
 
 	s := &Speech{stream: stream, cancel: cancel, op: "speech", upload: newFrameUploader(opts.Format)}
 	init := BuildInit(opts, c.cfg.Serial, c.cfg.ClientVersion)
-	if err := stream.Send(&phrasepb.SpeechRequest{
+	if err := s.sendMessage(&phrasepb.SpeechRequest{
 		Kind: &phrasepb.SpeechRequest_Init{Init: init},
 	}); err != nil {
 		cancel()
-		return nil, wrapStatus("speech init", err)
+		_ = stream.Close()
+		return nil, err
 	}
 	s.sentInit = true
 	return s, nil
@@ -321,8 +316,8 @@ func (s *Speech) SendAudio(pcm []byte) error {
 			},
 		}
 		s.chunkNum++
-		if err := s.stream.Send(req); err != nil {
-			s.sendErr = wrapStatus("speech chunk", err)
+		if err := s.sendMessage(req); err != nil {
+			s.sendErr = err
 			return s.sendErr
 		}
 	}
@@ -353,15 +348,15 @@ func (s *Speech) EOS() error {
 			},
 		}
 		s.chunkNum++
-		if err := s.stream.Send(req); err != nil {
-			s.sendErr = wrapStatus("speech chunk", err)
+		if err := s.sendMessage(req); err != nil {
+			s.sendErr = err
 			return s.sendErr
 		}
 	}
-	if err := s.stream.Send(&phrasepb.SpeechRequest{
+	if err := s.sendMessage(&phrasepb.SpeechRequest{
 		Kind: &phrasepb.SpeechRequest_Eos{Eos: &phrasepb.SpeechRequestEos{}},
 	}); err != nil {
-		s.sendErr = wrapStatus("speech eos", err)
+		s.sendErr = err
 		return s.sendErr
 	}
 	s.sentEOS = true
@@ -377,12 +372,12 @@ func (s *Speech) Abort(reason string) error {
 		return s.sendErr
 	}
 	s.sentEOS = true
-	err := s.stream.Send(&phrasepb.SpeechRequest{
+	err := s.sendMessage(&phrasepb.SpeechRequest{
 		Kind: &phrasepb.SpeechRequest_Abort{Abort: &phrasepb.SpeechRequestAbort{Reason: reason}},
 	})
 	_ = s.stream.CloseSend()
 	if err != nil {
-		s.sendErr = wrapStatus("speech abort", err)
+		s.sendErr = err
 		return s.sendErr
 	}
 	return nil
@@ -392,17 +387,33 @@ func (s *Speech) Abort(reason string) error {
 // stream and a *StatusError for a non-OK status. A canceled context returns the
 // context error.
 func (s *Speech) Recv() (*Event, error) {
-	resp, err := s.stream.Recv()
+	payload, err := s.stream.Recv()
 	if err != nil {
-		return nil, wrapStatus(s.op+" recv", err)
+		return nil, err
+	}
+	resp := &phrasepb.SpeechResponse{}
+	if err := proto.Unmarshal(payload, resp); err != nil {
+		return nil, fmt.Errorf("vkclient: decode SpeechResponse: %w", err)
 	}
 	return decodeResponse(resp)
+}
+
+// sendMessage marshals one request and writes it to the stream.
+func (s *Speech) sendMessage(message *phrasepb.SpeechRequest) error {
+	payload, err := proto.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("vkclient: encode SpeechRequest: %w", err)
+	}
+	return s.stream.Send(payload)
 }
 
 // Cancel tears the stream down immediately, without sending an abort frame.
 // Use Abort first when the server should observe the cancellation.
 func (s *Speech) Cancel() {
-	s.closeOnce.Do(func() { s.cancel() })
+	s.closeOnce.Do(func() {
+		s.cancel()
+		_ = s.stream.Close()
+	})
 }
 
 // Close cancels the stream. It is idempotent and safe after EOS.

@@ -26,10 +26,10 @@ func TestVirtualRunIdentityRequiresDaemonPeer(t *testing.T) {
 	sup := supervisor.New(context.Background(), logs, ids.NewClock(), "", nil)
 	d := &Daemon{sup: sup, logs: logs, internalToken: "test-token"}
 	m := &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 	}
-	runID := d.SystemAppRunID("capsula.clock")
+	runID := d.SystemAppRunID("capsulad.clock")
 	run, err := sup.RegisterBuiltin(m, runID)
 	if err != nil {
 		t.Fatal(err)
@@ -39,9 +39,9 @@ func TestVirtualRunIdentityRequiresDaemonPeer(t *testing.T) {
 	}
 
 	ctx := metadata.NewIncomingContext(context.Background(),
-		metadata.Pairs("capsula-run-id", runID, internalTokenKey, "test-token"))
+		metadata.Pairs("capsulad-run-id", runID, internalTokenKey, "test-token"))
 	appID, gotRun, ok := d.callerIdentity(grpcpeer.WithCreds(ctx, grpcpeer.Creds{PID: os.Getpid(), OK: true}))
-	if !ok || appID != "capsula.clock" || gotRun != runID {
+	if !ok || appID != "capsulad.clock" || gotRun != runID {
 		t.Fatalf("daemon peer rejected: app=%q run=%q ok=%v", appID, gotRun, ok)
 	}
 

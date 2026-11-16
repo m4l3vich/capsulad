@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -30,12 +31,12 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	"capsula/apps/marusia/internal/vkproto/clientpb"
-	"capsula/apps/marusia/internal/vkproto/clientprobepb"
-	commandspb "capsula/apps/marusia/internal/vkproto/commandspb"
-	"capsula/apps/marusia/internal/vkproto/optionspb"
-	"capsula/apps/marusia/internal/vkproto/phrasepb"
-	"capsula/apps/marusia/internal/vkproto/servicepb"
+	"capsulad/apps/marusia/internal/vkproto/clientpb"
+	"capsulad/apps/marusia/internal/vkproto/clientprobepb"
+	commandspb "capsulad/apps/marusia/internal/vkproto/commandspb"
+	"capsulad/apps/marusia/internal/vkproto/optionspb"
+	"capsulad/apps/marusia/internal/vkproto/phrasepb"
+	"capsulad/apps/marusia/internal/vkproto/servicepb"
 )
 
 const (
@@ -51,33 +52,49 @@ const (
 // and returns a pool that trusts it. All server connections are loopback.
 func testCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "marusia-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA: %v", err)
+	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "marusia-test"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-		DNSNames:              []string{"localhost"},
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "marusia-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &key.PublicKey, caKey)
 	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse certificate: %v", err)
+		t.Fatalf("create leaf: %v", err)
 	}
 	pool := x509.NewCertPool()
-	pool.AddCert(leaf)
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
+	pool.AddCert(caCert)
+	return tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: key}, pool
 }
 
 // startGRPC serves reg on a loopback TLS listener and returns its address.
@@ -95,6 +112,195 @@ func startGRPC(t *testing.T, cert tls.Certificate, reg func(*grpc.Server)) strin
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
 	return lis.Addr().String()
+}
+
+// rawMessage and rawCodec keep application protobuf bytes opaque on the wire,
+// exactly like the native engine's RawCodec.
+type rawMessage []byte
+
+type rawCodec struct{}
+
+func (rawCodec) Marshal(value any) ([]byte, error) {
+	message, ok := value.(rawMessage)
+	if !ok {
+		return nil, fmt.Errorf("rawCodec: unexpected %T", value)
+	}
+	return message, nil
+}
+
+func (rawCodec) Unmarshal(data []byte, value any) error {
+	message, ok := value.(*rawMessage)
+	if !ok {
+		return fmt.Errorf("rawCodec: unexpected %T", value)
+	}
+	*message = append((*message)[:0], data...)
+	return nil
+}
+
+func (rawCodec) Name() string { return "proto" }
+
+// testTransport is the in-process adapter behind the production seam. It uses
+// grpc-go and net/http, which is why it lives in _test.go: the application
+// binary does not link either.
+type testTransport struct {
+	http *http.Client
+	conn *grpc.ClientConn
+}
+
+func dialTest(t *testing.T, addr string, pool *x509.CertPool) *grpc.ClientConn {
+	t.Helper()
+	var dialer net.Dialer
+	conn, err := grpc.NewClient("passthrough:///"+addr,
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			RootCAs:    pool,
+			ServerName: "127.0.0.1",
+			MinVersion: tls.VersionTLS12,
+		})),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", addr)
+		}))
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func newTestTransport(t *testing.T, addr string, pool *x509.CertPool, httpClient *http.Client) *testTransport {
+	t.Helper()
+	transport := &testTransport{http: httpClient}
+	if addr != "" {
+		transport.conn = dialTest(t, addr, pool)
+	}
+	return transport
+}
+
+func (t *testTransport) Do(ctx context.Context, req HTTPRequest, timeout time.Duration) (*HTTPResponse, error) {
+	if t.http == nil {
+		return nil, errors.New("testTransport: no http client")
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	request, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range req.Header {
+		request.Header.Set(name, value)
+	}
+	response, err := t.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	headers := make(map[string]string, len(response.Header))
+	for name, values := range response.Header {
+		if len(values) > 0 {
+			headers[strings.ToLower(name)] = values[len(values)-1]
+		}
+	}
+	return &HTTPResponse{StatusCode: response.StatusCode, Header: headers, Body: body}, nil
+}
+
+func (t *testTransport) Unary(ctx context.Context, service, method string,
+	headers map[string]string, request []byte, timeout time.Duration) ([]byte, error) {
+	if t.conn == nil {
+		return nil, errors.New("testTransport: no grpc connection")
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	ctx = metadata.NewOutgoingContext(ctx, metadata.New(headers))
+	var response rawMessage
+	var md metadata.MD
+	err := t.conn.Invoke(ctx, "/"+service+"/"+method, rawMessage(request), &response,
+		grpc.ForceCodec(rawCodec{}), grpc.Header(&md))
+	if err != nil {
+		return nil, testStatusError(method, err)
+	}
+	return response, nil
+}
+
+func (t *testTransport) NewStream(ctx context.Context, service, method string,
+	headers map[string]string, kind CallKind, timeout time.Duration) (Stream, error) {
+	if t.conn == nil {
+		return nil, errors.New("testTransport: no grpc connection")
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx = metadata.NewOutgoingContext(streamCtx, metadata.New(headers))
+	stream, err := t.conn.NewStream(streamCtx, &grpc.StreamDesc{
+		ServerStreams: true,
+		ClientStreams: true,
+	}, "/"+service+"/"+method, grpc.ForceCodec(rawCodec{}))
+	if err != nil {
+		cancel()
+		return nil, testStatusError(method, err)
+	}
+	return &testStream{stream: stream, cancel: cancel, method: method}, nil
+}
+
+func (t *testTransport) Close() error {
+	if t.conn != nil {
+		_ = t.conn.Close()
+	}
+	return nil
+}
+
+type testStream struct {
+	stream grpc.ClientStream
+	cancel context.CancelFunc
+	method string
+}
+
+func (s *testStream) Send(payload []byte) error {
+	return testStatusError(s.method+" send", s.stream.SendMsg(rawMessage(payload)))
+}
+
+func (s *testStream) Recv() ([]byte, error) {
+	var message rawMessage
+	if err := s.stream.RecvMsg(&message); err != nil {
+		return nil, testStatusError(s.method+" recv", err)
+	}
+	return message, nil
+}
+
+func (s *testStream) CloseSend() error {
+	return testStatusError(s.method+" close send", s.stream.CloseSend())
+}
+
+func (s *testStream) Close() error {
+	s.cancel()
+	return nil
+}
+
+func testStatusError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, io.EOF) {
+		return io.EOF
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if st, ok := status.FromError(err); ok {
+		return &StatusError{Op: op, Code: Code(st.Code()), Message: st.Message()}
+	}
+	return err
 }
 
 type attachRecord struct {
@@ -150,17 +356,12 @@ func attachOK() string {
 // TLS/target derivation while both servers stay in process.
 func newTestClient(t *testing.T, base string, pool *x509.CertPool, httpClient *http.Client, grpcAddr, xtoken string) *Client {
 	t.Helper()
-	var dialer net.Dialer
 	client, err := New(Config{
-		BaseURL:    base,
-		XTokenID:   xtoken,
-		Serial:     testSerial,
-		DeviceID:   testDevice,
-		HTTPClient: httpClient,
-		TLS:        &tls.Config{RootCAs: pool},
-		DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", grpcAddr)
-		})},
+		BaseURL:   base,
+		XTokenID:  xtoken,
+		Serial:    testSerial,
+		DeviceID:  testDevice,
+		Transport: newTestTransport(t, grpcAddr, pool, httpClient),
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
@@ -323,11 +524,11 @@ func TestAttachRequestShape(t *testing.T) {
 	defer ts.Close()
 
 	client, err := New(Config{
-		BaseURL:    ts.URL,
-		XTokenID:   "xtoken-abc",
-		Serial:     testSerial,
-		DeviceID:   testDevice,
-		HTTPClient: ts.Client(),
+		BaseURL:   ts.URL,
+		XTokenID:  "xtoken-abc",
+		Serial:    testSerial,
+		DeviceID:  testDevice,
+		Transport: newTestTransport(t, "", nil, ts.Client()),
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -384,7 +585,7 @@ func TestAttachFailurePaths(t *testing.T) {
 		fake := &fakeAttach{status: http.StatusForbidden, response: `{"error":"nope"}`}
 		ts := httptest.NewTLSServer(fake)
 		defer ts.Close()
-		client, err := New(Config{BaseURL: ts.URL, XTokenID: "x", HTTPClient: ts.Client()})
+		client, err := New(Config{BaseURL: ts.URL, XTokenID: "x", Transport: newTestTransport(t, "", nil, ts.Client())})
 		if err != nil {
 			t.Fatalf("new: %v", err)
 		}
@@ -400,7 +601,7 @@ func TestAttachFailurePaths(t *testing.T) {
 		fake := &fakeAttach{response: attachOK()}
 		ts := httptest.NewTLSServer(fake)
 		defer ts.Close()
-		client, err := New(Config{BaseURL: ts.URL, Serial: testSerial, HTTPClient: ts.Client()})
+		client, err := New(Config{BaseURL: ts.URL, Serial: testSerial, Transport: newTestTransport(t, "", nil, ts.Client())})
 		if err != nil {
 			t.Fatalf("new: %v", err)
 		}
@@ -560,9 +761,9 @@ func TestAuthorizeMetadataAndSpeechTurn(t *testing.T) {
 	if device.GetSerial() != testSerial || device.GetVersion() != "44.91" {
 		t.Errorf("device_info = %+v", device)
 	}
-	capsula := init.GetClientOptions().GetState().GetState().GetCapsulaState()
-	if capsula == nil || !capsula.GetMicOn() {
-		t.Errorf("capsula state = %+v", capsula)
+	capsulad := init.GetClientOptions().GetState().GetState().GetCapsulaState()
+	if capsulad == nil || !capsulad.GetMicOn() {
+		t.Errorf("capsulad state = %+v", capsulad)
 	}
 	params := init.GetKeywordOptions().GetKwParams()
 	if params.GetKeyword() != "marusya" || params.GetHwId() != "9F25725B" {
@@ -611,20 +812,20 @@ func TestMetadataBeforeAttachHasEmptyAuthorization(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 	md := client.callMetadata()
-	if values := md.Get("authorization"); len(values) != 1 || values[0] != "" {
-		t.Fatalf("authorization = %v, want one empty value", values)
+	if value, ok := md["authorization"]; !ok || value != "" {
+		t.Fatalf("authorization = %q (present=%v), want one empty value", value, ok)
 	}
-	if values := md.Get("x-session-id"); len(values) != 1 || values[0] != "" {
-		t.Fatalf("x-session-id = %v", values)
+	if value := md["x-session-id"]; value != "" {
+		t.Fatalf("x-session-id = %q", value)
 	}
-	if values := md.Get("x-device-ver"); len(values) != 1 || values[0] != defaultClientVersion {
-		t.Fatalf("x-device-ver = %v", values)
+	if value := md["x-device-ver"]; value != defaultClientVersion {
+		t.Fatalf("x-device-ver = %q", value)
 	}
-	if values := md.Get("x-device-sn"); len(values) != 1 || values[0] != testSerial {
-		t.Fatalf("x-device-sn = %v, want the configured serial %q", values, testSerial)
+	if value := md["x-device-sn"]; value != testSerial {
+		t.Fatalf("x-device-sn = %q, want the configured serial %q", value, testSerial)
 	}
-	if ids := md.Get("x-client-request-id"); len(ids) != 1 || !uuidRE.MatchString(ids[0]) {
-		t.Fatalf("x-client-request-id = %v", ids)
+	if id := md["x-client-request-id"]; !uuidRE.MatchString(id) {
+		t.Fatalf("x-client-request-id = %q", id)
 	}
 }
 
@@ -724,7 +925,7 @@ func TestAuthorizeDoesNotReplaceRejectedSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("a rejected session must not be reported as authorized")
 	}
-	if !IsCode(err, codes.Unauthenticated) {
+	if !IsCode(err, CodeUnauthenticated) {
 		t.Fatalf("error = %v, want the UNAUTHENTICATED status", err)
 	}
 	if attach.callCount() != 0 {
@@ -757,16 +958,11 @@ func TestAuthorizeInvalidDeviceSNIsLegible(t *testing.T) {
 			addr := startGRPC(t, cert, func(server *grpc.Server) {
 				servicepb.RegisterClientProbeServer(server, probe)
 			})
-			var dialer net.Dialer
 			client, err := New(Config{
-				BaseURL:    ts.URL,
-				Serial:     tc.serial,
-				DeviceID:   testDevice,
-				HTTPClient: ts.Client(),
-				TLS:        &tls.Config{RootCAs: pool},
-				DialOptions: []grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-					return dialer.DialContext(ctx, "tcp", addr)
-				})},
+				BaseURL:   ts.URL,
+				Serial:    tc.serial,
+				DeviceID:  testDevice,
+				Transport: newTestTransport(t, addr, pool, ts.Client()),
 			})
 			if err != nil {
 				t.Fatalf("new: %v", err)
@@ -780,7 +976,7 @@ func TestAuthorizeInvalidDeviceSNIsLegible(t *testing.T) {
 			if !IsInvalidDeviceSN(err) {
 				t.Fatalf("error = %v, want the invalid x-device-sn classification", err)
 			}
-			if !IsCode(err, codes.InvalidArgument) {
+			if !IsCode(err, CodeInvalidArgument) {
 				t.Fatalf("error = %v, want the InvalidArgument status preserved", err)
 			}
 			for _, want := range []string{tc.want, `"serial" setting`, "hardware_serial"} {
@@ -911,10 +1107,10 @@ func TestStatusErrorSurfaces(t *testing.T) {
 	if !asError(err, &statusErr) {
 		t.Fatalf("error = %v, want *StatusError", err)
 	}
-	if statusErr.Code != codes.Unauthenticated {
+	if statusErr.Code != CodeUnauthenticated {
 		t.Fatalf("code = %v", statusErr.Code)
 	}
-	if !IsCode(err, codes.Unauthenticated) {
+	if !IsCode(err, CodeUnauthenticated) {
 		t.Fatal("IsCode did not recognize the status")
 	}
 }
@@ -985,6 +1181,32 @@ func TestParseBaseURL(t *testing.T) {
 	}
 }
 
+// TestParseBaseURLErrorDropsTheSignedTail covers the rejection path that reaches
+// the settings log: an operator can paste a URL with a signed query into
+// endpoint_custom, and the error must not echo it back.
+func TestParseBaseURLErrorDropsTheSignedTail(t *testing.T) {
+	const signed = "https://vc.go.mail.ru/api?X-Amz-Signature=deadbeef&X-Amz-Credential=secret#frag"
+	_, err := ParseBaseURL(signed)
+	if err == nil {
+		t.Fatal("a path, query and fragment must be rejected")
+	}
+	for _, secret := range []string{"deadbeef", "X-Amz", "secret", "#frag", "?"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("the error echoed %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "https://vc.go.mail.ru/api") {
+		t.Fatalf("the error must still name scheme://host/path: %v", err)
+	}
+
+	// The unparseable case must not fall back to the raw string either.
+	if _, err := ParseBaseURL("https://vc.go.mail.ru/%zz?X-Amz-Signature=deadbeef"); err == nil {
+		t.Fatal("an invalid escape must be rejected")
+	} else if strings.Contains(err.Error(), "deadbeef") {
+		t.Fatalf("the parse error echoed the signed query: %v", err)
+	}
+}
+
 func TestParseAudioFormat(t *testing.T) {
 	if f, err := ParseAudioFormat("wave"); err != nil || f != FormatWave {
 		t.Fatalf("wave = %v, %v", f, err)
@@ -1003,7 +1225,7 @@ func isErr(err, target error) bool { return errors.Is(err, target) }
 
 func isCanceled(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		IsCode(err, codes.Canceled) || IsCode(err, codes.DeadlineExceeded)
+		IsCode(err, CodeCanceled) || IsCode(err, CodeDeadlineExceeded)
 }
 
 func asError(err error, target any) bool { return errors.As(err, target) }

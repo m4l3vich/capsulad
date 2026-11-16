@@ -34,7 +34,7 @@ MP_URL="https://codeload.github.com/micropython/micropython/tar.gz/${MP_COMMIT}"
 say() { printf '%s\n' "$*" >&2; }
 die() { say "interpreter build: $*"; exit 1; }
 
-# Both hosts dlopen libcapsula. glibc below 2.34 still ships dlopen/dlsym in
+# Both hosts dlopen libcapsulad. glibc below 2.34 still ships dlopen/dlsym in
 # libdl, so a Linux link needs -ldl; newer glibc folds them into libc and the
 # extra flag is harmless.
 DL_LIBS=
@@ -102,11 +102,11 @@ build_quickjs() {
   mkdir -p "$OUT"
   "$CC" -O2 -std=c11 -Wall -Wextra \
     -I"$INCLUDE" -I"$COMMON" -I"$qjs_src" \
-    "$QUICKJS_DIR/host.c" "$COMMON/capsula_host.c" \
+    "$QUICKJS_DIR/host.c" "$COMMON/capsulad_host.c" \
     "$qjs_build/libqjs.a" -lm -lpthread $extra \
-    -o "$OUT/capsula-quickjs"
-  chmod 0755 "$OUT/capsula-quickjs"
-  say "staged $OUT/capsula-quickjs ($("$OUT/capsula-quickjs" --version))"
+    -o "$OUT/capsulad-quickjs"
+  chmod 0755 "$OUT/capsulad-quickjs"
+  say "staged $OUT/capsulad-quickjs ($("$OUT/capsulad-quickjs" --version))"
 }
 
 generate_prelude() {
@@ -144,7 +144,7 @@ build_micropython() {
   cp "$MICROPYTHON_DIR/mpconfigport.h" "$mp_work/mpconfigport.h"
   cat >"$mp_work/embed.mk" <<EOF
 MICROPYTHON_TOP := $mp_src
-SRC_QSTR += $MICROPYTHON_DIR/modcapsula.c
+SRC_QSTR += $MICROPYTHON_DIR/modcapsulad.c
 CFLAGS += -I$MICROPYTHON_DIR -I$COMMON -I$INCLUDE
 include \$(MICROPYTHON_TOP)/ports/embed/embed.mk
 EOF
@@ -165,14 +165,14 @@ EOF
     count=$((count + 1))
     "$CC" $cflags -c "$source" -o "$objdir/$count-$(basename "$source" .c).o"
   done
-  "$CC" $cflags -c "$COMMON/capsula_host.c" -o "$objdir/capsula_host.o"
-  "$CC" $cflags -c "$MICROPYTHON_DIR/modcapsula.c" -o "$objdir/modcapsula.o"
+  "$CC" $cflags -c "$COMMON/capsulad_host.c" -o "$objdir/capsulad_host.o"
+  "$CC" $cflags -c "$MICROPYTHON_DIR/modcapsulad.c" -o "$objdir/modcapsulad.o"
   "$CC" $cflags -c "$MICROPYTHON_DIR/host.c" -o "$objdir/host.o"
 
   mkdir -p "$OUT"
-  "$CC" "$objdir"/*.o -lm -lpthread $DL_LIBS -o "$OUT/capsula-micropython"
-  chmod 0755 "$OUT/capsula-micropython"
-  say "staged $OUT/capsula-micropython ($("$OUT/capsula-micropython" --version))"
+  "$CC" "$objdir"/*.o -lm -lpthread $DL_LIBS -o "$OUT/capsulad-micropython"
+  chmod 0755 "$OUT/capsulad-micropython"
+  say "staged $OUT/capsulad-micropython ($("$OUT/capsulad-micropython" --version))"
 }
 
 mkdir -p "$OUT" "$WORK"

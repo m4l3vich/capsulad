@@ -13,8 +13,8 @@
 // falls back explicitly and reports the actual mode in diagnostics.
 //
 // The shared native SDK runtime is installed once on the host, mounted
-// read-only at /capsula/lib in namespace modes and exposed through
-// CAPSULA_LIBRARY. Apps never bundle a copy; see runtime.go.
+// read-only at /capsulad/lib in namespace modes and exposed through
+// CAPSULAD_LIBRARY. Apps never bundle a copy; see runtime.go.
 package sandbox
 
 import (
@@ -38,11 +38,11 @@ type Config struct {
 	AssetsDir    string
 	RuntimePaths []string
 	// LibraryDir is the host directory holding the shared native SDK runtime
-	// (libcapsula.so.1 and capsula-native.json). Empty means resolve beside
+	// (libcapsulad.so.1 and capsulad-native.json). Empty means resolve beside
 	// the daemon binary: <exe-dir>/lib, then <exe-dir>/../lib.
 	LibraryDir string
 	// DeviceSerial is the SoC serial the daemon read at startup. It is handed
-	// to every app as CAPSULA_DEVICE_SERIAL; an empty value omits the variable
+	// to every app as CAPSULAD_DEVICE_SERIAL; an empty value omits the variable
 	// instead of exporting an empty one, so an app can tell "unknown" from a
 	// value the launcher assigned.
 	DeviceSerial string
@@ -147,7 +147,7 @@ func (l *Launcher) env() []string {
 		env = append(out, "TZ="+tz)
 		out = env
 	}
-	// CAPSULA_ASSETS is the app-facing read-only asset store. Namespace modes
+	// CAPSULAD_ASSETS is the app-facing read-only asset store. Namespace modes
 	// bind it at /assets; uid/none modes receive the host path so the same
 	// contract works without a mount namespace.
 	assets := l.cfg.AssetsDir
@@ -155,13 +155,13 @@ func (l *Launcher) env() []string {
 		assets = "/assets"
 	}
 	if assets != "" {
-		env = append(env, "CAPSULA_ASSETS="+assets)
+		env = append(env, "CAPSULAD_ASSETS="+assets)
 	}
-	// CAPSULA_DEVICE_SERIAL is the descriptor-free path to the SoC serial. A
+	// CAPSULAD_DEVICE_SERIAL is the descriptor-free path to the SoC serial. A
 	// native runtime built before DeviceInfo.hardware_serial existed drops the
 	// field from JSON replies, so apps cannot rely on the protocol there.
 	if serial := strings.TrimSpace(l.cfg.DeviceSerial); serial != "" {
-		env = append(env, "CAPSULA_DEVICE_SERIAL="+serial)
+		env = append(env, "CAPSULAD_DEVICE_SERIAL="+serial)
 	}
 	return env
 }
@@ -292,15 +292,15 @@ func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*
 		case "namespaces", "mountns":
 			execPath := filepath.Join(NamespaceLibraryDir, interp.File)
 			env = append(env,
-				"CAPSULA_APP_DIR=/app",
-				"CAPSULA_INTERPRETER="+execPath,
+				"CAPSULAD_APP_DIR=/app",
+				"CAPSULAD_INTERPRETER="+execPath,
 			)
 			return l.namespaceCommand(m, appDir, execPath, []string{filepath.Join("/app", m.Entrypoint.Path)}, runID, appID, env, libDir)
 		case "uid":
 			host := filepath.Join(libDir, interp.File)
 			env = append(env,
-				"CAPSULA_APP_DIR="+appDir,
-				"CAPSULA_INTERPRETER="+host,
+				"CAPSULAD_APP_DIR="+appDir,
+				"CAPSULAD_INTERPRETER="+host,
 			)
 			return l.uidCommand(appID, host, []string{scriptPath}, env)
 		case "none":
@@ -308,8 +308,8 @@ func (l *Launcher) Command(m *manifest.Manifest, appDir, runID, appID string) (*
 			cmd := exec.Command(host, scriptPath)
 			cmd.Dir = appDir
 			cmd.Env = append(env,
-				"CAPSULA_APP_DIR="+appDir,
-				"CAPSULA_INTERPRETER="+host,
+				"CAPSULAD_APP_DIR="+appDir,
+				"CAPSULAD_INTERPRETER="+host,
 			)
 			return cmd, nil
 		default:
@@ -413,7 +413,7 @@ func sandboxSocketEnv(mode, hostPath string) string {
 
 // specJSON builds the helper payload. env already contains the launch
 // environment including any native SDK variables; libraryDir is the host
-// directory the helper bind-mounts read-only at /capsula/lib. execPath is the
+// directory the helper bind-mounts read-only at /capsulad/lib. execPath is the
 // absolute path the helper executes after pivot_root; args are passed to it
 // verbatim (a script host receives the in-namespace script path).
 func (l *Launcher) specJSON(appDir, execPath string, args []string, runID, appID, mode string, env []string, libraryDir string) (string, error) {
@@ -428,10 +428,10 @@ func (l *Launcher) specJSON(appDir, execPath string, args []string, runID, appID
 	fullEnv := make([]string, 0, len(env)+4)
 	fullEnv = append(fullEnv, env...)
 	fullEnv = append(fullEnv,
-		"CAPSULA_SOCKET="+socket,
-		"CAPSULA_RUN_ID="+runID,
-		"CAPSULA_APP_ID="+appID,
-		"CAPSULA_SDK="+version.SDKVersion,
+		"CAPSULAD_SOCKET="+socket,
+		"CAPSULAD_RUN_ID="+runID,
+		"CAPSULAD_APP_ID="+appID,
+		"CAPSULAD_SDK="+version.SDKVersion,
 	)
 	spec := execSpec{
 		Root: root, AppDir: appDir, AppPath: execPath, Args: args,
@@ -465,10 +465,10 @@ func HandleHelper(args []string) (handled bool, code int) {
 }
 
 const (
-	internalExecArg         = "__capsula_sandbox_exec"
-	internalProbeArg        = "__capsula_sandbox_probe"
-	internalSeccompProbeArg = "__capsula_seccomp_probe"
-	specEnvVar              = "CAPSULA_SANDBOX_SPEC"
+	internalExecArg         = "__capsulad_sandbox_exec"
+	internalProbeArg        = "__capsulad_sandbox_probe"
+	internalSeccompProbeArg = "__capsulad_seccomp_probe"
+	specEnvVar              = "CAPSULAD_SANDBOX_SPEC"
 
 	// sandboxSocketPath is where the framework socket is bind-mounted inside
 	// an app's mount namespace.

@@ -2,7 +2,7 @@
  * QuickJS app host.
  *
  * The embedded engine is real QuickJS (quickjs-ng); this file installs a thin
- * native bridge over the public libcapsula C ABI and evaluates the SDK prelude
+ * native bridge over the public libcapsulad C ABI and evaluates the SDK prelude
  * before the package script. Scripts never receive raw framework sockets,
  * child processes or a second protocol implementation.
  */
@@ -11,22 +11,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "capsula_host.h"
+#include "capsulad_host.h"
 #include "quickjs.h"
 
 #define MAX_SCRIPT_BYTES (8u * 1024u * 1024u)
-#define CAPSULA_STR_INNER(x) #x
-#define CAPSULA_STR(x) CAPSULA_STR_INNER(x)
+#define CAPSULAD_STR_INNER(x) #x
+#define CAPSULAD_STR(x) CAPSULAD_STR_INNER(x)
 
-static capsula_host host;
+static capsulad_host host;
 
-static capsula_host *ctx_host(JSContext *ctx) {
-  return (capsula_host *)JS_GetContextOpaque(ctx);
+static capsulad_host *ctx_host(JSContext *ctx) {
+  return (capsulad_host *)JS_GetContextOpaque(ctx);
 }
 
-static JSValue throw_status(JSContext *ctx, capsula_host *h, int32_t status) {
+static JSValue throw_status(JSContext *ctx, capsulad_host *h, int32_t status) {
   char err[512];
-  capsula_host_error(h, status, err, sizeof(err));
+  capsulad_host_error(h, status, err, sizeof(err));
   return JS_ThrowInternalError(ctx, "%s", err);
 }
 
@@ -46,7 +46,7 @@ static uint32_t arg_timeout(JSContext *ctx, JSValueConst value,
     return fallback;
   }
   if (timeout < 0) {
-    return CAPSULA_WAIT_FOREVER;
+    return CAPSULAD_WAIT_FOREVER;
   }
   return (uint32_t)timeout;
 }
@@ -54,7 +54,7 @@ static uint32_t arg_timeout(JSContext *ctx, JSValueConst value,
 static uint64_t arg_handle(JSContext *ctx, JSValueConst value) {
   int64_t handle = 0;
   if (JS_ToInt64(ctx, &handle, value) != 0 || handle <= 0) {
-    return CAPSULA_HANDLE_INVALID;
+    return CAPSULAD_HANDLE_INVALID;
   }
   return (uint64_t)handle;
 }
@@ -82,10 +82,10 @@ static const uint8_t *arg_bytes(JSContext *ctx, JSValueConst value,
 static JSValue js_start(JSContext *ctx, JSValueConst this_val, int argc,
                         JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   uint32_t timeout = arg_timeout(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, 10000);
   char err[512];
-  if (capsula_host_start(h, timeout, err, sizeof(err)) != 0) {
+  if (capsulad_host_start(h, timeout, err, sizeof(err)) != 0) {
     JS_ThrowInternalError(ctx, "%s", err);
     return JS_EXCEPTION;
   }
@@ -95,7 +95,7 @@ static JSValue js_start(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_poll(JSContext *ctx, JSValueConst this_val, int argc,
                        JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   int timeout = 0;
   if (argc > 0 && !JS_IsUndefined(argv[0])) {
     int32_t value = 0;
@@ -104,13 +104,13 @@ static JSValue js_poll(JSContext *ctx, JSValueConst this_val, int argc,
     }
     timeout = value;
   }
-  capsula_host_job job;
-  if (!capsula_host_poll(h, timeout, &job)) {
+  capsulad_host_job job;
+  if (!capsulad_host_poll(h, timeout, &job)) {
     return JS_NULL;
   }
   JSValue out = JS_NewObject(ctx);
   switch (job.kind) {
-    case CAPSULA_HOST_JOB_EVENT: {
+    case CAPSULAD_HOST_JOB_EVENT: {
       JS_SetPropertyStr(ctx, out, "kind",
                         JS_NewString(ctx, "event"));
       JS_SetPropertyStr(ctx, out, "event", JS_NewInt32(ctx, job.event_kind));
@@ -123,7 +123,7 @@ static JSValue js_poll(JSContext *ctx, JSValueConst this_val, int argc,
       }
       break;
     }
-    case CAPSULA_HOST_JOB_CALL: {
+    case CAPSULAD_HOST_JOB_CALL: {
       JS_SetPropertyStr(ctx, out, "kind", JS_NewString(ctx, "call"));
       JS_SetPropertyStr(ctx, out, "call", JS_NewInt64(ctx, (int64_t)job.call));
       if (job.info != NULL && job.info_len > 0) {
@@ -135,7 +135,7 @@ static JSValue js_poll(JSContext *ctx, JSValueConst this_val, int argc,
       }
       break;
     }
-    case CAPSULA_HOST_JOB_DISCONNECTED: {
+    case CAPSULAD_HOST_JOB_DISCONNECTED: {
       JS_SetPropertyStr(ctx, out, "kind", JS_NewString(ctx, "disconnect"));
       JS_SetPropertyStr(ctx, out, "status", JS_NewInt32(ctx, job.status));
       JS_SetPropertyStr(ctx, out, "detail",
@@ -145,7 +145,7 @@ static JSValue js_poll(JSContext *ctx, JSValueConst this_val, int argc,
     default:
       break;
   }
-  capsula_host_free_job(&job);
+  capsulad_host_free_job(&job);
   return out;
 }
 
@@ -154,7 +154,7 @@ static JSValue js_stopped(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  return JS_NewBool(ctx, capsula_host_stopped(ctx_host(ctx)));
+  return JS_NewBool(ctx, capsulad_host_stopped(ctx_host(ctx)));
 }
 
 static JSValue js_disconnected(JSContext *ctx, JSValueConst this_val, int argc,
@@ -162,7 +162,7 @@ static JSValue js_disconnected(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  return JS_NewBool(ctx, capsula_host_disconnected(ctx_host(ctx)));
+  return JS_NewBool(ctx, capsulad_host_disconnected(ctx_host(ctx)));
 }
 
 static JSValue js_connected(JSContext *ctx, JSValueConst this_val, int argc,
@@ -170,7 +170,7 @@ static JSValue js_connected(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  return JS_NewBool(ctx, capsula_host_connected(ctx_host(ctx)));
+  return JS_NewBool(ctx, capsulad_host_connected(ctx_host(ctx)));
 }
 
 static JSValue js_ready(JSContext *ctx, JSValueConst this_val, int argc,
@@ -178,7 +178,7 @@ static JSValue js_ready(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  return JS_NewBool(ctx, capsula_host_bus_ready(ctx_host(ctx)));
+  return JS_NewBool(ctx, capsulad_host_bus_ready(ctx_host(ctx)));
 }
 
 static JSValue js_disconnect_status(JSContext *ctx, JSValueConst this_val,
@@ -188,7 +188,7 @@ static JSValue js_disconnect_status(JSContext *ctx, JSValueConst this_val,
   (void)argv;
   int32_t status = 0;
   char detail[512] = {0};
-  capsula_host_disconnect_status(ctx_host(ctx), &status, detail,
+  capsulad_host_disconnect_status(ctx_host(ctx), &status, detail,
                                  sizeof(detail));
   return JS_NewInt32(ctx, status);
 }
@@ -200,7 +200,7 @@ static JSValue js_disconnect_detail(JSContext *ctx, JSValueConst this_val,
   (void)argv;
   int32_t status = 0;
   char detail[512] = {0};
-  if (!capsula_host_disconnect_status(ctx_host(ctx), &status, detail,
+  if (!capsulad_host_disconnect_status(ctx_host(ctx), &status, detail,
                                       sizeof(detail))) {
     return JS_NULL;
   }
@@ -230,7 +230,7 @@ static JSValue js_log(JSContext *ctx, JSValueConst this_val, int argc,
     size_t len = 0;
     const char *text = arg_string(ctx, argv[0], &len);
     if (text != NULL) {
-      fprintf(stderr, "capsula-script: %.*s\n", (int)len, text);
+      fprintf(stderr, "capsulad-script: %.*s\n", (int)len, text);
       fflush(stderr);
       JS_FreeCString(ctx, text);
     }
@@ -241,7 +241,7 @@ static JSValue js_log(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_unary(JSContext *ctx, JSValueConst this_val, int argc,
                         JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 3) {
     return JS_ThrowTypeError(ctx, "unary(service, method, requestJSON, timeout?)");
   }
@@ -252,7 +252,7 @@ static JSValue js_unary(JSContext *ctx, JSValueConst this_val, int argc,
   if (service == NULL || method == NULL || request == NULL) {
     return JS_EXCEPTION;
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->client_unary(
       h->client, service, service_len, method, method_len,
       (const uint8_t *)request, request_len,
@@ -260,10 +260,10 @@ static JSValue js_unary(JSContext *ctx, JSValueConst this_val, int argc,
   JS_FreeCString(ctx, service);
   JS_FreeCString(ctx, method);
   JS_FreeCString(ctx, request);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
-  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsula_host_text_len(out.data, out.len));
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsulad_host_text_len(out.data, out.len));
   h->api->buf_free(out);
   return result;
 }
@@ -271,7 +271,7 @@ static JSValue js_unary(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_unary_proto(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 3) {
     return JS_ThrowTypeError(ctx,
                              "unaryProto(service, method, bytes, timeout?)");
@@ -289,13 +289,13 @@ static JSValue js_unary_proto(JSContext *ctx, JSValueConst this_val, int argc,
     JS_FreeCString(ctx, method);
     return JS_EXCEPTION;
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->client_unary_proto(
       h->client, service, service_len, method, method_len, request, request_len,
       arg_timeout(ctx, argc > 3 ? argv[3] : JS_UNDEFINED, 30000), &out);
   JS_FreeCString(ctx, service);
   JS_FreeCString(ctx, method);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   JSValue result = JS_NewUint8ArrayCopy(ctx, out.data, out.len);
@@ -306,7 +306,7 @@ static JSValue js_unary_proto(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_call_start(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 4) {
     return JS_ThrowTypeError(ctx,
                              "callStart(service, method, kind, timeout?)");
@@ -321,13 +321,13 @@ static JSValue js_call_start(JSContext *ctx, JSValueConst this_val, int argc,
     if (method != NULL) JS_FreeCString(ctx, method);
     return JS_EXCEPTION;
   }
-  capsula_handle call = CAPSULA_HANDLE_INVALID;
+  capsulad_handle call = CAPSULAD_HANDLE_INVALID;
   int32_t status = h->api->call_start(
       h->client, service, service_len, method, method_len, kind,
       arg_timeout(ctx, argc > 3 ? argv[3] : JS_UNDEFINED, 30000), &call);
   JS_FreeCString(ctx, service);
   JS_FreeCString(ctx, method);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_NewInt64(ctx, (int64_t)call);
@@ -336,7 +336,7 @@ static JSValue js_call_start(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_call_start_routed(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 4) {
     return JS_ThrowTypeError(
         ctx, "callStartRouted(appId, service, method, timeout?)");
@@ -351,14 +351,14 @@ static JSValue js_call_start_routed(JSContext *ctx, JSValueConst this_val,
     if (method != NULL) JS_FreeCString(ctx, method);
     return JS_EXCEPTION;
   }
-  capsula_handle call = CAPSULA_HANDLE_INVALID;
+  capsulad_handle call = CAPSULAD_HANDLE_INVALID;
   int32_t status = h->api->call_start_routed(
       h->client, app, app_len, service, service_len, method, method_len,
       arg_timeout(ctx, argc > 3 ? argv[3] : JS_UNDEFINED, 30000), &call);
   JS_FreeCString(ctx, app);
   JS_FreeCString(ctx, service);
   JS_FreeCString(ctx, method);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_NewInt64(ctx, (int64_t)call);
@@ -367,7 +367,7 @@ static JSValue js_call_start_routed(JSContext *ctx, JSValueConst this_val,
 static JSValue js_send_json(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 2) {
     return JS_ThrowTypeError(ctx, "sendJson(call, json)");
   }
@@ -379,7 +379,7 @@ static JSValue js_send_json(JSContext *ctx, JSValueConst this_val, int argc,
   }
   int32_t status = h->api->call_send_json(call, (const uint8_t *)json, len);
   JS_FreeCString(ctx, json);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -388,7 +388,7 @@ static JSValue js_send_json(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_send_proto(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 2) {
     return JS_ThrowTypeError(ctx, "sendProto(call, bytes)");
   }
@@ -400,7 +400,7 @@ static JSValue js_send_proto(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_EXCEPTION;
   }
   int32_t status = h->api->call_send_proto(call, data, len);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -409,12 +409,12 @@ static JSValue js_send_proto(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_half_close(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "halfClose(call)");
   }
   int32_t status = h->api->call_half_close(arg_handle(ctx, argv[0]));
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -423,21 +423,21 @@ static JSValue js_half_close(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_recv_json(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "recvJson(call, timeout?)");
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->call_recv_json(
       arg_handle(ctx, argv[0]),
       arg_timeout(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, 30000), &out);
-  if (status == CAPSULA_STATUS_END_OF_STREAM) {
+  if (status == CAPSULAD_STATUS_END_OF_STREAM) {
     return JS_NULL;
   }
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
-  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsula_host_text_len(out.data, out.len));
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsulad_host_text_len(out.data, out.len));
   h->api->buf_free(out);
   return result;
 }
@@ -445,18 +445,18 @@ static JSValue js_recv_json(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_recv_proto(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "recvProto(call, timeout?)");
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->call_recv_proto(
       arg_handle(ctx, argv[0]),
       arg_timeout(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, 30000), &out);
-  if (status == CAPSULA_STATUS_END_OF_STREAM) {
+  if (status == CAPSULAD_STATUS_END_OF_STREAM) {
     return JS_NULL;
   }
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   JSValue result = JS_NewUint8ArrayCopy(ctx, out.data, out.len);
@@ -467,7 +467,7 @@ static JSValue js_recv_proto(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_call_end(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "endCall(call, code, detail)");
   }
@@ -489,7 +489,7 @@ static JSValue js_call_end(JSContext *ctx, JSValueConst this_val, int argc,
   if (detail_allocated) {
     JS_FreeCString(ctx, detail);
   }
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -498,12 +498,12 @@ static JSValue js_call_end(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_cancel(JSContext *ctx, JSValueConst this_val, int argc,
                          JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "cancel(call)");
   }
   int32_t status = h->api->call_cancel(arg_handle(ctx, argv[0]));
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -512,12 +512,12 @@ static JSValue js_cancel(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_release(JSContext *ctx, JSValueConst this_val, int argc,
                           JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "release(call)");
   }
   int32_t status = h->api->call_release(arg_handle(ctx, argv[0]));
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -526,16 +526,16 @@ static JSValue js_release(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_call_info(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "callInfo(call)");
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->call_info(arg_handle(ctx, argv[0]), &out);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
-  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsula_host_text_len(out.data, out.len));
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsulad_host_text_len(out.data, out.len));
   h->api->buf_free(out);
   return result;
 }
@@ -543,15 +543,15 @@ static JSValue js_call_info(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_call_status(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "callStatus(call)");
   }
   int32_t code = 0;
-  capsula_buf detail = {0};
+  capsulad_buf detail = {0};
   int32_t status =
       h->api->call_status(arg_handle(ctx, argv[0]), &code, &detail);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   JSValue result = JS_NewArray(ctx);
@@ -559,7 +559,7 @@ static JSValue js_call_status(JSContext *ctx, JSValueConst this_val, int argc,
   JS_SetPropertyUint32(
       ctx, result, 1,
       JS_NewStringLen(ctx, (const char *)detail.data,
-                      capsula_host_text_len(detail.data, detail.len)));
+                      capsulad_host_text_len(detail.data, detail.len)));
   h->api->buf_free(detail);
   return result;
 }
@@ -567,7 +567,7 @@ static JSValue js_call_status(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_notify_invocation(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 2) {
     return JS_ThrowTypeError(ctx,
                              "notifyInvocation(id, accepted, detail?)");
@@ -595,7 +595,7 @@ static JSValue js_notify_invocation(JSContext *ctx, JSValueConst this_val,
   if (detail_allocated) {
     JS_FreeCString(ctx, detail);
   }
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -604,7 +604,7 @@ static JSValue js_notify_invocation(JSContext *ctx, JSValueConst this_val,
 static JSValue js_notify_action(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 2) {
     return JS_ThrowTypeError(ctx, "notifyAction(id, succeeded, detail?)");
   }
@@ -631,7 +631,7 @@ static JSValue js_notify_action(JSContext *ctx, JSValueConst this_val,
   if (detail_allocated) {
     JS_FreeCString(ctx, detail);
   }
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -642,13 +642,13 @@ static JSValue js_client_info(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  capsula_host *h = ctx_host(ctx);
-  capsula_buf out = {0};
+  capsulad_host *h = ctx_host(ctx);
+  capsulad_buf out = {0};
   int32_t status = h->api->client_info(h->client, &out);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
-  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsula_host_text_len(out.data, out.len));
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsulad_host_text_len(out.data, out.len));
   h->api->buf_free(out);
   return result;
 }
@@ -656,16 +656,16 @@ static JSValue js_client_info(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_handle_info(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "handleInfo(handle)");
   }
-  capsula_buf out = {0};
+  capsulad_buf out = {0};
   int32_t status = h->api->handle_info(arg_handle(ctx, argv[0]), &out);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
-  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsula_host_text_len(out.data, out.len));
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data, capsulad_host_text_len(out.data, out.len));
   h->api->buf_free(out);
   return result;
 }
@@ -673,7 +673,7 @@ static JSValue js_handle_info(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_register_descriptors(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
   (void)this_val;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   if (argc < 1) {
     return JS_ThrowTypeError(ctx, "registerDescriptors(bytes)");
   }
@@ -684,7 +684,7 @@ static JSValue js_register_descriptors(JSContext *ctx, JSValueConst this_val,
     return JS_EXCEPTION;
   }
   int32_t status = h->api->client_register_descriptors(h->client, data, len);
-  if (status != CAPSULA_STATUS_OK) {
+  if (status != CAPSULAD_STATUS_OK) {
     return throw_status(ctx, h, status);
   }
   return JS_UNDEFINED;
@@ -695,8 +695,8 @@ static JSValue js_env(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  const char *keys[] = {"CAPSULA_SOCKET", "CAPSULA_RUN_ID", "CAPSULA_APP_ID",
-                        "CAPSULA_SDK", "CAPSULA_LIBRARY", "CAPSULA_APP_DIR"};
+  const char *keys[] = {"CAPSULAD_SOCKET", "CAPSULAD_RUN_ID", "CAPSULAD_APP_ID",
+                        "CAPSULAD_SDK", "CAPSULAD_LIBRARY", "CAPSULAD_APP_DIR"};
   const char *names[] = {"socket", "runId", "appId", "sdk", "library",
                          "appDir"};
   JSValue env = JS_NewObject(ctx);
@@ -713,7 +713,7 @@ static JSValue js_stop(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-  capsula_host *h = ctx_host(ctx);
+  capsulad_host *h = ctx_host(ctx);
   pthread_mutex_lock(&h->mu);
   h->stopped = 1;
   pthread_cond_broadcast(&h->cv);
@@ -762,16 +762,16 @@ static int install_native(JSContext *ctx) {
   set_fn(ctx, native, "stop", js_stop, 0);
 
   JSValue global = JS_GetGlobalObject(ctx);
-  JS_SetPropertyStr(ctx, global, "__capsula_native", native);
+  JS_SetPropertyStr(ctx, global, "__capsulad_native", native);
   JS_FreeValue(ctx, global);
   return 0;
 }
 
 static const char *prelude =
-    "globalThis.capsula = (() => {\n"
+    "globalThis.capsulad = (() => {\n"
     "  \"use strict\";\n"
-    "  const n = globalThis.__capsula_native;\n"
-    "  delete globalThis.__capsula_native;\n"
+    "  const n = globalThis.__capsulad_native;\n"
+    "  delete globalThis.__capsulad_native;\n"
     "  const EVENT_NAMES = {1: \"invocation\", 2: \"settings_changed\",\n"
     "                       3: \"action\", 4: \"activation\",\n"
     "                       5: \"touch_released\"};\n"
@@ -840,7 +840,7 @@ static const char *prelude =
     "    handlers[kind] = fn;\n"
     "  }\n"
     "  function run() {\n"
-    "    if (!started) throw new Error(\"capsula.start() must be called first\");\n"
+    "    if (!started) throw new Error(\"capsulad.start() must be called first\");\n"
     "    if (finished) return {status: n.disconnect_status(), detail: n.disconnect_detail()};\n"
     "    try {\n"
     "      for (;;) {\n"
@@ -958,7 +958,7 @@ static char *read_file(const char *path, size_t *length) {
 static void dump_exception(JSContext *ctx, const char *where) {
   JSValue exception = JS_GetException(ctx);
   const char *text = JS_ToCString(ctx, exception);
-  fprintf(stderr, "capsula-quickjs: %s: %s\n", where,
+  fprintf(stderr, "capsulad-quickjs: %s: %s\n", where,
           text != NULL ? text : "JavaScript exception");
   fflush(stderr);
   if (text != NULL) {
@@ -970,8 +970,8 @@ static void dump_exception(JSContext *ctx, const char *where) {
 int main(int argc, char **argv) {
   if (argc == 2 && (strcmp(argv[1], "--version") == 0 ||
                     strcmp(argv[1], "-v") == 0)) {
-    printf("quickjs-ng %s.%s.%s%s\n", CAPSULA_STR(QJS_VERSION_MAJOR),
-           CAPSULA_STR(QJS_VERSION_MINOR), CAPSULA_STR(QJS_VERSION_PATCH),
+    printf("quickjs-ng %s.%s.%s%s\n", CAPSULAD_STR(QJS_VERSION_MAJOR),
+           CAPSULAD_STR(QJS_VERSION_MINOR), CAPSULAD_STR(QJS_VERSION_PATCH),
            QJS_VERSION_SUFFIX);
     return 0;
   }
@@ -979,20 +979,20 @@ int main(int argc, char **argv) {
     JSRuntime *check_rt = JS_NewRuntime();
     JSContext *check_ctx = check_rt != NULL ? JS_NewContext(check_rt) : NULL;
     if (check_ctx == NULL) {
-      fprintf(stderr, "capsula-quickjs: cannot create check context\n");
+      fprintf(stderr, "capsulad-quickjs: cannot create check context\n");
       return 1;
     }
     JS_SetContextOpaque(check_ctx, &host);
     install_native(check_ctx);
     JSValue check_result =
-        JS_Eval(check_ctx, prelude, strlen(prelude), "<capsula-sdk>",
+        JS_Eval(check_ctx, prelude, strlen(prelude), "<capsulad-sdk>",
                 JS_EVAL_TYPE_GLOBAL);
     int check_ok = !JS_IsException(check_result);
     if (!check_ok) {
       dump_exception(check_ctx, "SDK prelude");
     } else {
       JS_FreeValue(check_ctx, check_result);
-      printf("capsula-quickjs: SDK prelude compiled\n");
+      printf("capsulad-quickjs: SDK prelude compiled\n");
     }
     JS_FreeContext(check_ctx);
     JS_FreeRuntime(check_rt);
@@ -1000,33 +1000,33 @@ int main(int argc, char **argv) {
   }
   if (argc < 2) {
     fprintf(stderr,
-            "usage: capsula-quickjs SCRIPT.js\n"
-            "environment: CAPSULA_SOCKET, CAPSULA_RUN_ID, CAPSULA_APP_ID,\n"
-            "             CAPSULA_LIBRARY, CAPSULA_APP_DIR\n");
+            "usage: capsulad-quickjs SCRIPT.js\n"
+            "environment: CAPSULAD_SOCKET, CAPSULAD_RUN_ID, CAPSULAD_APP_ID,\n"
+            "             CAPSULAD_LIBRARY, CAPSULAD_APP_DIR\n");
     return 2;
   }
 
   char err[512];
-  if (capsula_host_load(&host, err, sizeof(err)) != 0) {
-    fprintf(stderr, "capsula-quickjs: %s\n", err);
+  if (capsulad_host_load(&host, err, sizeof(err)) != 0) {
+    fprintf(stderr, "capsulad-quickjs: %s\n", err);
     return 1;
   }
-  if (capsula_host_connect(&host, 10000, err, sizeof(err)) != 0) {
-    fprintf(stderr, "capsula-quickjs: %s\n", err);
+  if (capsulad_host_connect(&host, 10000, err, sizeof(err)) != 0) {
+    fprintf(stderr, "capsulad-quickjs: %s\n", err);
     return 1;
   }
 
   size_t script_len = 0;
   char *script = read_file(argv[1], &script_len);
   if (script == NULL) {
-    fprintf(stderr, "capsula-quickjs: cannot read %s: %s\n", argv[1],
+    fprintf(stderr, "capsulad-quickjs: cannot read %s: %s\n", argv[1],
             strerror(errno));
     return 1;
   }
 
   JSRuntime *rt = JS_NewRuntime();
   if (rt == NULL) {
-    fprintf(stderr, "capsula-quickjs: cannot create JavaScript runtime\n");
+    fprintf(stderr, "capsulad-quickjs: cannot create JavaScript runtime\n");
     free(script);
     return 1;
   }
@@ -1035,7 +1035,7 @@ int main(int argc, char **argv) {
   JS_SetCanBlock(rt, true);
   JSContext *ctx = JS_NewContext(rt);
   if (ctx == NULL) {
-    fprintf(stderr, "capsula-quickjs: cannot create JavaScript context\n");
+    fprintf(stderr, "capsulad-quickjs: cannot create JavaScript context\n");
     JS_FreeRuntime(rt);
     free(script);
     return 1;
@@ -1045,7 +1045,7 @@ int main(int argc, char **argv) {
 
   int exit_code = 0;
   JSValue prelude_result =
-      JS_Eval(ctx, prelude, strlen(prelude), "<capsula-sdk>",
+      JS_Eval(ctx, prelude, strlen(prelude), "<capsulad-sdk>",
               JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(prelude_result)) {
     dump_exception(ctx, "SDK prelude");
@@ -1060,12 +1060,12 @@ int main(int argc, char **argv) {
     } else {
       JS_FreeValue(ctx, result);
       JSValue global = JS_GetGlobalObject(ctx);
-      JSValue capsula = JS_GetPropertyStr(ctx, global, "capsula");
+      JSValue capsulad = JS_GetPropertyStr(ctx, global, "capsulad");
       JSValue state = JS_UNDEFINED;
-      if (!JS_IsUndefined(capsula)) {
-        JSValue state_fn = JS_GetPropertyStr(ctx, capsula, "state");
+      if (!JS_IsUndefined(capsulad)) {
+        JSValue state_fn = JS_GetPropertyStr(ctx, capsulad, "state");
         if (JS_IsFunction(ctx, state_fn)) {
-          state = JS_Call(ctx, state_fn, capsula, 0, NULL);
+          state = JS_Call(ctx, state_fn, capsulad, 0, NULL);
         }
         JS_FreeValue(ctx, state_fn);
       }
@@ -1078,18 +1078,18 @@ int main(int argc, char **argv) {
       }
       if (!was_started) {
         fprintf(stderr,
-                "capsula-quickjs: script exited without a ready app bus; "
-                "call capsula.start() before returning\n");
+                "capsulad-quickjs: script exited without a ready app bus; "
+                "call capsulad.start() before returning\n");
         exit_code = 1;
       } else {
-        JSValue run = JS_GetPropertyStr(ctx, capsula, "run");
+        JSValue run = JS_GetPropertyStr(ctx, capsulad, "run");
         if (!JS_IsFunction(ctx, run)) {
-          fprintf(stderr, "capsula-quickjs: SDK run() is missing\n");
+          fprintf(stderr, "capsulad-quickjs: SDK run() is missing\n");
           exit_code = 1;
         } else {
-          JSValue run_result = JS_Call(ctx, run, capsula, 0, NULL);
+          JSValue run_result = JS_Call(ctx, run, capsulad, 0, NULL);
           if (JS_IsException(run_result)) {
-            dump_exception(ctx, "capsula.run");
+            dump_exception(ctx, "capsulad.run");
             exit_code = 1;
           } else {
             JS_FreeValue(ctx, run_result);
@@ -1097,12 +1097,12 @@ int main(int argc, char **argv) {
         }
         JS_FreeValue(ctx, run);
       }
-      JS_FreeValue(ctx, capsula);
+      JS_FreeValue(ctx, capsulad);
       JS_FreeValue(ctx, global);
     }
   }
 
-  capsula_host_close(&host);
+  capsulad_host_close(&host);
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
   free(script);

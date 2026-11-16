@@ -34,10 +34,10 @@ In `namespaces` and `mountns`, the app is pivoted into a private root:
 
 | Path | Contents | Access |
 |---|---|---|
-| `/app` | The installed package (`CAPSULA_APP_DIR`) | Read-only |
-| `/assets` | Shared asset store (`CAPSULA_ASSETS`), when configured | Read-only |
+| `/app` | The installed package (`CAPSULAD_APP_DIR`) | Read-only |
+| `/assets` | Shared asset store (`CAPSULAD_ASSETS`), when configured | Read-only |
 | `/run/capsulad/hal.sock` | The one framework gRPC socket | Connect, read/write |
-| `/capsula/lib` | Shared native runtime and script hosts, when installed | Read-only |
+| `/capsulad/lib` | Shared native runtime and script hosts, when installed | Read-only |
 | `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` | System runtime libraries | Read-only |
 | `/etc/ld.so.cache`, `/etc/ssl`, `/etc/ca-certificates`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/localtime`, `/usr/share/zoneinfo` | Loader, TLS, resolver and timezone data | Read-only |
 | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | Basic devices | Read-only bind |
@@ -46,7 +46,7 @@ In `namespaces` and `mountns`, the app is pivoted into a private root:
 There is no writable `/tmp`, no home directory, no writable app data directory and no writable
 package tree. `/app` and `/assets` are remounted read-only after binding, so an app cannot replace
 a path inside its own sandbox. In `uid` and `none` modes there is no namespace: the app sees the
-host filesystem, and `CAPSULA_ASSETS`/`CAPSULA_APP_DIR` are host paths. Treat that as a
+host filesystem, and `CAPSULAD_ASSETS`/`CAPSULAD_APP_DIR` are host paths. Treat that as a
 development mode, not a security boundary.
 
 The framework socket is the only endpoint the app needs. There is no per-app socket, no network
@@ -54,8 +54,8 @@ gRPC listener and no app-to-app socket. An app-to-app call travels over the call
 `AppBusService.Call` stream and is relayed to the target's existing `Connect` stream. Applications
 never listen; a listening socket is a contract violation even where the sandbox would permit it.
 
-`-native-lib-dir`/`CAPSULA_LIBRARY` point at the shared runtime. Apps must not bundle a copy of
-`libcapsula` or an interpreter: the launcher mounts and names the platform runtime read-only, and
+`-native-lib-dir`/`CAPSULAD_LIBRARY` point at the shared runtime. Apps must not bundle a copy of
+`libcapsulad` or an interpreter: the launcher mounts and names the platform runtime read-only, and
 the injected library path is the only supported way to load it.
 
 ## Identity and UIDs
@@ -77,7 +77,7 @@ the injected library path is the only supported way to load it.
 
 "Administrator" means a local CLI, the daemon, or the Web UI session. "App scope" means a
 supervised app addressing its own state. A local caller is treated as an administrator only when
-it carries no app identity: no `capsula-run-id` metadata, a UID below the sandbox base, and a PID
+it carries no app identity: no `capsulad-run-id` metadata, a UID below the sandbox base, and a PID
 that is not supervised. A sandbox UID or a supervised PID is confined even without a run ID. App
 confinement is implemented by identity checks on each method, not by hiding the socket.
 
@@ -87,13 +87,13 @@ confinement is implemented by identity checks on each method, not by hiding the 
   `/dev/input`, audio devices, GPIO, the watchdog or any vendor character device. Publish output
   and take input through the framework services.
 - Open a listening socket, or attempt to receive a framework or app-to-app connection. Use the
-  injected `CAPSULA_SOCKET` and the app bus.
+  injected `CAPSULAD_SOCKET` and the app bus.
 - Read or update device settings, change master volume or microphone mute, force another app's
   capture, read diagnostics or retained logs, record or train wakewords, manage paired Bluetooth
   devices, or launch/stop apps.
 - Address another app's configuration, runs, logs, assets-by-path assumptions or captures.
   `ApplicationConfigurationService` and run queries are scoped to the caller.
-- Claim another run or app, reuse another run's `run_id`, spoof the `capsula-run-id` metadata, or
+- Claim another run or app, reuse another run's `run_id`, spoof the `capsulad-run-id` metadata, or
   try to acquire an administrator identity by omitting or forging identity.
 - Replay an activation ID, request another app's pre-roll, or capture after the visible/audible
   microphone indication is gone.
@@ -126,7 +126,7 @@ in [services.md](services.md).
 address any app. `AppInterfaceService` and `AssetService.ListAssets` are readable by apps.
 
 One deliberate exception to the own-app rule: the built-in clock and ring publish public standard
-contracts (`capsula.clock`, `capsula.ring`) that any supervised app may call, including writes.
+contracts (`capsulad.clock`, `capsulad.ring`) that any supervised app may call, including writes.
 Those are device-level services, not another app's private configuration. See
 [standard-contracts.md](standard-contracts.md).
 
@@ -169,7 +169,7 @@ min_minor = 0
 ```
 
 - The requirement is preflighted at install and again at launch against the installed runtime's
-  metadata (`capsula-native.json`). A wrong major or a too-new minor is a hard install failure
+  metadata (`capsulad-native.json`). A wrong major or a too-new minor is a hard install failure
   naming the mismatch.
 - The binding independently re-checks the library it loaded at startup.
 - The ABI requirement describes the shared library contract only. It does not enumerate
@@ -195,7 +195,7 @@ administrative boundary.
 ## Checklist
 
 - Publish output and read input only through the framework; never touch device nodes.
-- Connect only to `CAPSULA_SOCKET`; never listen.
+- Connect only to `CAPSULAD_SOCKET`; never listen.
 - Verify every setting you receive, including values that bypass the generated form.
 - Keep secrets in `text_masked` settings and never log them.
 - Handle `PERMISSION_DENIED` as final; do not probe other identities or run IDs.

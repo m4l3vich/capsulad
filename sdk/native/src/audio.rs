@@ -41,7 +41,7 @@ fn validate_format(format: &PcmFormat) -> SdkResult<u32> {
 }
 
 fn audio_format(format: &PcmFormat) -> SdkResult<prost_reflect::DynamicMessage> {
-    let mut message = dynamic::new_msg("capsula.framework.v1.AudioFormat")?;
+    let mut message = dynamic::new_msg("capsulad.framework.v1.AudioFormat")?;
     dynamic::set_enum(&mut message, "sample_format", format.sample_format);
     dynamic::set_u32(&mut message, "sample_rate_hz", format.sample_rate_hz);
     dynamic::set_u32(&mut message, "channels", format.channels);
@@ -70,7 +70,7 @@ pub fn capture_open(
     conversation_id: &str,
 ) -> SdkResult<Arc<OutboundCall>> {
     validate_format(format)?;
-    let mut request = dynamic::new_msg("capsula.framework.v1.CaptureAudioRequest")?;
+    let mut request = dynamic::new_msg("capsulad.framework.v1.CaptureAudioRequest")?;
     dynamic::set_str(&mut request, "endpoint_id", endpoint_id);
     dynamic::set_message(&mut request, "preferred_format", audio_format(format)?);
     dynamic::set_u32(&mut request, "packet_ms", packet_ms);
@@ -82,7 +82,7 @@ pub fn capture_open(
     }
     let call = start_direct(
         client,
-        "capsula.framework.v1.AudioService",
+        "capsulad.framework.v1.AudioService",
         "Capture",
         1,
         None,
@@ -95,7 +95,7 @@ pub fn capture_open(
 pub fn capture_recv(handle: u64, timeout_ms: u32) -> SdkResult<PcmEvent> {
     let call = outbound(handle)?;
     let bytes = call.recv(timeout_ms, false)?;
-    let desc = dynamic::base_message("capsula.framework.v1.CaptureAudioEvent")?;
+    let desc = dynamic::base_message("capsulad.framework.v1.CaptureAudioEvent")?;
     let event = prost_reflect::DynamicMessage::decode(desc, bytes.as_slice())
         .map_err(|e| SdkError::new(INVALID_MESSAGE, format!("capture event decode: {e}")))?;
 
@@ -152,19 +152,19 @@ pub fn playback_open(
     conversation_id: &str,
 ) -> SdkResult<Arc<OutboundCall>> {
     let bps = validate_format(format)?;
-    let mut open = dynamic::new_msg("capsula.framework.v1.OpenPlayback")?;
+    let mut open = dynamic::new_msg("capsulad.framework.v1.OpenPlayback")?;
     dynamic::set_str(&mut open, "endpoint_id", endpoint_id);
     dynamic::set_message(&mut open, "format", audio_format(format)?);
     dynamic::set_u32(&mut open, "target_latency_ms", target_latency_ms);
     if !conversation_id.is_empty() {
         dynamic::set_str(&mut open, "conversation_id", conversation_id);
     }
-    let mut request = dynamic::new_msg("capsula.framework.v1.PlaybackRequest")?;
+    let mut request = dynamic::new_msg("capsulad.framework.v1.PlaybackRequest")?;
     dynamic::set_message(&mut request, "open", open);
 
     let call = start_direct(
         client,
-        "capsula.framework.v1.AudioService",
+        "capsulad.framework.v1.AudioService",
         "Playback",
         3,
         None,
@@ -207,7 +207,7 @@ pub fn playback_write(
         ));
     }
 
-    let mut chunk = dynamic::new_msg("capsula.framework.v1.AudioChunk")?;
+    let mut chunk = dynamic::new_msg("capsulad.framework.v1.AudioChunk")?;
     dynamic::set_u64(&mut chunk, "sequence", call.next_sequence());
     dynamic::set_u64(
         &mut chunk,
@@ -223,7 +223,7 @@ pub fn playback_write(
     dynamic::set_bool(&mut chunk, "discontinuity", discontinuity);
     dynamic::set_u64(&mut chunk, "dropped_frames_before", dropped_frames_before);
 
-    let mut request = dynamic::new_msg("capsula.framework.v1.PlaybackRequest")?;
+    let mut request = dynamic::new_msg("capsulad.framework.v1.PlaybackRequest")?;
     dynamic::set_message(&mut request, "chunk", chunk);
     call.send_payload(request.encode_to_vec())
 }
@@ -236,7 +236,7 @@ pub fn playback_control(handle: u64, command: i32) -> SdkResult<()> {
         ));
     }
     let call = outbound(handle)?;
-    let mut request = dynamic::new_msg("capsula.framework.v1.PlaybackRequest")?;
+    let mut request = dynamic::new_msg("capsulad.framework.v1.PlaybackRequest")?;
     dynamic::set_enum(&mut request, "control", command);
     call.send_payload(request.encode_to_vec())
 }

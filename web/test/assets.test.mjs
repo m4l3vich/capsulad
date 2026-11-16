@@ -33,8 +33,8 @@ test('assetPathError rejects traversal, absolute and reserved shapes', () => {
     './dot.wav': 'cannot contain',
     '.': 'cannot contain',
     'audio\\reply.wav': 'path separator',
-    '.capsula-upload-123': 'reserved',
-    'audio/.capsula-upload-9': 'reserved',
+    '.capsulad-upload-123': 'reserved',
+    'audio/.capsulad-upload-9': 'reserved',
     [`${'x'.repeat(256)}.wav`]: 'at most 255'
   }
   for (const [path, hint] of Object.entries(invalid)) {
@@ -93,7 +93,7 @@ test('deleteAsset sends a CSRF-protected same-origin DELETE', async () => {
   assert.equal(calls[0].url, '/api/assets?path=audio%2Freplies%2Fhello.wav')
   assert.equal(calls[0].options.method, 'DELETE')
   assert.equal(calls[0].options.credentials, 'same-origin')
-  assert.equal(calls[0].options.headers['X-Capsula-CSRF'], 'csrf-token')
+  assert.equal(calls[0].options.headers['X-Capsulad-CSRF'], 'csrf-token')
 })
 
 test('a rejected delete surfaces the daemon error', async () => {

@@ -70,8 +70,8 @@ func TestEncodeWS2812Frame(t *testing.T) {
 		{R: 255, G: 128, B: 64},
 		{R: 200, G: 100, B: 50},
 	}
-	out := encodeWS2812Frame(pixels, 1, ws2812ChannelCount)
-	if len(out) != ws2812ChannelCount {
+	out := encodeWS2812Frame(pixels, 1, DefaultConfig().LEDWS2812Channels)
+	if len(out) != DefaultConfig().LEDWS2812Channels {
 		t.Fatalf("len = %d", len(out))
 	}
 	// Logical channel i lands at physical ws2812ChannelMap[i], after the
@@ -111,7 +111,7 @@ func TestEncodeWS2812FrameBrightness(t *testing.T) {
 		{"auto floor", 0.05, ws2812GammaTable[13]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := encodeWS2812Frame(pixel, tc.brightness, ws2812ChannelCount)
+			out := encodeWS2812Frame(pixel, tc.brightness, DefaultConfig().LEDWS2812Channels)
 			if got := out[ws2812ChannelMap[0]]; got != tc.want {
 				t.Fatalf("R = %d, want %d", got, tc.want)
 			}
@@ -145,8 +145,8 @@ func TestEncodeMultiCtrlFrame(t *testing.T) {
 	// Segment a of the first digit, segment g of the fourth, and both colon
 	// dots, each of which must reach its calibrated channel.
 	cells := []uint16{1 << 0, 0, 0, 1 << 6}
-	records := encodeMultiCtrlFrame(cells, true, 0.5, multiCtrlCellCount)
-	if len(records) != multiCtrlCellCount {
+	records := encodeMultiCtrlFrame(cells, true, 0.5, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
+	if len(records) != DefaultConfig().LEDMultiCtrlChannels {
 		t.Fatalf("len = %d", len(records))
 	}
 	if got := unsafe.Sizeof(records[0]); got != 20 {
@@ -170,7 +170,7 @@ func TestEncodeMultiCtrlFrame(t *testing.T) {
 	}
 	// The auto-darkness floor must survive 8-bit quantization: 5 % is 13/255,
 	// not zero, so an enabled automatic display stays visibly lit.
-	floor := encodeMultiCtrlFrame(cells, true, 0.05, multiCtrlCellCount)
+	floor := encodeMultiCtrlFrame(cells, true, 0.05, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
 	for i, record := range floor {
 		if want[i] != 0 && record.Brightness == 0 {
 			t.Fatalf("channel %d quantized the 5%% floor to zero", i)
@@ -188,7 +188,7 @@ func TestEncodeMultiCtrlFrameClockPattern(t *testing.T) {
 		three = 0b1001111 // a b c d g
 		four  = 0b1100110 // b c f g
 	)
-	records := encodeMultiCtrlFrame([]uint16{one, two, three, four}, true, 1, multiCtrlCellCount)
+	records := encodeMultiCtrlFrame([]uint16{one, two, three, four}, true, 1, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
 	want := map[int]bool{
 		28: true, 21: true, // digit 1: b, c
 		26: true, 25: true, 18: true, 23: true, 20: true, // digit 2: a b d e g
@@ -207,17 +207,17 @@ func TestEncodeMultiCtrlFrameClockPattern(t *testing.T) {
 // The display's record order is measured, not derived; this guards the table
 // against edits that would silently drive the wrong segment.
 func TestMultiCtrlChannelMapIsPermutation(t *testing.T) {
-	seen := make([]bool, multiCtrlCellCount)
+	seen := make([]bool, DefaultConfig().LEDMultiCtrlChannels)
 	for _, row := range multiCtrlChannelMap {
 		for _, ch := range row {
-			if ch < 0 || ch >= multiCtrlCellCount || seen[ch] {
+			if ch < 0 || ch >= DefaultConfig().LEDMultiCtrlChannels || seen[ch] {
 				t.Fatalf("multiCtrlChannelMap is not a permutation at channel %d", ch)
 			}
 			seen[ch] = true
 		}
 	}
 	for _, ch := range []int{multiCtrlColonTop, multiCtrlColonBottom} {
-		if ch < 0 || ch >= multiCtrlCellCount || seen[ch] {
+		if ch < 0 || ch >= DefaultConfig().LEDMultiCtrlChannels || seen[ch] {
 			t.Fatalf("colon channel %d is out of range or duplicated", ch)
 		}
 		seen[ch] = true

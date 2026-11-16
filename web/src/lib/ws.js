@@ -1,6 +1,6 @@
 import { ClientFrame, ServerFrame, Topic } from '../proto/web_pb.js'
 
-// One binary WebSocket per session. Frames are capsula.web.v1 protobuf, every
+// One binary WebSocket per session. Frames are capsulad.web.v1 protobuf, every
 // request is correlated by id, subscriptions own bounded snapshots plus
 // revisioned events, and a server resync notice forces a fresh snapshot
 // instead of letting the UI act on a stream with a hole.

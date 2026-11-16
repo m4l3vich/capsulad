@@ -7,8 +7,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
 // The Web UI's run table is the only source of the "Running" badge and the
@@ -18,7 +18,7 @@ func TestOverviewReportsBuiltinRunsUnderTheirOwnApp(t *testing.T) {
 	env := newTestEnv(t)
 	env.back.mu.Lock()
 	env.back.runs = append(env.back.runs, &frameworkv1.AppRun{
-		RunId: "builtin:capsula.ring", AppId: "capsula.ring", Pid: 42,
+		RunId: "builtin:capsulad.ring", AppId: "capsulad.ring", Pid: 42,
 		State: frameworkv1.AppRunState_APP_READY, Runtime: frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN,
 	})
 	env.back.mu.Unlock()
@@ -35,7 +35,7 @@ func TestOverviewReportsBuiltinRunsUnderTheirOwnApp(t *testing.T) {
 		}
 		seen[run.GetAppId()] = run
 	}
-	clock, ok := seen["capsula.clock"]
+	clock, ok := seen["capsulad.clock"]
 	if !ok {
 		t.Fatalf("the running clock is missing from the run table: %v", overview.GetRuns())
 	}
@@ -45,7 +45,7 @@ func TestOverviewReportsBuiltinRunsUnderTheirOwnApp(t *testing.T) {
 	if !clock.GetSelectedDefault() {
 		t.Fatal("the clock is the selected display provider but its run is not marked as a default")
 	}
-	ring, ok := seen["capsula.ring"]
+	ring, ok := seen["capsulad.ring"]
 	if !ok {
 		t.Fatalf("the ring run is missing from the run table: %v", overview.GetRuns())
 	}
@@ -98,7 +98,7 @@ func TestStopRequiresARunOfTheRequestedApp(t *testing.T) {
 	env := newTestEnv(t)
 	conn, _, _ := connectSession(t, env)
 	conn.send(&webv1.ClientFrame{RequestId: 62, Body: &webv1.ClientFrame_Command{Command: &webv1.Command{
-		Op: &webv1.Command_Stop{Stop: &webv1.StopRun{AppId: "capsula.clock", RunId: "run-2"}},
+		Op: &webv1.Command_Stop{Stop: &webv1.StopRun{AppId: "capsulad.clock", RunId: "run-2"}},
 	}}})
 	for {
 		frame := conn.read()

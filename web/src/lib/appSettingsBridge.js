@@ -6,7 +6,7 @@
 // keys declared by the app whose page hosts the frame. There is no generic
 // command, service, app-bus or cross-app operation.
 
-export const BRIDGE_PREFIX = 'capsula.settings-ui/1:'
+export const BRIDGE_PREFIX = 'capsulad.settings-ui/1:'
 export const BRIDGE_API_VERSION = 1
 export const MAX_CHILD_MESSAGE_BYTES = 64 << 10
 export const MAX_PATCH_CHANGES = 64
@@ -153,7 +153,7 @@ export class SettingsFrameHost {
     // Deterministic barrier: the first load is always a local about:blank
     // document that consumes the navigation step; init is only posted on the
     // second load, for the authenticated URL we chose.
-    this.iframe.src = 'about:blank#capsula-settings'
+    this.iframe.src = 'about:blank#capsulad-settings'
   }
 
   // arm records the authenticated document URL after the listener/token

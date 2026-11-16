@@ -1,23 +1,23 @@
 "use strict";
 
-// Runnable QuickJS Capsula app. The host embeds the real QuickJS engine and
-// exposes the same public libcapsula ABI as native apps through `capsula`.
+// Runnable QuickJS Capsulad app. The host embeds the real QuickJS engine and
+// exposes the same public libcapsulad ABI as native apps through `capsulad`.
 
-capsula.on("invocation", function (event) {
-  capsula.log("sample: invocation " + (event && event.invocationId));
-  capsula.notifyInvocation(event.invocationId, true, "sample accepted");
+capsulad.on("invocation", function (event) {
+  capsulad.log("sample: invocation " + (event && event.invocationId));
+  capsulad.notifyInvocation(event.invocationId, true, "sample accepted");
 });
 
-capsula.on("settings_changed", function (event) {
-  capsula.log("sample: settings revision " + (event && event.revision));
+capsulad.on("settings_changed", function (event) {
+  capsulad.log("sample: settings revision " + (event && event.revision));
 });
 
-capsula.on("action", function (event) {
-  capsula.log("sample: action " + (event && event.actionId));
-  capsula.notifyAction(event.actionInvocationId, true, "greeted");
+capsulad.on("action", function (event) {
+  capsulad.log("sample: action " + (event && event.actionId));
+  capsulad.notifyAction(event.actionInvocationId, true, "greeted");
 });
 
-capsula.on("call", function (call) {
+capsulad.on("call", function (call) {
   var info = call.info || {};
   if (info.rpc_name !== "Echo") {
     call.end(12, "the sample only implements Echo");
@@ -28,10 +28,10 @@ capsula.on("call", function (call) {
   call.end(0, "ok");
 });
 
-capsula.start();
-capsula.log("sample: READY app=" + capsula.env.appId);
+capsulad.start();
+capsulad.log("sample: READY app=" + capsulad.env.appId);
 
-var device = capsula.call("capsula.framework.v1.DeviceService", "GetInfo", {});
-capsula.log("sample: framework API model=" + device.model);
+var device = capsulad.call("capsulad.framework.v1.DeviceService", "GetInfo", {});
+capsulad.log("sample: framework API model=" + device.model);
 
-capsula.run();
+capsulad.run();

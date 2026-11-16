@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/profile"
 )
 
 // The stock firmware drives two independent LED controllers. Both were
@@ -26,19 +27,12 @@ import (
 //
 // Both char devices take vendor ioctls (see led_vendor_linux.go). The ring
 // channel permutation below is copied verbatim from the stock voice-agent and
-// makes logical pixel order line up with the physical WS2812B chain.
-const (
-	ws2812ChannelCount = 36
-	ws2812PixelCount   = 12
-	multiCtrlCellCount = 30
-	segmentPerDigit    = 7
-	segmentDigitCount  = 4
-)
-
+// makes logical pixel order line up with the physical WS2812B chain. Channel
+// counts, pixel geometry and gamma come from the device profile.
 var (
 	// ws2812ChannelMap maps logical channel index (R,G,B per pixel) to the
 	// physical WS2812B channel. Stock voice-agent: buf[map[i]] = in[i].
-	ws2812ChannelMap = [ws2812ChannelCount]int{
+	ws2812ChannelMap = [...]int{
 		1, 0, 2, 34, 33, 35, 31, 30, 32, 28, 27, 29,
 		25, 24, 26, 22, 21, 23, 19, 18, 20, 16, 15, 17,
 		13, 12, 14, 10, 9, 11, 7, 6, 8, 4, 3, 5,
@@ -181,14 +175,13 @@ func scaleChannel(v uint8, brightness float64) uint8 {
 	return uint8(math.Round(float64(v) * brightness))
 }
 
-// ws2812Gamma is the perceptual curve applied to ring output. The stock agent
-// only ever wrote 0 or 255 (integer JSON frames), so there is no vendor
-// evidence for a curve; 2.2 is the sRGB default and the common choice for
-// WS2812B indicators. The segment display is left linear because its calibration
-// and brightness behaviour were accepted on hardware as they are.
-const ws2812Gamma = 2.2
-
-var ws2812GammaTable = buildGammaTable(ws2812Gamma)
+// ws2812GammaTable is the default perceptual curve applied to ring output. The
+// stock agent only ever wrote 0 or 255 (integer JSON frames), so there is no
+// vendor evidence for a curve; 2.2 is the sRGB default and the common choice
+// for WS2812B indicators. The value comes from the device profile, and the
+// segment display is left linear because its calibration and brightness
+// behaviour were accepted on hardware as they are.
+var ws2812GammaTable = buildGammaTable(profile.RK3308Rev4Stock.LED.Gamma)
 
 func buildGammaTable(gamma float64) (table [256]uint8) {
 	for i := range table {
@@ -198,11 +191,15 @@ func buildGammaTable(gamma float64) (table [256]uint8) {
 }
 
 // encodeWS2812Frame expands RGB pixels into the controller's channel buffer
-// and applies the physical channel permutation. Missing pixels are black.
+// and applies the physical channel permutation with the default gamma table.
 func encodeWS2812Frame(pixels []backend.RGB, brightness float64, channels int) []byte {
-	if channels <= 0 {
-		channels = ws2812ChannelCount
-	}
+	return encodeWS2812FrameTable(pixels, brightness, channels, ws2812GammaTable)
+}
+
+// encodeWS2812FrameTable is encodeWS2812Frame with an explicit gamma table so
+// a backend built from another profile still derives the curve from its
+// configuration. Missing pixels are black.
+func encodeWS2812FrameTable(pixels []backend.RGB, brightness float64, channels int, gamma [256]uint8) []byte {
 	brightness = clampBrightness(brightness)
 	logical := make([]byte, channels)
 	pixels = pixels[:min(len(pixels), channels/3)]
@@ -210,9 +207,9 @@ func encodeWS2812Frame(pixels []backend.RGB, brightness float64, channels int) [
 		px := pixels[pixel]
 		// Brightness acts in linear light, then the perceptual curve is
 		// applied once per channel so dim and bright levels look even.
-		logical[pixel*3] = ws2812GammaTable[scaleChannel(px.R, brightness)]
-		logical[pixel*3+1] = ws2812GammaTable[scaleChannel(px.G, brightness)]
-		logical[pixel*3+2] = ws2812GammaTable[scaleChannel(px.B, brightness)]
+		logical[pixel*3] = gamma[scaleChannel(px.R, brightness)]
+		logical[pixel*3+1] = gamma[scaleChannel(px.G, brightness)]
+		logical[pixel*3+2] = gamma[scaleChannel(px.B, brightness)]
 	}
 	out := make([]byte, channels)
 	if channels == len(ws2812ChannelMap) {
@@ -256,22 +253,19 @@ const (
 // control records using the calibrated channel table. Missing cells are dark.
 // A frame on a display with an unexpected record count falls back to the linear
 // order so an unverified variant is not driven with the wrong map.
-func encodeMultiCtrlFrame(cells []uint16, colon bool, brightness float64, count int) []multiCtrlRecord {
-	if count <= 0 {
-		count = multiCtrlCellCount
-	}
+func encodeMultiCtrlFrame(cells []uint16, colon bool, brightness float64, count, digits, segmentsPerDigit int) []multiCtrlRecord {
 	brightness = clampBrightness(brightness)
 	logical := make([]byte, count)
 	level := uint8(math.Round(brightness * 255))
-	calibrated := count == multiCtrlCellCount
-	for cell := 0; cell < segmentDigitCount && cell < len(cells); cell++ {
+	calibrated := count == digits*segmentsPerDigit+2
+	for cell := range min(digits, len(cells)) {
 		mask := cells[cell]
-		for seg := 0; seg < segmentPerDigit; seg++ {
+		for seg := range segmentsPerDigit {
 			if mask&(1<<uint(seg)) == 0 {
 				continue
 			}
-			idx := cell*segmentPerDigit + seg
-			if calibrated {
+			idx := cell*segmentsPerDigit + seg
+			if calibrated && cell < len(multiCtrlChannelMap) && seg < len(multiCtrlChannelMap[cell]) {
 				idx = multiCtrlChannelMap[cell][seg]
 			}
 			if idx < count {

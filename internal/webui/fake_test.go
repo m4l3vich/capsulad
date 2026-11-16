@@ -15,10 +15,10 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/wakeword"
 )
 
@@ -62,6 +62,11 @@ type fakeBackend struct {
 	btMedia *frameworkv1.BluetoothMediaState
 	// btCommands records the Bluetooth media commands the browser issued.
 	btCommands []frameworkv1.BluetoothMediaCommand
+	// btStatus, when set, is what GetBluetoothStatus reports. A test can model
+	// the framework-only detail (A2DP readiness) the browser must receive.
+	btStatus *frameworkv1.BluetoothStatus
+	// btStatusErr fails GetBluetoothStatus so the error path is observable.
+	btStatusErr error
 }
 
 func newFakeBackend() *fakeBackend {
@@ -70,7 +75,7 @@ func newFakeBackend() *fakeBackend {
 			Revision: 5,
 			Values: &frameworkv1.UserSettings{
 				Hostname: "capsula", MasterVolume: 0.4, Timezone: "UTC",
-				DefaultAppByResource: map[string]string{"display.segment.front": "capsula.clock"},
+				DefaultAppByResource: map[string]string{"display.segment.front": "capsulad.clock"},
 				DisplayBrightness:    map[string]float32{"display.segment.front": 0.7},
 				BrightnessMode:       map[string]string{},
 				MutedMicrophoneIndicator: &frameworkv1.MutedMicrophoneIndicator{
@@ -79,7 +84,7 @@ func newFakeBackend() *fakeBackend {
 			},
 		},
 		apps: []*frameworkv1.InstalledApplication{
-			{AppId: "capsula.clock", DisplayName: "Clock", Version: "1.0.0", SystemApp: true, CanStop: true,
+			{AppId: "capsulad.clock", DisplayName: "Clock", Version: "1.0.0", SystemApp: true, CanStop: true,
 				Provides: []string{"segment_display_provider"}},
 			{AppId: "org.example.player", DisplayName: "Player", Version: "2.1.0", CanStop: true,
 				Provides: []string{"media_player"}},
@@ -89,7 +94,7 @@ func newFakeBackend() *fakeBackend {
 				Provides: []string{"media_player"}},
 		},
 		runs: []*frameworkv1.AppRun{
-			{RunId: "run-1", AppId: "capsula.clock", Pid: 42, State: frameworkv1.AppRunState_APP_READY,
+			{RunId: "run-1", AppId: "capsulad.clock", Pid: 42, State: frameworkv1.AppRunState_APP_READY,
 				Runtime: frameworkv1.ApplicationRuntime_RUNTIME_BUILTIN},
 			{RunId: "run-2", AppId: "org.example.player", Pid: 43, State: frameworkv1.AppRunState_APP_READY,
 				Runtime: frameworkv1.ApplicationRuntime_RUNTIME_NATIVE},
@@ -217,6 +222,14 @@ type fakeSystem struct {
 }
 
 func (f *fakeSystem) GetBluetoothStatus(context.Context, *frameworkv1.GetBluetoothStatusRequest) (*frameworkv1.BluetoothStatus, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	if f.b.btStatusErr != nil {
+		return nil, f.b.btStatusErr
+	}
+	if f.b.btStatus != nil {
+		return proto.Clone(f.b.btStatus).(*frameworkv1.BluetoothStatus), nil
+	}
 	return &frameworkv1.BluetoothStatus{Present: true, Powered: true, Discoverable: false, IncomingConnections: true,
 		Adapter: "hci0", Detail: "ready", Name: "Capsula"}, nil
 }
@@ -416,7 +429,7 @@ type fakeRouting struct {
 }
 
 func (f *fakeRouting) GetRouting(_ context.Context, req *frameworkv1.GetRoutingRequest) (*frameworkv1.RoutingState, error) {
-	return &frameworkv1.RoutingState{ResourceId: req.GetResourceId(), SelectedAppId: "capsula.clock", Revision: 1}, nil
+	return &frameworkv1.RoutingState{ResourceId: req.GetResourceId(), SelectedAppId: "capsulad.clock", Revision: 1}, nil
 }
 
 type fakeBus struct {
@@ -461,7 +474,7 @@ func (f *fakeBus) Call(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallReq
 
 func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) ([]byte, error) {
 	switch start.GetGrpcService() {
-	case "capsula.contracts.clock.v1.ClockService":
+	case "capsulad.contracts.clock.v1.ClockService":
 		// The public wire is binary protobuf; decoding the request and encoding
 		// the response here keeps the browser adapter honest.
 		switch start.GetRpcName() {
@@ -498,7 +511,7 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 		default:
 			return nil, status.Errorf(codes.Unimplemented, "unexpected clock rpc %s", start.GetRpcName())
 		}
-	case "capsula.contracts.ring.v1.RingService":
+	case "capsulad.contracts.ring.v1.RingService":
 		var req ringv1.GetStateRequest
 		if err := proto.Unmarshal(request, &req); err != nil {
 			return nil, err
@@ -507,7 +520,7 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 			Effect: "pulse", Palette: "linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)",
 			Brightness: 0.5, Speed: 1, PresentationId: "p1", Active: true, SettingsRevision: 4,
 		})
-	case "capsula.contracts.media.v1.MediaPlayerService":
+	case "capsulad.contracts.media.v1.MediaPlayerService":
 		if start.GetRpcName() == "ListPlayers" {
 			resp, _ := proto.Marshal(&mediav1.ListPlayersResponse{Players: []*mediav1.PlayerStatus{{
 				PlayerId: "p1", PlaybackState: mediav1.PlaybackState_PLAYBACK_PLAYING, Title: protoString("Scarlet Fire"),

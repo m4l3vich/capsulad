@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-const apFirewallChain = "CAPSULA_AP_PORTAL"
+const apFirewallChain = "CAPSULAD_AP_PORTAL"
 
 // installAPFirewall keeps the provisioning network from becoming a second path
 // to the daemon's administrator surfaces. It is deliberately a dedicated
-// chain: CAPSULA_AP_PORTAL only permits DHCP, DNS and the portal port on the AP
+// chain: CAPSULAD_AP_PORTAL only permits DHCP, DNS and the portal port on the AP
 // interface and drops every other inbound packet. The rules are best-effort:
 // if iptables is unavailable the portal is still bound only to the AP address,
 // and the daemon's Web UI default remains loopback. Cleanup removes the jump

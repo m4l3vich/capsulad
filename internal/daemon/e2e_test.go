@@ -16,18 +16,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/settings"
 )
 
-// nativeLibDir is the shared libcapsula runtime directory for daemon tests.
+// nativeLibDir is the shared libcapsulad runtime directory for daemon tests.
 // The test binary lives in a temporary directory, so exe-adjacent discovery
-// would never see the repo's build/lib. CAPSULA_NATIVE_LIB_DIR overrides the
+// would never see the repo's build/lib. CAPSULAD_NATIVE_LIB_DIR overrides the
 // repository default; the launcher still validates and loads real metadata.
 func nativeLibDir(t *testing.T) string {
 	t.Helper()
-	if dir := os.Getenv("CAPSULA_NATIVE_LIB_DIR"); dir != "" {
+	if dir := os.Getenv("CAPSULAD_NATIVE_LIB_DIR"); dir != "" {
 		return dir
 	}
 	return filepath.Join(moduleRoot(t), "build", "lib")

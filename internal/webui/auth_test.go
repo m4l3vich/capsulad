@@ -108,7 +108,7 @@ func loginSession(t *testing.T, e *testEnv, c *http.Client) string {
 	token := csrfToken(t, c, e.ts.URL)
 	code, body, _ := doJSON(t, c, http.MethodPost, e.ts.URL+"/api/login",
 		map[string]string{"password": "correct horse battery", "next": "/settings"},
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("login: %d %v", code, body)
 	}
@@ -142,7 +142,7 @@ func TestSPAAndSessionFlow(t *testing.T) {
 		t.Fatalf("CSP = %q", csp)
 	}
 	// Deep links are served the shell as well.
-	resp, err = c.Get(env.ts.URL + "/applications/capsula.clock")
+	resp, err = c.Get(env.ts.URL + "/applications/capsulad.clock")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +162,12 @@ func TestSPAAndSessionFlow(t *testing.T) {
 	}
 
 	code, body, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/login",
-		map[string]string{"password": "wrong"}, map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"password": "wrong"}, map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusUnauthorized || body["error"] != "incorrect password" {
 		t.Fatalf("wrong password: %d %v", code, body)
 	}
 	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/login",
-		map[string]string{"password": "correct horse battery"}, map[string]string{"Origin": "https://attacker.example", "X-Capsula-CSRF": token})
+		map[string]string{"password": "correct horse battery"}, map[string]string{"Origin": "https://attacker.example", "X-Capsulad-CSRF": token})
 	if code != http.StatusForbidden {
 		t.Fatalf("cross-origin login accepted: %d", code)
 	}
@@ -191,7 +191,7 @@ func TestSPAAndSessionFlow(t *testing.T) {
 	token = csrfToken(t, c, env.ts.URL)
 	code, body, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/password",
 		map[string]string{"current": "correct horse battery", "next": "another long password", "confirm": "another long password"},
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("password change: %d %v", code, body)
 	}
@@ -204,7 +204,7 @@ func TestSPAAndSessionFlow(t *testing.T) {
 	}
 
 	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/logout", nil,
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("logout: %d", code)
 	}

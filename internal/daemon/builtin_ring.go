@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presets"
 	"capsulad/internal/ringpalette"

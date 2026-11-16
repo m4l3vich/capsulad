@@ -29,7 +29,7 @@
 package servicepb
 
 import (
-	phrasepb "capsula/apps/marusia/internal/vkproto/phrasepb"
+	phrasepb "capsulad/apps/marusia/internal/vkproto/phrasepb"
 	context "context"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"

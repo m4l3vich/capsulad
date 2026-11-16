@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presets"
 )
@@ -72,7 +72,7 @@ func (c *builtinAppClient) Close() {
 }
 
 func (c *builtinAppClient) context(parent context.Context) context.Context {
-	return metadata.AppendToOutgoingContext(parent, "capsula-run-id", c.runID)
+	return metadata.AppendToOutgoingContext(parent, "capsulad-run-id", c.runID)
 }
 
 // --- presentation service ---------------------------------------------------

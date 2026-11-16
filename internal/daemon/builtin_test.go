@@ -15,8 +15,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/dcron"
 	"capsulad/internal/presentations"
@@ -125,7 +125,7 @@ func TestBuiltinSystemAppsWithoutInstalledPackages(t *testing.T) {
 	})
 
 	for _, resourceID := range []string{"display.segment.front", "light.ring.main"} {
-		if sel := d.router.Current(resourceID); sel.SelectedAppID == "capsula.builtin" {
+		if sel := d.router.Current(resourceID); sel.SelectedAppID == "capsulad.builtin" {
 			t.Fatalf("hidden builtin baseline still owns %s", resourceID)
 		}
 	}
@@ -642,7 +642,7 @@ func TestBuiltinPublicContractState(t *testing.T) {
 	if err := d.builtins.clock.handleCall(ctx, clockServiceName, "GetState", nil, emit); err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	if err := d.builtins.clock.handleCall(ctx, "capsula.internal.clock.v1.ClockService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
+	if err := d.builtins.clock.handleCall(ctx, "capsulad.internal.clock.v1.ClockService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("retired private ClockService name code = %v, want Unimplemented", status.Code(err))
 	}
 	if len(payloads) != 1 {
@@ -736,7 +736,7 @@ func TestBuiltinPublicContractState(t *testing.T) {
 	if err := d.builtins.ring.handleCall(ctx, ringServiceName, "GetState", nil, emit); err != nil {
 		t.Fatalf("ring GetState: %v", err)
 	}
-	if err := d.builtins.ring.handleCall(ctx, "capsula.internal.ring.v1.RingService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
+	if err := d.builtins.ring.handleCall(ctx, "capsulad.internal.ring.v1.RingService", "GetState", nil, emit); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("retired private RingService name code = %v, want Unimplemented", status.Code(err))
 	}
 	var ring ringv1.RingState

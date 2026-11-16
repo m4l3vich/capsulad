@@ -193,10 +193,11 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   module could still rescale the framework's output, and it is not part of this guarantee.
 - **Wi-Fi fallback and captive portal.** When no saved network connects within the bounded startup
   attempt (or none is saved), the daemon raises the setup AP instead of leaving the speaker
-  unreachable: SSID from the live Bluetooth adapter alias, WPA2 password `capsulad`, address
-  `192.168.4.1`. The portal there exposes only Wi-Fi status, Scan and Connect — no administrator
-  login, device settings, app control or system mutation — accepts requests only from the AP subnet
-  with Host/Origin checks and an HMAC token bound to the client address and valid for 15 minutes,
+  unreachable: SSID from the first 32 UTF-8 bytes (rune-aligned) of the live Bluetooth adapter
+  alias, WPA2 password `capsulad`, address `192.168.4.1`. The portal there exposes only Wi-Fi
+  status, Scan and Connect — no administrator login, device settings, app control or system
+  mutation — accepts requests only from the AP subnet with Host/Origin checks and an HMAC token
+  bound to the client address and valid for 15 minutes,
   runs no script, and stops with the AP. The authenticated Web UI never offers the console's own
   network for Forget, has no remote disconnect, and forgets only inactive saved networks after
   explicit confirmation. Scan is capability-driven and may require manual SSID entry in AP mode. A
@@ -232,7 +233,14 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   or discoverability are refused while the audio profile is not advertised. **Incoming connections**
   off denies new inbound BR/EDR links, including from paired devices, with the adapter and BLE radio
   still powered and existing links left alone; **Discoverable** on implies incoming connections, and
-  incoming off forces discoverable off. A source PulseAudio is actively streaming is not torn down
+  incoming off forces discoverable off. The advertised device name is an administrator-only Web UI
+  setting (Settings → Bluetooth, pencil button): it is validated as 1..248 UTF-8 bytes with no
+  control characters, persisted by BlueZ as the adapter alias and advertised without a power cycle.
+  The provisioning AP SSID is derived from this name only when the AP is (re)started, and uses its
+  first 32 UTF-8 bytes on a rune boundary (a Wi-Fi SSID cannot carry more), so a rename while the
+  AP is up takes effect on the next raise. Apps cannot change adapter exposure or the advertised name:
+  there is no framework RPC for either.
+  A source PulseAudio is actively streaming is not torn down
   to switch owners; the switch completes after it disconnects, while an idle PulseAudio module set is
   retired as soon as the native sink is armed even if a source is merely connected or paused. A
   paired source may already hold an ACL from the pre-daemon autopower window; the connect handler
@@ -300,11 +308,11 @@ credential-mutating routes.
   only, never PCM or stored takes.
 - **Administrator-only surfaces.** Device settings (including hostname, volume, microphone mute),
   device-wide diagnostics and log history, forced capture release, wakeword enrollment/training,
-  Bluetooth incoming-connection/discoverable policy and unpair, application launch/stop, and
-  foreign-app configuration. An app that omits its run ID still identifies as an app through its
-  sandbox UID or supervised PID; silence never grants administrator identity. A compiled-in app
+  Bluetooth incoming-connection/discoverable policy, advertised-name change and unpair, application
+  launch/stop, and foreign-app configuration. An app that omits its run ID still identifies as an
+  app through its sandbox UID or supervised PID; silence never grants administrator identity. A compiled-in app
   is instead an explicit identity: its virtual run shares the daemon's PID with the Web UI and
-  every other in-process client, so a PID alone never selects `capsula.clock` or `capsula.ring`
+  every other in-process client, so a PID alone never selects `capsulad.clock` or `capsulad.ring`
   — only that run's stable ID plus the per-boot internal token does, and the Web UI's own reads
   stay administrator reads. Per-app configuration, actions and run listings are scoped to the
   calling app; the administrator run table lists each built-in once under its own app ID with
@@ -400,7 +408,7 @@ marker; it is bounded to five contacts and carries no PCM or presentation metada
 Animated trace on the Rockchip service:
 
 ```sh
-CAPSULA_OUTPUT_TRACE=1 /etc/init.d/S99btctl.sh restart
+CAPSULAD_OUTPUT_TRACE=1 /etc/init.d/S99btctl.sh restart
 tail -f /data/capsdemo/capsulad.log
 /etc/init.d/S99btctl.sh restart   # end high-rate tracing
 ```

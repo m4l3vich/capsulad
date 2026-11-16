@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
@@ -20,7 +20,7 @@ import (
 // appMetadata is how the SDK identifies a supervised run. These gates must
 // reject it before any device-wide store is touched.
 func appMetadata(runID string) context.Context {
-	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("capsula-run-id", runID))
+	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("capsulad-run-id", runID))
 }
 
 func testLogBus(t *testing.T) (*logbus.Bus, *ids.Clock) {
@@ -71,7 +71,7 @@ func TestInternalBusAuthorizerAllowsOnlyDeclaredInterfaces(t *testing.T) {
 		t.Fatalf("declared public interface rejected: %v", err)
 	}
 	// The retired private name is not declared and stays denied.
-	if err := d.authorizeInternalBusCall(context.Background(), target, "capsula.internal.clock.v1.ClockService"); status.Code(err) != codes.PermissionDenied {
+	if err := d.authorizeInternalBusCall(context.Background(), target, "capsulad.internal.clock.v1.ClockService"); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("undeclared service code = %v, want PermissionDenied", status.Code(err))
 	}
 	// A wrong per-boot token is not identity; the declared-interface rule is
@@ -100,7 +100,7 @@ func TestAppScopeRejectsForeignApplication(t *testing.T) {
 	d := &Daemon{cfg: Config{SandboxUIDBase: 20000}, sup: sup, logs: logs, internalToken: "scope-token"}
 
 	own := metadata.NewIncomingContext(context.Background(),
-		metadata.Pairs("capsula-run-id", clockAppID, internalTokenKey, "scope-token"))
+		metadata.Pairs("capsulad-run-id", clockAppID, internalTokenKey, "scope-token"))
 	if err := d.requireAppScope(own, clockAppID); err != nil {
 		t.Fatalf("own app scope rejected: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestPublicAppBusTargetReachableByOrdinaryClient(t *testing.T) {
 	}
 	if err := privateStream.Send(&frameworkv1.RoutedCallRequest{Message: &frameworkv1.RoutedCallRequest_Start{
 		Start: &frameworkv1.RoutedCallStart{
-			TargetAppId: clockAppID, GrpcService: "capsula.internal.clock.v1.ClockService",
+			TargetAppId: clockAppID, GrpcService: "capsulad.internal.clock.v1.ClockService",
 			RpcName: "GetState", TimeoutMs: 2000,
 		},
 	}}); err != nil {

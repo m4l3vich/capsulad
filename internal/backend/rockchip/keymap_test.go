@@ -33,7 +33,7 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 	// authoritative.
 	writeKeyNode(t, gpio, "voice-key", keyHappy, "happy")
 
-	keys := probeKeyMap(root)
+	keys := probeKeyMap(root, DefaultConfig().InputKeymapCompatible)
 	want := map[int]string{
 		keyMicMute:    "mic_toggle",
 		keyVolumeUp:   "volume_up",
@@ -49,7 +49,7 @@ func TestProbeKeyMapFromDeviceTree(t *testing.T) {
 }
 
 func TestProbeKeyMapFallbackCoversBothCentreCodes(t *testing.T) {
-	keys := probeKeyMap(t.TempDir())
+	keys := probeKeyMap(t.TempDir(), DefaultConfig().InputKeymapCompatible)
 	if keys[keyVoiceCmd] != "center" || keys[keyHappy] != "center" {
 		t.Fatalf("centre codes = %q/%q", keys[keyVoiceCmd], keys[keyHappy])
 	}

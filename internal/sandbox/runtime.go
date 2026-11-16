@@ -20,19 +20,19 @@ import (
 const (
 	// RuntimeMetadataFile is emitted by the native build next to the shared
 	// library. It describes the ABI the installed runtime provides.
-	RuntimeMetadataFile = "capsula-native.json"
+	RuntimeMetadataFile = "capsulad-native.json"
 
 	// NamespaceLibraryDir is the fixed read-only location of the runtime
 	// inside an app mount namespace.
-	NamespaceLibraryDir = "/capsula/lib"
+	NamespaceLibraryDir = "/capsulad/lib"
 
 	// InterpreterQuickJS is the script host executable installed beside the
 	// native runtime. It embeds QuickJS and drives the public C ABI.
-	InterpreterQuickJS = "capsula-quickjs"
+	InterpreterQuickJS = "capsulad-quickjs"
 
 	// InterpreterMicroPython is the script host executable installed beside the
 	// native runtime. It embeds MicroPython and drives the public C ABI.
-	InterpreterMicroPython = "capsula-micropython"
+	InterpreterMicroPython = "capsulad-micropython"
 )
 
 // Interpreter is one script host installed in the shared runtime directory.
@@ -68,7 +68,7 @@ type Runtime struct {
 	File     string // file name relative to Dir
 	ABIMajor int
 	ABIMinor int
-	Metadata bool // capsula-native.json was present and valid
+	Metadata bool // capsulad-native.json was present and valid
 	// Interpreters maps a script runtime to its installed host executable.
 	// A runtime without a host is absent from the map; that is the only
 	// truthful answer until the host is staged beside the library.
@@ -187,11 +187,11 @@ func HasRuntime(dir string) bool {
 func libraryCandidates() []string {
 	switch runtime.GOOS {
 	case "darwin":
-		return []string{"libcapsula.1.dylib", "libcapsula.dylib", "libcapsula.so.1", "libcapsula.so"}
+		return []string{"libcapsulad.1.dylib", "libcapsulad.dylib", "libcapsulad.so.1", "libcapsulad.so"}
 	case "linux":
-		return []string{"libcapsula.so.1", "libcapsula.so", "libcapsula.1.dylib", "libcapsula.dylib"}
+		return []string{"libcapsulad.so.1", "libcapsulad.so", "libcapsulad.1.dylib", "libcapsulad.dylib"}
 	default:
-		return []string{"libcapsula.so.1", "libcapsula.so", "libcapsula.1.dylib", "libcapsula.dylib"}
+		return []string{"libcapsulad.so.1", "libcapsulad.so", "libcapsulad.1.dylib", "libcapsulad.dylib"}
 	}
 }
 
@@ -455,7 +455,7 @@ func CheckRequirement(rt *Runtime, req manifest.NativeSDK) error {
 
 // LibraryEnv is the launch environment that points an app at the shared SDK.
 // In namespace modes the runtime is mounted read-only at NamespaceLibraryDir;
-// in uid/none modes the app receives the host path. CAPSULA_LIBRARY names the
+// in uid/none modes the app receives the host path. CAPSULAD_LIBRARY names the
 // exact file a binding should dlopen; the loader path names the directory so
 // the runtime's own dependencies/companion libraries resolve.
 func LibraryEnv(mode string, rt *Runtime) []string {
@@ -474,8 +474,8 @@ func LibraryEnv(mode string, rt *Runtime) []string {
 		loader = "DYLD_LIBRARY_PATH"
 	}
 	return []string{
-		"CAPSULA_LIBRARY=" + file,
-		"CAPSULA_LIBRARY_DIR=" + dir,
+		"CAPSULAD_LIBRARY=" + file,
+		"CAPSULAD_LIBRARY_DIR=" + dir,
 		loader + "=" + dir,
 	}
 }

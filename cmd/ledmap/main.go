@@ -26,6 +26,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"capsulad/internal/backend/profile"
 )
 
 const segmentLetters = "abcdefg"
@@ -42,14 +44,15 @@ type result struct {
 }
 
 func main() {
+	led := profile.RK3308Rev4Stock.LED
 	serial := flag.String("serial", "", "adb serial (-s); empty uses the only device")
-	remote := flag.String("remote", "/data/capsdemo/capsula", "path to capsula on the device")
-	device := flag.String("device", "/dev/led_multi_ctrl", "vendor display device")
+	remote := flag.String("remote", "/data/capsdemo/capsulad", "path to capsulad on the device")
+	device := flag.String("device", led.DefaultPath, "vendor display device")
 	value := flag.Int("value", 200, "brightness of the channel under test")
 	bg := flag.Int("bg", 12, "dim baseline brightness for the rest of the display")
 	out := flag.String("out", "ledmap.json", "where to write the mapping")
 	from := flag.Int("from", 0, "first channel")
-	to := flag.Int("to", 29, "last channel")
+	to := flag.Int("to", led.MultiCtrlChannels-1, "last channel")
 	flag.Parse()
 
 	fmt.Println("Segment letters (conventional 7-segment):")

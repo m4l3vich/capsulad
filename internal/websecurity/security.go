@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	sessionCookie = "capsula_session"
+	sessionCookie = "capsulad_session"
 	maxSessions   = 128
 	maxAPIKeys    = 64
 )
@@ -262,7 +262,7 @@ func (s *Store) CreateAPIKey(name string) (string, APIKeyInfo, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", APIKeyInfo{}, err
 	}
-	token := "capsula_" + base64.RawURLEncoding.EncodeToString(raw[:])
+	token := "capsulad_" + base64.RawURLEncoding.EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(token))
 	rec := apiKeyRecord{
 		Name: name, Prefix: token[:16], Hash: hex.EncodeToString(sum[:]), CreatedAt: time.Now().UTC(),
@@ -452,7 +452,7 @@ func (s *Store) newServerCert(opts CertOptions) (CertInfo, error) {
 		opts.Hostname, _ = os.Hostname()
 	}
 	if opts.Hostname == "" {
-		opts.Hostname = "capsulad.local"
+		opts.Hostname = "capsula.local"
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -473,7 +473,7 @@ func (s *Store) newServerCert(opts CertOptions) (CertInfo, error) {
 	}
 	tpl := &x509.Certificate{
 		SerialNumber:          randomSerial(),
-		Subject:               pkix.Name{CommonName: opts.Hostname, Organization: []string{"Capsula Web UI"}},
+		Subject:               pkix.Name{CommonName: opts.Hostname, Organization: []string{"Capsulad Web UI"}},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.AddDate(0, 0, opts.Days),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

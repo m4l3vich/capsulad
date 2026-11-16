@@ -22,12 +22,13 @@ import (
 	"syscall"
 	"time"
 
-	"capsula/apps/marusia/internal/media"
-	"capsula/apps/marusia/internal/settings"
-	"capsula/apps/marusia/internal/turn"
-	"capsula/apps/marusia/internal/vkclient"
-	"capsula/apps/marusia/internal/vkproto/clientpb"
-	"capsula/sdk/capsula"
+	"capsulad/apps/marusia/internal/media"
+	"capsulad/apps/marusia/internal/redact"
+	"capsulad/apps/marusia/internal/settings"
+	"capsulad/apps/marusia/internal/turn"
+	"capsulad/apps/marusia/internal/vkclient"
+	"capsulad/apps/marusia/internal/vkproto/clientpb"
+	"capsulad/sdk/capsulad"
 )
 
 const (
@@ -52,32 +53,32 @@ const (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	env := capsula.FromEnv()
+	env := capsulad.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	client, err := capsula.Connect(ctx, env)
+	client, err := capsulad.Connect(ctx, env)
 	if err != nil {
 		log.Fatalf("marusia: connect: %v", err)
 	}
 	defer client.Close()
 
 	a := newApp(ctx, client)
-	client.SetHandlers(capsula.Handlers{
+	client.SetHandlers(capsulad.Handlers{
 		Ready: func() {
 			log.Printf("marusia: ready; %s", a.summary())
 		},
-		Activation: func(_ context.Context, activation *capsula.Activation) {
+		Activation: func(_ context.Context, activation *capsulad.Activation) {
 			a.enqueue(activation)
 		},
-		TouchRelease: func(released *capsula.InputReleased) {
+		TouchRelease: func(released *capsulad.InputReleased) {
 			a.releaseInput(released)
 		},
 		Settings: a.applySettings,
-		Action: func(_ context.Context, action *capsula.ActionInvoked) {
+		Action: func(_ context.Context, action *capsulad.ActionInvoked) {
 			a.action(action)
 		},
-		Invocation: func(_ context.Context, invocation *capsula.LaunchInvocation) {
+		Invocation: func(_ context.Context, invocation *capsulad.LaunchInvocation) {
 			detail := "marusia is ready"
 			if !a.config().HasSession() {
 				detail = "marusia is ready; no session is configured, so the next turn tries the " +
@@ -108,7 +109,7 @@ func main() {
 // active turn and the activation queue.
 type app struct {
 	ctx    context.Context
-	client *capsula.Client
+	client *capsulad.Client
 	fetch  *media.Fetch
 
 	// fallback is the identity used while the serial and device_id settings
@@ -125,13 +126,17 @@ type app struct {
 	queue        chan activationJob
 	sessionOnce  sync.Once
 	serialOnce   sync.Once
+	// plaintextOnce keeps the insecure-endpoint warning to one line per
+	// process, the first time a selected configuration would send a
+	// credential over http://.
+	plaintextOnce sync.Once
 }
 
 // activationJob is one queued activation plus the framework's expiry as a
 // local deadline. The activation carries monotonic nanoseconds; the queue
 // converts the remaining window once, at enqueue time.
 type activationJob struct {
-	activation  *capsula.Activation
+	activation  *capsulad.Activation
 	deadline    time.Time
 	hasDeadline bool
 }
@@ -149,12 +154,12 @@ func (a *app) logSession(session vkclient.Session) {
 	a.sessionOnce.Do(func() {
 		if config.Provisioned() {
 			log.Printf("marusia: attach succeeded with the provisioned xtoken_id; account=%s",
-				redactAccount(session.AccountID))
+				redact.Account(session.AccountID))
 			return
 		}
 		log.Printf("marusia: attach succeeded with an empty xtoken_id (the service accepted an "+
 			"unprovisioned attach); account=%s; configure session_id/session_secret if that changes",
-			redactAccount(session.AccountID))
+			redact.Account(session.AccountID))
 	})
 }
 
@@ -181,7 +186,21 @@ func (a *app) logSerialSource(config settings.Config) {
 	})
 }
 
-func newApp(ctx context.Context, client *capsula.Client) *app {
+// logPlaintextWarning states, once per process, that the selected endpoint
+// carries the credential without TLS. The http:// endpoints are an operator
+// test choice, so the choice is kept and its consequence is logged rather than
+// the scheme being silently upgraded or the credential silently dropped.
+func (a *app) logPlaintextWarning(config settings.Config) {
+	warning := settings.PlaintextWarning(config)
+	if warning == "" {
+		return
+	}
+	a.plaintextOnce.Do(func() {
+		log.Printf("marusia: WARN %s", warning)
+	})
+}
+
+func newApp(ctx context.Context, client *capsulad.Client) *app {
 	a := &app{
 		ctx:      ctx,
 		client:   client,
@@ -197,6 +216,7 @@ func newApp(ctx context.Context, client *capsula.Client) *app {
 	} else {
 		a.cfg = config
 		a.logSerialSource(config)
+		a.logPlaintextWarning(config)
 		for _, warning := range warnings {
 			log.Printf("marusia: %s", warning)
 		}
@@ -212,7 +232,7 @@ func (a *app) config() settings.Config {
 
 // deviceService is the local framework service that reports the stable device
 // identity; GetInfo is app-readable.
-const deviceService = "capsula.framework.v1.DeviceService"
+const deviceService = "capsulad.framework.v1.DeviceService"
 
 // deviceInfoTimeout bounds the one identity call at startup.
 const deviceInfoTimeout = 5 * time.Second
@@ -224,7 +244,7 @@ type deviceInfo struct {
 }
 
 // deviceInfoCaller is the SDK surface identity resolution needs;
-// *capsula.Client implements it with CallJSON.
+// *capsulad.Client implements it with CallJSON.
 type deviceInfoCaller interface {
 	CallJSON(ctx context.Context, targetAppID, service, rpc string, request, response any, timeout time.Duration) error
 }
@@ -236,11 +256,11 @@ var cpuSerialReader = settings.ReadCPUSerial
 // envSerialReader reads the launcher-injected SoC serial. The SDK constant is
 // the contract; it is a variable so a test can drive the precedence without
 // touching the process environment.
-var envSerialReader = func() string { return capsula.FromEnv().DeviceSerial }
+var envSerialReader = func() string { return capsulad.FromEnv().DeviceSerial }
 
 // loadIdentity resolves the identity the settings do not supply. The SoC
 // serial is resolved once per process, in this order: the launcher's
-// CAPSULA_DEVICE_SERIAL, the framework's DeviceService.GetInfo hardware_serial,
+// CAPSULAD_DEVICE_SERIAL, the framework's DeviceService.GetInfo hardware_serial,
 // a local /proc/cpuinfo read (the stock sandbox has no /proc, so this only
 // works on a host), then empty. The environment comes first because a native
 // runtime built before DeviceInfo.hardware_serial existed decodes JSON replies
@@ -300,7 +320,7 @@ func (a *app) summary() string {
 
 // --- events -----------------------------------------------------------------
 
-func (a *app) enqueue(activation *capsula.Activation) {
+func (a *app) enqueue(activation *capsulad.Activation) {
 	if activation == nil {
 		return
 	}
@@ -322,7 +342,7 @@ func (a *app) enqueue(activation *capsula.Activation) {
 	}
 }
 
-func (a *app) releaseInput(released *capsula.InputReleased) {
+func (a *app) releaseInput(released *capsulad.InputReleased) {
 	if released == nil || released.ActivationID == "" {
 		return
 	}
@@ -337,7 +357,7 @@ func (a *app) releaseInput(released *capsula.InputReleased) {
 	a.mu.Unlock()
 }
 
-func (a *app) applySettings(changed *capsula.SettingsChanged) {
+func (a *app) applySettings(changed *capsulad.SettingsChanged) {
 	values, err := settings.Read(changed)
 	if err != nil {
 		log.Printf("marusia: settings rejected: %v", err)
@@ -356,10 +376,11 @@ func (a *app) applySettings(changed *capsula.SettingsChanged) {
 	a.cfg = config
 	a.mu.Unlock()
 	a.logSerialSource(config)
+	a.logPlaintextWarning(config)
 	log.Printf("marusia: settings applied; %s", a.summary())
 }
 
-func (a *app) action(action *capsula.ActionInvoked) {
+func (a *app) action(action *capsulad.ActionInvoked) {
 	if action == nil {
 		return
 	}
@@ -398,7 +419,7 @@ func (a *app) dismiss() {
 // reauth runs the attach handshake with the current settings and reports the
 // outcome through the action result. It uses its own short-lived client so it
 // can never close the channel an active turn is using.
-func (a *app) reauth(action *capsula.ActionInvoked) {
+func (a *app) reauth(action *capsulad.ActionInvoked) {
 	config := a.config()
 	resolved, source, resolveErr := resolveSession(config)
 	config = resolved
@@ -431,8 +452,7 @@ func (a *app) reauth(action *capsula.ActionInvoked) {
 			_ = a.client.NotifyActionResult(action.ID, false, describeReauth(err))
 			return
 		}
-		log.Printf("marusia: reauth succeeded with the session from %s; account=%s",
-			source, redactAccount(session.AccountID))
+		logReauthSuccess("the session from "+source, session)
 		_ = a.client.NotifyActionResult(action.ID, true, "session accepted from "+source)
 		return
 	}
@@ -443,9 +463,16 @@ func (a *app) reauth(action *capsula.ActionInvoked) {
 		_ = a.client.NotifyActionResult(action.ID, false, describeReauth(err))
 		return
 	}
-	log.Printf("marusia: reauth succeeded with the provisioning attach; session=%s account=%s",
-		attached.SessionID, attached.AccountID)
+	logReauthSuccess("the provisioning attach", attached)
 	_ = a.client.NotifyActionResult(action.ID, true, "session attach succeeded")
+}
+
+// logReauthSuccess is the one line for a successful reauth. It names the source
+// and shortened identifiers only: the session id is bearer material, so the
+// full value never reaches the log.
+func logReauthSuccess(source string, session vkclient.Session) {
+	log.Printf("marusia: reauth succeeded with %s; session=%s account=%s",
+		source, redact.SessionID(session.SessionID), redact.Account(session.AccountID))
 }
 
 // describeReauth is the one line an operator sees for a failed reauth. It names
@@ -460,15 +487,6 @@ func describeReauth(err error) string {
 		return fmt.Sprintf("the service rejected the attach with HTTP %d", attachErr.Status)
 	}
 	return err.Error()
-}
-
-// redactAccount keeps an account id useful for correlation without logging the
-// whole value.
-func redactAccount(account string) string {
-	if len(account) <= 8 {
-		return "…"
-	}
-	return account[:8] + "…"
 }
 
 func (a *app) shutdown() {
@@ -517,7 +535,7 @@ func (a *app) runQueue() {
 	}
 }
 
-func (a *app) runActivation(activation *capsula.Activation) {
+func (a *app) runActivation(activation *capsulad.Activation) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	defer cancel()
 	active := &activeTurn{activationID: activation.ID, cancel: cancel, release: make(chan struct{})}
@@ -581,7 +599,7 @@ func (a *app) runActivation(activation *capsula.Activation) {
 		close(pumpDone)
 	}()
 
-	hold := activation.Origin == capsula.ActivationOriginTouch && activation.HoldToTalk
+	hold := activation.Origin == capsulad.ActivationOriginTouch && activation.HoldToTalk
 	speech := speechOptionsFor(config, activation)
 	mode := "touch"
 	if keywordEvidence(activation) {
@@ -624,12 +642,19 @@ func (a *app) runActivation(activation *capsula.Activation) {
 	case turn.NoSpeech:
 		log.Printf("marusia: activation=%s ended: %s", activation.ID, result.Detail)
 	case turn.Completed:
-		log.Printf("marusia: activation=%s completed text=%q played=%q",
-			activation.ID, result.Text, result.PlayedURL)
+		logTurnCompleted(activation.ID, result)
 	}
 	if result.AuthRejected {
 		a.dropSession(protocol)
 	}
+}
+
+// logTurnCompleted is the one success line for a turn. The reply URL is written
+// as scheme://host/path only: a vendor TTS URL carries its signature in the
+// query string, which must never reach the log.
+func logTurnCompleted(activationID string, result turn.Result) {
+	log.Printf("marusia: activation=%s completed text=%q played=%q",
+		activationID, result.Text, redact.URL(result.PlayedURL))
 }
 
 // speechOptionsFor builds one turn's init fields. kw_params is only sent when
@@ -638,7 +663,7 @@ func (a *app) runActivation(activation *capsula.Activation) {
 // key, so the utterance begins with the command and the service must not
 // demand the keyword). media_state is always set inside the block because the
 // service refuses an unspecified state.
-func speechOptionsFor(config settings.Config, activation *capsula.Activation) vkclient.SpeechOptions {
+func speechOptionsFor(config settings.Config, activation *capsulad.Activation) vkclient.SpeechOptions {
 	options := vkclient.SpeechOptions{
 		Format:           config.Format,
 		Timezone:         timezone(),
@@ -656,12 +681,12 @@ func speechOptionsFor(config settings.Config, activation *capsula.Activation) vk
 // Only that origin carries keyword evidence: a key press and an API activation
 // both start a phrase the service must transcribe without a keyword, and
 // claiming one makes the service answer "keyword not confirmed" instead.
-func keywordEvidence(activation *capsula.Activation) bool {
-	return activation != nil && activation.Origin == capsula.ActivationOriginWakeword
+func keywordEvidence(activation *capsulad.Activation) bool {
+	return activation != nil && activation.Origin == capsulad.ActivationOriginWakeword
 }
 
 // closeMic ends the capture and waits for both the framework stream and the
-func closeMic(ctx context.Context, mic *capsula.Mic, pumpDone <-chan struct{}) {
+func closeMic(ctx context.Context, mic *capsulad.Mic, pumpDone <-chan struct{}) {
 	_ = mic.Close()
 	select {
 	case <-mic.Done():
@@ -764,7 +789,7 @@ func (a *app) protocolFor(config settings.Config) (*vkclient.Client, error) {
 	return client, nil
 }
 
-func (a *app) beginConversation(ctx context.Context, activationID string) (*capsula.Conversation, string) {
+func (a *app) beginConversation(ctx context.Context, activationID string) (*capsulad.Conversation, string) {
 	conversation, err := a.client.BeginConversation(ctx, activationID)
 	if err != nil {
 		// Capture and playback still work; the mixer will not duck others.
@@ -779,12 +804,12 @@ func (a *app) beginConversation(ctx context.Context, activationID string) (*caps
 // the gap is logged. It returns when the microphone stream or the turn ends;
 // chunks lost before the phrase opened are counted into preOpenDropped, which
 // the turn's one-line audio summary reports.
-func (a *app) pumpMic(ctx context.Context, in <-chan capsula.MicChunk, out chan []byte,
+func (a *app) pumpMic(ctx context.Context, in <-chan capsulad.MicChunk, out chan []byte,
 	opened <-chan struct{}, preOpenDropped *atomic.Int64) {
 	// The SDK attaches the capture format to every chunk, so the format
 	// announcement is logged once per stream instead of once per chunk.
 	var (
-		format         capsula.AudioFormat
+		format         capsulad.AudioFormat
 		haveFormat     bool
 		formatWarned   bool
 		loggedStreamID string
@@ -824,10 +849,10 @@ func (a *app) pumpMic(ctx context.Context, in <-chan capsula.MicChunk, out chan 
 				continue
 			}
 			if !haveFormat {
-				format = capsula.DefaultAudioFormat()
+				format = capsulad.DefaultAudioFormat()
 				haveFormat = true
 			}
-			if format.SampleFormat != capsula.SampleFormatPCM16LE {
+			if format.SampleFormat != capsulad.SampleFormatPCM16LE {
 				if !formatWarned {
 					formatWarned = true
 					log.Printf("marusia: microphone sample format %s is not PCM s16le; audio is being dropped",
@@ -885,7 +910,7 @@ func (e endpoint) OpenSpeech(ctx context.Context, opts vkclient.SpeechOptions) (
 // speaker fetches a play_url body, decodes it and writes PCM to the framework
 // mixer. It closes the playback stream on every path; a write failure aborts.
 type speaker struct {
-	client         *capsula.Client
+	client         *capsulad.Client
 	fetch          *media.Fetch
 	conversationID string
 }
@@ -902,8 +927,8 @@ func (s *speaker) Play(ctx context.Context, url string) error {
 	if len(pcm) == 0 {
 		return errors.New("the reply audio decoded to zero samples")
 	}
-	playback, err := s.client.OpenPlayback(ctx, outputEndpoint, capsula.AudioFormat{
-		SampleFormat: capsula.SampleFormatPCM16LE,
+	playback, err := s.client.OpenPlayback(ctx, outputEndpoint, capsulad.AudioFormat{
+		SampleFormat: capsulad.SampleFormatPCM16LE,
 		SampleRateHz: vkclient.SampleRate,
 		Channels:     1,
 	}, s.conversationID)
@@ -933,10 +958,10 @@ func (s *speaker) Play(ctx context.Context, url string) error {
 // --- ring -------------------------------------------------------------------
 
 var (
-	ringTeal   = capsula.RGB{G: 128, B: 128}
-	ringBlue   = capsula.RGB{G: 64, B: 255}
-	ringGreen  = capsula.RGB{G: 220}
-	ringRed    = capsula.RGB{R: 255}
+	ringTeal   = capsulad.RGB{G: 128, B: 128}
+	ringBlue   = capsulad.RGB{G: 64, B: 255}
+	ringGreen  = capsulad.RGB{G: 220}
+	ringRed    = capsulad.RGB{R: 255}
 	ringPixels = 12
 )
 
@@ -944,8 +969,8 @@ var (
 // visible, non-blank presentation refreshed at least every 2 s for capture, and
 // this renderer writes a frame at 25 Hz for the whole turn.
 type ringView struct {
-	pres    *capsula.Presentation
-	capture *capsula.Capture
+	pres    *capsulad.Presentation
+	capture *capsulad.Capture
 
 	mu    sync.Mutex
 	state turn.State
@@ -953,7 +978,7 @@ type ringView struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
-	pixels    []capsula.RGB
+	pixels    []capsulad.RGB
 }
 
 func (a *app) openRing(ctx context.Context) (*ringView, error) {
@@ -961,7 +986,7 @@ func (a *app) openRing(ctx context.Context) (*ringView, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ring unavailable: %w", err)
 	}
-	capture, err := a.client.OpenCapture(ctx, ringResource, pres.ID(), capsula.CaptureModeUnspecified)
+	capture, err := a.client.OpenCapture(ctx, ringResource, pres.ID(), capsulad.CaptureModeUnspecified)
 	if err != nil {
 		_ = pres.Close()
 		return nil, fmt.Errorf("ring capture: %w", err)
@@ -971,7 +996,7 @@ func (a *app) openRing(ctx context.Context) (*ringView, error) {
 		capture: capture,
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
-		pixels:  make([]capsula.RGB, ringPixels),
+		pixels:  make([]capsulad.RGB, ringPixels),
 	}
 	if err := view.renderFrame(); err != nil {
 		capture.Close()
@@ -1049,7 +1074,7 @@ func (v *ringView) Close() {
 	})
 }
 
-func scaleRGB(color capsula.RGB, brightness float64) capsula.RGB {
+func scaleRGB(color capsulad.RGB, brightness float64) capsulad.RGB {
 	clamp := func(v float64) uint8 {
 		if v < 0 {
 			v = 0
@@ -1059,7 +1084,7 @@ func scaleRGB(color capsula.RGB, brightness float64) capsula.RGB {
 		}
 		return uint8(v)
 	}
-	return capsula.RGB{
+	return capsulad.RGB{
 		R: clamp(float64(color.R) * brightness),
 		G: clamp(float64(color.G) * brightness),
 		B: clamp(float64(color.B) * brightness),

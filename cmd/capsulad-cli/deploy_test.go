@@ -95,7 +95,7 @@ func TestDeployDryRunChangesNothing(t *testing.T) {
 	sameFilesystemHook(t, false)
 	bundle := t.TempDir()
 	writeTestFile(t, bundle, "capsulad", "#!/bin/sh\necho 'capsulad test (sdk 0.5)'\n", 0o755)
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
 	writeTestFile(t, bundle, "boot/S99btctl.sh", "#!/bin/sh\nexit 0\n", 0o755)
 	dataDir := t.TempDir()
 	initScript := filepath.Join(t.TempDir(), "S99btctl.sh")
@@ -199,11 +199,11 @@ func TestDeployDryRunDefersDaemonProbe(t *testing.T) {
 // The bundle binary runs as root, so the probe must not inherit the operator's
 // environment.
 func TestVerifyDaemonBinaryUsesMinimalEnvironment(t *testing.T) {
-	t.Setenv("CAPSULA_PROBE_LEAK", "secret")
+	t.Setenv("CAPSULAD_PROBE_LEAK", "secret")
 	t.Setenv("OPERATOR_SECRET", "secret")
 	binary := filepath.Join(t.TempDir(), "capsulad")
 	script := "#!/bin/sh\n" +
-		"[ -z \"$CAPSULA_PROBE_LEAK\" ] || exit 9\n" +
+		"[ -z \"$CAPSULAD_PROBE_LEAK\" ] || exit 9\n" +
 		"[ -z \"$OPERATOR_SECRET\" ] || exit 9\n" +
 		"[ -n \"$HOME\" ] || exit 8\n" +
 		"[ \"$LANG\" = C ] || exit 7\n" +
@@ -388,8 +388,8 @@ func TestDeployRejectsSymlinkedBundleEntries(t *testing.T) {
 
 func TestDeployNativeRequirementAcceptsSingleFileRuntime(t *testing.T) {
 	lib := t.TempDir()
-	writeTestFile(t, lib, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, lib, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, lib, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, lib, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	d := &deployment{
 		libSrc: lib,
 		packages: []*artifact.Package{{
@@ -407,14 +407,14 @@ func TestDeployNativeRequirementAcceptsSingleFileRuntime(t *testing.T) {
 
 func TestSyncLibSkipsUnchangedAndReplacesChangedFiles(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "first runtime", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "first runtime", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
-	target := filepath.Join(dst, "libcapsula.so.1.0.0")
+	target := filepath.Join(dst, "libcapsulad.so.1.0.0")
 	before, err := os.Stat(target)
 	if err != nil {
 		t.Fatal(err)
@@ -430,7 +430,7 @@ func TestSyncLibSkipsUnchangedAndReplacesChangedFiles(t *testing.T) {
 		t.Fatalf("unchanged runtime was rewritten: before=%v after=%v", before, after)
 	}
 
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "changed runtime", 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "changed runtime", 0o644)
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("sync changed runtime: %v", err)
 	}
@@ -448,23 +448,23 @@ func TestSyncLibSkipsUnchangedAndReplacesChangedFiles(t *testing.T) {
 
 func TestSyncLibCreatesAndPreservesRuntimeLayout(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	for name, want := range map[string]string{
-		"libcapsula.so":   "libcapsula.so.1",
-		"libcapsula.so.1": "libcapsula.so.1.0.0",
+		"libcapsulad.so":   "libcapsulad.so.1",
+		"libcapsulad.so.1": "libcapsulad.so.1.0.0",
 	} {
 		got, err := os.Readlink(filepath.Join(dst, name))
 		if err != nil || got != want {
 			t.Errorf("link %s = %q, %v; want %q", name, got, err, want)
 		}
 	}
-	links := []string{"libcapsula.so", "libcapsula.so.1"}
+	links := []string{"libcapsulad.so", "libcapsulad.so.1"}
 	before := make([]os.FileInfo, len(links))
 	for i, name := range links {
 		info, err := os.Lstat(filepath.Join(dst, name))
@@ -488,11 +488,11 @@ func TestSyncLibCreatesAndPreservesRuntimeLayout(t *testing.T) {
 }
 
 func TestSyncLibRejectsUnsafeRuntimeLinkTargets(t *testing.T) {
-	for _, library := range []string{"/outside/libcapsula.so.1", "../outside/libcapsula.so.1"} {
+	for _, library := range []string{"/outside/libcapsulad.so.1", "../outside/libcapsulad.so.1"} {
 		t.Run(library, func(t *testing.T) {
 			src := t.TempDir()
-			writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"`+library+`"}`, 0o644)
-			writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+			writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"`+library+`"}`, 0o644)
+			writeTestFile(t, src, "libcapsulad.so.1.0.0", "runtime", 0o644)
 			if err := syncLib(src, filepath.Join(t.TempDir(), "lib")); err == nil || !strings.Contains(err.Error(), "plain file name") {
 				t.Fatalf("unsafe metadata library error = %v, want path rejection", err)
 			}
@@ -502,24 +502,24 @@ func TestSyncLibRejectsUnsafeRuntimeLinkTargets(t *testing.T) {
 
 func TestSyncLibReplacesAbsoluteAndEscapingInstalledLinks(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/usr/lib/libcapsula.so.1", filepath.Join(dst, "libcapsula.so")); err != nil {
+	if err := os.Symlink("/usr/lib/libcapsulad.so.1", filepath.Join(dst, "libcapsulad.so")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("../elsewhere/libcapsula.so.1.0.0", filepath.Join(dst, "libcapsula.so.1")); err != nil {
+	if err := os.Symlink("../elsewhere/libcapsulad.so.1.0.0", filepath.Join(dst, "libcapsulad.so.1")); err != nil {
 		t.Fatal(err)
 	}
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	for name, want := range map[string]string{
-		"libcapsula.so":   "libcapsula.so.1",
-		"libcapsula.so.1": "libcapsula.so.1.0.0",
+		"libcapsulad.so":   "libcapsulad.so.1",
+		"libcapsulad.so.1": "libcapsulad.so.1.0.0",
 	} {
 		got, err := os.Readlink(filepath.Join(dst, name))
 		if err != nil || got != want {
@@ -530,21 +530,21 @@ func TestSyncLibReplacesAbsoluteAndEscapingInstalledLinks(t *testing.T) {
 
 func TestSyncLibReplacesDereferencedABIFileCopiesWithLinks(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, dst, "libcapsula.so.1.0.0", "runtime", 0o644)
-	writeTestFile(t, dst, "libcapsula.so.1", "runtime", 0o644)
-	writeTestFile(t, dst, "libcapsula.so", "runtime", 0o644)
+	writeTestFile(t, dst, "libcapsulad.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, dst, "libcapsulad.so.1", "runtime", 0o644)
+	writeTestFile(t, dst, "libcapsulad.so", "runtime", 0o644)
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	for name, want := range map[string]string{
-		"libcapsula.so":   "libcapsula.so.1",
-		"libcapsula.so.1": "libcapsula.so.1.0.0",
+		"libcapsulad.so":   "libcapsulad.so.1",
+		"libcapsulad.so.1": "libcapsulad.so.1.0.0",
 	} {
 		got, err := os.Readlink(filepath.Join(dst, name))
 		if err != nil || got != want {
@@ -555,23 +555,23 @@ func TestSyncLibReplacesDereferencedABIFileCopiesWithLinks(t *testing.T) {
 
 func TestSyncLibLeavesCorrectPreexistingLayoutUntouched(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, src, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, src, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, dst, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
-	writeTestFile(t, dst, "libcapsula.so.1.0.0", "runtime", 0o644)
+	writeTestFile(t, dst, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
+	writeTestFile(t, dst, "libcapsulad.so.1.0.0", "runtime", 0o644)
 	for name, target := range map[string]string{
-		"libcapsula.so":   "libcapsula.so.1",
-		"libcapsula.so.1": "libcapsula.so.1.0.0",
+		"libcapsulad.so":   "libcapsulad.so.1",
+		"libcapsulad.so.1": "libcapsulad.so.1.0.0",
 	} {
 		if err := os.Symlink(target, filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	links := []string{"libcapsula.so", "libcapsula.so.1"}
+	links := []string{"libcapsulad.so", "libcapsulad.so.1"}
 	before := make([]os.FileInfo, len(links))
 	for i, name := range links {
 		info, err := os.Lstat(filepath.Join(dst, name))
@@ -596,7 +596,7 @@ func TestSyncLibLeavesCorrectPreexistingLayoutUntouched(t *testing.T) {
 
 func TestSyncLibDoesNotWriteThroughManagedFileSymlinkToDirectory(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{}`, 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{}`, 0o644)
 	writeTestFile(t, src, "managed", "bundle", 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -628,19 +628,19 @@ func TestSyncLibDoesNotWriteThroughManagedFileSymlinkToDirectory(t *testing.T) {
 
 func TestSyncLibLeavesLinksAloneWithoutMatchingRuntimeFile(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, src, "capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
 	dst := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("libcapsula.so.1", filepath.Join(dst, "libcapsula.so")); err != nil {
+	if err := os.Symlink("libcapsulad.so.1", filepath.Join(dst, "libcapsulad.so")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("missing.so", filepath.Join(dst, "libcapsula.so.1")); err != nil {
+	if err := os.Symlink("missing.so", filepath.Join(dst, "libcapsulad.so.1")); err != nil {
 		t.Fatal(err)
 	}
 	before := make([]os.FileInfo, 2)
-	for i, name := range []string{"libcapsula.so", "libcapsula.so.1"} {
+	for i, name := range []string{"libcapsulad.so", "libcapsulad.so.1"} {
 		info, err := os.Lstat(filepath.Join(dst, name))
 		if err != nil {
 			t.Fatal(err)
@@ -650,7 +650,7 @@ func TestSyncLibLeavesLinksAloneWithoutMatchingRuntimeFile(t *testing.T) {
 	if err := syncLib(src, dst); err != nil {
 		t.Fatalf("sync partial runtime: %v", err)
 	}
-	for i, name := range []string{"libcapsula.so", "libcapsula.so.1"} {
+	for i, name := range []string{"libcapsulad.so", "libcapsulad.so.1"} {
 		after, err := os.Lstat(filepath.Join(dst, name))
 		if err != nil {
 			t.Fatal(err)
@@ -663,7 +663,7 @@ func TestSyncLibLeavesLinksAloneWithoutMatchingRuntimeFile(t *testing.T) {
 
 func TestSyncLibRefusesSymlinkedRuntimeDirectories(t *testing.T) {
 	src := t.TempDir()
-	writeTestFile(t, src, "capsula-native.json", "{}", 0o644)
+	writeTestFile(t, src, "capsulad-native.json", "{}", 0o644)
 	writeTestFile(t, src, "nested/lib.so", "x", 0o644)
 
 	outside := t.TempDir()
@@ -752,7 +752,7 @@ func TestDeployResolvesDataDirAbsolute(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle := t.TempDir()
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
 
 	out, err := captureStdout(t, func() error {
 		return runDeploy([]string{bundle, "-dry-run"}, "relative-data", "")
@@ -1101,7 +1101,7 @@ func TestDeployStopsInstallsAndRestarts(t *testing.T) {
 	calls := filepath.Join(t.TempDir(), "calls")
 	initScript := filepath.Join(t.TempDir(), bootHookName)
 	writeTestFile(t, filepath.Dir(initScript), bootHookName,
-		"#!/bin/sh\necho \"$1 $CAPSULA_DATA_DIR\" >> "+calls+"\nexit 0\n", 0o755)
+		"#!/bin/sh\necho \"$1 $CAPSULAD_DATA_DIR\" >> "+calls+"\nexit 0\n", 0o755)
 
 	out, err := captureStdout(t, func() error {
 		return runDeploy([]string{bundle, "-init-script", initScript}, dataDir, "")
@@ -1145,7 +1145,7 @@ func TestDeployStopsInstallsAndRestarts(t *testing.T) {
 func TestDeployStagesOutsideTheDataDirectory(t *testing.T) {
 	sameFilesystemHook(t, false)
 	bundle := t.TempDir()
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
 
 	defaultStaging := filepath.Join(os.TempDir(), "capsulad-deploy-")
 	out, err := captureStdout(t, func() error {
@@ -1186,7 +1186,7 @@ func TestDeployStagesOutsideTheDataDirectory(t *testing.T) {
 func TestDeployChecksStagingOnTheDataFilesystem(t *testing.T) {
 	sameFilesystemHook(t, true)
 	bundle := t.TempDir()
-	writeTestFile(t, bundle, "lib/capsula-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsula.so.1"}`, 0o644)
+	writeTestFile(t, bundle, "lib/capsulad-native.json", `{"abi_major":1,"abi_minor":0,"library":"libcapsulad.so.1"}`, 0o644)
 
 	// A single-filesystem host with room to spare keeps working.
 	out, err := captureStdout(t, func() error {

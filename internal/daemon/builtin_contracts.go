@@ -6,8 +6,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
 	"capsulad/internal/registry"
 )
 
@@ -16,8 +16,8 @@ import (
 // installed app's declared interface, and ordinary supervised apps call them
 // through AppBusService.Call targeting the builtin app ID.
 const (
-	clockServiceName = "capsula.contracts.clock.v1.ClockService"
-	ringServiceName  = "capsula.contracts.ring.v1.RingService"
+	clockServiceName = "capsulad.contracts.clock.v1.ClockService"
+	ringServiceName  = "capsulad.contracts.ring.v1.RingService"
 
 	clockContractVersion = "1.0.0"
 	ringContractVersion  = "1.0.0"
@@ -27,7 +27,7 @@ const (
 // descriptor set is generated from the compiled Go descriptor, so it can never
 // drift from the wire types.
 func clockInterface() registry.Interface {
-	data := descriptorSet(clockv1.File_capsula_contracts_clock_v1_clock_proto)
+	data := descriptorSet(clockv1.File_capsulad_contracts_clock_v1_clock_proto)
 	return registry.Interface{
 		Service: clockServiceName, Version: clockContractVersion,
 		Summary:    "Built-in clock: stopwatch, timers, alarms and active alerts.",
@@ -38,7 +38,7 @@ func clockInterface() registry.Interface {
 }
 
 func ringInterface() registry.Interface {
-	data := descriptorSet(ringv1.File_capsula_contracts_ring_v1_ring_proto)
+	data := descriptorSet(ringv1.File_capsulad_contracts_ring_v1_ring_proto)
 	return registry.Interface{
 		Service: ringServiceName, Version: ringContractVersion,
 		Summary:    "Built-in LED ring: render state plus validated, revisioned settings.",
@@ -63,7 +63,7 @@ const clockContractDocs = `# ClockService
 
 Standard app contract for the compiled-in Clock application. Discover it through
 AppInterfaceService and call it through AppBusService.Call with
-target_app_id "capsula.clock".
+target_app_id "capsulad.clock".
 
 ## GetState: returns the authoritative clock snapshot
 
@@ -148,7 +148,7 @@ const ringContractDocs = `# RingService
 
 Standard app contract for the compiled-in Ring application. Discover it through
 AppInterfaceService and call it through AppBusService.Call with
-target_app_id "capsula.ring". The baseline presentation still uses normal
+target_app_id "capsulad.ring". The baseline presentation still uses normal
 routing; these RPCs only read and change declared settings.
 
 ## GetState: returns the effective rendered state

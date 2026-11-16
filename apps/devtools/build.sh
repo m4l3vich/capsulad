@@ -27,17 +27,17 @@ CLI=${CAPSULAD_CLI:-}
 say() { printf '%s\n' "$*" >&2; }
 die() { say "devapps: $*"; exit 1; }
 
-# Hard prerequisites. The native runtime (libcapsula + capsula-native.json) is
+# Hard prerequisites. The native runtime (libcapsulad + capsulad-native.json) is
 # not linked into the app, but the app cannot run without the launcher loading
 # it, so refuse to produce a package that looks usable when it is not.
 SDK_DIR="$ROOT/sdk/go"
-[ -f "$SDK_DIR/go.mod" ] && [ -d "$SDK_DIR/capsula" ] ||
+[ -f "$SDK_DIR/go.mod" ] && [ -d "$SDK_DIR/capsulad" ] ||
   die "Go SDK not found at $SDK_DIR; restore sdk/go or set up the repository root"
-LIB_DIR=${CAPSULA_NATIVE_LIB_DIR:-"$ROOT/build/lib"}
-[ -f "$LIB_DIR/capsula-native.json" ] ||
-  die "native runtime metadata missing at $LIB_DIR/capsula-native.json; build it with 'make native' (or set CAPSULA_NATIVE_LIB_DIR)"
-ls "$LIB_DIR"/libcapsula* >/dev/null 2>&1 ||
-  die "no libcapsula shared library in $LIB_DIR; build it with 'make native' (or set CAPSULA_NATIVE_LIB_DIR)"
+LIB_DIR=${CAPSULAD_NATIVE_LIB_DIR:-"$ROOT/build/lib"}
+[ -f "$LIB_DIR/capsulad-native.json" ] ||
+  die "native runtime metadata missing at $LIB_DIR/capsulad-native.json; build it with 'make native' (or set CAPSULAD_NATIVE_LIB_DIR)"
+ls "$LIB_DIR"/libcapsulad* >/dev/null 2>&1 ||
+  die "no libcapsulad shared library in $LIB_DIR; build it with 'make native' (or set CAPSULAD_NATIVE_LIB_DIR)"
 
 GOOS=${GOOS:-$($GO env GOOS)}
 GOARCH=${GOARCH:-$($GO env GOARCH)}
@@ -152,7 +152,7 @@ if want dev.micropython; then
   pack dev.micropython
 fi
 
-if [ ! -x "$LIB_DIR/capsula-quickjs" ] || [ ! -x "$LIB_DIR/capsula-micropython" ]; then
+if [ ! -x "$LIB_DIR/capsulad-quickjs" ] || [ ! -x "$LIB_DIR/capsulad-micropython" ]; then
   say "devapps: note: script hosts are not both installed in $LIB_DIR; run 'make interpreter' before starting dev.quickjs/dev.micropython"
 fi
 

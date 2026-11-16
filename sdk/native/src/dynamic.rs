@@ -9,10 +9,10 @@ use prost_types::FileDescriptorSet;
 
 use crate::ffi::{SdkError, SdkResult, DESCRIPTOR_NOT_FOUND, INVALID_ARGUMENT, INVALID_MESSAGE};
 
-const EMBEDDED_FDS: &[u8] = include_bytes!("../descriptors/capsula-framework.protoset");
+const EMBEDDED_FDS: &[u8] = include_bytes!("../descriptors/capsulad-framework.protoset");
 
 pub static BASE_POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
-    DescriptorPool::decode(EMBEDDED_FDS).expect("capsula native: invalid embedded descriptor set")
+    DescriptorPool::decode(EMBEDDED_FDS).expect("capsulad native: invalid embedded descriptor set")
 });
 
 pub fn base_message(name: &str) -> SdkResult<MessageDescriptor> {
@@ -176,11 +176,11 @@ pub fn get_message(msg: &DynamicMessage, field: &str) -> Option<DynamicMessage> 
  * ------------------------------------------------------------------ */
 
 fn app_outbound() -> SdkResult<DynamicMessage> {
-    new_msg("capsula.framework.v1.AppOutbound")
+    new_msg("capsulad.framework.v1.AppOutbound")
 }
 
 pub fn app_hello(run_id: &str) -> SdkResult<Vec<u8>> {
-    let mut hello = new_msg("capsula.framework.v1.AppHello")?;
+    let mut hello = new_msg("capsulad.framework.v1.AppHello")?;
     set_str(&mut hello, "run_id", run_id);
     let mut out = app_outbound()?;
     set_message(&mut out, "hello", hello);
@@ -189,12 +189,16 @@ pub fn app_hello(run_id: &str) -> SdkResult<Vec<u8>> {
 
 pub fn app_ready() -> SdkResult<Vec<u8>> {
     let mut out = app_outbound()?;
-    set_message(&mut out, "ready", new_msg("capsula.framework.v1.AppReady")?);
+    set_message(
+        &mut out,
+        "ready",
+        new_msg("capsulad.framework.v1.AppReady")?,
+    );
     Ok(out.encode_to_vec())
 }
 
 pub fn app_call_reply_message(call_id: &str, payload: Vec<u8>) -> SdkResult<Vec<u8>> {
-    let mut reply = new_msg("capsula.framework.v1.AppCallReply")?;
+    let mut reply = new_msg("capsulad.framework.v1.AppCallReply")?;
     set_str(&mut reply, "call_id", call_id);
     set_bytes(&mut reply, "response_message", payload);
     let mut out = app_outbound()?;
@@ -203,10 +207,10 @@ pub fn app_call_reply_message(call_id: &str, payload: Vec<u8>) -> SdkResult<Vec<
 }
 
 pub fn app_call_reply_end(call_id: &str, code: i32, detail: &str) -> SdkResult<Vec<u8>> {
-    let mut end = new_msg("capsula.framework.v1.AppCallEnd")?;
+    let mut end = new_msg("capsulad.framework.v1.AppCallEnd")?;
     set_i32(&mut end, "grpc_status_code", code);
     set_str(&mut end, "detail", detail);
-    let mut reply = new_msg("capsula.framework.v1.AppCallReply")?;
+    let mut reply = new_msg("capsulad.framework.v1.AppCallReply")?;
     set_str(&mut reply, "call_id", call_id);
     set_message(&mut reply, "end", end);
     let mut out = app_outbound()?;
@@ -219,7 +223,7 @@ pub fn app_invocation_result(
     accepted: bool,
     detail: &str,
 ) -> SdkResult<Vec<u8>> {
-    let mut result = new_msg("capsula.framework.v1.AppInvocationResult")?;
+    let mut result = new_msg("capsulad.framework.v1.AppInvocationResult")?;
     set_str(&mut result, "invocation_id", invocation_id);
     set_bool(&mut result, "accepted", accepted);
     set_str(&mut result, "detail", detail);
@@ -229,7 +233,7 @@ pub fn app_invocation_result(
 }
 
 pub fn app_action_result(invocation_id: &str, succeeded: bool, detail: &str) -> SdkResult<Vec<u8>> {
-    let mut result = new_msg("capsula.framework.v1.AppActionResult")?;
+    let mut result = new_msg("capsulad.framework.v1.AppActionResult")?;
     set_str(&mut result, "action_invocation_id", invocation_id);
     set_bool(&mut result, "succeeded", succeeded);
     set_str(&mut result, "detail", detail);
@@ -243,7 +247,7 @@ pub fn app_action_result(invocation_id: &str, succeeded: bool, detail: &str) -> 
  * ------------------------------------------------------------------ */
 
 fn routed_request() -> SdkResult<DynamicMessage> {
-    new_msg("capsula.framework.v1.RoutedCallRequest")
+    new_msg("capsulad.framework.v1.RoutedCallRequest")
 }
 
 pub fn routed_start(
@@ -252,7 +256,7 @@ pub fn routed_start(
     rpc: &str,
     timeout_ms: u32,
 ) -> SdkResult<Vec<u8>> {
-    let mut start = new_msg("capsula.framework.v1.RoutedCallStart")?;
+    let mut start = new_msg("capsulad.framework.v1.RoutedCallStart")?;
     set_str(&mut start, "target_app_id", target_app_id);
     set_str(&mut start, "grpc_service", service);
     set_str(&mut start, "rpc_name", rpc);
@@ -273,7 +277,7 @@ pub fn routed_half_close() -> SdkResult<Vec<u8>> {
     set_message(
         &mut req,
         "half_close",
-        new_msg("capsula.framework.v1.CallHalfClose")?,
+        new_msg("capsulad.framework.v1.CallHalfClose")?,
     );
     Ok(req.encode_to_vec())
 }
@@ -284,7 +288,7 @@ pub enum RoutedResponse {
 }
 
 pub fn decode_routed_response(bytes: &[u8]) -> SdkResult<RoutedResponse> {
-    let desc = base_message("capsula.framework.v1.RoutedCallResponse")?;
+    let desc = base_message("capsulad.framework.v1.RoutedCallResponse")?;
     let msg = DynamicMessage::decode(desc, bytes)
         .map_err(|e| SdkError::new(INVALID_MESSAGE, format!("routed response decode: {e}")))?;
     if msg.has_field_by_name("response_message") {
@@ -332,7 +336,7 @@ pub enum InboundKind {
 }
 
 pub fn decode_inbound(bytes: &[u8]) -> SdkResult<InboundKind> {
-    let desc = base_message("capsula.framework.v1.AppInbound")?;
+    let desc = base_message("capsulad.framework.v1.AppInbound")?;
     let msg = DynamicMessage::decode(desc, bytes)
         .map_err(|e| SdkError::new(INVALID_MESSAGE, format!("AppInbound decode: {e}")))?;
 
@@ -417,23 +421,23 @@ mod tests {
     #[test]
     fn embedded_pool_covers_every_framework_service() {
         for service in [
-            "capsula.framework.v1.DeviceService",
-            "capsula.framework.v1.SettingsService",
-            "capsula.framework.v1.RoutingService",
-            "capsula.framework.v1.PresentationService",
-            "capsula.framework.v1.AudioService",
-            "capsula.framework.v1.InputService",
-            "capsula.framework.v1.AssistantService",
-            "capsula.framework.v1.ApplicationService",
-            "capsula.framework.v1.ApplicationConfigurationService",
-            "capsula.framework.v1.AppInterfaceService",
-            "capsula.framework.v1.AppBusService",
-            "capsula.framework.v1.SensorService",
-            "capsula.framework.v1.SystemService",
-            "capsula.framework.v1.DiagnosticsService",
-            "capsula.framework.v1.AssetService",
-            "capsula.framework.v1.BluetoothMediaService",
-            "capsula.contracts.media.v1.MediaPlayerService",
+            "capsulad.framework.v1.DeviceService",
+            "capsulad.framework.v1.SettingsService",
+            "capsulad.framework.v1.RoutingService",
+            "capsulad.framework.v1.PresentationService",
+            "capsulad.framework.v1.AudioService",
+            "capsulad.framework.v1.InputService",
+            "capsulad.framework.v1.AssistantService",
+            "capsulad.framework.v1.ApplicationService",
+            "capsulad.framework.v1.ApplicationConfigurationService",
+            "capsulad.framework.v1.AppInterfaceService",
+            "capsulad.framework.v1.AppBusService",
+            "capsulad.framework.v1.SensorService",
+            "capsulad.framework.v1.SystemService",
+            "capsulad.framework.v1.DiagnosticsService",
+            "capsulad.framework.v1.AssetService",
+            "capsulad.framework.v1.BluetoothMediaService",
+            "capsulad.contracts.media.v1.MediaPlayerService",
         ] {
             assert!(
                 BASE_POOL.get_service_by_name(service).is_some(),
@@ -444,8 +448,8 @@ mod tests {
 
     #[test]
     fn unset_oneof_is_not_treated_as_present() {
-        let mut out = new_msg("capsula.framework.v1.AppInbound").unwrap();
-        let mut invocation = new_msg("capsula.framework.v1.AppLaunchInvocation").unwrap();
+        let mut out = new_msg("capsulad.framework.v1.AppInbound").unwrap();
+        let mut invocation = new_msg("capsulad.framework.v1.AppLaunchInvocation").unwrap();
         set_str(&mut invocation, "invocation_id", "inv_test");
         set_message(&mut out, "invocation", invocation);
         let bytes = out.encode_to_vec();
@@ -458,7 +462,7 @@ mod tests {
     #[test]
     fn json_roundtrip_and_unknown_field_rejection() {
         let method =
-            resolve_method(&BASE_POOL, "capsula.framework.v1.DeviceService", "GetInfo").unwrap();
+            resolve_method(&BASE_POOL, "capsulad.framework.v1.DeviceService", "GetInfo").unwrap();
         let msg = json_to_dynamic(&method.input(), b"{}").unwrap();
         assert!(msg.get_field_by_name("nope").is_none());
         assert!(json_to_dynamic(&method.input(), br#"{"unknown":1}"#).is_err());

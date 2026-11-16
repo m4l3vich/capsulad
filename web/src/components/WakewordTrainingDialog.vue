@@ -16,7 +16,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'refresh'])
 
-const STORAGE_KEY = 'capsula.wakeword.setup.v6'
+const STORAGE_KEY = 'capsulad.wakeword.setup.v6'
 const CUE_MS = 3000
 
 // The target is part of the setup identity: switching between "create a new

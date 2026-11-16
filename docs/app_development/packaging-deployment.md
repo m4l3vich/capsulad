@@ -67,7 +67,7 @@ capsulad-cli app package ./my-app -out build/apps/my-app.tar.gz
 
 | Command | Result |
 |---|---|
-| `make dumbassistant` | Builds the first-party assistant for the selected `GOOS`/`GOARCH`, stages `build/apps/org.capsula.dumbassistant/` and runs `app package` there, producing `build/apps/org.capsula.dumbassistant-<version>.tar.gz`. |
+| `make dumbassistant` | Builds the first-party assistant for the selected `GOOS`/`GOARCH`, stages `build/apps/org.capsulad.dumbassistant/` and runs `app package` there, producing `build/apps/org.capsulad.dumbassistant-<version>.tar.gz`. |
 | `make devapps` | Runs `apps/devtools/build.sh`, which builds and packages `dev.hardware`, `dev.quickjs` and `dev.micropython` under `build/devapps/`. |
 | `APP=dev.hardware make devapps` | Builds one development app. |
 | `OUT=/tmp/devapps make devapps` | Changes the output directory. |
@@ -191,7 +191,7 @@ under the operator's environment.
 | `/data/capsdemo/apps/<app-id>` | Installed package. |
 | `/data/capsdemo/app-settings/<app-id>/settings.json` | App settings and revision. |
 | `/data/capsdemo/assets` | Shared asset store. |
-| `/data/capsdemo/lib` | Native runtime (`libcapsula`, `capsula-native.json`, script hosts). |
+| `/data/capsdemo/lib` | Native runtime (`libcapsulad`, `capsulad-native.json`, script hosts). |
 | `/data/capsdemo/run/hal.sock` | Framework Unix socket (host path). |
 | `/run/capsulad/hal.sock` | The same socket inside an app's mount namespace. |
 | `/data/capsdemo/capsulad.log` | Daemon log. |
@@ -218,7 +218,7 @@ command resolves that path from `-data-dir`. `-dev-admin` adds a development-onl
 for simulator tooling. `capsulad-cli dev …` injects wakeword, gesture, key, raw and state events into a running
 simulator.
 
-A host build loads the host `libcapsula`; the simulator also accepts `quickjs` and `micropython`
+A host build loads the host `libcapsulad`; the simulator also accepts `quickjs` and `micropython`
 packages when their hosts are installed beside it. The sandbox mode is whatever the host kernel
 probes; on a stock device it is normally `mountns`, so do not assume the simulator's isolation
 proves the device's.

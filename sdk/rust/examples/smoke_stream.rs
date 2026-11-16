@@ -1,10 +1,10 @@
 //! Server-streaming smoke client.
 //!
 //! ```sh
-//! CAPSULA_LIBRARY=/path/libcapsula.1.dylib \
-//! CAPSULA_SOCKET=/tmp/capsulad.sock CAPSULA_RUN_ID=run-... \
+//! CAPSULAD_LIBRARY=/path/libcapsulad.1.dylib \
+//! CAPSULAD_SOCKET=/tmp/capsulad.sock CAPSULAD_RUN_ID=run-... \
 //! cargo run --example smoke_stream -- \
-//!   capsula.framework.v1.ApplicationService WatchRuns '{}'
+//!   capsulad.framework.v1.ApplicationService WatchRuns '{}'
 //! ```
 //!
 //! Arguments: `[service] [method] [request-json]`. Each response is printed on
@@ -14,7 +14,7 @@ use std::env;
 use std::error::Error;
 use std::time::Duration;
 
-use capsula::{CallKind, Library};
+use capsulad::{CallKind, Library};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let library = Library::load()?;
@@ -23,19 +23,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let service = args
         .first()
         .cloned()
-        .or_else(|| env::var("CAPSULA_SERVICE").ok())
-        .unwrap_or_else(|| "capsula.framework.v1.ApplicationService".to_string());
+        .or_else(|| env::var("CAPSULAD_SERVICE").ok())
+        .unwrap_or_else(|| "capsulad.framework.v1.ApplicationService".to_string());
     let method = args
         .get(1)
         .cloned()
-        .or_else(|| env::var("CAPSULA_METHOD").ok())
+        .or_else(|| env::var("CAPSULAD_METHOD").ok())
         .unwrap_or_else(|| "WatchRuns".to_string());
     let request = args
         .get(2)
         .cloned()
-        .or_else(|| env::var("CAPSULA_REQUEST").ok())
+        .or_else(|| env::var("CAPSULAD_REQUEST").ok())
         .unwrap_or_else(|| "{}".to_string());
-    let recv_timeout = env::var("CAPSULA_TIMEOUT_MS")
+    let recv_timeout = env::var("CAPSULAD_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)

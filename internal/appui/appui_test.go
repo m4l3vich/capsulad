@@ -14,8 +14,8 @@ func TestWrapDocumentInjectsPolicyBeforeAppContent(t *testing.T) {
 		t.Fatalf("doctype moved: %q", s[:40])
 	}
 	csp := strings.Index(s, "http-equiv=\"Content-Security-Policy\"")
-	kit := strings.Index(s, "id=\"capsula-ui-kit\"")
-	bridge := strings.Index(s, "id=\"capsula-ui-bridge\"")
+	kit := strings.Index(s, "id=\"capsulad-ui-kit\"")
+	bridge := strings.Index(s, "id=\"capsulad-ui-bridge\"")
 	app := strings.Index(s, "window.app = true")
 	if csp < 0 || kit < 0 || bridge < 0 || app < 0 {
 		t.Fatalf("missing injected pieces csp=%d kit=%d bridge=%d app=%d", csp, kit, bridge, app)
@@ -41,12 +41,12 @@ func TestWrapDocumentWithoutHead(t *testing.T) {
 }
 
 func TestBuiltinDocumentsExistAndAreSelfContained(t *testing.T) {
-	for _, id := range []string{"capsula.clock", "capsula.ring"} {
-		doc, err := BuiltinHTML(id, id[len("capsula."):]+".html")
+	for _, id := range []string{"capsulad.clock", "capsulad.ring"} {
+		doc, err := BuiltinHTML(id, id[len("capsulad."):]+".html")
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
-		if !bytes.Contains(doc, []byte("CapsulaUI")) {
+		if !bytes.Contains(doc, []byte("CapsuladUI")) {
 			t.Fatalf("%s does not use the bridge API", id)
 		}
 		if bytes.Contains(doc, []byte("http://")) || bytes.Contains(doc, []byte("https://")) {

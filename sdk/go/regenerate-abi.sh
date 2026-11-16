@@ -1,9 +1,9 @@
 #!/bin/sh
 # Regenerates the vendored C ABI header used by the cgo binding.
 #
-# The published capsula/sdk module must build without the rest of the
+# The published capsulad/sdk module must build without the rest of the
 # repository, so it carries an exact copy of the canonical native header.
-# Packaging/CI should run this after sdk/native/include/capsula/capsula.h
+# Packaging/CI should run this after sdk/native/include/capsulad/capsulad.h
 # changes and fail on drift:
 #
 #   sdk/go/regenerate-abi.sh          # rewrite the copy
@@ -11,9 +11,9 @@
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-source_header="$here/../native/include/capsula/capsula.h"
-target="$here/capsula/abi.h"
-banner='/* Code generated from sdk/native/include/capsula/capsula.h by sdk/go/regenerate-abi.sh. DO NOT EDIT. */'
+source_header="$here/../native/include/capsulad/capsulad.h"
+target="$here/capsulad/abi.h"
+banner='/* Code generated from sdk/native/include/capsulad/capsulad.h by sdk/go/regenerate-abi.sh. DO NOT EDIT. */'
 
 if [ ! -f "$source_header" ]; then
     echo "regenerate-abi: canonical header not found: $source_header" >&2

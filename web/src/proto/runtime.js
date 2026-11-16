@@ -1,4 +1,4 @@
-// Minimal protobuf wire runtime for the generated capsula.web.v1 bindings.
+// Minimal protobuf wire runtime for the generated capsulad.web.v1 bindings.
 //
 // The browser schema uses only proto3 scalars, strings, enums, messages and
 // maps of scalars/messages. That is deliberately a smaller surface than the

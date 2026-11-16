@@ -1,9 +1,9 @@
 [package]
-name = "capsula"
+name = "capsulad"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Safe Rust consumer for the Capsula shared-engine C ABI"
+description = "Safe Rust consumer for the Capsulad shared-engine C ABI"
 license = "MIT"
 
 [dependencies]

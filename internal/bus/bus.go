@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/grpcpeer"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
@@ -360,7 +360,7 @@ func (b *Bus) Call(stream frameworkv1.AppBusService_CallServer) error {
 	callerRunID := ""
 	creds := grpcpeer.FromContext(stream.Context())
 	if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
-		if vals := md.Get("capsula-run-id"); len(vals) > 0 {
+		if vals := md.Get("capsulad-run-id"); len(vals) > 0 {
 			appID, pid, found := b.resolve(vals[0])
 			switch {
 			case !found:

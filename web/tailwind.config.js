@@ -17,7 +17,7 @@ export default {
     logs: false,
     themes: [
       {
-        capsula: {
+        capsulad: {
           primary: '#1d4ed8',
           'primary-content': '#eff6ff',
           secondary: '#475569',

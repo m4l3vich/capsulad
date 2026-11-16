@@ -34,13 +34,13 @@ test('bridge posts only namespaced messages after init', () => {
   vm.runInContext(source, context)
 
   // DOMContentLoaded / ResizeObserver ordering must not leak a pre-init post.
-  windowObject.CapsulaUI.resize()
+  windowObject.CapsuladUI.resize()
   assert.deepEqual(posted, [])
 
   listeners.message[0]({
     source: parent,
     data: {
-      type: 'capsula.settings-ui/1:init',
+      type: 'capsulad.settings-ui/1:init',
       channel: TOKEN,
       appId: 'org.example.clock',
       apiVersion: 1,
@@ -50,15 +50,15 @@ test('bridge posts only namespaced messages after init', () => {
     }
   })
 
-  assert.equal(posted[0].type, 'capsula.settings-ui/1:ready')
+  assert.equal(posted[0].type, 'capsulad.settings-ui/1:ready')
   assert.equal(posted[0].channel, TOKEN)
-  assert.equal(posted[0].type.startsWith('capsula.settings-ui/1:'), true)
+  assert.equal(posted[0].type.startsWith('capsulad.settings-ui/1:'), true)
   // appId travels host->child on init; child status/patch messages carry only
   // the channel (validateChildMessage treats appId as optional).
-  assert.equal(windowObject.CapsulaUI.appId, 'org.example.clock')
+  assert.equal(windowObject.CapsuladUI.appId, 'org.example.clock')
 
-  windowObject.CapsulaUI.patch([{ key: 'effect', valueJson: '"static"' }])
-  const patch = posted.find((message) => message.type === 'capsula.settings-ui/1:patch')
+  windowObject.CapsuladUI.patch([{ key: 'effect', valueJson: '"static"' }])
+  const patch = posted.find((message) => message.type === 'capsulad.settings-ui/1:patch')
   assert.ok(patch, 'patch keeps the protocol namespace')
   assert.equal(patch.channel, TOKEN)
   assert.equal(patch.requestId, 1)

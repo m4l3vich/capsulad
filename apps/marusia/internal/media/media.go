@@ -10,13 +10,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net"
-	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"capsulad/apps/marusia/internal/redact"
+	"capsulad/sdk/capsulad"
 )
 
 const (
@@ -26,85 +27,144 @@ const (
 	PlaybackRate = 16000
 )
 
+// HTTPRequest is one media fetch.
+type HTTPRequest struct {
+	Method string
+	URL    string
+	Header map[string]string
+	Body   []byte
+}
+
+// HTTPResponse is a completed fetch; non-2xx is not an error.
+type HTTPResponse struct {
+	StatusCode int
+	Header     map[string]string
+	Body       []byte
+}
+
+// Transport is the HTTP seam. Production uses the native capsulad client;
+// tests inject an in-process adapter so no net/http is linked into the app.
+type Transport interface {
+	Do(ctx context.Context, req HTTPRequest, timeout time.Duration) (*HTTPResponse, error)
+}
+
 // Fetch retrieves one media body over HTTP(S) with bounded time, size and
 // redirect policy.
 type Fetch struct {
-	Client *http.Client
+	Transport Transport
 	// MaxBytes defaults to MaxBody.
 	MaxBytes int64
+
+	mu       sync.Mutex
+	fallback *capsulad.HTTPClient
 }
 
 // NewFetch returns a fetcher with a 20 s connect and 30 s total deadline.
+// The native client is opened lazily on the first fetch.
 func NewFetch() *Fetch {
-	return &Fetch{
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
-				TLSHandshakeTimeout:   20 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-				DisableCompression:    true,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 4 {
-					return errors.New("too many redirects")
-				}
-				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-					return fmt.Errorf("redirect to unsupported scheme %q", req.URL.Scheme)
-				}
-				return nil
-			},
-		},
-		MaxBytes: MaxBody,
+	return &Fetch{MaxBytes: MaxBody}
+}
+
+// nativeClient returns the shared native HTTP client, opening it once.
+func (f *Fetch) nativeClient(limit int64) (*capsulad.HTTPClient, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fallback != nil {
+		return f.fallback, nil
 	}
+	client, err := capsulad.OpenHTTP(capsulad.FromEnv(), capsulad.HTTPOptions{
+		Roots:           "system",
+		UserAgent:       "voice-agent/1",
+		MaxBody:         limit,
+		FollowRedirects: 4,
+		ConnectTimeout:  20 * time.Second,
+		ReadTimeout:     30 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+	f.fallback = client
+	return client, nil
 }
 
 // Fetch downloads rawURL. The scheme must be http or https; the body is capped
 // and returned whole for decoding by magic, never by Content-Type.
+//
+// Every error names the URL as scheme://host/path only: a vendor TTS URL
+// carries its signature in the query string, so the raw value must never reach
+// a log line or an operator message.
 func (f *Fetch) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return nil, fmt.Errorf("media: invalid play_url %q: %w", rawURL, err)
+		// The URL parser's error embeds the input, query included; only its
+		// reason is reported.
+		return nil, fmt.Errorf("media: invalid play_url %s: %v", redact.URL(rawURL), parseReason(err))
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("media: play_url %q must use http or https", rawURL)
+		return nil, fmt.Errorf("media: play_url %s must use http or https", redact.URL(rawURL))
 	}
 	if parsed.Host == "" {
-		return nil, fmt.Errorf("media: play_url %q has no host", rawURL)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("media: play_url request: %w", err)
-	}
-	// The vendor's media player identifies itself this way; it is the only
-	// header the recon recovered for media fetches.
-	req.Header.Set("User-Agent", "voice-agent/1")
-
-	client := f.Client
-	if client == nil {
-		client = NewFetch().Client
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("media: fetch %s: %w", rawURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("media: fetch %s: HTTP %d", rawURL, resp.StatusCode)
+		return nil, fmt.Errorf("media: play_url %s has no host", redact.URL(rawURL))
 	}
 	limit := f.MaxBytes
 	if limit <= 0 {
 		limit = MaxBody
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("media: read %s: %w", rawURL, err)
+	// The vendor's media player identifies itself this way; it is the only
+	// header the recon recovered for media fetches.
+	headers := map[string]string{"User-Agent": "voice-agent/1"}
+
+	var body []byte
+	var status int
+	if f.Transport != nil {
+		response, err := f.Transport.Do(ctx, HTTPRequest{
+			Method: "GET",
+			URL:    parsed.String(),
+			Header: headers,
+		}, 30*time.Second)
+		if err != nil {
+			return nil, fetchError(rawURL, err)
+		}
+		status, body = response.StatusCode, response.Body
+	} else {
+		client, err := f.nativeClient(limit)
+		if err != nil {
+			return nil, fmt.Errorf("media: open http client: %w", err)
+		}
+		response, err := client.Do(ctx, capsulad.HTTPRequest{
+			Method:  "GET",
+			URL:     parsed.String(),
+			Header:  headers,
+			Timeout: 30 * time.Second,
+		})
+		if err != nil {
+			return nil, fetchError(rawURL, err)
+		}
+		status, body = response.StatusCode, response.Body
+	}
+	if status < 200 || status > 299 {
+		return nil, fmt.Errorf("media: fetch %s: HTTP %d", redact.URL(rawURL), status)
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("media: %s exceeds the %d MiB playback limit", rawURL, limit>>20)
+		return nil, fmt.Errorf("media: %s exceeds the %d MiB playback limit", redact.URL(rawURL), limit>>20)
 	}
 	return body, nil
+}
+
+// fetchError wraps a transport failure without the signed URL. The transport's
+// own message may quote the request URL, so the exact raw string is replaced by
+// its redacted form before the error leaves this package.
+func fetchError(rawURL string, err error) error {
+	return fmt.Errorf("media: fetch %s: %s", redact.URL(rawURL), redact.ErrorText(err, rawURL))
+}
+
+// parseReason strips net/url's wrapper, whose message repeats the raw URL.
+func parseReason(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
 }
 
 // ErrNotWAV is returned for a body this package cannot decode.

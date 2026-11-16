@@ -29,10 +29,10 @@ func TestBuiltinRunLifecycle(t *testing.T) {
 	sup.SetCallbacks(func(run Run) { states = append(states, run.State) }, nil)
 
 	m := &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 	}
-	runID := "builtin:capsula.clock"
+	runID := "builtin:capsulad.clock"
 	run, err := sup.RegisterBuiltin(m, runID)
 	if err != nil {
 		t.Fatal(err)
@@ -40,10 +40,10 @@ func TestBuiltinRunLifecycle(t *testing.T) {
 	if run.State != Ready || !run.Virtual {
 		t.Fatalf("builtin run = %+v", run)
 	}
-	if _, ok := sup.ReadyRun("capsula.clock"); !ok {
+	if _, ok := sup.ReadyRun("capsulad.clock"); !ok {
 		t.Fatal("builtin is not ready")
 	}
-	if got := len(sup.List("capsula.clock")); got != 1 {
+	if got := len(sup.List("capsulad.clock")); got != 1 {
 		t.Fatalf("runs = %d", got)
 	}
 	stopped := 0
@@ -57,7 +57,7 @@ func TestBuiltinRunLifecycle(t *testing.T) {
 	if _, ok := sup.Get(runID); ok {
 		t.Fatal("stopped builtin still has a run")
 	}
-	if got := len(sup.List("capsula.clock")); got != 0 {
+	if got := len(sup.List("capsulad.clock")); got != 0 {
 		t.Fatalf("runs after stop = %d", got)
 	}
 	if len(states) < 2 || states[len(states)-1] != Exited {
@@ -421,11 +421,11 @@ func TestBuiltinRunsAreListedOnceUnderTheirOwnApp(t *testing.T) {
 		return &manifest.Manifest{ID: id, Name: id, Version: "1.0.0",
 			Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin}}
 	}
-	clockID, ringID := "builtin:capsula.clock", "builtin:capsula.ring"
-	if _, err := sup.RegisterBuiltin(builtin("capsula.clock"), clockID); err != nil {
+	clockID, ringID := "builtin:capsulad.clock", "builtin:capsulad.ring"
+	if _, err := sup.RegisterBuiltin(builtin("capsulad.clock"), clockID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sup.RegisterBuiltin(builtin("capsula.ring"), ringID); err != nil {
+	if _, err := sup.RegisterBuiltin(builtin("capsulad.ring"), ringID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -445,10 +445,10 @@ func TestBuiltinRunsAreListedOnceUnderTheirOwnApp(t *testing.T) {
 				t.Fatalf("%s: %s run id = %q, want %q", label, run.AppID, run.RunID, want)
 			}
 		}
-		if len(all) != 2 || seen["capsula.clock"] != 1 || seen["capsula.ring"] != 1 {
+		if len(all) != 2 || seen["capsulad.clock"] != 1 || seen["capsulad.ring"] != 1 {
 			t.Fatalf("%s: runs = %+v, want one entry per built-in app", label, all)
 		}
-		if got := sup.List("capsula.ring"); len(got) != 1 || got[0].AppID != "capsula.ring" {
+		if got := sup.List("capsulad.ring"); len(got) != 1 || got[0].AppID != "capsulad.ring" {
 			t.Fatalf("%s: ring listing = %+v", label, got)
 		}
 	}
@@ -457,10 +457,10 @@ func TestBuiltinRunsAreListedOnceUnderTheirOwnApp(t *testing.T) {
 	if !sup.Stop(clockID) {
 		t.Fatal("stopping the clock run was refused")
 	}
-	if got := sup.List("capsula.clock"); len(got) != 0 {
+	if got := sup.List("capsulad.clock"); len(got) != 0 {
 		t.Fatalf("stopped clock is still listed: %+v", got)
 	}
-	if _, err := sup.RegisterBuiltin(builtin("capsula.clock"), clockID); err != nil {
+	if _, err := sup.RegisterBuiltin(builtin("capsulad.clock"), clockID); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	check("after stop and restart")

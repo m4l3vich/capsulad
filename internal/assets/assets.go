@@ -53,7 +53,7 @@ const (
 	// stagingPrefix marks the temporary file an upload is written to before its
 	// atomic rename. Staging files are never published and clients may not use
 	// names that begin with it.
-	stagingPrefix = ".capsula-upload-"
+	stagingPrefix = ".capsulad-upload-"
 
 	maxNameBytes = 255
 )

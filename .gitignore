@@ -1,5 +1,5 @@
 build/
-.capsula/
+.capsulad/
 _capsula-mini-*/
 probe
 *.log

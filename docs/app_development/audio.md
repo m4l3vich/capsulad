@@ -196,7 +196,7 @@ blocks its own writer, not the mixer. Chunks larger than 1 MiB are rejected
 ```go
 const rate, channels = 48000, 2
 playback, err := client.OpenPlayback(ctx, "audio.output.speaker",
-    capsula.AudioFormat{SampleFormat: capsula.SampleFormatPCM16LE, SampleRateHz: rate, Channels: channels}, "")
+    capsulad.AudioFormat{SampleFormat: capsulad.SampleFormatPCM16LE, SampleRateHz: rate, Channels: channels}, "")
 if err != nil {
     log.Fatalf("playback: %v", err)
 }

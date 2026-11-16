@@ -18,7 +18,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -44,7 +47,43 @@ var (
 	// adapter was not discoverable. An existing bond does not depend on this
 	// window.
 	ErrPairingDisabled = errors.New("Bluetooth discoverability is disabled")
+	// ErrInvalidName means an advertised device name is empty, too long, not
+	// valid UTF-8, or contains a control character.
+	ErrInvalidName = errors.New("invalid Bluetooth device name")
 )
+
+// MaxAdapterNameBytes is the longest advertised Bluetooth name, in UTF-8
+// bytes. 248 is the HCI/BlueZ adapter-name limit, so a longer Adapter1.Alias
+// could not be advertised intact. The provisioning AP SSID is derived from the
+// name only when the AP is (re)started and uses its first 32 UTF-8 bytes on a
+// rune boundary, because a Wi-Fi SSID cannot carry more.
+const MaxAdapterNameBytes = 248
+
+// ValidateAdapterName returns the trimmed advertised name, or ErrInvalidName
+// when it cannot be advertised. The rule is shared by the real manager, the
+// simulator and the Web UI so a name the dialog accepts is exactly one the
+// adapter accepts. A name longer than 32 bytes is still valid for Bluetooth;
+// the provisioning AP shortens it rather than rejecting it.
+func ValidateAdapterName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: the name is empty", ErrInvalidName)
+	}
+	if !utf8.ValidString(trimmed) {
+		return "", fmt.Errorf("%w: the name is not valid UTF-8", ErrInvalidName)
+	}
+	if len(trimmed) > MaxAdapterNameBytes {
+		return "", fmt.Errorf("%w: the name is longer than %d bytes", ErrInvalidName, MaxAdapterNameBytes)
+	}
+	for _, r := range trimmed {
+		// NUL and the rest of the control range would be truncated or mangled
+		// by BlueZ's Alias and by the AP SSID, so reject them outright.
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("%w: the name contains a control character", ErrInvalidName)
+		}
+	}
+	return trimmed, nil
+}
 
 // A2DPTransport is an acquired A2DP media transport. The caller owns File and
 // must close it to release the stream; Config is the negotiated SBC media
@@ -336,6 +375,10 @@ type Manager interface {
 	// the radio off. Enabling discoverability also enables incoming
 	// connections; disabling incoming connections disables discoverability.
 	SetIncomingConnections(ctx context.Context, on bool) error
+	// SetAdapterName changes the name the adapter advertises. It is an
+	// administrator setting with no framework/app RPC; BlueZ persists it as
+	// Adapter1.Alias. The name is validated with ValidateAdapterName.
+	SetAdapterName(ctx context.Context, name string) error
 	EnsurePowered(ctx context.Context) error
 	PairedDevices(ctx context.Context) ([]Device, error)
 	Unpair(ctx context.Context, address string) error
@@ -425,6 +468,26 @@ func (m *Memory) SetIncomingConnections(_ context.Context, on bool) error {
 		// when no inbound link is accepted.
 		m.status.Discoverable = false
 	}
+	return nil
+}
+
+// SetAdapterName renames the simulated adapter. It mirrors the real manager's
+// validation, bumps the revision and notifies watchers so a UI showing the
+// advertised name refreshes instead of waiting for a snapshot.
+func (m *Memory) SetAdapterName(_ context.Context, name string) error {
+	trimmed, err := ValidateAdapterName(name)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if !m.status.Present {
+		m.mu.Unlock()
+		return ErrUnavailable
+	}
+	m.status.Name = trimmed
+	m.revision++
+	m.mu.Unlock()
+	m.broadcast(Event{Kind: EventAdapter})
 	return nil
 }
 

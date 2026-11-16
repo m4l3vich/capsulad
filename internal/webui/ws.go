@@ -20,10 +20,10 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
-// The browser transport is one binary WebSocket carrying capsula.web.v1
+// The browser transport is one binary WebSocket carrying capsulad.web.v1
 // frames. It is intentionally small and dependency-free: one authenticated
 // session per connection, bounded frames, one writer goroutine, a bounded
 // outbound queue, and an explicit resync signal instead of unbounded memory.

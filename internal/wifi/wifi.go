@@ -4,6 +4,11 @@
 // captive portal. It never scans except for an explicit Scan call: startup
 // association uses the saved network list, and opening a status view only reads
 // the current state.
+//
+// Stock-firmware paths (supplicant configuration files, restore file and any
+// extra control sockets) are injected by the composition root through Config;
+// the package never defaults them from a board profile. The only built-in
+// locations are the generic Linux supplicant control directories.
 package wifi
 
 import (
@@ -151,10 +156,21 @@ type Config struct {
 	// triggers a scan.
 	OnChange func()
 
-	// StockConfigPaths overrides the vendor wpa_supplicant configuration paths
-	// imported once before takeover. Nil uses the stock defaults; an empty
-	// non-nil slice disables stock import for focused tests.
+	// StockConfigPaths are the vendor wpa_supplicant configuration files
+	// imported once before takeover, supplied by the composition root. Nil or
+	// empty means no stock file is read.
 	StockConfigPaths []string
+	// StockCtrlDirs are additional supplicant control directories probed for
+	// the stock/active supplicant and terminated before takeover. Generic Linux
+	// directories are always probed; this field adds board-specific ones. Nil
+	// or empty adds nothing.
+	StockCtrlDirs []string
+	// RestoreConfigPath is the stock configuration restarted on shutdown when
+	// the framework stopped the stock supplicant. Empty disables restore.
+	RestoreConfigPath string
+	// AdoptStock imports stock networks and terminates the stock supplicant.
+	// False leaves the stock stack untouched.
+	AdoptStock bool
 
 	StartupTimeout time.Duration
 	ConnectTimeout time.Duration

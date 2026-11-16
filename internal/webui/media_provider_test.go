@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
-	webv1 "capsulad/gen/go/capsula/web/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	webv1 "capsulad/gen/go/capsulad/web/v1"
 )
 
 // connectedBluetoothSource is a playing phone that exposes AVRCP metadata, as

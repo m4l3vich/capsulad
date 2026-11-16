@@ -10,11 +10,6 @@ import (
 	"time"
 )
 
-var stockConfigPaths = []string{
-	"/etc/wpa_supplicant.conf",
-	"/etc/wpa_supplicant/wpa_supplicant.conf",
-}
-
 // importStockNetworks adopts the vendor/stock wpa_supplicant configuration
 // once, before the daemon terminates that supplicant. The stock file may hold
 // plaintext passphrases; only derived PSKs are written to the private 0600
@@ -22,6 +17,9 @@ var stockConfigPaths = []string{
 func (m *linuxManager) importStockNetworks(ctx context.Context) error {
 	if m.store.stockImported() {
 		return nil
+	}
+	if !m.cfg.AdoptStock {
+		return m.store.markStockImported()
 	}
 	stock, found, err := readStockNetworks(m.stockConfigs)
 	if err != nil {
@@ -79,7 +77,7 @@ func (m *linuxManager) stockActiveSSID(ctx context.Context) string {
 	if m.tools.cli == "" {
 		return ""
 	}
-	for _, dir := range []string{"/var/run/wpa_supplicant", "/run/wpa_supplicant"} {
+	for _, dir := range m.stockCtrlDirs() {
 		out, err := m.run(ctx, 3*time.Second, m.tools.cli, "-p", dir, "-i", m.iface, "status")
 		if err != nil {
 			continue

@@ -5,8 +5,9 @@ go 1.22.5
 toolchain go1.22.6
 
 require (
-	capsula/sdk v0.0.0
+	capsulad/sdk v0.0.0
 	github.com/BurntSushi/toml v1.4.0
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/godbus/dbus/v5 v5.2.0
 	github.com/sigstore/protobuf-specs v0.3.2
 	github.com/sigstore/sigstore-go v0.6.2
@@ -23,7 +24,6 @@ require (
 	github.com/cyberphone/json-canonicalization v0.0.0-20220623050100-57a0ce2678a7 // indirect
 	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
-	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-chi/chi v4.1.2+incompatible // indirect
 	github.com/go-jose/go-jose/v4 v4.0.2 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
@@ -95,4 +95,4 @@ require (
 	k8s.io/klog/v2 v2.120.1 // indirect
 )
 
-replace capsula/sdk => ./sdk/go
+replace capsulad/sdk => ./sdk/go

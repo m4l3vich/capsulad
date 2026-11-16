@@ -47,21 +47,21 @@ The launcher injects these variables. Read them; never hard-code a path.
 
 | Variable | Meaning |
 |---|---|
-| `CAPSULA_SOCKET` | The framework's Unix socket. `/run/capsulad/hal.sock` in namespace modes; the host path otherwise. |
-| `CAPSULA_RUN_ID` | This run's identity. Required by `Connect`. |
-| `CAPSULA_APP_ID` | The installed app ID. |
-| `CAPSULA_SDK` | The framework SDK version the daemon reports for this platform. |
-| `CAPSULA_LIBRARY` | Absolute path of the compatible `libcapsula`. `/capsula/lib/libcapsula.so.1` in namespace modes. |
-| `CAPSULA_LIBRARY_DIR` | Directory for the library's own dependency resolution. |
-| `CAPSULA_ASSETS` | The read-only asset store: `/assets` in namespace modes, the host path otherwise. |
-| `CAPSULA_DEVICE_SERIAL` | The SoC serial read by the daemon from the host (`/proc/cpuinfo` `Serial` on ARM), provided when known and omitted entirely when unknown. This is not a `device_id`. |
-| `CAPSULA_APP_DIR` | Script hosts only (quickjs, micropython): the package root, `/app` in namespace modes and the host path otherwise. Native apps do not receive this variable. |
-| `CAPSULA_INTERPRETER` | Script runtimes only: the engine executable that is running the script. |
+| `CAPSULAD_SOCKET` | The framework's Unix socket. `/run/capsulad/hal.sock` in namespace modes; the host path otherwise. |
+| `CAPSULAD_RUN_ID` | This run's identity. Required by `Connect`. |
+| `CAPSULAD_APP_ID` | The installed app ID. |
+| `CAPSULAD_SDK` | The framework SDK version the daemon reports for this platform. |
+| `CAPSULAD_LIBRARY` | Absolute path of the compatible `libcapsulad`. `/capsulad/lib/libcapsulad.so.1` in namespace modes. |
+| `CAPSULAD_LIBRARY_DIR` | Directory for the library's own dependency resolution. |
+| `CAPSULAD_ASSETS` | The read-only asset store: `/assets` in namespace modes, the host path otherwise. |
+| `CAPSULAD_DEVICE_SERIAL` | The SoC serial read by the daemon from the host (`/proc/cpuinfo` `Serial` on ARM), provided when known and omitted entirely when unknown. This is not a `device_id`. |
+| `CAPSULAD_APP_DIR` | Script hosts only (quickjs, micropython): the package root, `/app` in namespace modes and the host path otherwise. Native apps do not receive this variable. |
+| `CAPSULAD_INTERPRETER` | Script runtimes only: the engine executable that is running the script. |
 | `TZ` | The resolved device timezone, when one is configured. |
 
 Do not assume a working directory: namespace modes start at `/`, `uid` mode inherits the
 daemon's directory, and only `none` runs from the package root. Script apps read
-`CAPSULA_APP_DIR`; native apps locate package files relative to their own executable path,
+`CAPSULAD_APP_DIR`; native apps locate package files relative to their own executable path,
 since the launcher starts them by absolute path.
 
 Inside a namespace sandbox the filesystem view is fixed:
@@ -70,7 +70,7 @@ Inside a namespace sandbox the filesystem view is fixed:
 /app                   the installed package, read-only
 /assets                the shared asset store, read-only
 /run/capsulad/hal.sock the framework socket
-/capsula/lib           the native runtime and script hosts, read-only
+/capsulad/lib           the native runtime and script hosts, read-only
 ```
 
 In `uid` and `none` modes the same contract holds with host paths; the variables tell you
@@ -127,7 +127,7 @@ Report the outcome with `AppInvocationResult{invocation_id, accepted, detail}`. 
 notification: the framework logs it and no error comes back if you skip it.
 
 ```go
-Invocation: func(ctx context.Context, inv *capsula.LaunchInvocation) {
+Invocation: func(ctx context.Context, inv *capsulad.LaunchInvocation) {
     // apply inv.Arguments, then:
     _ = client.NotifyInvocationResult(inv.ID, true, "applied")
 },
@@ -293,8 +293,8 @@ Emit short lines ending in `\n`; never log one large blob. Chunk long payloads y
 example every 1000 characters on separate lines) and write diagnostics to the stream you still
 need.
 
-`capsula.log(message)` (Go: `log.Print`/`fmt.Fprintln`) writes to `stderr` with the prefix
-`capsula-script:`, so it appears as an `app.stderr` record. The Go and Rust bindings' log
+`capsulad.log(message)` (Go: `log.Print`/`fmt.Fprintln`) writes to `stderr` with the prefix
+`capsulad-script:`, so it appears as an `app.stderr` record. The Go and Rust bindings' log
 callbacks are local hooks; they do not forward to the daemon.
 
 An app can read **its own** records through `DiagnosticsService.WatchLogs` (pass its own

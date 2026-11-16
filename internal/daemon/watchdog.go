@@ -9,17 +9,20 @@ import (
 	"time"
 
 	"capsulad/internal/backend"
-	"capsulad/internal/backend/rockchip"
+	"capsulad/internal/backend/profile"
 	"capsulad/internal/logbus"
 )
 
-// watchdogOptions parses the -watchdog value. "auto" means /dev/watchdog when
-// the node exists, "off" disables the supervisor entirely, anything else is a
-// device path.
-func watchdogPath(setting string) (path string, enabled bool) {
+// watchdogOptions parses the -watchdog value. "auto" means the profile's
+// device path when it has one, "off" disables the supervisor entirely,
+// anything else is a device path.
+func watchdogPath(setting, defaultPath string) (path string, enabled bool) {
 	switch strings.TrimSpace(setting) {
 	case "", "auto":
-		return "/dev/watchdog", true
+		if defaultPath == "" {
+			return "", false
+		}
+		return defaultPath, true
 	case "off", "none", "disabled":
 		return "", false
 	default:
@@ -46,15 +49,19 @@ type watchdogSupervisor struct {
 	path   string
 	runDir string
 	on     bool
+	open   func(path string) (backend.Watchdog, error)
 
 	mu    sync.Mutex
 	wd    backend.Watchdog
 	state watchdogState
 }
 
-func newWatchdogSupervisor(runDir string, logs *logbus.Bus, setting string) *watchdogSupervisor {
-	path, enabled := watchdogPath(setting)
-	s := &watchdogSupervisor{logs: logs, path: path, on: enabled, runDir: runDir}
+func newWatchdogSupervisor(runDir string, logs *logbus.Bus, setting string, wd profile.Watchdog, open func(string) (backend.Watchdog, error)) *watchdogSupervisor {
+	path, enabled := watchdogPath(setting, wd.Path)
+	if open == nil {
+		enabled = false
+	}
+	s := &watchdogSupervisor{logs: logs, path: path, on: enabled, runDir: runDir, open: open}
 	s.state = watchdogState{path: path, enabled: enabled}
 	if !enabled {
 		s.state.detail = "disabled by configuration"
@@ -110,7 +117,7 @@ func (s *watchdogSupervisor) Start(ctx context.Context) {
 }
 
 func (s *watchdogSupervisor) tryOpen() {
-	wd, err := rockchip.OpenWatchdog(s.path)
+	wd, err := s.open(s.path)
 	if err != nil {
 		// A feeder left by a previous daemon keeps feeding forever; ask it to
 		// release so this supervisor can own the timer. This also covers the

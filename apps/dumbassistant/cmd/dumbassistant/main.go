@@ -32,7 +32,7 @@ import (
 	"syscall"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 const (
@@ -41,10 +41,10 @@ const (
 
 	// The package ships the default reply beside the executable. A configured
 	// reply_asset comes from the framework's shared read-only asset store
-	// instead; CAPSULA_ASSETS names that store (/assets in the sandbox, the
+	// instead; CAPSULAD_ASSETS names that store (/assets in the sandbox, the
 	// host assets directory for unsandboxed runs).
 	defaultReplyFile  = "reply.wav"
-	assetStoreEnv     = "CAPSULA_ASSETS"
+	assetStoreEnv     = "CAPSULAD_ASSETS"
 	defaultAssetStore = "/assets"
 
 	chunkMS    = 20
@@ -76,8 +76,8 @@ const (
 
 var (
 	// teal is the listening state (#008080); blue is the delay/answer chase.
-	teal = capsula.RGB{G: 128, B: 128}
-	blue = capsula.RGB{G: 64, B: 255}
+	teal = capsulad.RGB{G: 128, B: 128}
+	blue = capsulad.RGB{G: 64, B: 255}
 )
 
 // delaySpec is one configured reply delay. A zero spec means no wait.
@@ -167,7 +167,7 @@ func parseDelayMS(text string) (int64, error) {
 }
 
 type clip struct {
-	format        capsula.AudioFormat
+	format        capsulad.AudioFormat
 	pcm           []byte
 	bytesPerFrame int
 }
@@ -176,7 +176,7 @@ func (c *clip) frames() int { return len(c.pcm) / c.bytesPerFrame }
 
 type reply struct {
 	activationID string
-	origin       capsula.ActivationOrigin
+	origin       capsulad.ActivationOrigin
 	originName   string
 	// holdToTalk is the per-activation rule from the framework: the release
 	// event ends input instead of speech-end detection. It is carried by the
@@ -207,7 +207,7 @@ func (t *turn) signalRelease() {
 
 type assistant struct {
 	ctx        context.Context
-	client     *capsula.Client
+	client     *capsulad.Client
 	rng        *rand.Rand
 	pkgRoot    string
 	assetStore string
@@ -222,7 +222,7 @@ type assistant struct {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	env := capsula.FromEnv()
+	env := capsulad.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
@@ -239,7 +239,7 @@ func main() {
 		store = defaultAssetStore
 	}
 	store = filepath.Clean(store)
-	client, err := capsula.Connect(ctx, env)
+	client, err := capsulad.Connect(ctx, env)
 	if err != nil {
 		log.Fatalf("dumbassistant: connect: %v", err)
 	}
@@ -254,25 +254,25 @@ func main() {
 		},
 		queue: make(chan reply, queueDepth),
 	}
-	client.SetHandlers(capsula.Handlers{
+	client.SetHandlers(capsulad.Handlers{
 		Ready: func() {
 			log.Printf("dumbassistant: ready; reply %d frames at %d Hz/%d ch",
 				clip.frames(), clip.format.SampleRateHz, clip.format.Channels)
 		},
-		Activation: func(_ context.Context, act *capsula.Activation) {
+		Activation: func(_ context.Context, act *capsulad.Activation) {
 			a.enqueue(act)
 		},
-		TouchRelease: func(rel *capsula.InputReleased) {
+		TouchRelease: func(rel *capsulad.InputReleased) {
 			a.releaseInput(rel)
 		},
 		Settings: a.applySettings,
-		Action: func(_ context.Context, act *capsula.ActionInvoked) {
+		Action: func(_ context.Context, act *capsulad.ActionInvoked) {
 			if act == nil || act.ActionID != dismissActionID {
 				return
 			}
 			a.dismiss()
 		},
-		Invocation: func(_ context.Context, inv *capsula.LaunchInvocation) {
+		Invocation: func(_ context.Context, inv *capsulad.LaunchInvocation) {
 			log.Printf("dumbassistant: invocation %s", inv.ID)
 			_ = client.NotifyInvocationResult(inv.ID, true, "dumb assistant is always ready")
 		},
@@ -285,7 +285,7 @@ func main() {
 	}
 }
 
-func (a *assistant) enqueue(act *capsula.Activation) {
+func (a *assistant) enqueue(act *capsulad.Activation) {
 	if act == nil {
 		return
 	}
@@ -315,7 +315,7 @@ func (a *assistant) enqueue(act *capsula.Activation) {
 	}
 }
 
-func (a *assistant) releaseInput(rel *capsula.InputReleased) {
+func (a *assistant) releaseInput(rel *capsulad.InputReleased) {
 	if rel == nil || rel.ActivationID == "" {
 		return
 	}
@@ -445,7 +445,7 @@ func (a *assistant) dismiss() {
 	}
 }
 
-func (a *assistant) beginConversation(ctx context.Context, activationID string) (*capsula.Conversation, string) {
+func (a *assistant) beginConversation(ctx context.Context, activationID string) (*capsulad.Conversation, string) {
 	conv, err := a.client.BeginConversation(ctx, activationID)
 	if err != nil {
 		// Capture and playback still work; the mixer simply will not duck
@@ -463,7 +463,7 @@ func (a *assistant) beginConversation(ctx context.Context, activationID string) 
 // watchdog still applies: a release that is never delivered must not leave the
 // ring and microphone claimed for the full listen cap.
 func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringView, conversationID string) bool {
-	holdToTalk := item.origin == capsula.ActivationOriginTouch && item.holdToTalk
+	holdToTalk := item.origin == capsulad.ActivationOriginTouch && item.holdToTalk
 
 	micCtx, micCancel := context.WithCancel(ctx)
 	mic, err := a.client.OpenMic(micCtx, item.activationID, conversationID)
@@ -583,7 +583,7 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 	}
 }
 
-func isPreroll(item reply, c *capsula.AudioChunk) bool {
+func isPreroll(item reply, c *capsulad.AudioChunk) bool {
 	return item.activationNS != 0 && c.MonotonicTimeNS != 0 && c.MonotonicTimeNS < item.activationNS
 }
 
@@ -591,7 +591,7 @@ func isPreroll(item reply, c *capsula.AudioChunk) bool {
 // summons. For a wakeword activation the phrase itself is part of the last
 // second, so folding the whole window into the noise floor would teach the
 // tracker that speech is background. The guard also absorbs chunk duration.
-func earlyPreroll(item reply, c *capsula.AudioChunk) bool {
+func earlyPreroll(item reply, c *capsulad.AudioChunk) bool {
 	const guard = uint64(400 * time.Millisecond)
 	const chunk = uint64(20 * time.Millisecond)
 	if item.activationNS == 0 || c.MonotonicTimeNS == 0 {
@@ -1134,8 +1134,8 @@ const (
 // renderer goroutine writes time-based frames; captured audio only publishes
 // the latest level, so frames never allocate per pixel.
 type ringView struct {
-	pres    *capsula.Presentation
-	capture *capsula.Capture
+	pres    *capsulad.Presentation
+	capture *capsulad.Capture
 	stop    chan struct{}
 	done    chan struct{}
 
@@ -1149,7 +1149,7 @@ type ringView struct {
 	lastFrame   time.Time
 	delayAt     time.Time
 	fade        time.Duration
-	pixels      []capsula.RGB
+	pixels      []capsulad.RGB
 }
 
 func (a *assistant) openRing(ctx context.Context, item reply) (*ringView, error) {
@@ -1161,13 +1161,13 @@ func (a *assistant) openRing(ctx context.Context, item reply) (*ringView, error)
 		pres:   pres,
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
-		pixels: make([]capsula.RGB, ringPixels),
+		pixels: make([]capsulad.RGB, ringPixels),
 	}
 	if err := v.writeFrame(); err != nil {
 		_ = pres.Close()
 		return nil, fmt.Errorf("ring frame: %w", err)
 	}
-	capture, err := a.client.OpenCapture(ctx, ringResource, pres.ID(), capsula.CaptureModeUnspecified)
+	capture, err := a.client.OpenCapture(ctx, ringResource, pres.ID(), capsulad.CaptureModeUnspecified)
 	if err != nil {
 		_ = pres.Close()
 		return nil, fmt.Errorf("ring capture: %w", err)
@@ -1253,7 +1253,7 @@ func (v *ringView) writeFrame() error {
 			chase := 0.12 + 0.88*head*head
 			brightness := listenLevel + (chase-listenLevel)*blend
 			v.pixels[i] = scaleRGB(
-				capsula.RGB{
+				capsulad.RGB{
 					R: uint8(lerp(0, float64(blue.R), blend) + 0.5),
 					G: uint8(lerp(float64(teal.G), float64(blue.G), blend) + 0.5),
 					B: uint8(lerp(float64(teal.B), float64(blue.B), blend) + 0.5),
@@ -1289,9 +1289,9 @@ func (v *ringView) close() {
 	})
 }
 
-func scaleRGB(c capsula.RGB, brightness float64) capsula.RGB {
+func scaleRGB(c capsulad.RGB, brightness float64) capsulad.RGB {
 	brightness = clamp01(brightness)
-	return capsula.RGB{
+	return capsulad.RGB{
 		R: uint8(float64(c.R)*brightness + 0.5),
 		G: uint8(float64(c.G)*brightness + 0.5),
 		B: uint8(float64(c.B)*brightness + 0.5),
@@ -1330,7 +1330,7 @@ func smoothstep(t float64) float64 {
 // play paces chunks at real time so the daemon sees a normal streaming client
 // instead of a burst that outlives its source. Closing the stream after the
 // last chunk lets the mixer drain the queued tail normally.
-func (a *assistant) play(ctx context.Context, playback *capsula.Playback, clip *clip) error {
+func (a *assistant) play(ctx context.Context, playback *capsulad.Playback, clip *clip) error {
 	framesPerChunk := int(clip.format.SampleRateHz) * chunkMS / 1000
 	if framesPerChunk <= 0 {
 		return fmt.Errorf("invalid clip sample rate %d", clip.format.SampleRateHz)
@@ -1368,7 +1368,7 @@ func (a *assistant) nextReply() (delaySpec, *clip) {
 	return a.settings.delay, a.settings.clip
 }
 
-func (a *assistant) applySettings(change *capsula.SettingsChanged) {
+func (a *assistant) applySettings(change *capsulad.SettingsChanged) {
 	if change == nil {
 		return
 	}
@@ -1622,8 +1622,8 @@ func parseWAV(data []byte) (*clip, error) {
 		return nil, fmt.Errorf("data chunk is empty")
 	}
 	return &clip{
-		format: capsula.AudioFormat{
-			SampleFormat: capsula.SampleFormatPCM16LE,
+		format: capsulad.AudioFormat{
+			SampleFormat: capsulad.SampleFormatPCM16LE,
 			SampleRateHz: uint32(sampleRate),
 			Channels:     uint32(channels),
 		},

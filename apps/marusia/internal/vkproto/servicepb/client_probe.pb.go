@@ -27,7 +27,7 @@
 package servicepb
 
 import (
-	clientprobepb "capsula/apps/marusia/internal/vkproto/clientprobepb"
+	clientprobepb "capsulad/apps/marusia/internal/vkproto/clientprobepb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

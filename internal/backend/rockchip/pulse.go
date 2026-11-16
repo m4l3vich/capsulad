@@ -36,13 +36,9 @@ type pulseAudio struct {
 
 func newPulseAudio(cfg Config) *pulseAudio { return &pulseAudio{cfg: cfg} }
 
-func (p *pulseAudio) PlaybackFormat() backend.AudioFormat {
-	return backend.AudioFormat{Format: backend.S16LE, RateHz: 48000, Channels: 2}
-}
+func (p *pulseAudio) PlaybackFormat() backend.AudioFormat { return p.cfg.AudioPlaybackFormat }
 
-func (p *pulseAudio) CaptureFormat() backend.AudioFormat {
-	return backend.AudioFormat{Format: backend.S16LE, RateHz: 16000, Channels: 1}
-}
+func (p *pulseAudio) CaptureFormat() backend.AudioFormat { return p.cfg.AudioCaptureFormat }
 
 func (p *pulseAudio) OpenOutput() (backend.Sink, error) {
 	p.mu.Lock()

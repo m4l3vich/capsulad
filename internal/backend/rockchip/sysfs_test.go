@@ -14,7 +14,8 @@ func TestProbeSysfsLEDsClassifiesRoles(t *testing.T) {
 	writeFile(t, filepath.Join(leds, "clock-led10", "brightness"), "0\n")
 	writeFile(t, filepath.Join(leds, "clock-led1", "brightness"), "0\n")
 
-	ring, mono := probeSysfsLEDs(root)
+	cfg := DefaultConfig()
+	ring, mono := probeSysfsLEDs(root, cfg.LEDSysfsClassDir, cfg.LEDWS2812Pixels, cfg.LEDMultiCtrlChannels)
 	if len(ring) != 1 || filepath.Base(ring[0]) != "rgb0" {
 		t.Fatalf("ring = %v", ring)
 	}

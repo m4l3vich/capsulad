@@ -20,6 +20,8 @@ import (
 	"capsulad/internal/logbus"
 )
 
+const testOutRate = 48000
+
 // levelSink records mixer output so tests can measure the digital result.
 type levelSink struct {
 	mu  sync.Mutex
@@ -409,11 +411,11 @@ func TestOnlyMixLoopWritesPCM(t *testing.T) {
 // both directions, so the gain climbs back to the exact threshold gain for the
 // held peak while no frame exceeds the threshold.
 func TestMasterLimiterReleasesTowardThresholdAfterTransient(t *testing.T) {
-	lim := newMasterLimiter(outRate)
+	lim := newMasterLimiter(testOutRate)
 	limit := float32(limiterThreshold)
 	const transient, steady float32 = 1.0, 0.96
-	holdSamples := limiterAttackMS * outRate / 1000
-	releaseSamples := limiterReleaseMS * outRate / 1000
+	holdSamples := limiterAttackMS * testOutRate / 1000
+	releaseSamples := limiterReleaseMS * testOutRate / 1000
 
 	for i := 0; i < 2*holdSamples; i++ {
 		g := lim.next(transient)
@@ -490,10 +492,10 @@ func TestMasterLimiterReleasesTowardThresholdAfterTransient(t *testing.T) {
 // itself is exact: a steady signal just above the threshold is attenuated to
 // the threshold and no further.
 func TestMasterLimiterSteadyLevelSitsOnThreshold(t *testing.T) {
-	lim := newMasterLimiter(outRate)
+	lim := newMasterLimiter(testOutRate)
 	limit := float32(limiterThreshold)
 	const level float32 = 0.96
-	for i := 0; i < outRate/10; i++ {
+	for i := 0; i < testOutRate/10; i++ {
 		g := lim.next(level)
 		if out := level * g; out > limit+1e-6 {
 			t.Fatalf("frame %d output %v exceeds the threshold %v", i, out, limit)

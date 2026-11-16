@@ -48,8 +48,8 @@ started or removed by the directory name.
   rescanned. The registry is read at startup: restart `capsulad`, or use
   `capsulad-cli deploy`.
 - `PERMISSION_DENIED: run_id does not match the connecting process` or `unknown run_id` during
-  `AppBusService.Connect` means the process sent a stale or foreign `CAPSULA_RUN_ID`. Read
-  `CAPSULA_RUN_ID` from the environment of the current process; never cache it across runs.
+  `AppBusService.Connect` means the process sent a stale or foreign `CAPSULAD_RUN_ID`. Read
+  `CAPSULAD_RUN_ID` from the environment of the current process; never cache it across runs.
 - A package that reuses a built-in system app's ID is ignored or refused. Built-in IDs are
   reserved; choose another ID.
 
@@ -59,7 +59,7 @@ started or removed by the directory name.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `native SDK runtime is not installed` | No `capsula-native.json` beside the runtime, or the runtime directory is wrong. | Install the shared runtime in `<data-dir>/lib` or `<daemon-dir>/lib`, or pass `-native-lib-dir`. |
+| `native SDK runtime is not installed` | No `capsulad-native.json` beside the runtime, or the runtime directory is wrong. | Install the shared runtime in `<data-dir>/lib` or `<daemon-dir>/lib`, or pass `-native-lib-dir`. |
 | `requires native SDK ABI major N but the installed runtime provides major M` | ABI major mismatch. | Ship a runtime and binding from the same major version. |
 | `requires native SDK ABI N.M or newer but the installed runtime provides …` | The runtime is older than declared. | Lower `min_minor` or install a newer runtime. |
 | `app requires native SDK ABI … : no native SDK runtime directory is configured` | The CLI cannot find the runtime for its preflight. | Use `-native-lib-dir` or install the runtime in `<data-dir>/lib`. |
@@ -71,15 +71,15 @@ still fail at startup if its metadata and its exported ABI disagree.
 
 **Symptom** — a Python or JavaScript package fails at launch with
 `runtime quickjs is unavailable: …` or `runtime micropython is unavailable: …`; a native package
-fails with a loader error for `libcapsula`.
+fails with a loader error for `libcapsulad`.
 
 | Cause | Fix |
 |---|---|
-| Script host not installed beside the runtime | Install `capsula-quickjs` or `capsula-micropython` in `<data-dir>/lib`. `make interpreter` builds them. |
+| Script host not installed beside the runtime | Install `capsulad-quickjs` or `capsulad-micropython` in `<data-dir>/lib`. `make interpreter` builds them. |
 | Script host not executable | Check the mode; a non-executable host is reported as unavailable. |
-| Native runtime absent and the app declares `[native_sdk]` | Install `libcapsula` plus `capsula-native.json`. |
+| Native runtime absent and the app declares `[native_sdk]` | Install `libcapsulad` plus `capsulad-native.json`. |
 | Native app does not declare `[native_sdk]` but calls the SDK anyway | No preflight is done, so a missing runtime fails at startup instead of install. Declare the requirement. |
-| App bundles its own `libcapsula` | Remove it; the launcher injects the shared runtime path. |
+| App bundles its own `libcapsulad` | Remove it; the launcher injects the shared runtime path. |
 
 The Web UI shows which runtimes are available and their detail line; a client can call
 `ApplicationService.ListRuntimes`. A launch failure names the missing host explicitly.
@@ -93,8 +93,8 @@ The Web UI shows which runtimes are available and their detail line; a client ca
 | Cause | Fix |
 |---|---|
 | The process never calls `AppBusService.Connect` | Connect before serving or presenting. |
-| It connects to the wrong socket | Use `CAPSULA_SOCKET`; in a sandbox the host path does not resolve. |
-| It sends `AppHello` with a run ID that is not its own | Use `CAPSULA_RUN_ID` exactly. |
+| It connects to the wrong socket | Use `CAPSULAD_SOCKET`; in a sandbox the host path does not resolve. |
+| It sends `AppHello` with a run ID that is not its own | Use `CAPSULAD_RUN_ID` exactly. |
 | It sends something else first | The first message must be `AppHello{run_id}`, the second `AppReady`. |
 | It crashes before ready | Check the captured stdout/stderr in `logs -app`. |
 | A library load fails at startup | Fix the ABI or install the runtime. |
@@ -135,7 +135,7 @@ client call.
 | `resource … does not support captures` | Resource is a sensor, audio or unknown ID. | Capture only display, ring, touch or assistant role. |
 | `this touch backend cannot provide a full-panel stream` | `full_panel_available=false`. | Use partial capture. |
 | `this touch backend provides no semantic gestures` | `partial_gestures_available=false`. | Use full capture. |
-| `this RPC requires a supervised application connection` | No verified app identity. | Run inside the supervised process and connect with `CAPSULA_RUN_ID`. |
+| `this RPC requires a supervised application connection` | No verified app identity. | Run inside the supervised process and connect with `CAPSULAD_RUN_ID`. |
 | `capture_id must be the caller's currently selected touch capture` | `WatchInput` with a stale or foreign capture. | Watch only after `CaptureSelectionChanged{selected:true}`; re-subscribe after selection changes. |
 | `microphone is globally muted` | Global mute is on. | Unmute from the Web UI or the microphone key. |
 | `microphone capture requires a selected visible ring or segment indication` | No qualifying visible output. | Show a non-blank, non-zero-brightness presentation that is currently selected. |
@@ -179,10 +179,10 @@ overwrite a concurrent change.
 
 | Cause | Fix |
 |---|---|
-| Joined the catalog `path` onto `CAPSULA_ASSETS` | `path` already includes `/assets/…`. Join the **host root** with `asset_id`. |
-| Used the host store path inside a namespace sandbox | Use `CAPSULA_ASSETS` (`/assets`). Host paths do not resolve. |
+| Joined the catalog `path` onto `CAPSULAD_ASSETS` | `path` already includes `/assets/…`. Join the **host root** with `asset_id`. |
+| Used the host store path inside a namespace sandbox | Use `CAPSULAD_ASSETS` (`/assets`). Host paths do not resolve. |
 | File was copied into a directory reached through a symlink | Symlinks are never followed or published. Copy the real file. |
-| File name begins `.capsula-upload-` | Reserved for in-flight uploads; rename it. |
+| File name begins `.capsulad-upload-` | Reserved for in-flight uploads; rename it. |
 | Catalog entry exists but read fails | Check the file mode (published files are `0644`, the store `0755`) and that the component is not a symlink. |
 | Upload returned 413 | The file is over 32 MiB or the 48 MiB store budget is full. Remove unused assets. |
 | Extension not in the table | Media type is `application/octet-stream`; rename to the correct extension. |
@@ -216,10 +216,10 @@ stay stopped. Uninstalling a looping app requires stopping its run first.
 | Area | Simulator | Device |
 |---|---|---|
 | Binary ABI | Host binary accepted | `aarch64`/`arm64`, Linux ABI, glibc 2.33 or older |
-| Native library | Host `libcapsula` | Target `libcapsula` and `capsula-native.json` |
+| Native library | Host `libcapsulad` | Target `libcapsulad` and `capsulad-native.json` |
 | Sandbox | Whatever the host kernel probes | `mountns` on stock firmware; no user namespace, no seccomp |
 | Framework socket | `<data-dir>/run/hal.sock`, host path | Host path `<data-dir>/run/hal.sock`; `/run/capsulad/hal.sock` in the sandbox |
-| Asset path | Host asset directory via `CAPSULA_ASSETS` in `uid`/`none`; `/assets` in namespaces | `/assets` |
+| Asset path | Host asset directory via `CAPSULAD_ASSETS` in `uid`/`none`; `/assets` in namespaces | `/assets` |
 | Touch | Virtual panel with optional coordinate injection | Five keys, no raw coordinates |
 | Audio | Virtual 16 kHz mono capture, 48 kHz stereo output | Backend capture format (normally the same), vendor DSP tap |
 | Brightness and cues | Virtual, always present | Hardware dependent; a backend may be partial or absent |

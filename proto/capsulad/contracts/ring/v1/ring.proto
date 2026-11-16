@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+option go_package = "capsulad/gen/go/capsulad/contracts/ring/v1;ringv1";
+
+package capsulad.contracts.ring.v1;
+
+// Standard LED-ring contract exposed by the built-in Ring application.
+//
+// The service is discoverable through capsulad.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsulad.ring". The
+// ring still renders its baseline presentation through the normal
+// presentation/capture routing; these RPCs only read or change its declared
+// settings.
+//
+// Every declared setting is readable, writable with compare-and-swap, and
+// watchable. Updates run the same validation as the generic application
+// configuration surface and never reset the app's baseline presentation
+// ownership. WatchSettings streams an initial snapshot first and then
+// converges on the newest accepted revision; intermediate revisions may be
+// coalesced for a slow consumer.
+service RingService {
+  rpc GetState(GetStateRequest) returns (RingState);
+  rpc WatchState(WatchStateRequest) returns (stream RingState);
+
+  rpc GetSettings(GetSettingsRequest) returns (RingSettingsSnapshot);
+  rpc UpdateSettings(UpdateSettingsRequest) returns (RingSettingsSnapshot);
+  rpc WatchSettings(WatchSettingsRequest) returns (stream RingSettingsSnapshot);
+}
+
+message GetStateRequest {}
+message WatchStateRequest {}
+message GetSettingsRequest {}
+message WatchSettingsRequest {}
+
+message RingSettings {
+  // Effect values: breathe, spinner, rainbow, pulse, comet, sparkle, static.
+  // "static" is a solid colour and does not animate.
+  string effect = 1;
+  // Canonical gradient: linear-gradient(<angle>deg, #RRGGBB [pct%], ...) or a
+  // plain #RRGGBB solid palette.
+  string palette = 2;
+  float brightness = 3; // [0,1]
+  float speed = 4;      // [0.1,4]
+  bool schedule_enabled = 5;
+  // HH:MM in the device timezone; the window may cross midnight and equal
+  // bounds mean the whole day.
+  string schedule_start = 6;
+  string schedule_end = 7;
+}
+
+message RingSettingsSnapshot {
+  uint64 revision = 1;
+  RingSettings values = 2;
+}
+
+message UpdateSettingsRequest {
+  uint64 expected_revision = 1; // Compare-and-swap, else ABORTED.
+  RingSettings values = 2;
+  // Required setting paths, for example "palette" or "schedule_start".
+  repeated string update_fields = 3;
+}
+
+message RingState {
+  // Effective values currently rendered by the app (not a pending edit).
+  string effect = 1;
+  string palette = 2;
+  float brightness = 3;
+  float speed = 4;
+  // Presentation currently owned by the ring baseline; empty when stopped.
+  string presentation_id = 5;
+  // Whether the baseline is lit. False while the configured active window
+  // excludes the current local time; the app then presents an explicit blank
+  // frame and other captures (volume, mute, alerts) still preempt it.
+  bool active = 6;
+  uint64 settings_revision = 7;
+  bool schedule_enabled = 8;
+  string schedule_start = 9;
+  string schedule_end = 10;
+  // Ring pixel count derived from the advertised ring capability.
+  uint32 pixel_count = 11;
+}

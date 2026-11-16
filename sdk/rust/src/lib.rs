@@ -1,23 +1,34 @@
-//! Safe Rust consumer for the Capsula shared engine (C ABI v1).
+//! Safe Rust consumer for the Capsulad shared engine (C ABI v1).
 //!
-//! The crate loads `libcapsula` dynamically (never linking transport code or a
+//! The crate loads `libcapsulad` dynamically (never linking transport code or a
 //! native crate), negotiates the ABI table, and wraps every native allocation
 //! in an RAII type. It is a thin binding: protobuf JSON/proto payloads are
 //! opaque byte slices and the shared library owns the daemon transport.
 //!
 //! # Library resolution
 //!
-//! [`Library::load`] uses `CAPSULA_LIBRARY` when it is set (an absolute path,
-//! normally `/capsula/lib/libcapsula.so.1` inside a sandbox), then
-//! `CAPSULA_LIBRARY_DIR` joined with the platform soname, then the soname
-//! itself (`libcapsula.so.1` on Linux, `libcapsula.1.dylib` on Darwin).
+//! [`Library::load`] uses `CAPSULAD_LIBRARY` when it is set (an absolute path,
+//! normally `/capsulad/lib/libcapsulad.so.1` inside a sandbox), then
+//! `CAPSULAD_LIBRARY_DIR` joined with the platform soname, then the soname
+//! itself (`libcapsulad.so.1` on Linux, `libcapsulad.1.dylib` on Darwin).
 //!
 //! # ABI negotiation
 //!
-//! The loader resolves `capsula_get_api`, zero-initializes a table, copies
+//! The loader resolves `capsulad_get_api`, zero-initializes a table, copies
 //! `min(binding_size, library_size)` bytes, and requires major 1, a
 //! `struct_size` covering every v1 field used here, and non-NULL required
 //! function pointers. A newer minor may append fields.
+//!
+//! # Outbound networking and primitives
+//!
+//! [`HttpClient`] performs bounded HTTP/1.1 requests with verified TLS;
+//! `request_with_id` plus `cancel(id)` abort exactly one exchange;
+//! [`Client::open_remote`] opens a remote gRPC channel (TLS with ALPN `h2`, or
+//! h2c prior knowledge) whose calls reuse [`Call`]. [`Client::start_call_meta`]
+//! attaches validated metadata to a call. [`Library`] also exposes the shared
+//! encoding/crypto/URL primitives (`base64_*`, `percent_*`, `sha256`,
+//! `random_bytes`, `uuid_v4`, `parse_url`). Remote clients have no app bus:
+//! [`Client::bus`] and [`Client::start_routed`] fail with `INVALID_ARGUMENT`.
 //!
 //! # Build and smoke tests
 //!
@@ -28,18 +39,18 @@
 //! ```
 //!
 //! The `smoke_unary`, `smoke_stream` and `smoke_bus` examples connect to a
-//! real daemon using `CAPSULA_SOCKET`/`CAPSULA_RUN_ID` (or
+//! real daemon using `CAPSULAD_SOCKET`/`CAPSULAD_RUN_ID` (or
 //! `Library::connect_env`). They exercise unary, server-streaming and AppBus
 //! paths; no transport is linked into the Rust binary.
 //!
 //! ```no_run
-//! use capsula::Library;
+//! use capsulad::Library;
 //!
-//! let library = Library::load().expect("load libcapsula");
+//! let library = Library::load().expect("load libcapsulad");
 //! let client = library.connect_env().expect("connect");
 //! let reply = client
 //!     .unary_json(
-//!         "capsula.framework.v1.DeviceService",
+//!         "capsulad.framework.v1.DeviceService",
 //!         "GetInfo",
 //!         b"{}",
 //!         Some(std::time::Duration::from_secs(2)),
@@ -53,6 +64,9 @@ mod bus;
 mod call;
 mod client;
 mod error;
+mod grpc;
+mod http;
+mod primitives;
 mod sys;
 
 pub use audio::{PcmEvent, PcmFormat, PcmKind, PlaybackCommand, SampleFormat};
@@ -60,6 +74,9 @@ pub use bus::{Bus, BusEvent, BusEventKind, BusHandler, CallInfo};
 pub use call::{Call, CallKind, CallStatus, InboundCall};
 pub use client::Client;
 pub use error::{Error, Result};
+pub use grpc::RemoteOptions;
+pub use http::{HttpClient, HttpOptions, HttpRequest, HttpResponse};
+pub use primitives::{Url, BASE64_NO_PADDING, BASE64_STANDARD, BASE64_URL_SAFE};
 pub use sys::DEFAULT_SOCKET;
 
 use std::env;
@@ -77,7 +94,7 @@ pub(crate) struct Inner {
     pub(crate) path: PathBuf,
 }
 
-/// A loaded Capsula shared library.
+/// A loaded Capsulad shared library.
 ///
 /// Cloning is cheap; every clone refers to the same mapped library. The
 /// library is never unloaded while a [`Client`], [`Call`] or [`Bus`] exists.
@@ -89,10 +106,10 @@ pub struct Library {
 impl Library {
     /// Loads the library using the launcher contract:
     ///
-    /// 1. `CAPSULA_LIBRARY` when set (must be an absolute path);
-    /// 2. `CAPSULA_LIBRARY_DIR` joined with the platform soname;
-    /// 3. the platform soname (`libcapsula.so.1` on Linux,
-    ///    `libcapsula.1.dylib` on Darwin).
+    /// 1. `CAPSULAD_LIBRARY` when set (must be an absolute path);
+    /// 2. `CAPSULAD_LIBRARY_DIR` joined with the platform soname;
+    /// 3. the platform soname (`libcapsulad.so.1` on Linux,
+    ///    `libcapsulad.1.dylib` on Darwin).
     pub fn load() -> Result<Self> {
         Self::open(resolve_library_path()?)
     }
@@ -114,12 +131,12 @@ impl Library {
 
         let api_major = {
             let f: libloading::Symbol<MajorFn> =
-                unsafe { lib.get(b"capsula_abi_major\0") }.map_err(symbol_error)?;
+                unsafe { lib.get(b"capsulad_abi_major\0") }.map_err(symbol_error)?;
             unsafe { f() }
         };
         let _api_minor = {
             let f: libloading::Symbol<MinorFn> =
-                unsafe { lib.get(b"capsula_abi_minor\0") }.map_err(symbol_error)?;
+                unsafe { lib.get(b"capsulad_abi_minor\0") }.map_err(symbol_error)?;
             unsafe { f() }
         };
         if api_major != sys::ABI_MAJOR {
@@ -135,7 +152,7 @@ impl Library {
 
         let native_size = {
             let f: libloading::Symbol<SizeFn> =
-                unsafe { lib.get(b"capsula_api_size\0") }.map_err(symbol_error)?;
+                unsafe { lib.get(b"capsulad_api_size\0") }.map_err(symbol_error)?;
             unsafe { f() }
         };
         if native_size < sys::TABLE_SIZE {
@@ -156,14 +173,14 @@ impl Library {
         let mut slot = std::mem::MaybeUninit::<sys::Api>::zeroed();
         let status = {
             let f: libloading::Symbol<GetApiFn> =
-                unsafe { lib.get(b"capsula_get_api\0") }.map_err(symbol_error)?;
+                unsafe { lib.get(b"capsulad_get_api\0") }.map_err(symbol_error)?;
             unsafe { f(sys::ABI_MAJOR, sys::TABLE_SIZE, slot.as_mut_ptr()) }
         };
         if status != sys::STATUS_OK {
             return Err(Error::local(
                 error::CODE_ABI,
                 format!(
-                    "{} refused capsula_get_api({}, {}): status {status}",
+                    "{} refused capsulad_get_api({}, {}): status {status}",
                     path.display(),
                     sys::ABI_MAJOR,
                     sys::TABLE_SIZE
@@ -188,7 +205,7 @@ impl Library {
 
         let version = {
             let f: libloading::Symbol<VersionFn> =
-                unsafe { lib.get(b"capsula_version\0") }.map_err(symbol_error)?;
+                unsafe { lib.get(b"capsulad_version\0") }.map_err(symbol_error)?;
             let ptr = unsafe { f() };
             if ptr.is_null() {
                 String::new()
@@ -210,7 +227,7 @@ impl Library {
         })
     }
 
-    /// Library version string reported by `capsula_version`.
+    /// Library version string reported by `capsulad_version`.
     pub fn version(&self) -> &str {
         &self.inner.version
     }
@@ -233,8 +250,8 @@ impl Library {
         Client::connect(self, socket, run_id, None, None)
     }
 
-    /// Opens a client using `CAPSULA_SOCKET`, `CAPSULA_RUN_ID` and
-    /// `CAPSULA_APP_ID` as injected by the launcher.
+    /// Opens a client using `CAPSULAD_SOCKET`, `CAPSULAD_RUN_ID` and
+    /// `CAPSULAD_APP_ID` as injected by the launcher.
     pub fn connect_env(&self) -> Result<Client> {
         Client::from_env(self)
     }
@@ -248,27 +265,27 @@ fn symbol_error(err: libloading::Error) -> Error {
 pub fn default_soname() -> &'static str {
     #[cfg(target_os = "linux")]
     {
-        "libcapsula.so.1"
+        "libcapsulad.so.1"
     }
     #[cfg(target_os = "macos")]
     {
-        "libcapsula.1.dylib"
+        "libcapsulad.1.dylib"
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        "libcapsula.so.1"
+        "libcapsulad.so.1"
     }
 }
 
 fn resolve_library_path() -> Result<PathBuf> {
-    if let Some(value) = env::var_os("CAPSULA_LIBRARY") {
+    if let Some(value) = env::var_os("CAPSULAD_LIBRARY") {
         if !value.is_empty() {
             let path = PathBuf::from(value);
             if !path.is_absolute() {
                 return Err(Error::local(
                     error::CODE_INVALID_ARGUMENT,
                     format!(
-                        "CAPSULA_LIBRARY must be an absolute path, got {}",
+                        "CAPSULAD_LIBRARY must be an absolute path, got {}",
                         path.display()
                     ),
                 ));
@@ -276,7 +293,7 @@ fn resolve_library_path() -> Result<PathBuf> {
             return Ok(path);
         }
     }
-    if let Some(dir) = env::var_os("CAPSULA_LIBRARY_DIR") {
+    if let Some(dir) = env::var_os("CAPSULAD_LIBRARY_DIR") {
         if !dir.is_empty() {
             return Ok(PathBuf::from(dir).join(default_soname()));
         }
@@ -296,7 +313,7 @@ pub(crate) unsafe fn take_buf(inner: &Inner, buf: sys::Buf) -> Vec<u8> {
     out
 }
 
-/// Copies `capsula_last_error` immediately (it is thread-local and valid only
+/// Copies `capsulad_last_error` immediately (it is thread-local and valid only
 /// until the next SDK call on this thread).
 pub(crate) fn status_error(inner: &Inner, status: i32, context: &str) -> Error {
     let detail = unsafe {
@@ -339,6 +356,20 @@ pub(crate) fn wait_ms(timeout: Option<Duration>) -> u32 {
     }
 }
 
+/// Encodes a positive duration as whole milliseconds, rounding up so a
+/// sub-millisecond value becomes `1`, never `0` (which would select a native
+/// default several orders of magnitude larger). A zero duration is rejected:
+/// callers that mean "use the default" pass `None` and omit the key.
+pub(crate) fn positive_ms(duration: Duration) -> Result<u64> {
+    if duration.is_zero() {
+        return Err(Error::local(
+            crate::error::CODE_INVALID_ARGUMENT,
+            "timeout must be positive",
+        ));
+    }
+    Ok(duration.as_millis().max(1).min(u32::MAX as u128) as u64)
+}
+
 pub(crate) fn os_bytes(value: &OsStr) -> &[u8] {
     value.as_bytes()
 }
@@ -354,9 +385,9 @@ mod tests {
     #[test]
     fn soname_matches_platform_contract() {
         #[cfg(target_os = "linux")]
-        assert_eq!(default_soname(), "libcapsula.so.1");
+        assert_eq!(default_soname(), "libcapsulad.so.1");
         #[cfg(target_os = "macos")]
-        assert_eq!(default_soname(), "libcapsula.1.dylib");
+        assert_eq!(default_soname(), "libcapsulad.1.dylib");
     }
 
     #[test]
@@ -370,7 +401,7 @@ mod tests {
 
     #[test]
     fn missing_library_is_an_error() {
-        let err = match Library::open("/nonexistent/capsula/libcapsula.so.1") {
+        let err = match Library::open("/nonexistent/capsulad/libcapsulad.so.1") {
             Ok(_) => panic!("unexpectedly loaded a missing library"),
             Err(err) => err,
         };

@@ -28,7 +28,7 @@ func TestParseHardwareSerial(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			got, err := parseHardwareSerial(path)
+			got, err := parseHardwareSerial(path, hardwareSerialFields)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}

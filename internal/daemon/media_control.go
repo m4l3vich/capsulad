@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 )
 
 // The physical circle key and panel swipes drive current media through public
@@ -22,7 +22,7 @@ import (
 // through the public BluetoothMediaService on the same socket, which resolves
 // its own direction. There is no private transport or second control plane:
 // both paths are the daemon's normal public services.
-const mediaPlayerService = "capsula.contracts.media.v1.MediaPlayerService"
+const mediaPlayerService = "capsulad.contracts.media.v1.MediaPlayerService"
 
 type mediaAction int
 

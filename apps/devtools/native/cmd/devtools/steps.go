@@ -8,7 +8,7 @@ import (
 	"log"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 type subsystemBackend struct {
@@ -81,7 +81,7 @@ func (a *devApp) stepDisplay(ctx context.Context, gen uint64) stepResult {
 	}
 	log.Printf("devtools: display gen=%d presentation=%s digits=1234 masks=%s colon=%v",
 		gen, pres.ID(), maskHex(cells), colon)
-	capture, err := a.client.OpenCapture(ctx, segment.ResourceID, pres.ID(), capsula.CaptureModeUnspecified)
+	capture, err := a.client.OpenCapture(ctx, segment.ResourceID, pres.ID(), capsulad.CaptureModeUnspecified)
 	if err != nil {
 		return classify("open segment capture", err)
 	}
@@ -124,7 +124,7 @@ func (a *devApp) stepRing(ctx context.Context, gen uint64) stepResult {
 	}
 	log.Printf("devtools: ring gen=%d presentation=%s pixels=%d frame=%s",
 		gen, pres.ID(), pixels, rgbSummary(frame))
-	capture, err := a.client.OpenCapture(ctx, ring.ResourceID, pres.ID(), capsula.CaptureModeUnspecified)
+	capture, err := a.client.OpenCapture(ctx, ring.ResourceID, pres.ID(), capsulad.CaptureModeUnspecified)
 	if err != nil {
 		return classify("open ring capture", err)
 	}
@@ -206,7 +206,7 @@ func (a *devApp) stepEcho(ctx context.Context, gen uint64) stepResult {
 }
 
 func peerUnavailable(err error) bool {
-	var status *capsula.StatusError
+	var status *capsulad.StatusError
 	if !errors.As(err, &status) {
 		return false
 	}
@@ -218,7 +218,7 @@ func peerUnavailable(err error) bool {
 }
 
 func statusDetail(err error) string {
-	var status *capsula.StatusError
+	var status *capsulad.StatusError
 	if errors.As(err, &status) {
 		if status.Message != "" {
 			return status.Message

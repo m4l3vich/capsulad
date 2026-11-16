@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"

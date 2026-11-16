@@ -111,7 +111,7 @@ Rules and limits:
   serves is entirely the target's decision, including unknown methods.
 - A target disconnect fails in-flight calls with `UNAVAILABLE`; calls are never replayed to a new
   process.
-- The caller's identity is derived from the socket peer and the optional `capsula-run-id`
+- The caller's identity is derived from the socket peer and the optional `capsulad-run-id`
   metadata. A claim that contradicts peer credentials is `PERMISSION_DENIED`.
 - Built-in system apps answer in-process through an internal handler. Their wire shape is
   identical: one request frame, optional half-close, then responses and `end`. Bidirectional

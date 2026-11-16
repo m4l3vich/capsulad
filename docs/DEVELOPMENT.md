@@ -9,7 +9,7 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Tool | Needed for |
 |---|---|
 | Go 1.22.5 or newer | daemon, CLI, tools, Go SDK |
-| Rust 1.85 or newer with Cargo | `libcapsula`, Rust binding |
+| Rust 1.85 or newer with Cargo | `libcapsulad`, Rust binding |
 | C compiler | Go SDK cgo shim, C/C++ example, script hosts |
 | Node.js + npm | rebuilding the Web UI (`web/`) only; the built SPA is checked in |
 | `protoc` | regenerating Go bindings and the embedded descriptor after schema changes |
@@ -26,7 +26,7 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make debug` | the same targets without stripping |
 | `make daemon` | only `capsulad` and `capsulad-cli` (no native SDK, no cgo) |
 | `make sdk` | `make sdk-go` and `make sdk-rust` |
-| `make native` | `libcapsula`, header, symlinks and `capsula-native.json` |
+| `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
 | `make web` | `npm ci && npm run build` into `internal/webui/dist` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
 | `make devapps` / `make dumbassistant` / `make marusia` | development apps and the two optional assistants: package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
@@ -63,7 +63,7 @@ Check the result before installing anything; every symbol must be glibc 2.33 or 
 
 ```sh
 readelf --version-info build/bin/capsulad | grep -o 'GLIBC_[0-9.]*' | sort -u
-readelf --version-info build/lib/libcapsula.so.1.0.0 | grep -o 'GLIBC_[0-9.]*' | sort -u
+readelf --version-info build/lib/libcapsulad.so.1.0.0 | grep -o 'GLIBC_[0-9.]*' | sort -u
 ```
 
 ## Web UI
@@ -89,10 +89,10 @@ mkdir -p build/dev-web
 cd web && npm run dev            # https://localhost:5173 with HMR
 ```
 
-`CAPSULA_WEB_TARGET` overrides the proxy target (default `https://127.0.0.1:8443`). The
+`CAPSULAD_WEB_TARGET` overrides the proxy target (default `https://127.0.0.1:8443`). The
 dev server reuses the daemon certificate (`build/dev-web/security`, or
-`CAPSULA_DEV_SECURITY_DIR`) and serves HTTPS because session cookies are
-`Secure; SameSite=Strict`; set `CAPSULA_DEV_HTTPS=0` only for browsers that accept Secure
+`CAPSULAD_DEV_SECURITY_DIR`) and serves HTTPS because session cookies are
+`Secure; SameSite=Strict`; set `CAPSULAD_DEV_HTTPS=0` only for browsers that accept Secure
 cookies from `localhost`.
 
 `sh tools/dev-media.sh build/dev-web` installs the stopped `dev.media` fixture, which the
@@ -110,8 +110,8 @@ contract for the artifact, manifest and install flow is
 Packaging runs on the build host, never on the device. Each app build target compiles its tree
 and then packages it with `capsulad-cli app package DIR`, which writes `<id>-<version>.tar.gz`
 beside the package directory: `make dumbassistant` leaves
-`build/apps/org.capsula.dumbassistant-<version>.tar.gz`, `make marusia` leaves
-`build/apps/org.capsula.marusia-<version>.tar.gz`, and `make devapps` leaves one archive per
+`build/apps/org.capsulad.dumbassistant-<version>.tar.gz`, `make marusia` leaves
+`build/apps/org.capsulad.marusia-<version>.tar.gz`, and `make devapps` leaves one archive per
 development app under `build/devapps`. `apps/devtools/build.sh` takes `PACKAGE=0` to stage
 the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli` to choose the packager.
 A cross build packages with the host-executable `build/bin/capsulad-cli-host`
@@ -120,7 +120,7 @@ A cross build packages with the host-executable `build/bin/capsulad-cli-host`
 The device receives archives only:
 
 ```sh
-capsulad-cli app install build/apps/org.capsula.dumbassistant-<version>.tar.gz
+capsulad-cli app install build/apps/org.capsulad.dumbassistant-<version>.tar.gz
 capsulad-cli app install build/deploy-bundle/apps/dev.hardware-<version>.tar.gz
 capsulad-cli app list
 capsulad-cli app start APP_ID [NAME=VALUE ...]
@@ -159,12 +159,12 @@ apps/*.tar.gz               application packages
 boot/S99btctl.sh            boot hook
 ```
 
-`lib/` carries regular files only: the real runtime library (`libcapsula.so.1.0.0` on the
-device), `capsula-native.json` and any host extras. `make deploy-bundle` copies regular files
-and never dereferences the build tree's `libcapsula.so -> libcapsula.so.1 -> libcapsula.so.1.0.0`
+`lib/` carries regular files only: the real runtime library (`libcapsulad.so.1.0.0` on the
+device), `capsulad-native.json` and any host extras. `make deploy-bundle` copies regular files
+and never dereferences the build tree's `libcapsulad.so -> libcapsulad.so.1 -> libcapsulad.so.1.0.0`
 links, so one library is 4 MiB in the bundle instead of 12 MiB. The deployer rebuilds the ABI
-layout after installing the files: it reads `library` from the installed `capsula-native.json`,
-links that SONAME to the matching `libcapsula.so.1.0.0`, and links `libcapsula.so` to the
+layout after installing the files: it reads `library` from the installed `capsulad-native.json`,
+links that SONAME to the matching `libcapsulad.so.1.0.0`, and links `libcapsulad.so` to the
 SONAME, relative to the lib directory, refusing an absolute or escaping target and leaving a
 conflicting regular file alone with a warning. A hand-assembled bundle follows the same rule —
 ship the real file, not the links — and the preflight resolves the declared library from the
@@ -237,7 +237,7 @@ The steps, in order:
    inside the staging tree is deleted once it is written; a directory bundle is left alone
    unless it shares the target filesystem, where the rename consumes its entry — rebuild the
    bundle before repeating that path.
-8. Run `<init-script> restart` with `CAPSULA_DATA_DIR` exported, then poll
+8. Run `<init-script> restart` with `CAPSULAD_DATA_DIR` exported, then poll
    `capsulad -health -socket <socket>` until it exits 0 (exit 2 falls back to a framework
    API probe).
 9. On success, remove the transient backups. On failure, restore the replaced binaries and
@@ -257,9 +257,9 @@ bundle there:
 
 ```sh
 # Build for the device, then assemble the bundle on the build host.
-adb -s <device> push build/linux-arm64/<build>/bundle /tmp/capsula-bundle
-adb shell /tmp/capsula-bundle/capsulad-cli -data-dir /data/capsdemo \
-  deploy /tmp/capsula-bundle -timeout 60s
+adb -s <device> push build/linux-arm64/<build>/bundle /tmp/capsulad-bundle
+adb shell /tmp/capsulad-bundle/capsulad-cli -data-dir /data/capsdemo \
+  deploy /tmp/capsulad-bundle -timeout 60s
 adb shell /data/capsdemo/capsulad -health -socket /data/capsdemo/run/hal.sock
 ```
 
@@ -273,7 +273,7 @@ killed); use a script and the init helper:
 
 ```sh
 # /tmp/deploy.sh
-/tmp/capsula-bundle/capsulad-cli -data-dir /data/capsdemo deploy /tmp/capsula-bundle \
+/tmp/capsulad-bundle/capsulad-cli -data-dir /data/capsdemo deploy /tmp/capsulad-bundle \
   -staging /run -timeout 180s > /tmp/deploy.log 2>&1
 echo "exit=$?" >> /tmp/deploy.log
 ```
@@ -311,7 +311,7 @@ complete.
 ```text
 /data/capsdemo/capsulad
 /data/capsdemo/capsulad-cli
-/data/capsdemo/lib/               libcapsula.so.1.0.0, capsula-native.json, script hosts, include/
+/data/capsdemo/lib/               libcapsulad.so.1.0.0, capsulad-native.json, script hosts, include/
 /data/capsdemo/apps/<app_id>/
 /data/capsdemo/assets/
 /data/capsdemo/run/hal.sock
@@ -355,6 +355,18 @@ Useful `capsulad` flags: `-platform`, `-data-dir`, `-socket`, `-web-addr` (empty
 disables the UI), `-native-lib-dir`, `-sandbox auto|namespaces|mountns|uid|none`,
 `-dev-admin`, `-mem-limit-mb`, `-output-trace`, `-wakeword-trace`, `-watchdog`.
 
+Platform selection:
+
+| `-platform` | Backend | Notes |
+|---|---|---|
+| `simulator` (default) | in-memory simulator | neutral `profile.Simulator`: no device paths or watchdog |
+| `rockchip-stock` (alias `rockchip`) | RK3308 stock backend | hardware profile; backend factory and watchdog opener are wired by `cmd/capsulad` |
+
+`CAPSULA_MINI_AMLOGIC_STOCK` and `CAPSULA_MINI_AMLOGIC_ALPINE` remain in the wire enum as
+defined-but-unsupported/reserved values. This build has no internal platform constant, no
+selection case and no backend for them, so any other `-platform` value fails with
+`unknown platform ... (simulator, rockchip-stock)`.
+
 ## Tests
 
 ```sh
@@ -378,9 +390,9 @@ sdk/go/regenerate-abi.sh --check
 
 Standalone Go test commands on macOS need `-ldflags '-linkmode=external'`; the Makefile
 and app build scripts already handle it. Host daemon integration tests need a matching host
-native runtime with metadata, normally `build/lib`, or the `CAPSULA_NATIVE_LIB_DIR`
+native runtime with metadata, normally `build/lib`, or the `CAPSULAD_NATIVE_LIB_DIR`
 override; a Linux library is not a usable macOS test runtime. Tests that start a daemon
-also need the real Mach-O runtime and its `capsula-native.json`.
+also need the real Mach-O runtime and its `capsulad-native.json`.
 
 The script-host smoke test covers ready, invocation, unary and routed calls, stream
 cancellation, stop/crash cleanup and a daemon-crash disconnect:
@@ -395,7 +407,7 @@ sh interpreter/smoke/run.sh
 `make interpreter` builds both hosts and `make interpreter-quickjs` /
 `make interpreter-micropython` one. They come from pinned sha256-verified sources
 (quickjs-ng 0.18.0, MicroPython `1c6321…`); set `QUICKJS_SRC`/`MICROPYTHON_SRC` for
-offline builds and note that they stage beside `libcapsula`.
+offline builds and note that they stage beside `libcapsulad`.
 
 ```sh
 make devapps        # dev.hardware, dev.quickjs, dev.micropython, one .tar.gz each
@@ -419,8 +431,8 @@ capsulad-cli -data-dir build/demo auth key revoke automation
 capsulad-cli -data-dir build/demo cert status
 capsulad-cli -data-dir build/demo cert renew -days 365
 capsulad-cli -data-dir build/demo settings show
-capsulad-cli -data-dir build/demo settings app capsula.clock blink=true
-capsulad-cli -data-dir build/demo settings app capsula.ring effect=static palette='#FF7828'
+capsulad-cli -data-dir build/demo settings app capsulad.clock blink=true
+capsulad-cli -data-dir build/demo settings app capsulad.ring effect=static palette='#FF7828'
 capsulad-cli -data-dir build/demo logs -app APP_ID -n 100
 capsulad-cli -data-dir build/demo media list
 capsulad-cli platform inspect -root /path/to/extracted/rootfs

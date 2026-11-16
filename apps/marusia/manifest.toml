@@ -1,4 +1,4 @@
-id = "org.capsula.marusia"
+id = "org.capsulad.marusia"
 name = "Marusia"
 version = "0.1.0"
 description = "VK Marusia voice assistant: streams microphone PCM to the recovered vendor gRPC service and plays the returned TTS URL."
@@ -15,7 +15,7 @@ architecture = "aarch64"
 abi = "linux-gnu"
 sdk = "0.5"
 
-# The app links only the Go SDK, which dlopens the shared Capsula engine. The
+# The app links only the Go SDK, which dlopens the shared Capsulad engine. The
 # engine is injected by the launcher and is never bundled into this package.
 [native_sdk]
 abi_major = 1
@@ -34,7 +34,7 @@ description = "Repeats the session attach handshake with the configured xtoken i
 [[settings]]
 key = "endpoint"
 label = "Service endpoint"
-description = "Vendor deployment the device talks to. Custom overrides it when non-empty."
+description = "Vendor deployment the device talks to. Custom overrides it when non-empty. Test 2 is a plaintext http:// deployment: the session and xtoken travel without TLS, so selecting it logs one warning."
 type = "select"
 default = "prod"
 [[settings.choices]]
@@ -45,7 +45,7 @@ value = "test1"
 label = "Test 1 (vc1.go.mail.ru)"
 [[settings.choices]]
 value = "test2"
-label = "Test 2 (voice-test2.ngx.openstack.go.devmail.ru)"
+label = "Test 2 (voice-test2.ngx.openstack.go.devmail.ru, plaintext http:// — credential sent unencrypted)"
 [[settings.choices]]
 value = "stag1"
 label = "Staging (s1-vc.go.mail.ru)"
@@ -56,7 +56,7 @@ label = "Dev (vc1.go.devmail.ru)"
 [[settings]]
 key = "endpoint_custom"
 label = "Custom base URL"
-description = "Overrides endpoint when non-empty. Must be http:// or https:// with a host and no path, query or fragment."
+description = "Overrides endpoint when non-empty. Must be http:// or https:// with a host and no path, query or fragment. An http:// base sends the session and xtoken without TLS and logs one warning."
 type = "text"
 default = ""
 
@@ -91,7 +91,7 @@ default = "/data/voice-agent/session.json"
 [[settings]]
 key = "serial"
 label = "Device serial override"
-description = "Sent as x-device-sn and as the attach serial. Optional: when empty CAPSULA_DEVICE_SERIAL, framework hardware_serial, then local /proc/cpuinfo supply the SoC serial in that order; this setting always wins."
+description = "Sent as x-device-sn and as the attach serial. Optional: when empty CAPSULAD_DEVICE_SERIAL, framework hardware_serial, then local /proc/cpuinfo supply the SoC serial in that order; this setting always wins."
 type = "text"
 default = ""
 

@@ -320,6 +320,32 @@ func (b *BlueZ) SetIncomingConnections(ctx context.Context, on bool) error {
 	return nil
 }
 
+// SetAdapterName writes Adapter1.Alias. BlueZ persists the alias across
+// restarts and advertises it, so the adapter is not power-cycled and no
+// policy state is touched.
+func (b *BlueZ) SetAdapterName(ctx context.Context, name string) error {
+	trimmed, err := ValidateAdapterName(name)
+	if err != nil {
+		return err
+	}
+	// Resolve the current adapter path first: a BlueZ restart can leave the
+	// cached path stale, and the validation rejection above already avoided
+	// any bus round trip for a bad name.
+	if err := b.refresh(ctx); err != nil {
+		return err
+	}
+	if err := b.setAdapterProperty(ctx, "Alias", trimmed); err != nil {
+		return err
+	}
+	if err := b.refresh(ctx); err != nil {
+		return err
+	}
+	// The Alias PropertiesChanged signal also refreshes, but publishing here
+	// makes the change observable before the watcher re-arms.
+	b.publishAdapterEvent()
+	return nil
+}
+
 // enableIncomingLocked powers the adapter, arms the pairing agent and enables
 // connectability. policyMu must be held.
 func (b *BlueZ) enableIncomingLocked(ctx context.Context) error {

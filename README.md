@@ -8,9 +8,13 @@ local gRPC surface over a Unix socket. Applications are ordinary executables or 
 that talk to that socket through the shared native SDK or a script host; they never listen
 on a socket of their own or write hardware directly.
 
-The supported hardware is the Capsula Mini rev 4 (Rockchip RK3308, aarch64 glibc 2.33).
-A complete virtual backend (`-platform simulator`) implements the same contracts for
-development and tests.
+The only supported hardware configuration is the Capsula Mini rev 4 running the stock
+Rockchip firmware (RK3308, aarch64 glibc 2.33). Its board specifics are inert data in
+`internal/backend/profile`; the backend and deployment layer (`internal/backend/rockchip`,
+`deploy/rockchip-stock`) applies them, and hardware-agnostic packages take the values they
+need from the composition root. A complete virtual backend (`-platform simulator`, neutral
+profile) implements the same contracts for development and tests. Amlogic is unsupported: no
+backend exists and its protocol enum values are reserved.
 
 The administrative CLI is `capsulad-cli` (`capsulad-cli status`, `app`, `deploy`, `auth`,
 `cert`, `settings`, `logs`, `media`, `platform`, `dev`). The daemon-to-app wire protocol may
@@ -21,8 +25,8 @@ version.
 
 ```text
  native apps (Go/Rust/C/C++)  script apps (QuickJS, MicroPython)
-          │ CAPSULA_LIBRARY             │ capsula-quickjs / capsula-micropython
-          └──────── libcapsula ─────────┘
+          │ CAPSULAD_LIBRARY            │ capsulad-quickjs / capsulad-micropython
+          └──────── libcapsulad ────────┘
                           │
         app bus (reverse RPC) + framework calls
                           │
@@ -46,10 +50,15 @@ version.
 - **AppBus reverse RPC.** Each app holds one long-lived `Connect` stream. Routed unary
   and streaming calls reach other apps through `AppBusService.Call`; no app accepts an
   inbound connection.
-- **Shared native SDK.** `libcapsula` is a pure Rust cdylib exposing a frozen C ABI v1
-  through one bounded `capsula_get_api` table. It owns the transport, protobuf/JSON
-  reflection, AppBus sessions, routed calls and the raw-PCM audio path. Thin Go and Rust
-  bindings load it dynamically; C and C++ use the installed header.
+- **Shared native SDK.** `libcapsulad` is a pure Rust cdylib exposing a frozen C ABI v1
+  through one bounded `capsulad_get_api` table. It owns the Unix-socket gRPC engine,
+  protobuf/JSON reflection, AppBus sessions, routed calls, the raw-PCM audio path,
+  outbound HTTP/1.1 over verified TLS, remote gRPC over TLS or h2c, and the
+  encoding/hash/random/URL primitives (base64, percent coding, SHA-256, getrandom,
+  UUIDv4, absolute-URL parsing). ABI 1.0 keeps its identity: the new entry points are
+  appended to the table under the same major version. Thin Go and Rust bindings load it
+  dynamically; C and C++ use the installed header. Native apps should not bundle their
+  own HTTP, TLS or gRPC stack.
 - **Presentations and captures.** Apps open output presentations and acquire routing
   captures. First valid frame makes a presentation eligible; the latest eligible capture
   wins; release, crash and app stop fall back to the selected default baseline.
@@ -67,10 +76,10 @@ version.
   media through the standard media contract over the app bus — routed
   `MediaPlayerService.SkipNext`/`SkipPrevious` for an app provider, otherwise
   `BluetoothMediaService.Command` — never through a private daemon→hardware path.
-- **Built-in clock and ring.** `capsula.clock` and `capsula.ring` are compiled into the
+- **Built-in clock and ring.** `capsulad.clock` and `capsulad.ring` are compiled into the
   daemon as normal registry identities with run lifecycle, settings, routing ownership
   and app-bus endpoints. Their functionality is published as the public contracts
-  `capsula.contracts.clock.v1.ClockService` and `capsula.contracts.ring.v1.RingService`.
+  `capsulad.contracts.clock.v1.ClockService` and `capsulad.contracts.ring.v1.RingService`.
   The clock always runs because it owns the timers, alarms and stopwatch; the ring runs
   only while it is the selected ring/display provider, and neither manifest boot flag nor a
   restart overrides that rule.
@@ -123,14 +132,20 @@ version.
 - **Bluetooth:** BlueZ adapter power, incoming-connections and discoverable policy,
   pairing-agent support, paired-device listing and unpair, AVRCP transport and absolute
   volume, and a native A2DP Sink endpoint with a pure-Go SBC decoder, advertising the spec's
-  four-octet SBC capabilities. After every connection the daemon asserts that a
+  four-octet SBC capabilities. The Settings page edits the advertised Bluetooth name with a
+  pencil button and a modal that validates 1–248 UTF-8 bytes with no control characters; the
+  save writes BlueZ `Adapter1.Alias` without power-cycling the adapter or touching its
+  policy. After every connection the daemon asserts that a
   `MediaTransport1` carrying the A2DP sink UUID exists and performs one disconnect/reconnect
   repair when it does not; a source that never reports absolute volume is reported as such
   instead of accepting a write that cannot reach it. PulseAudio is the fallback owner when
   native registration fails, and its module set is retired as soon as the native sink is
   armed unless it is actively streaming a connected source.
 - **Wi-Fi:** a Linux manager over saved networks, stock `wpa_supplicant.conf` import,
-  bounded startup association and a WPA2 setup AP with a restricted captive portal.
+  bounded startup association and a WPA2 setup AP with a restricted captive portal. The AP
+  takes the live Bluetooth advertised name when it starts and shortens it to the first 32
+  UTF-8 bytes on a rune boundary, because that is the SSID limit; the saved host name is
+  only a fallback for a device without Bluetooth.
 - **Discovery:** Avahi mDNS host name (`<label>.local`), applied idempotently and never
   written when the label is already active.
 - **Personal wakewords:** on-device training and inference over the shared processed
@@ -163,7 +178,7 @@ version.
 ## Application model
 
 An application is a package directory installed under `<data-dir>/apps/<app_id>`, or one of the
-built-in system apps (`capsula.clock`, `capsula.ring`). A package ships as a
+built-in system apps (`capsulad.clock`, `capsulad.ring`). A package ships as a
 deterministic `.tar.gz` whose root entry is
 `manifest.toml`, produced on the build host by the app's build target; `capsulad-cli app
 install` validates the archive and installs it atomically, and `capsulad-cli app remove` deletes
@@ -224,7 +239,7 @@ On the device the data directory is `/data/capsdemo`:
 ```text
 /data/capsdemo/capsulad          daemon
 /data/capsdemo/capsulad-cli      administration CLI
-/data/capsdemo/lib/              libcapsula, capsula-native.json, interpreter hosts, headers
+/data/capsdemo/lib/              libcapsulad, capsulad-native.json, interpreter hosts, headers
 /data/capsdemo/apps/<app_id>/    installed application packages
 /data/capsdemo/assets/           shared asset store, mounted read-only at /assets
 /data/capsdemo/run/hal.sock      framework socket
@@ -237,7 +252,7 @@ On the device the data directory is `/data/capsdemo`:
 once the health gate passes; they are a transient buffer for the deployment in flight.
 
 `make marusia` builds and packages the second optional assistant
-(`build/apps/org.capsula.marusia-<version>.tar.gz`). It has no packaged assets and no
+(`build/apps/org.capsulad.marusia-<version>.tar.gz`). It has no packaged assets and no
 embedded credentials: the reply is a TTS URL fetched at turn time. Its credential is a vendor
 session supplied by the operator: the masked `session_id` and `session_secret` app settings (with
 `device_id` also masked) are the supported path, applied on every settings push without an app
@@ -261,7 +276,7 @@ before the next turn.
 - **Identity, not assertions.** Supervised apps are identified by run ID, peer credentials,
   sandbox UID and supervised PID. A built-in run additionally requires the daemon's
   per-boot token, because every in-process client — the Web UI included — shares the daemon's
-  PID, so a PID match alone never selects `capsula.clock` or `capsula.ring`; the Web UI's own
+  PID, so a PID match alone never selects `capsulad.clock` or `capsulad.ring`; the Web UI's own
   connection stays an administrator. The administrator run table lists each built-in once under
   its own app id with its real state, and launch/stop act on the run of the requested app.
   Omitting a run ID does not grant administrator rights.
@@ -320,8 +335,11 @@ before the next turn.
   on-device recognition after deployment is still to be confirmed by physical presses.
 - **Script hosts inherit the mount-only sandbox.** QuickJS and MicroPython are sandboxed
   exactly like native apps; there is no stronger isolation available.
-- **Amlogic stock and Alpine backends are not implemented.** Selecting them fails with an
-  explicit message. `SystemService.ControlUnit` returns `UNIMPLEMENTED`.
+- **Amlogic is unsupported and has no backend.** `-platform amlogic-stock` and
+  `-platform amlogic-alpine` are rejected as unknown platforms
+  (`unknown platform "…" (simulator, rockchip-stock)`), and the historical
+  `CAPSULA_MINI_AMLOGIC_*` protocol enum values are reserved only: no code path tests them
+  and no parity is claimed. `SystemService.ControlUnit` returns `UNIMPLEMENTED`.
 - **No app-facing Wi-Fi service.** Wi-Fi is owned by the authenticated Web UI and the
   isolated captive portal; apps cannot read or change network configuration.
 - **Bluetooth media has no provider app.** The daemon ships no Bluetooth media application and
@@ -397,8 +415,10 @@ before the next turn.
 | `internal/presentations`, `internal/routing` | dynamic outputs and capture stack |
 | `internal/audio`, `internal/input`, `internal/wakeword` | realtime services |
 | `internal/bluetooth`, `internal/wifi`, `internal/discovery` | BlueZ, Wi-Fi and mDNS integrations |
+| `internal/backend/profile` | data-only board profiles: Rockchip Capsula Mini rev 4 stock and the neutral simulator |
 | `internal/backend/simulator.go` | complete virtual backend |
-| `internal/backend/rockchip` | RK3308 stock backend (vendor LED ABI recovered) |
+| `internal/backend/rockchip` | RK3308 stock backend: board paths, quirks and vendor LED ABI |
+| `internal/backend/rockchip/inspect` | offline stock-firmware inspector |
 | `internal/sandbox` | Linux namespace/UID launcher and runtime discovery |
 | `internal/artifact`, `internal/manifest`, `internal/registry` | package format, manifest schema, installation |
 | `internal/assets` | shared read-only asset store |
@@ -406,7 +426,7 @@ before the next turn.
 | `internal/provenance` | Sigstore/GitHub attestation verification |
 | `internal/webui`, `web` | HTTPS server, embedded SPA and its protobuf WebSocket |
 | `internal/sounds` | embedded framework UI cues and their CC BY-SA `COPYING` |
-| `sdk/native` | Rust shared engine behind the C ABI, header and C example |
+| `sdk/native` | Rust shared engine behind the C ABI: UDS gRPC, HTTP/TLS, remote gRPC, primitives, header and C example |
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
 | `apps/devtools`, `apps/dumbassistant`, `apps/marusia` | development apps and the two optional assistants |
@@ -420,7 +440,7 @@ before the next turn.
 |---|---|
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | prerequisites, build targets, cross builds, packaging, deployment, simulator, tests, admin commands |
 | [docs/app_development/README.md](docs/app_development/README.md) | the application manual: supported targets, prerequisites, a complete native app and the page index |
-| [manifest](docs/app_development/manifest.md), [lifecycle](docs/app_development/lifecycle.md), [sdk](docs/app_development/sdk.md), [app bus](docs/app_development/app-bus.md) | artifact and manifest fields, launch/identity/restart, the native SDK and script hosts, routed calls between apps |
+| [manifest](docs/app_development/manifest.md), [lifecycle](docs/app_development/lifecycle.md), [sdk](docs/app_development/sdk.md), [app bus](docs/app_development/app-bus.md) | artifact and manifest fields, launch/identity/restart, the native SDK including HTTP/TLS, remote gRPC and primitives, and script hosts, routed calls between apps |
 | [services](docs/app_development/services.md), [output & input](docs/app_development/output-input.md), [audio](docs/app_development/audio.md), [settings & actions](docs/app_development/settings-actions.md) | every framework service and method, presentations/captures/keys/gestures, audio streams and indication, typed settings and actions |
 | [assets](docs/app_development/assets.md), [standard contracts](docs/app_development/standard-contracts.md), [packaging & deployment](docs/app_development/packaging-deployment.md), [security](docs/app_development/security.md), [troubleshooting](docs/app_development/troubleshooting.md) | the asset store, clock/ring/media contracts, install and deployment bundles, sandbox and trust boundaries, common failures |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | proof levels, measured device evidence, host-only evidence, unavailable paths and open gates |

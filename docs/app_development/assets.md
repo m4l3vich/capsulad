@@ -8,14 +8,14 @@ root is an asset.
 | Item | Value |
 |---|---|
 | Host directory | `<data-dir>/assets` (on the stock device `/data/capsdemo/assets`) |
-| App environment | `CAPSULA_ASSETS` — `/assets` in namespace sandboxes, the host path in `uid`/`none` modes |
+| App environment | `CAPSULAD_ASSETS` — `/assets` in namespace sandboxes, the host path in `uid`/`none` modes |
 | Canonical app path | `/assets/<asset-id>` |
 | Access | Read-only for every app |
 | Writer | The daemon's session-authenticated Web UI routes only |
 
 How it relates to the package:
 
-- Files inside your package are immutable app data at `/app` (`CAPSULA_APP_DIR`). Use them for
+- Files inside your package are immutable app data at `/app` (`CAPSULAD_APP_DIR`). Use them for
   defaults, templates, icons and fallback audio.
 - The asset store is user-managed media shared by all apps. Use it for recordings, imported
   audio, images and other files a user adds at runtime.
@@ -36,7 +36,7 @@ How it relates to the package:
 
 Entries are sorted by `asset_id`. The store is enumerated on every call, so a file added by an
 administrator or copied onto the device is visible without restarting the daemon. Symlinks,
-directories, special files and in-progress upload staging files (`.capsula-upload-…`) are never
+directories, special files and in-progress upload staging files (`.capsulad-upload-…`) are never
 published. A file that cannot be hashed is skipped rather than reported with a partial hash.
 
 ```json
@@ -61,12 +61,12 @@ var list struct {
         Size      uint64 `json:"sizeBytes"`
     } `json:"assets"`
 }
-err := client.CallJSON(ctx, "", "capsula.framework.v1.AssetService", "ListAssets",
+err := client.CallJSON(ctx, "", "capsulad.framework.v1.AssetService", "ListAssets",
     map[string]any{"prefix": "audio/"}, &list, 0)
 if err != nil {
     log.Fatalf("list assets: %v", err)
 }
-root := os.Getenv("CAPSULA_ASSETS") // "/assets" inside the sandbox
+root := os.Getenv("CAPSULAD_ASSETS") // "/assets" inside the sandbox
 for _, a := range list.Assets {
     pcm, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(a.AssetID)))
     if err != nil {
@@ -80,7 +80,7 @@ for _, a := range list.Assets {
 A shell or Python app uses the same path:
 
 ```sh
-ls "$CAPSULA_ASSETS/audio"
+ls "$CAPSULAD_ASSETS/audio"
 ```
 
 ## Media types
@@ -132,7 +132,7 @@ missing asset, `403` for a permission problem, `507` when the device filesystem 
 | Asset ID | 4096 bytes |
 | One path component | 255 bytes |
 | Separator | `/` only; backslashes are rejected |
-| Reserved | Components beginning `.capsula-upload-` |
+| Reserved | Components beginning `.capsulad-upload-` |
 | Rejected components | absolute paths, empty components, `.`, `..`, NUL bytes |
 
 Parent directories are created as needed. An existing parent that is a symlink or not a
@@ -166,7 +166,7 @@ setting is empty or the file has disappeared.
 | Limit | Current behavior |
 |---|---|
 | App writes to `/assets` | Not possible; the mount is read-only. |
-| Asset download API | None. Read the file from `CAPSULA_ASSETS`. |
+| Asset download API | None. Read the file from `CAPSULAD_ASSETS`. |
 | Content sniffing | None; media type follows the extension. |
 | Per-app asset visibility | None; every app sees the whole store. |
 | Directory removal | Not exposed. Empty directories may remain after deletes. |

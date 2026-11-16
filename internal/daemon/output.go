@@ -4,7 +4,7 @@ import (
 	"slices"
 	"time"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"

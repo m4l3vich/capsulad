@@ -50,13 +50,13 @@ func defaultKeyMap() keyMap {
 // semantic name using the node name and label. Node names are authoritative
 // because the two stock DTBs use different labels ("happy" vs "GPIO Volume
 // Voice-assistant") for the same unmarked centre key.
-func probeKeyMap(prefix string) keyMap {
+func probeKeyMap(prefix, compatible string) keyMap {
 	keys := defaultKeyMap()
 	base := deviceTreeBase(prefix)
 	if base == "" {
 		return keys
 	}
-	node := findCompatible(base, "gpio-keys")
+	node := findCompatible(base, compatible)
 	if node == "" {
 		return keys
 	}

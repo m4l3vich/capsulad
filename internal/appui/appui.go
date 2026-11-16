@@ -48,8 +48,8 @@ var builtinDocuments = map[string]struct {
 	file string
 	doc  []byte
 }{
-	"capsula.clock": {"clock.html", clockHTML},
-	"capsula.ring":  {"ring.html", ringHTML},
+	"capsulad.clock": {"clock.html", clockHTML},
+	"capsulad.ring":  {"ring.html", ringHTML},
 }
 
 // BuiltinHTML returns the embedded document for a compiled-in application.
@@ -88,7 +88,7 @@ func HeaderContentSecurityPolicy() string {
 // local JavaScript; neither performs network I/O.
 func WrapDocument(doc []byte) []byte {
 	payload := fmt.Sprintf(
-		"<meta http-equiv=\"Content-Security-Policy\" content=\"%s\">\n<style id=\"capsula-ui-kit\">\n%s\n</style>\n<script id=\"capsula-ui-bridge\">\n%s\n</script>\n",
+		"<meta http-equiv=\"Content-Security-Policy\" content=\"%s\">\n<style id=\"capsulad-ui-kit\">\n%s\n</style>\n<script id=\"capsulad-ui-bridge\">\n%s\n</script>\n",
 		ContentSecurityPolicy, kitCSS, bridgeJS)
 
 	lower := bytes.ToLower(doc)

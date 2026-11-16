@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/daemon"
 )
 
@@ -24,7 +24,7 @@ import (
 func checkHealth(cfg daemon.Config) int {
 	dataDir := cfg.DataDir
 	if dataDir == "" {
-		dataDir = ".capsula"
+		dataDir = ".capsulad"
 	}
 	socket := cfg.SocketPath
 	if socket == "" {

@@ -27,7 +27,7 @@
 package servicepb
 
 import (
-	clientprobepb "capsula/apps/marusia/internal/vkproto/clientprobepb"
+	clientprobepb "capsulad/apps/marusia/internal/vkproto/clientprobepb"
 	context "context"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"

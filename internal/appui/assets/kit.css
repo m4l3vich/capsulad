@@ -1,8 +1,8 @@
 /*
- * Capsula system UI kit for application settings documents.
+ * Capsulad system UI kit for application settings documents.
  *
  * Injected by the daemon into every settings document. It is local CSS only:
- * no fonts, images, imports or network requests. Use the .capsula-ui wrapper
+ * no fonts, images, imports or network requests. Use the .capsulad-ui wrapper
  * (or body) and the documented classes. Version 1.
  */
 
@@ -39,34 +39,34 @@ body {
   padding: 0;
 }
 
-.capsula-ui { display: block; max-width: 100%; }
-.capsula-ui h2 { margin: 0 0 10px; font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
-.capsula-ui h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
-.capsula-ui p { margin: 0 0 10px; max-width: 68ch; }
-.capsula-ui small, .capsula-ui .hint { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.capsula-ui .mono, .capsula-ui code { font-family: var(--mono); font-size: 12px; }
+.capsulad-ui { display: block; max-width: 100%; }
+.capsulad-ui h2 { margin: 0 0 10px; font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.capsulad-ui h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.capsulad-ui p { margin: 0 0 10px; max-width: 68ch; }
+.capsulad-ui small, .capsulad-ui .hint { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.capsulad-ui .mono, .capsulad-ui code { font-family: var(--mono); font-size: 12px; }
 
-.capsula-ui .card {
+.capsulad-ui .card {
   background: var(--surface);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   padding: 14px;
 }
-.capsula-ui .card + .card { margin-top: 12px; }
-.capsula-ui .stack { display: flex; flex-direction: column; gap: 12px; }
-.capsula-ui .row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
-.capsula-ui .row > * { min-width: 0; }
-.capsula-ui .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.capsula-ui .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.capsulad-ui .card + .card { margin-top: 12px; }
+.capsulad-ui .stack { display: flex; flex-direction: column; gap: 12px; }
+.capsulad-ui .row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.capsulad-ui .row > * { min-width: 0; }
+.capsulad-ui .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.capsulad-ui .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
-.capsula-ui .field { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
-.capsula-ui label { color: var(--muted); font-size: 12.5px; }
-.capsula-ui label.check {
+.capsulad-ui .field { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+.capsulad-ui label { color: var(--muted); font-size: 12.5px; }
+.capsulad-ui label.check {
   display: inline-flex; align-items: center; gap: 8px;
   color: var(--fg); font-size: 13px; cursor: pointer;
 }
 
-.capsula-ui input, .capsula-ui select, .capsula-ui textarea {
+.capsulad-ui input, .capsulad-ui select, .capsulad-ui textarea {
   background: var(--surface-2);
   color: var(--fg);
   border: 1px solid var(--line);
@@ -75,19 +75,19 @@ body {
   font: inherit;
   min-height: 34px;
 }
-.capsula-ui input[type="number"] { width: 110px; }
-.capsula-ui input[type="time"] { width: 118px; }
-.capsula-ui input[type="range"] { min-height: 24px; padding: 0; accent-color: var(--accent); }
-.capsula-ui input[type="color"] { padding: 2px; width: 44px; height: 34px; }
-.capsula-ui input:focus-visible, .capsula-ui select:focus-visible, .capsula-ui textarea:focus-visible,
-.capsula-ui button:focus-visible {
+.capsulad-ui input[type="number"] { width: 110px; }
+.capsulad-ui input[type="time"] { width: 118px; }
+.capsulad-ui input[type="range"] { min-height: 24px; padding: 0; accent-color: var(--accent); }
+.capsulad-ui input[type="color"] { padding: 2px; width: 44px; height: 34px; }
+.capsulad-ui input:focus-visible, .capsulad-ui select:focus-visible, .capsulad-ui textarea:focus-visible,
+.capsulad-ui button:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 1px;
 }
-.capsula-ui input:disabled, .capsula-ui select:disabled, .capsula-ui textarea:disabled { opacity: 0.55; }
-.capsula-ui textarea { min-height: 76px; resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+.capsulad-ui input:disabled, .capsulad-ui select:disabled, .capsulad-ui textarea:disabled { opacity: 0.55; }
+.capsulad-ui textarea { min-height: 76px; resize: vertical; font-family: var(--mono); font-size: 12.5px; }
 
-.capsula-ui button {
+.capsulad-ui button {
   background: var(--accent);
   color: #14100a;
   border: 1px solid transparent;
@@ -98,16 +98,16 @@ body {
   cursor: pointer;
   min-height: 34px;
 }
-.capsula-ui button:hover { background: var(--accent-strong); }
-.capsula-ui button:disabled { opacity: 0.5; cursor: not-allowed; }
-.capsula-ui button.secondary { background: var(--surface-3); color: var(--fg); border-color: var(--line); }
-.capsula-ui button.secondary:hover { background: var(--line); }
-.capsula-ui button.ghost { background: transparent; color: var(--muted); border-color: transparent; }
-.capsula-ui button.ghost:hover { color: var(--fg); background: var(--surface-2); }
-.capsula-ui button.danger { background: transparent; color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
-.capsula-ui button.danger:hover { background: color-mix(in srgb, var(--err) 14%, transparent); }
+.capsulad-ui button:hover { background: var(--accent-strong); }
+.capsulad-ui button:disabled { opacity: 0.5; cursor: not-allowed; }
+.capsulad-ui button.secondary { background: var(--surface-3); color: var(--fg); border-color: var(--line); }
+.capsulad-ui button.secondary:hover { background: var(--line); }
+.capsulad-ui button.ghost { background: transparent; color: var(--muted); border-color: transparent; }
+.capsulad-ui button.ghost:hover { color: var(--fg); background: var(--surface-2); }
+.capsulad-ui button.danger { background: transparent; color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.capsulad-ui button.danger:hover { background: color-mix(in srgb, var(--err) 14%, transparent); }
 
-.capsula-ui .pill {
+.capsulad-ui .pill {
   display: inline-flex; align-items: center; gap: 5px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -115,11 +115,11 @@ body {
   font-size: 11.5px;
   color: var(--muted);
 }
-.capsula-ui .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
-.capsula-ui .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
-.capsula-ui .pill.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.capsulad-ui .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.capsulad-ui .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.capsulad-ui .pill.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
 
-.capsula-ui .notice {
+.capsulad-ui .notice {
   border: 1px solid var(--line);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius-sm);
@@ -127,52 +127,52 @@ body {
   padding: 8px 10px;
   font-size: 12.5px;
 }
-.capsula-ui .notice.err { border-left-color: var(--err); color: var(--err); }
-.capsula-ui .notice.ok { border-left-color: var(--ok); color: var(--ok); }
+.capsulad-ui .notice.err { border-left-color: var(--err); color: var(--err); }
+.capsulad-ui .notice.ok { border-left-color: var(--ok); color: var(--ok); }
 
-.capsula-ui table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.capsula-ui th {
+.capsulad-ui table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.capsulad-ui th {
   text-align: left; color: var(--faint); font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 8px;
   border-bottom: 1px solid var(--line);
 }
-.capsula-ui td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
-.capsula-ui tr:last-child td { border-bottom: 0; }
+.capsulad-ui td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.capsulad-ui tr:last-child td { border-bottom: 0; }
 
-.capsula-ui .alarm-list { display: flex; flex-direction: column; gap: 8px; }
-.capsula-ui .alarm-item {
+.capsulad-ui .alarm-list { display: flex; flex-direction: column; gap: 8px; }
+.capsulad-ui .alarm-item {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
   background: var(--surface-2); padding: 8px 10px;
 }
-.capsula-ui .alarm-item .time { font-family: var(--mono); font-size: 16px; color: var(--fg); }
-.capsula-ui .days { display: flex; flex-wrap: wrap; gap: 2px; }
-.capsula-ui .days label {
+.capsulad-ui .alarm-item .time { font-family: var(--mono); font-size: 16px; color: var(--fg); }
+.capsulad-ui .days { display: flex; flex-wrap: wrap; gap: 2px; }
+.capsulad-ui .days label {
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; border-radius: 50%;
   border: 1px solid var(--line); background: var(--surface-3);
   color: var(--muted); cursor: pointer; font-size: 11px;
 }
-.capsula-ui .days input { position: absolute; opacity: 0; pointer-events: none; }
-.capsula-ui .days label:has(input:checked) { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-dim); }
+.capsulad-ui .days input { position: absolute; opacity: 0; pointer-events: none; }
+.capsulad-ui .days label:has(input:checked) { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-dim); }
 
-.capsula-ui .swatches { display: flex; flex-wrap: wrap; gap: 8px; }
-.capsula-ui .swatch {
+.capsulad-ui .swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.capsulad-ui .swatch {
   width: 32px; height: 32px; border-radius: 50%;
   border: 2px solid var(--line); padding: 0; min-height: 0; cursor: pointer;
 }
-.capsula-ui .swatch.selected { border-color: var(--fg); }
+.capsulad-ui .swatch.selected { border-color: var(--fg); }
 
-.capsula-ui .gradient-preview {
+.capsulad-ui .gradient-preview {
   height: 42px; border-radius: var(--radius-sm);
   border: 1px solid var(--line); background: var(--surface-3);
 }
-.capsula-ui .stop-row {
+.capsulad-ui .stop-row {
   display: grid; grid-template-columns: 44px minmax(90px, 1fr) 100px auto; gap: 8px; align-items: center;
 }
-.capsula-ui .grow { flex: 1 1 auto; }
-.capsula-ui .wrap { overflow-wrap: anywhere; }
-.capsula-ui .sr-only {
+.capsulad-ui .grow { flex: 1 1 auto; }
+.capsulad-ui .wrap { overflow-wrap: anywhere; }
+.capsulad-ui .sr-only {
   position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap;
 }

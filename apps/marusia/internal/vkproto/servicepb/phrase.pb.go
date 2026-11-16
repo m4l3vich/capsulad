@@ -29,7 +29,7 @@
 package servicepb
 
 import (
-	phrasepb "capsula/apps/marusia/internal/vkproto/phrasepb"
+	phrasepb "capsulad/apps/marusia/internal/vkproto/phrasepb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

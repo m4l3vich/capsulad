@@ -115,12 +115,12 @@ func TestAssetsRequireBrowserSessionAndCSRF(t *testing.T) {
 		t.Fatalf("upload without CSRF = %d %v, want 403", code, body)
 	}
 	code, body = rawRequest(t, c, http.MethodPost, env.ts.URL+"/api/assets?path=a.wav", strings.NewReader("x"), "application/octet-stream",
-		map[string]string{"X-Capsula-CSRF": token, "Origin": "https://attacker.example"})
+		map[string]string{"X-Capsulad-CSRF": token, "Origin": "https://attacker.example"})
 	if code != http.StatusForbidden {
 		t.Fatalf("cross-origin upload = %d %v, want 403", code, body)
 	}
 	code, body = rawRequest(t, c, http.MethodPost, env.ts.URL+"/api/assets?path=audio/a.wav", strings.NewReader("x"), "application/octet-stream",
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("raw upload with header CSRF = %d %v", code, body)
 	}
@@ -132,7 +132,7 @@ func TestAssetsRequireBrowserSessionAndCSRF(t *testing.T) {
 		t.Fatalf("delete without CSRF = %d %v, want 403", code, body)
 	}
 	code, body = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/a.wav", nil, "",
-		map[string]string{"X-Capsula-CSRF": token, "Origin": "https://attacker.example"})
+		map[string]string{"X-Capsulad-CSRF": token, "Origin": "https://attacker.example"})
 	if code != http.StatusForbidden {
 		t.Fatalf("cross-origin delete = %d %v, want 403", code, body)
 	}
@@ -140,7 +140,7 @@ func TestAssetsRequireBrowserSessionAndCSRF(t *testing.T) {
 		t.Fatalf("rejected delete removed the file: %v", err)
 	}
 	code, body = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/a.wav", nil, "",
-		map[string]string{"X-Capsula-CSRF": token})
+		map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("CSRF-bearing delete = %d %v", code, body)
 	}
@@ -154,7 +154,7 @@ func TestAssetsUploadListOverwriteDelete(t *testing.T) {
 
 	wav := []byte("RIFF-test-wave")
 	code, body := rawRequest(t, c, http.MethodPost, env.ts.URL+"/api/assets?path=audio/replies/hello.wav",
-		bytes.NewReader(wav), "audio/wav", map[string]string{"X-Capsula-CSRF": token})
+		bytes.NewReader(wav), "audio/wav", map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("upload = %d %v", code, body)
 	}
@@ -181,7 +181,7 @@ func TestAssetsUploadListOverwriteDelete(t *testing.T) {
 
 	// Another file in a sibling directory keeps the listing recursive.
 	code, body = rawRequest(t, c, http.MethodPost, env.ts.URL+"/api/assets?path=images/logo.png",
-		strings.NewReader("png"), "image/png", map[string]string{"X-Capsula-CSRF": token})
+		strings.NewReader("png"), "image/png", map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("second upload = %d %v", code, body)
 	}
@@ -192,26 +192,26 @@ func TestAssetsUploadListOverwriteDelete(t *testing.T) {
 	// Overwrite is atomic and updates the hash without leaving staging files.
 	replacement := []byte("RIFF-replaced")
 	code, body = rawRequest(t, c, http.MethodPost, env.ts.URL+"/api/assets?path=audio/replies/hello.wav",
-		bytes.NewReader(replacement), "audio/wav", map[string]string{"X-Capsula-CSRF": token})
+		bytes.NewReader(replacement), "audio/wav", map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("overwrite = %d %v", code, body)
 	}
 	if entry = assetEntry(t, body); entry["sha256"] == hex.EncodeToString(sum[:]) {
 		t.Fatalf("overwrite kept the old hash: %v", entry)
 	}
-	staged, err := filepath.Glob(filepath.Join(root, "audio", "replies", ".capsula-upload-*"))
+	staged, err := filepath.Glob(filepath.Join(root, "audio", "replies", ".capsulad-upload-*"))
 	if err != nil || len(staged) != 0 {
 		t.Fatalf("staging files survived: %v %v", staged, err)
 	}
 
-	code, body = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/replies/hello.wav", nil, "", map[string]string{"X-Capsula-CSRF": token})
+	code, body = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/replies/hello.wav", nil, "", map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusOK {
 		t.Fatalf("delete = %d %v", code, body)
 	}
 	if _, err := os.Stat(filepath.Join(root, "audio", "replies", "hello.wav")); !os.IsNotExist(err) {
 		t.Fatalf("file survived delete: %v", err)
 	}
-	code, _ = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/replies/hello.wav", nil, "", map[string]string{"X-Capsula-CSRF": token})
+	code, _ = rawRequest(t, c, http.MethodDelete, env.ts.URL+"/api/assets?path=audio/replies/hello.wav", nil, "", map[string]string{"X-Capsulad-CSRF": token})
 	if code != http.StatusNotFound {
 		t.Fatalf("second delete = %d, want 404", code)
 	}
@@ -261,7 +261,7 @@ func TestAssetsRejectTraversalAbsoluteReservedSymlinkAndOversize(t *testing.T) {
 	c := env.client(t)
 	loginSession(t, env, c)
 	token := csrfToken(t, c, env.ts.URL)
-	headers := map[string]string{"X-Capsula-CSRF": token}
+	headers := map[string]string{"X-Capsulad-CSRF": token}
 
 	outsideDir := t.TempDir()
 	outside := filepath.Join(outsideDir, "secret.wav")
@@ -274,7 +274,7 @@ func TestAssetsRejectTraversalAbsoluteReservedSymlinkAndOversize(t *testing.T) {
 
 	for _, target := range []string{
 		"../escape.wav", "/etc/passwd", "audio/../../escape.wav", `audio\escape.wav`,
-		".capsula-upload-123", "audio//double.wav", "./dot.wav", "linkdir/inner.wav",
+		".capsulad-upload-123", "audio//double.wav", "./dot.wav", "linkdir/inner.wav",
 	} {
 		code, body := rawRequest(t, c, http.MethodPost,
 			env.ts.URL+"/api/assets?path="+url.QueryEscape(target), strings.NewReader("x"), "application/octet-stream", headers)
@@ -315,7 +315,7 @@ func TestAssetsRejectTraversalAbsoluteReservedSymlinkAndOversize(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "big.bin")); !os.IsNotExist(err) {
 		t.Fatalf("oversized file was published: %v", err)
 	}
-	staged, err := filepath.Glob(filepath.Join(root, ".capsula-upload-*"))
+	staged, err := filepath.Glob(filepath.Join(root, ".capsulad-upload-*"))
 	if err != nil || len(staged) != 0 {
 		t.Fatalf("oversized upload left staging files: %v %v", staged, err)
 	}
@@ -355,10 +355,10 @@ func TestAssetErrorsMapStorageExhaustion(t *testing.T) {
 		},
 		{
 			name:   "unexpected io failure",
-			err:    fmt.Errorf("/var/lib/capsula/assets: %w", errors.New("boom")),
+			err:    fmt.Errorf("/var/lib/capsulad/assets: %w", errors.New("boom")),
 			status: http.StatusInternalServerError,
 			want:   "asset store operation failed",
-			leak:   "/var/lib/capsula",
+			leak:   "/var/lib/capsulad",
 		},
 	}
 	for _, tc := range cases {

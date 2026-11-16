@@ -1,8 +1,8 @@
 # Framework services
 
-Every framework method lives on the single local Unix socket (`CAPSULA_SOCKET`, mounted at
+Every framework method lives on the single local Unix socket (`CAPSULAD_SOCKET`, mounted at
 `/run/capsulad/hal.sock` inside a sandbox). There is no network listener and no per-app port.
-Services are grouped by concern; all types named here are `capsula.framework.v1` messages
+Services are grouped by concern; all types named here are `capsulad.framework.v1` messages
 unless a fully qualified contract name is given.
 
 ## Access model
@@ -22,7 +22,7 @@ runs inside the daemon, so its run records the daemon's own PID — the same PID
 connection the daemon opens to its own socket, including the Web UI's. A virtual run is
 claimed only by its stable run ID together with the daemon's per-boot internal token, which
 only the daemon itself holds; a peer that merely shares the daemon PID (the Web UI,
-`capsulad-cli`, a framework cue) is an administrator, never `capsula.clock` or `capsula.ring`.
+`capsulad-cli`, a framework cue) is an administrator, never `capsulad.clock` or `capsulad.ring`.
 
 | Service | App access |
 |---|---|
@@ -63,7 +63,7 @@ only the daemon itself holds; a peer that merely shares the daemon PID (the Web 
 | `firmware` | string | Firmware description. |
 | `daemon_version` | string | Running `capsulad` version. |
 | `boot_id` | string | Boot identity; changes on restart. |
-| `target_platform` | enum | `CAPSULA_MINI_ROCKCHIP_STOCK`, `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE`, or `TARGET_PLATFORM_UNSPECIFIED` for the simulator. The Amlogic values are defined by the protocol but no Amlogic backend exists in this build; see [README.md](README.md). |
+| `target_platform` | enum | `CAPSULA_MINI_ROCKCHIP_STOCK`, or `TARGET_PLATFORM_UNSPECIFIED` for the simulator. `CAPSULA_MINI_AMLOGIC_STOCK` and `CAPSULA_MINI_AMLOGIC_ALPINE` are defined but unsupported/reserved wire values: this build has no Amlogic platform constant or backend, so no daemon reports them and `-platform` rejects them. |
 | `subsystem_backends` | `BackendAvailability[]` | `{subsystem, backend_id, status, detail}`; status is `BACKEND_AVAILABLE`, `BACKEND_PARTIAL`, `BACKEND_UNAVAILABLE` or `BACKEND_UNVERIFIED`. |
 | `hardware_serial` | string | The SoC serial as the host kernel reports it (`/proc/cpuinfo` `Serial` on ARM), read once by the daemon at startup. Empty when the host cannot report it. It is not a secret and it is not the vendor-compatible `device_id`. |
 
@@ -72,7 +72,7 @@ device does not, so `/proc/cpuinfo` is unreadable inside an app. `hardware_seria
 therefore the supported way for an app to obtain the SoC serial the framework can read;
 never parse `/proc` yourself, and never substitute `device_id` for a serial value. `hardware_serial`
 is authoritative in the protocol, but apps whose native runtime predates this field must use
-`CAPSULA_DEVICE_SERIAL`.
+`CAPSULAD_DEVICE_SERIAL`.
 
 `ResourceInfo`:
 
@@ -91,7 +91,7 @@ is authoritative in the protocol, but apps whose native runtime predates this fi
 
 ```text
 # JSON request for a unary call
-capsula.call("capsula.framework.v1.DeviceService", "ListResources", {})
+capsulad.call("capsulad.framework.v1.DeviceService", "ListResources", {})
 ```
 
 ## SettingsService
@@ -354,7 +354,7 @@ no child process of its own (`runtime = RUNTIME_BUILTIN`); never treat `pid` as 
 
 An app calling `ListRuns`/`WatchRuns` for another `app_id` gets `PERMISSION_DENIED`. An
 administrator listing is the complete run table: every live run appears once under its own
-`app_id` with its real `state`, and the compiled-in `capsula.clock` and `capsula.ring` runs are
+`app_id` with its real `state`, and the compiled-in `capsulad.clock` and `capsulad.ring` runs are
 ordinary entries with their stable `builtin:<app_id>` run IDs. A run whose state is not
 `APP_READY` (starting, stopping, exited, failed) is never "running the app": it cannot serve its
 declared interfaces, and a Web UI provider needs `APP_READY`.
@@ -501,11 +501,11 @@ changes nothing for the speaker: the refused write is logged once per session an
 local. An app that needs the current level reads `AudioService.GetAudioState`, and setting it is
 administrator-only.
 
-The daemon also publishes this source in the browser protocol (`capsula.web.v1`) as a media
+The daemon also publishes this source in the browser protocol (`capsulad.web.v1`) as a media
 provider, and that provider is framework-owned rather than an app: `MediaProviderView.kind` is
 `MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA` with an empty `app_id`, one player `bluetooth`
 while a source is connected and none otherwise, and its commands are this service's `Command`.
-An installed or compiled-in app that declares `capsula.contracts.media.v1.MediaPlayerService`
+An installed or compiled-in app that declares `capsulad.contracts.media.v1.MediaPlayerService`
 is listed as `MEDIA_PROVIDER_KIND_APP` with its `app_id`. The kind is additive: a client that
 predates it reads `MEDIA_PROVIDER_KIND_APP` and addresses providers by `app_id`. `BluetoothMediaService`
 itself is unchanged by that view — it has no app identity, no run and no declared interface, so an
@@ -540,7 +540,7 @@ opened_monotonic_ns}), monotonic_time_ns}`.
 `ListAssetsRequest` = `{prefix}`; an empty prefix lists everything and a `/assets/…` prefix is
 accepted as an alias. `SharedAssetInfo` = `{asset_id, path, media_type, sha256_hex, size_bytes}`;
 `path` is the canonical `/assets/<asset_id>` location. Contents are never returned: read the
-file from the mount named by `CAPSULA_ASSETS`.
+file from the mount named by `CAPSULAD_ASSETS`.
 
 See [assets.md](assets.md).
 

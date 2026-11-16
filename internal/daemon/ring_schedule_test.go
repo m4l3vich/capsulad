@@ -8,7 +8,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	ringv1 "capsulad/gen/go/capsula/contracts/ring/v1"
+	ringv1 "capsulad/gen/go/capsulad/contracts/ring/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"

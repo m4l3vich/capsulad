@@ -1,23 +1,23 @@
-// Capsula C++ consumer example.
+// Capsulad C++ consumer example.
 //
 // This is intentionally an example, not a second SDK: it uses the installed
-// capsula/capsula.h and resolves libcapsula dynamically with dlopen, exactly like a
+// capsulad/capsulad.h and resolves libcapsulad dynamically with dlopen, exactly like a
 // native app that was not linked against the shared engine. RAII guards close
 // clients, calls and buses; buffers are always returned through buf_free.
 //
-// Build (canonical installed header is build/include/capsula/capsula.h):
-//   c++ -std=c++17 -pthread -I build/include sdk/cpp/example.cpp -o build/capsula-cpp-example -ldl
+// Build (canonical installed header is build/include/capsulad/capsulad.h):
+//   c++ -std=c++17 -pthread -I build/include sdk/cpp/example.cpp -o build/capsulad-cpp-example -ldl
 //
 // Run:
-//   export CAPSULA_LIBRARY=$PWD/build/lib/libcapsula.so.1
-//   export CAPSULA_SOCKET=/run/capsulad/hal.sock
-//   export CAPSULA_RUN_ID=run-...
-//   ./build/capsula-cpp-example capsula.framework.v1.DeviceService GetInfo '{}'
+//   export CAPSULAD_LIBRARY=$PWD/build/lib/libcapsulad.so.1
+//   export CAPSULAD_SOCKET=/run/capsulad/hal.sock
+//   export CAPSULAD_RUN_ID=run-...
+//   ./build/capsulad-cpp-example capsulad.framework.v1.DeviceService GetInfo '{}'
 //
-// Set CAPSULA_BUS=1 to open the AppBus, print events, echo routed calls and
-// wait for disconnect. Set CAPSULA_STREAM=1 for a server-streaming call.
+// Set CAPSULAD_BUS=1 to open the AppBus, print events, echo routed calls and
+// wait for disconnect. Set CAPSULAD_STREAM=1 for a server-streaming call.
 
-#include <capsula/capsula.h>
+#include <capsulad/capsulad.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -46,11 +46,11 @@ class CapsuleError : public std::runtime_error {
 };
 
 [[noreturn]] void fail(const std::string& message) {
-  throw std::runtime_error("capsula: " + message);
+  throw std::runtime_error("capsulad: " + message);
 }
 
-void check(const capsula_api* api, int32_t status, const char* what) {
-  if (status == CAPSULA_STATUS_OK) return;
+void check(const capsulad_api* api, int32_t status, const char* what) {
+  if (status == CAPSULAD_STATUS_OK) return;
   const char* detail = api->last_error ? api->last_error() : nullptr;
   std::string message = std::string(what) + ": status " + std::to_string(status);
   if (detail != nullptr && *detail != '\0') {
@@ -68,16 +68,16 @@ std::string env_or(const char* name, const char* fallback) {
 
 const char* default_soname() {
 #if defined(__APPLE__)
-  return "libcapsula.1.dylib";
+  return "libcapsulad.1.dylib";
 #else
-  return "libcapsula.so.1";
+  return "libcapsulad.so.1";
 #endif
 }
 
 std::string default_library_path() {
-  const std::string explicit_path = env_or("CAPSULA_LIBRARY", "");
+  const std::string explicit_path = env_or("CAPSULAD_LIBRARY", "");
   if (!explicit_path.empty()) return explicit_path;
-  const std::string dir = env_or("CAPSULA_LIBRARY_DIR", "");
+  const std::string dir = env_or("CAPSULAD_LIBRARY_DIR", "");
   if (!dir.empty()) return dir + "/" + default_soname();
   return default_soname();
 }
@@ -104,7 +104,7 @@ class Library {
   // Process-lifetime residency: never dlclose an initialized engine.
   ~Library() = default;
 
-  const capsula_api* api() const { return &api_; }
+  const capsulad_api* api() const { return &api_; }
 
   static Library load() {
     const std::string path = default_library_path();
@@ -115,20 +115,20 @@ class Library {
       fail("dlopen " + path + ": " + (error != nullptr ? error : "unknown"));
     }
 
-    using GetApiFn = int32_t (*)(uint32_t, size_t, capsula_api*);
+    using GetApiFn = int32_t (*)(uint32_t, size_t, capsulad_api*);
     auto get_api =
-        reinterpret_cast<GetApiFn>(dlsym(library.handle_, "capsula_get_api"));
+        reinterpret_cast<GetApiFn>(dlsym(library.handle_, "capsulad_get_api"));
     if (get_api == nullptr) {
-      fail(path + " does not export capsula_get_api");
+      fail(path + " does not export capsulad_get_api");
     }
     std::memset(&library.api_, 0, sizeof(library.api_));
     const int32_t status =
-        get_api(CAPSULA_ABI_MAJOR, sizeof(library.api_), &library.api_);
-    if (status != CAPSULA_STATUS_OK) {
+        get_api(CAPSULAD_ABI_MAJOR, sizeof(library.api_), &library.api_);
+    if (status != CAPSULAD_STATUS_OK) {
       fail(path + " rejected ABI v1: status " + std::to_string(status));
     }
-    if (library.api_.abi_major != CAPSULA_ABI_MAJOR ||
-        library.api_.struct_size < sizeof(capsula_api)) {
+    if (library.api_.abi_major != CAPSULAD_ABI_MAJOR ||
+        library.api_.struct_size < sizeof(capsulad_api)) {
       fail(path + " returned an incompatible ABI table");
     }
     require(library.api_);
@@ -136,7 +136,7 @@ class Library {
   }
 
  private:
-  static void require(const capsula_api& api) {
+  static void require(const capsulad_api& api) {
     if (api.client_connect == nullptr || api.client_close == nullptr ||
         api.client_unary == nullptr || api.call_start == nullptr ||
         api.call_send_json == nullptr || api.call_send_proto == nullptr ||
@@ -152,11 +152,11 @@ class Library {
   }
 
   void* handle_ = nullptr;
-  capsula_api api_{};
+  capsulad_api api_{};
 };
 
 // Copies and releases one native buffer.
-std::string take_buf(const capsula_api* api, capsula_buf buf) {
+std::string take_buf(const capsulad_api* api, capsulad_buf buf) {
   std::string out;
   if (buf.data != nullptr && buf.len != 0) {
     out.assign(reinterpret_cast<const char*>(buf.data), buf.len);
@@ -166,8 +166,8 @@ std::string take_buf(const capsula_api* api, capsula_buf buf) {
 }
 
 struct BufGuard {
-  const capsula_api* api;
-  capsula_buf buf{};
+  const capsulad_api* api;
+  capsulad_buf buf{};
   ~BufGuard() {
     if (api != nullptr) api->buf_free(buf);
   }
@@ -175,7 +175,7 @@ struct BufGuard {
 
 class Call {
  public:
-  Call(const capsula_api* api, capsula_handle handle, bool owns_reference)
+  Call(const capsulad_api* api, capsulad_handle handle, bool owns_reference)
       : api_(api), handle_(handle), owns_reference_(owns_reference) {}
   Call(const Call&) = delete;
   Call& operator=(const Call&) = delete;
@@ -197,7 +197,7 @@ class Call {
   }
   ~Call() { release(); }
 
-  capsula_handle handle() const { return handle_; }
+  capsulad_handle handle() const { return handle_; }
 
   Call retain() const {
     check(api_, api_->call_retain(handle_), "call_retain");
@@ -241,19 +241,19 @@ class Call {
   }
 
  private:
-  using RecvFn = int32_t (*)(capsula_handle, uint32_t, capsula_buf*);
+  using RecvFn = int32_t (*)(capsulad_handle, uint32_t, capsulad_buf*);
 
   std::optional<std::string> recv(RecvFn fn, uint32_t timeout_ms,
                                   const char* what) const {
-    capsula_buf out{};
+    capsulad_buf out{};
     const int32_t status = fn(handle_, timeout_ms, &out);
-    if (status == CAPSULA_STATUS_OK) return take_buf(api_, out);
-    if (status == CAPSULA_STATUS_END_OF_STREAM) {
+    if (status == CAPSULAD_STATUS_OK) return take_buf(api_, out);
+    if (status == CAPSULAD_STATUS_END_OF_STREAM) {
       api_->buf_free(out);
       return std::nullopt;
     }
     BufGuard guard{api_, out};
-    if (status == CAPSULA_STATUS_GRPC) {
+    if (status == CAPSULAD_STATUS_GRPC) {
       throw CapsuleError(status, std::string(what) + ": " + grpc_detail());
     }
     check(api_, status, what);
@@ -262,10 +262,10 @@ class Call {
 
   std::string grpc_detail() const {
     int32_t code = -1;
-    capsula_buf detail{};
+    capsulad_buf detail{};
     const int32_t status = api_->call_status(handle_, &code, &detail);
     const std::string text = take_buf(api_, detail);
-    if (status != CAPSULA_STATUS_OK) return "gRPC " + std::to_string(code);
+    if (status != CAPSULAD_STATUS_OK) return "gRPC " + std::to_string(code);
     return "gRPC " + std::to_string(code) + ": " + text;
   }
 
@@ -276,15 +276,15 @@ class Call {
     handle_ = 0;
   }
 
-  const capsula_api* api_ = nullptr;
-  capsula_handle handle_ = 0;
+  const capsulad_api* api_ = nullptr;
+  capsulad_handle handle_ = 0;
   bool owns_reference_ = true;
 };
 
 class Client {
  public:
   Client() = default;
-  Client(const capsula_api* api, capsula_handle handle)
+  Client(const capsulad_api* api, capsulad_handle handle)
       : api_(api), handle_(handle) {}
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
@@ -302,10 +302,10 @@ class Client {
   }
   ~Client() { close(); }
 
-  static Client connect(const capsula_api* api, const std::string& socket,
+  static Client connect(const capsulad_api* api, const std::string& socket,
                         const std::string& run_id, const std::string& app_id,
                         uint32_t timeout_ms) {
-    capsula_handle handle = 0;
+    capsulad_handle handle = 0;
     const int32_t status = api->client_connect(
         socket.data(), socket.size(), run_id.data(), run_id.size(),
         app_id.data(), app_id.size(), timeout_ms, &handle);
@@ -314,16 +314,16 @@ class Client {
     return Client(api, handle);
   }
 
-  capsula_handle handle() const { return handle_; }
+  capsulad_handle handle() const { return handle_; }
 
   std::string unary_json(const std::string& service, const std::string& method,
                          std::string_view request, uint32_t timeout_ms) const {
-    capsula_buf out{};
+    capsulad_buf out{};
     const int32_t status = api_->client_unary(
         handle_, service.data(), service.size(), method.data(), method.size(),
         reinterpret_cast<const uint8_t*>(request.data()), request.size(),
         timeout_ms, &out);
-    if (status != CAPSULA_STATUS_OK) {
+    if (status != CAPSULAD_STATUS_OK) {
       BufGuard guard{api_, out};
       check(api_, status, "client_unary");
     }
@@ -332,7 +332,7 @@ class Client {
 
   Call start_call(const std::string& service, const std::string& method,
                   int32_t kind, uint32_t timeout_ms) const {
-    capsula_handle handle = 0;
+    capsulad_handle handle = 0;
     const int32_t status = api_->call_start(
         handle_, service.data(), service.size(), method.data(), method.size(),
         kind, timeout_ms, &handle);
@@ -344,7 +344,7 @@ class Client {
   Call start_routed(const std::string& target_app_id,
                     const std::string& service, const std::string& method,
                     uint32_t timeout_ms) const {
-    capsula_handle handle = 0;
+    capsulad_handle handle = 0;
     const int32_t status = api_->call_start_routed(
         handle_, target_app_id.data(), target_app_id.size(), service.data(),
         service.size(), method.data(), method.size(), timeout_ms, &handle);
@@ -354,7 +354,7 @@ class Client {
   }
 
   class Bus;
-  Bus open_bus(const capsula_bus_callbacks_v1* callbacks) const;
+  Bus open_bus(const capsulad_bus_callbacks_v1* callbacks) const;
 
  private:
   void close() {
@@ -362,25 +362,25 @@ class Client {
     handle_ = 0;
   }
 
-  const capsula_api* api_ = nullptr;
-  capsula_handle handle_ = 0;
+  const capsulad_api* api_ = nullptr;
+  capsulad_handle handle_ = 0;
 };
 
 struct BusContext {
-  const capsula_api* api = nullptr;
+  const capsulad_api* api = nullptr;
   std::mutex mutex;
   std::condition_variable cv;
   bool disconnected = false;
 };
 
-void on_ready(capsula_handle, void*) {
+void on_ready(capsulad_handle, void*) {
   try {
     std::cerr << "bus: ready\n";
   } catch (...) {
   }
 }
 
-void on_disconnected(capsula_handle, int32_t status, const char* detail,
+void on_disconnected(capsulad_handle, int32_t status, const char* detail,
                      void* user_data) {
   try {
     auto* context = static_cast<BusContext*>(user_data);
@@ -395,7 +395,7 @@ void on_disconnected(capsula_handle, int32_t status, const char* detail,
   }
 }
 
-void on_event(capsula_handle, int32_t kind, const uint8_t* json, size_t len,
+void on_event(capsulad_handle, int32_t kind, const uint8_t* json, size_t len,
               void*) {
   try {
     const std::string payload =
@@ -407,7 +407,7 @@ void on_event(capsula_handle, int32_t kind, const uint8_t* json, size_t len,
   }
 }
 
-void on_call(capsula_handle, capsula_handle handle, const uint8_t* info,
+void on_call(capsulad_handle, capsulad_handle handle, const uint8_t* info,
              size_t info_len, void* user_data) {
   auto* context = static_cast<BusContext*>(user_data);
   // Inbound callback reference is owned by the library: do not release it.
@@ -420,10 +420,10 @@ void on_call(capsula_handle, capsula_handle handle, const uint8_t* info,
     std::cerr << "bus: call " << info_text << "\n";
     std::string request;
     for (;;) {
-      capsula_buf chunk{};
+      capsulad_buf chunk{};
       const int32_t status =
           context->api->call_recv_proto(handle, 5000, &chunk);
-      if (status == CAPSULA_STATUS_OK) {
+      if (status == CAPSULAD_STATUS_OK) {
         if (chunk.data != nullptr && chunk.len != 0) {
           request.append(reinterpret_cast<const char*>(chunk.data), chunk.len);
         }
@@ -431,7 +431,7 @@ void on_call(capsula_handle, capsula_handle handle, const uint8_t* info,
         continue;
       }
       context->api->buf_free(chunk);
-      if (status == CAPSULA_STATUS_END_OF_STREAM) break;
+      if (status == CAPSULAD_STATUS_END_OF_STREAM) break;
       const char* last = context->api->last_error();
       const std::string detail =
           last != nullptr ? std::string(last) : std::string("request read failed");
@@ -441,7 +441,7 @@ void on_call(capsula_handle, capsula_handle handle, const uint8_t* info,
     const int32_t status = context->api->call_send_proto(
         handle, reinterpret_cast<const uint8_t*>(request.data()),
         request.size());
-    if (status != CAPSULA_STATUS_OK) {
+    if (status != CAPSULAD_STATUS_OK) {
       const char* last = context->api->last_error();
       const std::string detail =
           last != nullptr ? std::string(last) : std::string("reply failed");
@@ -472,7 +472,7 @@ void on_log(int32_t level, const char* message, void*) {
 
 class Client::Bus {
  public:
-  Bus(const capsula_api* api, capsula_handle handle)
+  Bus(const capsulad_api* api, capsulad_handle handle)
       : api_(api), handle_(handle) {}
   Bus(const Bus&) = delete;
   Bus& operator=(const Bus&) = delete;
@@ -517,7 +517,7 @@ class Client::Bus {
   void close() {
     if (api_ != nullptr && handle_ != 0) {
       const int32_t status = api_->bus_close(handle_);
-      if (status == CAPSULA_STATUS_OK || status == CAPSULA_STATUS_CLOSED) {
+      if (status == CAPSULAD_STATUS_OK || status == CAPSULAD_STATUS_CLOSED) {
         handle_ = 0;
         return;
       }
@@ -526,13 +526,13 @@ class Client::Bus {
   }
 
  private:
-  const capsula_api* api_ = nullptr;
-  capsula_handle handle_ = 0;
+  const capsulad_api* api_ = nullptr;
+  capsulad_handle handle_ = 0;
 };
 
 Client::Bus Client::open_bus(
-    const capsula_bus_callbacks_v1* callbacks) const {
-  capsula_handle handle = 0;
+    const capsulad_bus_callbacks_v1* callbacks) const {
+  capsulad_handle handle = 0;
   const int32_t status = api_->bus_open(handle_, callbacks, &handle);
   check(api_, status, "bus_open");
   if (handle == 0) fail("bus_open returned a zero handle");
@@ -544,17 +544,17 @@ Client::Bus Client::open_bus(
 int main(int argc, char** argv) {
   try {
     Library library = Library::load();
-    const capsula_api* api = library.api();
-    const std::string socket = env_or("CAPSULA_SOCKET", CAPSULA_DEFAULT_SOCKET);
-    const std::string run_id = env_or("CAPSULA_RUN_ID", "");
-    if (run_id.empty()) fail("CAPSULA_RUN_ID is required");
-    const std::string app_id = env_or("CAPSULA_APP_ID", "");
+    const capsulad_api* api = library.api();
+    const std::string socket = env_or("CAPSULAD_SOCKET", CAPSULAD_DEFAULT_SOCKET);
+    const std::string run_id = env_or("CAPSULAD_RUN_ID", "");
+    if (run_id.empty()) fail("CAPSULAD_RUN_ID is required");
+    const std::string app_id = env_or("CAPSULAD_APP_ID", "");
     Client client = Client::connect(api, socket, run_id, app_id, 0);
 
-    if (env_or("CAPSULA_BUS", "0") == "1") {
+    if (env_or("CAPSULAD_BUS", "0") == "1") {
       BusContext context{};
       context.api = api;
-      capsula_bus_callbacks_v1 callbacks{};
+      capsulad_bus_callbacks_v1 callbacks{};
       callbacks.struct_size = sizeof(callbacks);
       callbacks.user_data = &context;
       callbacks.on_ready = &on_ready;
@@ -573,16 +573,16 @@ int main(int argc, char** argv) {
 
     const std::string service =
         argc > 1 ? std::string(argv[1])
-                 : env_or("CAPSULA_SERVICE",
-                          "capsula.framework.v1.DeviceService");
+                 : env_or("CAPSULAD_SERVICE",
+                          "capsulad.framework.v1.DeviceService");
     const std::string method =
-        argc > 2 ? std::string(argv[2]) : env_or("CAPSULA_METHOD", "GetInfo");
+        argc > 2 ? std::string(argv[2]) : env_or("CAPSULAD_METHOD", "GetInfo");
     const std::string request =
-        argc > 3 ? std::string(argv[3]) : env_or("CAPSULA_REQUEST", "{}");
+        argc > 3 ? std::string(argv[3]) : env_or("CAPSULAD_REQUEST", "{}");
 
-    if (env_or("CAPSULA_STREAM", "0") == "1") {
+    if (env_or("CAPSULAD_STREAM", "0") == "1") {
       Call call = client.start_call(service, method,
-                                    CAPSULA_CALL_SERVER_STREAM, 0);
+                                    CAPSULAD_CALL_SERVER_STREAM, 0);
       call.send_json(request);
       call.half_close();
       while (auto message = call.recv_json(30000)) {
@@ -593,7 +593,7 @@ int main(int argc, char** argv) {
     }
     return 0;
   } catch (const std::exception& error) {
-    std::cerr << "capsula: " << error.what() << "\n";
+    std::cerr << "capsulad: " << error.what() << "\n";
     return 1;
   }
 }

@@ -30,6 +30,24 @@ pass does not establish a coherent user experience.
   implementation; do not redefine success to match broken behavior. Raise consequential
   product ambiguities rather than silently changing the contract.
 
+## Keep hardware specifics in the board profile (non-negotiable)
+
+Board and firmware specifics belong to the data-only `internal/backend/profile`, applied by
+`internal/backend/rockchip` and `deploy/rockchip-stock`. Hardware-agnostic packages
+(`internal/wifi`, `internal/audio`, `internal/webui`, …) take configuration from the
+composition root and must not import a board profile. The supported configurations are the
+Rockchip Capsula Mini rev 4 stock profile and the neutral simulator profile; Amlogic has no
+backend and its wire enum values stay reserved.
+
+## Use the shared SDK for app networking (non-negotiable)
+
+Native apps use the shared `libcapsulad` transport and network helpers — the UDS gRPC
+engine, `capsulad.OpenHTTP`, `capsulad.OpenGRPC` and the encoding/hash/random/URL
+primitives — instead of bundling Go's `net/http`, `crypto/tls` or a gRPC stack. Keep those
+packages out of a first-party app's production binary (`go list -deps` is the check); a
+test-only loopback server over the transport seam is fine. Add a missing capability to the
+shared SDK instead of giving an app a second network stack.
+
 ## Keep the application manual in step (non-negotiable)
 
 Any change to an application-facing API MUST include the corresponding update to
@@ -114,8 +132,10 @@ or equate extra animation with polish.
   assistant; `make test-race` adds the race detector to the root module. Focused commands are in
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests). Standalone Go test commands on macOS need
   `-ldflags '-linkmode=external'`, as the Makefile and app build helpers already handle.
+  `internal/daemon` `TestDumbAssistantEndsAfterSpeechOverColoredRoom` fails on this host and
+  reproduces on pristine HEAD; treat it as environmental, not as a regression.
 - Host daemon integration tests require a matching host native runtime and metadata
-  (`build/lib`, or `CAPSULA_NATIVE_LIB_DIR`). Do not mistake a Linux library for a usable macOS
+  (`build/lib`, or `CAPSULAD_NATIVE_LIB_DIR`). Do not mistake a Linux library for a usable macOS
   test runtime.
 - For device-facing changes, verify the reachable surface when device work is authorized. Use
   bounded input/routing/driver-write traces; `-output-trace` instructions are in the behavior

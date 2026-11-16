@@ -34,11 +34,17 @@ when told. The platform handles installation, sandboxing, identity, routing and 
 | Capsula Mini, Rockchip stock firmware | `rockchip-stock` | Primary device. aarch64, glibc 2.33. Kernel supports mount-namespace sandboxing only. |
 | Host simulator | `simulator` | Full virtual segment display, LED ring, five-key panel, microphone and speaker. Runs on a development host, accepts every package a device accepts. |
 
-**Amlogic is not supported in this build.** `amlogic-stock` and `amlogic-alpine` are accepted
-platform names, but the daemon refuses to start on them with
-`platform "…" is not implemented yet` — no Amlogic backend has been probed on hardware. Do not
-test, document or claim Amlogic parity, and do not assume the Rockchip resource set applies
-there; an app that must run on Amlogic has to wait for a backend.
+**Amlogic is not supported in this build.** There is no Amlogic backend:
+`-platform amlogic-stock` and `-platform amlogic-alpine` are rejected as unknown platforms
+(`unknown platform "…" (simulator, rockchip-stock)`), not accepted and then refused. The
+historical `CAPSULA_MINI_AMLOGIC_*` values remain reserved wire enums with no backend. Do
+not test, document, plan a parity milestone or claim Amlogic support; an app that must run
+on Amlogic has to wait for a backend and its own board profile.
+
+The only supported hardware profile is the Rockchip Capsula Mini rev 4 stock configuration,
+held as inert data in `internal/backend/profile`; board paths and quirks live in
+`internal/backend/rockchip` and `deploy/rockchip-stock`. An app sees the same framework
+contract on the simulator, whose profile names no device nodes.
 
 A device advertises only what its backend implements: query `DeviceService.ListResources`
 before assuming a display, ring, panel or audio path exists. The simulator reports
@@ -61,7 +67,7 @@ Resource identifiers are stable across targets:
 | Item | Needed for |
 |---|---|
 | `capsulad` and `capsulad-cli` | Running a simulator or a device; `capsulad-cli` packages, installs and controls apps. |
-| The shared native runtime (`libcapsula` plus its metadata file) in the platform `lib/` directory | Every runtime: native apps load it, script hosts embed it. |
+| The shared native runtime (`libcapsulad` plus its metadata file) in the platform `lib/` directory | Every runtime: native apps load it, script hosts embed it. |
 | Go 1.22 or newer and a C compiler | Native apps written in Go. The Go binding uses cgo. |
 | A C compiler, or Rust 1.75 or newer with Cargo | Native apps written in C/C++ or Rust. |
 | The QuickJS host installed in the platform `lib/` directory | `runtime = "quickjs"` apps. |
@@ -116,21 +122,21 @@ import (
 	"syscall"
 	"time"
 
-	"capsula/sdk/capsula"
+	"capsulad/sdk/capsulad"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	client, err := capsula.Connect(ctx, capsula.FromEnv())
+	client, err := capsulad.Connect(ctx, capsulad.FromEnv())
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
 	defer client.Close()
 
 	ready := make(chan struct{})
-	client.SetHandlers(capsula.Handlers{
+	client.SetHandlers(capsulad.Handlers{
 		Ready:        func() { close(ready) },
 		Disconnected: func(err error) { log.Printf("disconnected: %v", err) },
 	})
@@ -171,8 +177,8 @@ Build and package **on the build host**, then install:
 
 ```sh
 go mod init hello-segment
-go mod edit -require=capsula/sdk@v0.0.0
-go mod edit -replace=capsula/sdk=/path/to/platform/capsula-sdk
+go mod edit -require=capsulad/sdk@v0.0.0
+go mod edit -replace=capsulad/sdk=/path/to/platform/capsulad-sdk
 CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
   go build -trimpath -o bin/hello .
 
@@ -219,14 +225,14 @@ The full walkthrough, including manifest fields, deployment bundles and rollback
 |---|---|
 | [manifest.md](manifest.md) | Every manifest field, type, default, constraint and validation rule; runtimes; settings, actions, arguments, interfaces; complete examples. |
 | [lifecycle.md](lifecycle.md) | Launch, identity, environment variables, run states, restart and backoff, settings and action callbacks, shutdown, failures versus stops. |
-| [sdk.md](sdk.md) | The native SDK model, Go/Rust/C usage, handles and threading, status model, JSON versus protobuf, deadlines, script hosts. |
+| [sdk.md](sdk.md) | The native SDK model, Go/Rust/C usage, handles and threading, status model, JSON versus protobuf, deadlines, outbound HTTP(S)/TLS, remote gRPC (TLS/h2c), encoding/hash/random/URL primitives, script hosts. |
 | [app-bus.md](app-bus.md) | `Connect`, routed `Call`, notifications, descriptor publication, encoding rules, one stream per app, error codes. |
 | [services.md](services.md) | Every framework service and method with request/response fields. |
 | [output-input.md](output-input.md) | Presentation messages, readiness, captures, routing priority, touch modes, keys, gestures, dismissal. |
 | [audio.md](audio.md) | Endpoints, formats, capture and playback streams, pre-roll, ducking, indication, buffering, drain. |
 | [settings-actions.md](settings-actions.md) | Typed settings, compare-and-swap, validation, redaction, actions, custom settings UI protocol. |
 | [assets.md](assets.md) | The shared read-only asset store and how apps consume it. |
-| [standard-contracts.md](standard-contracts.md) | `capsula.contracts.clock.v1.ClockService`, `capsula.contracts.ring.v1.RingService`, `capsula.contracts.media.v1.MediaPlayerService`. |
+| [standard-contracts.md](standard-contracts.md) | `capsulad.contracts.clock.v1.ClockService`, `capsulad.contracts.ring.v1.RingService`, `capsulad.contracts.media.v1.MediaPlayerService`. |
 | [packaging-deployment.md](packaging-deployment.md) | Artifact format, packaging, install/update/remove, deployment bundles, simulator, versioning, rollback. |
 | [security.md](security.md) | Sandbox modes, filesystem view, sockets, what an app must never attempt, provenance, trust boundaries. |
 | [troubleshooting.md](troubleshooting.md) | Symptom, cause and fix for the failures an app author actually hits. |

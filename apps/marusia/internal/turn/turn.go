@@ -14,9 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/grpc/codes"
-
-	"capsula/apps/marusia/internal/vkclient"
+	"capsulad/apps/marusia/internal/redact"
+	"capsulad/apps/marusia/internal/vkclient"
 )
 
 // State is the visible indication a turn asks for.
@@ -487,8 +486,12 @@ func Run(ctx context.Context, opts Options) (result Result) {
 			return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
 		}
 		return Result{Outcome: Failed,
-			Detail: fmt.Sprintf("reply audio from %s could not be played: %v", playURL, err),
-			Text:   text, PlayedURL: playURL}
+			// The reply URL is signed in its query string, and the Detail is
+			// logged, so neither the URL nor an error that quotes it may
+			// carry the signature here.
+			Detail: fmt.Sprintf("reply audio from %s could not be played: %s",
+				redact.URL(playURL), redact.ErrorText(err, playURL)),
+			Text: text, PlayedURL: playURL}
 	}
 	return Result{Outcome: Completed, Text: text, PlayedURL: playURL}
 }
@@ -567,10 +570,10 @@ func describeAuth(err error) string {
 			detail += ": " + attachErr.Body
 		}
 		return detail + "; correct xtoken_id/endpoint and retry with the reauth action"
-	case vkclient.IsCode(err, codes.Unauthenticated), vkclient.IsCode(err, codes.PermissionDenied):
+	case vkclient.IsCode(err, vkclient.CodeUnauthenticated), vkclient.IsCode(err, vkclient.CodePermissionDenied):
 		return "the speech service rejected the session credential: " +
 			"reload the vendor session file or configure session_id/session_secret"
-	case vkclient.IsCode(err, codes.InvalidArgument) && strings.Contains(err.Error(), "Invalid 'x-device-sn'"):
+	case vkclient.IsCode(err, vkclient.CodeInvalidArgument) && strings.Contains(err.Error(), "Invalid 'x-device-sn'"):
 		return "the device serial is missing or invalid; configure the serial setting (or make /proc/cpuinfo readable)"
 	default:
 		return "could not authorize with the voice service: " + err.Error()
@@ -594,5 +597,5 @@ func isCancel(err error) bool {
 // deliberately not included: the client caches it for the current settings
 // revision, so the turn fails once per revision instead of retrying the attach.
 func authRejected(err error) bool {
-	return vkclient.IsCode(err, codes.Unauthenticated) || vkclient.IsCode(err, codes.PermissionDenied)
+	return vkclient.IsCode(err, vkclient.CodeUnauthenticated) || vkclient.IsCode(err, vkclient.CodePermissionDenied)
 }

@@ -5,6 +5,7 @@ package rockchip
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -41,15 +42,17 @@ type ws2812bRing struct {
 	mu       sync.Mutex
 	fd       *os.File
 	channels int
+	gamma    [256]uint8
 }
 
-// openWS2812BRing opens /dev/topleds and validates the channel count reported
-// by the driver. cfg.RootPrefix disables real devices (offline inspection).
+// openWS2812BRing opens the vendor ring device and validates the channel count
+// reported by the driver. cfg.RootPrefix disables real devices (offline
+// inspection).
 func openWS2812BRing(cfg Config, node *ws2812RingNode) (backend.RingDevice, error) {
 	if cfg.RootPrefix != "" {
 		return nil, errLEDOffline
 	}
-	f, err := os.OpenFile("/dev/topleds", os.O_RDONLY, 0)
+	f, err := os.OpenFile(cfg.LEDTopPath, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -58,11 +61,11 @@ func openWS2812BRing(cfg Config, node *ws2812RingNode) (backend.RingDevice, erro
 		f.Close()
 		return nil, fmt.Errorf("read WS2812B channel count: %w", err)
 	}
-	if count != ws2812ChannelCount {
+	if count != cfg.LEDWS2812Channels {
 		f.Close()
-		return nil, fmt.Errorf("driver reports %d WS2812B channels, want the %d-channel Capsula Mini ring", count, ws2812ChannelCount)
+		return nil, fmt.Errorf("driver reports %d WS2812B channels, want the %d-channel Capsula Mini ring", count, cfg.LEDWS2812Channels)
 	}
-	if node != nil && node.DeviceName != "" && node.DeviceName != "topleds" {
+	if node != nil && node.DeviceName != "" && node.DeviceName != filepath.Base(cfg.LEDTopPath) {
 		f.Close()
 		return nil, fmt.Errorf("unsupported WS2812B device-name %q", node.DeviceName)
 	}
@@ -70,7 +73,7 @@ func openWS2812BRing(cfg Config, node *ws2812RingNode) (backend.RingDevice, erro
 		f.Close()
 		return nil, fmt.Errorf("device tree declares %d WS2812B channels, driver reports %d", node.Channels, count)
 	}
-	return &ws2812bRing{fd: f, channels: count}, nil
+	return &ws2812bRing{fd: f, channels: count, gamma: buildGammaTable(cfg.LEDGamma)}, nil
 }
 
 func (r *ws2812bRing) Caps() backend.RingCaps {
@@ -84,7 +87,7 @@ func (r *ws2812bRing) WriteRing(frame backend.RingFrame) error {
 	if r.fd == nil {
 		return os.ErrClosed
 	}
-	buffer := encodeWS2812Frame(frame.Pixels, frame.Brightness, r.channels)
+	buffer := encodeWS2812FrameTable(frame.Pixels, frame.Brightness, r.channels, r.gamma)
 	request := ws2812SetRequest{Count: uint32(len(buffer)), Data: uintptr(unsafe.Pointer(&buffer[0]))}
 	if err := ioctlPointer(r.fd, ledsWS2812BSet, unsafe.Pointer(&request)); err != nil {
 		return fmt.Errorf("set WS2812B frame: %w", err)
@@ -105,18 +108,21 @@ func (r *ws2812bRing) Close() error {
 }
 
 type multiCtrlSegment struct {
-	mu    sync.Mutex
-	fd    *os.File
-	cells int
+	mu               sync.Mutex
+	fd               *os.File
+	cells            int
+	digits           int
+	segmentsPerDigit int
+	colonChannels    int
 }
 
-// openMultiCtrlSegment opens /dev/led_multi_ctrl (the IS31FL3236 driver) and
-// validates the cell count reported by the driver.
+// openMultiCtrlSegment opens the vendor IS31FL3236 node and validates the cell
+// count reported by the driver.
 func openMultiCtrlSegment(cfg Config, node *multiCtrlNode) (backend.SegmentDevice, error) {
 	if cfg.RootPrefix != "" {
 		return nil, errLEDOffline
 	}
-	f, err := os.OpenFile("/dev/led_multi_ctrl", os.O_RDONLY, 0)
+	f, err := os.OpenFile(cfg.LEDMultiCtrlPath, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -133,22 +139,22 @@ func openMultiCtrlSegment(cfg Config, node *multiCtrlNode) (backend.SegmentDevic
 		f.Close()
 		return nil, fmt.Errorf("device tree declares %d display cells, driver reports %d", node.Cells, count)
 	}
-	return &multiCtrlSegment{fd: f, cells: count}, nil
+	return &multiCtrlSegment{fd: f, cells: count, digits: cfg.LEDSegmentDigits, segmentsPerDigit: cfg.LEDSegmentsPerDigit, colonChannels: cfg.LEDMultiCtrlChannels}, nil
 }
 
 func (s *multiCtrlSegment) Caps() backend.SegmentCaps {
-	digits := s.cells / segmentPerDigit
-	if digits > segmentDigitCount {
-		digits = segmentDigitCount
+	digits := s.cells / s.segmentsPerDigit
+	if digits > s.digits {
+		digits = s.digits
 	}
 	if digits < 1 {
 		digits = 1
 	}
 	return backend.SegmentCaps{
 		DigitCount:       digits,
-		SupportsColon:    s.cells >= multiCtrlCellCount,
+		SupportsColon:    s.cells >= s.colonChannels,
 		SupportsDecimal:  false,
-		SegmentsPerDigit: segmentPerDigit,
+		SegmentsPerDigit: s.segmentsPerDigit,
 	}
 }
 func (s *multiCtrlSegment) ResourceID() string { return "display.segment.front" }
@@ -159,7 +165,7 @@ func (s *multiCtrlSegment) WriteSegment(frame backend.SegmentFrame) error {
 	if s.fd == nil {
 		return os.ErrClosed
 	}
-	records := encodeMultiCtrlFrame(frame.Cells, frame.Colon, frame.Brightness, s.cells)
+	records := encodeMultiCtrlFrame(frame.Cells, frame.Colon, frame.Brightness, s.cells, s.digits, s.segmentsPerDigit)
 	if err := ioctlPointer(s.fd, ledsMultiCtrlSet, unsafe.Pointer(&records[0])); err != nil {
 		return fmt.Errorf("set segment frame: %w", err)
 	}

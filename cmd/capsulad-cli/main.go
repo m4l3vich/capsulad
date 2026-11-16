@@ -29,12 +29,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/artifact"
+	"capsulad/internal/backend/rockchip/inspect"
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 	"capsulad/internal/manifest"
-	"capsulad/internal/platform"
 	"capsulad/internal/registry"
 	"capsulad/internal/sandbox"
 	"capsulad/internal/version"
@@ -111,7 +111,7 @@ command:
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `capsulad-cli — capsulad administration CLI
+	fmt.Fprintf(os.Stderr, `capsulad-cli — capsulad administration CLI
 
 Global flags (before the command): -data-dir DIR, -socket PATH, -security-dir DIR, -native-lib-dir DIR, -json
 
@@ -149,7 +149,7 @@ Deploy flags: -init-script PATH, -restart auto|always|never, -dry-run, -staging 
 the data directory and on the data filesystem only with room for the largest staged tree;
 the data partition is checked for the space the binary writes cannot free themselves
 before the daemon is stopped.
-A deployment bundle contains capsulad, capsulad-cli, lib/, apps/ and boot/S99btctl.sh;
+A deployment bundle contains capsulad, capsulad-cli, lib/, apps/ and boot/%s;
 unknown top-level entries are reported and ignored. A restarting deployment stops the
 daemon first, installs with nothing running, then restarts it. Binaries are installed as
 <data-dir>/capsulad and <data-dir>/capsulad-cli (0755), lib/ as <data-dir>/lib and
@@ -157,7 +157,7 @@ apps/ under <data-dir>/apps; the boot hook is installed only when the bundle
 carries it and the daemon is restarted.
 Certificate flags: -hostname H, -ip IP (repeatable), -days N. Security store default: <data-dir>/security.
 The Web UI uses self-signed TLS; browsers will warn until the fingerprint is trusted.
-`)
+`, bootHookName)
 	os.Exit(2)
 }
 
@@ -172,18 +172,18 @@ func resolveDataDir(dataDir string) string {
 	if dataDir != "" {
 		return dataDir
 	}
-	if v := os.Getenv("CAPSULA_DATA_DIR"); v != "" {
+	if v := os.Getenv("CAPSULAD_DATA_DIR"); v != "" {
 		return v
 	}
-	return ".capsula"
+	return ".capsulad"
 }
 
 // resolveNativeLibDir locates the shared native SDK for install-time checks.
-// Precedence: -native-lib-dir, CAPSULA_NATIVE_LIB_DIR, <data-dir>/lib beside
+// Precedence: -native-lib-dir, CAPSULAD_NATIVE_LIB_DIR, <data-dir>/lib beside
 // the installed daemon, then the executable-adjacent launcher default.
 func resolveNativeLibDir(dataDir, explicit string) (string, error) {
 	if explicit == "" {
-		explicit = os.Getenv("CAPSULA_NATIVE_LIB_DIR")
+		explicit = os.Getenv("CAPSULAD_NATIVE_LIB_DIR")
 	}
 	if explicit != "" {
 		return sandbox.ResolveLibraryDir(explicit)
@@ -225,7 +225,7 @@ func resolveSocket(dataDir, socket string) string {
 	if socket != "" {
 		return socket
 	}
-	if v := os.Getenv("CAPSULA_SOCKET"); v != "" {
+	if v := os.Getenv("CAPSULAD_SOCKET"); v != "" {
 		return v
 	}
 	return filepath.Join(resolveDataDir(dataDir), "run", "hal.sock")
@@ -662,7 +662,7 @@ func runMedia(args []string, socket string) error {
 	}
 	found := false
 	for _, iface := range ifaces.Interfaces {
-		if iface.GrpcService != "capsula.contracts.media.v1.MediaPlayerService" {
+		if iface.GrpcService != "capsulad.contracts.media.v1.MediaPlayerService" {
 			continue
 		}
 		found = true
@@ -936,7 +936,7 @@ func runPlatform(args []string, jsonOut bool) error {
 	if *root == "" {
 		return fmt.Errorf("-root is required")
 	}
-	report, err := platform.Inspect(*root)
+	report, err := inspect.Inspect(*root)
 	if err != nil {
 		return err
 	}

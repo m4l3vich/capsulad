@@ -8,8 +8,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	mediav1 "capsulad/gen/go/capsula/contracts/media/v1"
-	frameworkv1 "capsulad/gen/go/capsula/framework/v1"
+	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
+	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/bluetooth"
 )

@@ -112,15 +112,15 @@ func (t *evdevTouch) Caps() backend.TouchCaps {
 	return caps
 }
 
-func probeEvdev(prefix string, keys keyMap) backend.TouchDevice {
-	dir := filepath.Join(prefix, "/dev/input")
+func probeEvdev(cfg Config, keys keyMap) backend.TouchDevice {
+	dir := filepath.Join(cfg.RootPrefix, cfg.InputEventDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 	var names []string
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "event") {
+		if strings.HasPrefix(e.Name(), cfg.InputEventPrefix) {
 			names = append(names, e.Name())
 		}
 	}

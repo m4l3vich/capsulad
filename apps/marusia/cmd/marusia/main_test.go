@@ -12,10 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"capsula/apps/marusia/internal/settings"
-	"capsula/apps/marusia/internal/vkclient"
-	"capsula/apps/marusia/internal/vkproto/clientpb"
-	"capsula/sdk/capsula"
+	"capsulad/apps/marusia/internal/settings"
+	"capsulad/apps/marusia/internal/turn"
+	"capsulad/apps/marusia/internal/vkclient"
+	"capsulad/apps/marusia/internal/vkproto/clientpb"
+	"capsulad/sdk/capsulad"
 )
 
 // fakeDeviceService is the DeviceService.GetInfo caller used instead of the
@@ -49,7 +50,7 @@ func (f *fakeDeviceService) CallJSON(_ context.Context, targetAppID, service, rp
 // absent and the SoC serial cannot be read.
 func unreadableProc(t *testing.T) {
 	t.Helper()
-	t.Setenv(capsula.DeviceSerialEnv, "")
+	t.Setenv(capsulad.DeviceSerialEnv, "")
 	previous := cpuSerialReader
 	cpuSerialReader = func() string { return "" }
 	t.Cleanup(func() { cpuSerialReader = previous })
@@ -100,7 +101,7 @@ func TestIdentityFallsBackToFrameworkDeviceID(t *testing.T) {
 }
 
 func TestCPUSerialReachesConfig(t *testing.T) {
-	t.Setenv(capsula.DeviceSerialEnv, "")
+	t.Setenv(capsulad.DeviceSerialEnv, "")
 	previous := cpuSerialReader
 	cpuSerialReader = func() string { return "11bfcbc5d63d55fc" }
 	t.Cleanup(func() { cpuSerialReader = previous })
@@ -119,7 +120,7 @@ func TestCPUSerialReachesConfig(t *testing.T) {
 }
 
 func TestFrameworkSerialWinsOverLocalCPUInfo(t *testing.T) {
-	t.Setenv(capsula.DeviceSerialEnv, "")
+	t.Setenv(capsulad.DeviceSerialEnv, "")
 	previous := cpuSerialReader
 	cpuSerialReader = func() string { return "local-cpuinfo-serial" }
 	t.Cleanup(func() { cpuSerialReader = previous })
@@ -296,7 +297,7 @@ func TestLogsNeverContainMaskedSettings(t *testing.T) {
 		values:   settings.Default(),
 		queue:    make(chan activationJob, 1),
 	}
-	a.applySettings(&capsula.SettingsChanged{Revision: 2, Values: []capsula.SettingValue{
+	a.applySettings(&capsulad.SettingsChanged{Revision: 2, Values: []capsulad.SettingValue{
 		{Key: settings.KeyDeviceID, ValueJSON: `"` + masked + `"`},
 		{Key: settings.KeyXToken, ValueJSON: `"xtoken-secret"`},
 	}})
@@ -331,16 +332,16 @@ func TestPumpMicLogsFormatOncePerStream(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	a := &app{}
-	in := make(chan capsula.MicChunk, 64)
+	in := make(chan capsulad.MicChunk, 64)
 	out := make(chan []byte, 64)
-	format := capsula.AudioFormat{
-		SampleFormat: capsula.SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1,
+	format := capsulad.AudioFormat{
+		SampleFormat: capsulad.SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1,
 	}
 	for range 40 {
-		in <- capsula.MicChunk{
+		in <- capsulad.MicChunk{
 			StreamID: "mic_1",
 			Format:   &format,
-			Chunk:    &capsula.AudioChunk{PCM: make([]byte, 640)},
+			Chunk:    &capsulad.AudioChunk{PCM: make([]byte, 640)},
 		}
 	}
 	close(in)
@@ -371,7 +372,7 @@ func TestPumpMicLogsFormatOncePerStream(t *testing.T) {
 // a later one: the pump exits on cancellation and closes its output exactly once.
 func TestPumpMicStopsAfterCancel(t *testing.T) {
 	a := &app{}
-	in := make(chan capsula.MicChunk)
+	in := make(chan capsulad.MicChunk)
 	out := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -390,7 +391,7 @@ func TestPumpMicStopsAfterCancel(t *testing.T) {
 		t.Fatal("pumpMic must close its output when it returns")
 	}
 	select {
-	case in <- capsula.MicChunk{Chunk: &capsula.AudioChunk{PCM: make([]byte, 640)}}:
+	case in <- capsulad.MicChunk{Chunk: &capsulad.AudioChunk{PCM: make([]byte, 640)}}:
 		t.Fatal("the pump still accepts audio after it returned")
 	default:
 	}
@@ -403,8 +404,8 @@ func TestKeywordOptionsFollowActivationEvidence(t *testing.T) {
 		HWID:    "9F25725B",
 	}
 
-	wake := &capsula.Activation{
-		Origin:         capsula.ActivationOriginWakeword,
+	wake := &capsulad.Activation{
+		Origin:         capsulad.ActivationOriginWakeword,
 		MatchedModelID: "wakeword-model-1",
 	}
 	wakeInit := vkclient.BuildInit(speechOptionsFor(config, wake), "serial", "version")
@@ -418,7 +419,7 @@ func TestKeywordOptionsFollowActivationEvidence(t *testing.T) {
 
 	// A touch turn states no_kw: the service rejects an absent variant with
 	// "Invalid 'kw_type' param: unknown keyword type".
-	touch := &capsula.Activation{Origin: capsula.ActivationOriginTouch}
+	touch := &capsulad.Activation{Origin: capsulad.ActivationOriginTouch}
 	touchInit := vkclient.BuildInit(speechOptionsFor(config, touch), "serial", "version")
 	if touchInit.GetKeywordOptions().GetNoKw() == nil {
 		t.Fatalf("touch init = %+v, want no_kw", touchInit.GetKeywordOptions())
@@ -436,14 +437,14 @@ func TestSpeechOptionsClaimAKeywordOnlyForAWakeword(t *testing.T) {
 	config := settings.Config{Format: vkclient.FormatWave, Keyword: "marusya"}
 	cases := []struct {
 		name       string
-		activation *capsula.Activation
+		activation *capsulad.Activation
 		want       string
 	}{
-		{"api", &capsula.Activation{Origin: capsula.ActivationOriginAPI}, ""},
-		{"touch", &capsula.Activation{Origin: capsula.ActivationOriginTouch}, ""},
-		{"touch with a model id", &capsula.Activation{Origin: capsula.ActivationOriginTouch, MatchedModelID: "manual.button"}, ""},
-		{"unspecified", &capsula.Activation{}, ""},
-		{"wakeword", &capsula.Activation{Origin: capsula.ActivationOriginWakeword, MatchedModelID: "word"}, "marusya"},
+		{"api", &capsulad.Activation{Origin: capsulad.ActivationOriginAPI}, ""},
+		{"touch", &capsulad.Activation{Origin: capsulad.ActivationOriginTouch}, ""},
+		{"touch with a model id", &capsulad.Activation{Origin: capsulad.ActivationOriginTouch, MatchedModelID: "manual.button"}, ""},
+		{"unspecified", &capsulad.Activation{}, ""},
+		{"wakeword", &capsulad.Activation{Origin: capsulad.ActivationOriginWakeword, MatchedModelID: "word"}, "marusya"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -460,14 +461,14 @@ func TestSpeechOptionsClaimAKeywordOnlyForAWakeword(t *testing.T) {
 
 // micChunk makes one forwarded 20 ms capture chunk carrying its index, so a
 // test can tell which audio survived the queue.
-func micChunk(index int) capsula.MicChunk {
+func micChunk(index int) capsulad.MicChunk {
 	pcm := make([]byte, 640)
 	pcm[0] = byte(index)
 	pcm[1] = byte(index >> 8)
-	return capsula.MicChunk{
+	return capsulad.MicChunk{
 		StreamID: "mic_1",
-		Format:   &capsula.AudioFormat{SampleFormat: capsula.SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1},
-		Chunk:    &capsula.AudioChunk{PCM: pcm},
+		Format:   &capsulad.AudioFormat{SampleFormat: capsulad.SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1},
+		Chunk:    &capsulad.AudioChunk{PCM: pcm},
 	}
 }
 
@@ -481,7 +482,7 @@ func TestPumpMicHoldsUtteranceDuringSlowOpen(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	a := &app{}
-	in := make(chan capsula.MicChunk, 64)
+	in := make(chan capsulad.MicChunk, 64)
 	out := make(chan []byte, captureQueue)
 
 	done := make(chan struct{})
@@ -526,7 +527,7 @@ func TestPumpMicHoldsUtteranceDuringSlowOpen(t *testing.T) {
 // so the oldest 50 are discarded and counted for the turn's audio summary.
 func TestPumpMicReportsDroppedPreOpenChunks(t *testing.T) {
 	a := &app{}
-	in := make(chan capsula.MicChunk, 256)
+	in := make(chan capsulad.MicChunk, 256)
 	out := make(chan []byte, captureQueue)
 	var preOpenDropped atomic.Int64
 
@@ -627,5 +628,128 @@ func TestResolveSessionPrecedence(t *testing.T) {
 	}
 	if source != "" || got.HasSession() {
 		t.Fatalf("absent result = %+v (%s)", got, source)
+	}
+}
+
+// --- log redaction ----------------------------------------------------------
+
+// captureLog swaps the process log output for a buffer and restores it after
+// the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buffer bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&buffer)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	return &buffer
+}
+
+// TestAttachSuccessLogRedactsIdentifiers covers the one line an operator gets
+// for a successful attach: the account id is shortened and the session id is
+// not in this line at all.
+func TestAttachSuccessLogRedactsIdentifiers(t *testing.T) {
+	const account = "account-0123456789"
+	const session = "session-0123456789abcdef"
+	buffer := captureLog(t)
+
+	a := &app{}
+	a.cfg = settings.Config{BaseURL: "https://vc.go.mail.ru", XTokenID: "provisioned-xtoken"}
+	a.logSession(vkclient.Session{SessionID: session, SessionSecret: "secret-value", AccountID: account})
+
+	output := buffer.String()
+	if !strings.Contains(output, "account=account-…") {
+		t.Fatalf("the log must keep a correlation prefix: %q", output)
+	}
+	for _, hidden := range []string{account, session, "secret-value", "provisioned-xtoken"} {
+		if strings.Contains(output, hidden) {
+			t.Fatalf("the attach log leaked %q: %q", hidden, output)
+		}
+	}
+}
+
+// TestReauthSuccessLogRedactsCredentials covers the reauth line that used to
+// print the full session id and the full account id.
+func TestReauthSuccessLogRedactsCredentials(t *testing.T) {
+	const session = "session-0123456789abcdef"
+	const account = "account-0123456789"
+	buffer := captureLog(t)
+
+	logReauthSuccess("the provisioning attach", vkclient.Session{
+		SessionID: session, SessionSecret: "secret-value", AccountID: account,
+	})
+
+	output := buffer.String()
+	if !strings.Contains(output, "session=session-…") || !strings.Contains(output, "account=account-…") {
+		t.Fatalf("the reauth log must shorten both identifiers: %q", output)
+	}
+	for _, hidden := range []string{session, account, "secret-value"} {
+		if strings.Contains(output, hidden) {
+			t.Fatalf("the reauth log leaked %q: %q", hidden, output)
+		}
+	}
+}
+
+// TestCompletedTurnLogDropsSignedQuery covers the success line: the vendor
+// signs the TTS URL in its query string, so only scheme://host/path may appear.
+func TestCompletedTurnLogDropsSignedQuery(t *testing.T) {
+	buffer := captureLog(t)
+
+	logTurnCompleted("act-1", turn.Result{
+		Text:      "погода",
+		PlayedURL: "https://tts.example/voice/a.wav?X-Amz-Signature=deadbeef&X-Amz-Credential=secret#frag",
+	})
+
+	output := buffer.String()
+	if !strings.Contains(output, `played="https://tts.example/voice/a.wav"`) {
+		t.Fatalf("the completed line must keep scheme://host/path: %q", output)
+	}
+	for _, hidden := range []string{"deadbeef", "X-Amz", "?", "#"} {
+		if strings.Contains(output, hidden) {
+			t.Fatalf("the completed line leaked %q: %q", hidden, output)
+		}
+	}
+}
+
+// TestPlaintextWarningFiresOnce covers the startup decision: an http:// base
+// that carries a credential is announced exactly once, and an https base is
+// silent.
+func TestPlaintextWarningFiresOnce(t *testing.T) {
+	plaintext := settings.Config{
+		BaseURL:   "http://voice-test2.ngx.openstack.go.devmail.ru",
+		SessionID: "sid", SessionSecret: "secret",
+	}
+
+	buffer := captureLog(t)
+	a := &app{}
+	a.logPlaintextWarning(plaintext)
+	a.logPlaintextWarning(plaintext)
+	output := buffer.String()
+	if count := strings.Count(output, "WARN endpoint http://voice-test2"); count != 1 {
+		t.Fatalf("the plaintext warning fired %d times, want one: %q", count, output)
+	}
+	if !strings.Contains(output, "unencrypted bearer token") {
+		t.Fatalf("the warning must state the consequence: %q", output)
+	}
+	if strings.Contains(output, "secret") && !strings.Contains(output, "bearer token") {
+		t.Fatalf("unexpected content: %q", output)
+	}
+
+	// An https configuration is silent and must not consume the once.
+	secure := captureLog(t)
+	other := &app{}
+	other.logPlaintextWarning(settings.Config{BaseURL: "https://vc.go.mail.ru", SessionID: "sid", SessionSecret: "s"})
+	if output := secure.String(); output != "" {
+		t.Fatalf("an https endpoint must not warn: %q", output)
+	}
+	other.logPlaintextWarning(plaintext)
+	if output := secure.String(); strings.Count(output, "WARN endpoint") != 1 {
+		t.Fatalf("the first plaintext configuration after an https one must warn once: %q", output)
+	}
+
+	// No credential source at all means nothing is sent in clear.
+	quiet := captureLog(t)
+	(&app{}).logPlaintextWarning(settings.Config{BaseURL: "http://voice-test2.example"})
+	if output := quiet.String(); output != "" {
+		t.Fatalf("a plaintext endpoint without any credential must not warn: %q", output)
 	}
 }

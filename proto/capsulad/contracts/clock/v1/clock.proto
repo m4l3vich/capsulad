@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+option go_package = "capsulad/gen/go/capsulad/contracts/clock/v1;clockv1";
+
+package capsulad.contracts.clock.v1;
+
+// Standard clock/alarm contract exposed by the built-in Clock application.
+//
+// The service is discoverable through capsulad.framework.v1.AppInterfaceService
+// and called through AppBusService.Call targeting app_id "capsulad.clock"; there
+// is no separate app socket. Any local caller may use it (supervised apps get
+// the same routed-call path as the daemon's own Web UI).
+//
+// Clock behavior is the product contract:
+// - A stopwatch starts at zero when idle; start is a no-op while running.
+// - A timer alerts until it is explicitly dismissed; the alert is not a
+//   transient notification.
+// - Alarms are recurring schedules stored in the app setting `alarms` (see
+//   documentation on DescribeInterface). Each entry is one five-field dcron
+//   expression. An active alarm alert rings until explicitly dismissed.
+// - Unrelated setting, timezone or device-setting changes never reset a
+//   running stopwatch or a pending timer.
+//
+// WatchState streams a full snapshot first and then a new snapshot whenever an
+// observable field changes; consumers converge on the latest snapshot even if
+// intermediate transitions are lost.
+service ClockService {
+  rpc GetState(GetStateRequest) returns (ClockState);
+  rpc WatchState(WatchStateRequest) returns (stream ClockState);
+
+  rpc StopwatchStart(StopwatchCommandRequest) returns (StopwatchState);
+  rpc StopwatchPause(StopwatchCommandRequest) returns (StopwatchState);
+  rpc StopwatchResume(StopwatchCommandRequest) returns (StopwatchState);
+  rpc StopwatchReset(StopwatchCommandRequest) returns (StopwatchState);
+
+  rpc StartTimer(StartTimerRequest) returns (Timer);
+  // Cancels one running timer. A completed timer is removed by dismissing its
+  // alert, not by CancelTimer.
+  rpc CancelTimer(CancelTimerRequest) returns (Timer);
+  rpc ListTimers(ListTimersRequest) returns (ListTimersResponse);
+
+  rpc ListAlarms(ListAlarmsRequest) returns (ListAlarmsResponse);
+  // Adds one five-field dcron expression to the canonical `alarms` setting.
+  // Adding an existing normalized expression is idempotent. expected_revision
+  // is the app-settings revision for compare-and-swap; 0 skips the check.
+  rpc AddAlarm(AddAlarmRequest) returns (Alarm);
+  // Deletes the alarm whose alarm_id identifies its schedule and modifiers.
+  rpc DeleteAlarm(DeleteAlarmRequest) returns (DeleteAlarmResponse);
+  // Disables or re-enables a configured alarm without losing it. Disabling
+  // dismisses that alarm's active alert.
+  rpc SetAlarmEnabled(SetAlarmEnabledRequest) returns (Alarm);
+
+  // Stops every current timer/alarm alert. An empty alert_id dismisses all.
+  rpc DismissAlert(DismissAlertRequest) returns (DismissAlertResponse);
+}
+
+message GetStateRequest {}
+message WatchStateRequest {}
+message StopwatchCommandRequest {}
+message ListTimersRequest {}
+message ListAlarmsRequest {}
+message StartTimerRequest {
+  uint64 duration_ms = 1;
+  string label = 2;
+}
+message CancelTimerRequest { string timer_id = 1; }
+message AddAlarmRequest {
+  string schedule = 1; // One five-field dcron expression.
+  uint64 expected_revision = 2;
+  // Optional IANA zone. Empty follows the device timezone.
+  string timezone = 3;
+  // A one-shot alarm fires at its next match and is then marked disabled.
+  bool one_shot = 4;
+  // Disabled alarms stay configured but do not fire.
+  bool disabled = 5;
+  // Display label. Empty keeps an existing label, or "Alarm" for a new entry.
+  string label = 6;
+}
+message DeleteAlarmRequest {
+  string alarm_id = 1; // entry identity: expr [@zone] [!once]
+  uint64 expected_revision = 2;
+}
+message SetAlarmEnabledRequest {
+  string alarm_id = 1;
+  bool enabled = 2;
+  uint64 expected_revision = 3;
+}
+message DeleteAlarmResponse { bool deleted = 1; }
+message ListTimersResponse { repeated Timer timers = 1; }
+message ListAlarmsResponse { repeated Alarm alarms = 1; }
+message DismissAlertRequest { string alert_id = 1; }
+message DismissAlertResponse { uint32 dismissed = 1; }
+
+enum StopwatchStatus {
+  STOPWATCH_STATUS_UNSPECIFIED = 0;
+  STOPWATCH_STATUS_IDLE = 1;
+  STOPWATCH_STATUS_RUNNING = 2;
+  STOPWATCH_STATUS_PAUSED = 3;
+}
+
+message StopwatchState {
+  StopwatchStatus status = 1;
+  uint64 elapsed_ms = 2;
+  uint64 started_unix_ms = 3;
+}
+
+enum TimerStatus {
+  TIMER_STATUS_UNSPECIFIED = 0;
+  TIMER_STATUS_RUNNING = 1;
+  TIMER_STATUS_COMPLETED = 2;
+  TIMER_STATUS_CANCELLED = 3;
+}
+
+message Timer {
+  string timer_id = 1;
+  string label = 2;
+  uint64 duration_ms = 3;
+  uint64 remaining_ms = 4;
+  TimerStatus status = 5;
+  uint64 started_unix_ms = 6;
+  uint64 finished_unix_ms = 7;
+}
+
+// Alarm identity is its canonical dcron expression: it survives list reorder
+// and lets every caller address the alarm without a private index or label.
+message Alarm {
+  string alarm_id = 1;
+  string schedule = 2;
+  string next_trigger_rfc3339 = 3;
+  uint64 next_trigger_unix_ms = 4;
+  uint64 last_triggered_unix_ms = 5;
+  // True while this alarm owns an active (visible/audible) alert.
+  bool ringing = 6;
+  string alert_id = 7;
+  string effective_timezone = 8;
+  bool enabled = 9;
+  bool one_shot = 10;
+  // Explicit IANA zone, or empty for the device timezone.
+  string timezone = 11;
+  string label = 12;
+}
+
+enum AlertKind {
+  ALERT_KIND_UNSPECIFIED = 0;
+  ALERT_KIND_TIMER = 1;
+  ALERT_KIND_ALARM = 2;
+}
+
+message ActiveAlert {
+  string alert_id = 1;
+  AlertKind kind = 2;
+  string source_id = 3;
+  string label = 4;
+  uint64 started_unix_ms = 5;
+}
+
+message ClockState {
+  string local_time_rfc3339 = 1;
+  string timezone = 2;
+  StopwatchState stopwatch = 3;
+  repeated Timer timers = 4;
+  repeated Alarm alarms = 5;
+  repeated ActiveAlert active_alerts = 6;
+  // Increases whenever any observable field changes; snapshots are ordered.
+  uint64 revision = 7;
+  // Canonical configured `alarms` string exactly as persisted.
+  string alarms_setting = 8;
+}

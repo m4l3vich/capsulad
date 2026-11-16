@@ -5,7 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	clockv1 "capsulad/gen/go/capsula/contracts/clock/v1"
+	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
 )
 
 // The clock adapter must decode the app's binary protobuf response; JSON is

@@ -28,8 +28,6 @@ import (
 )
 
 const (
-	outRate       = 48000
-	outChannels   = 2
 	mixFrameMS    = 10
 	playbackQueue = 32
 	// The capture event channel must hold the one-second pre-roll, which is
@@ -62,6 +60,10 @@ const (
 var ErrPlaybackLimit = errors.New("concurrent playback stream limit reached")
 
 type Options struct {
+	// OutputFormat is the mixer's production playback format. The zero value
+	// falls back to the backend's PlaybackFormat so a caller that does not
+	// select a profile keeps the previous behaviour.
+	OutputFormat backend.AudioFormat
 	// IndicationActive reports whether an app currently shows a qualifying
 	// visible ring/segment indication.
 	IndicationActive func(appID string) bool
@@ -130,6 +132,7 @@ type Manager struct {
 	logs   *logbus.Bus
 	dev    backend.AudioDevice
 	opts   Options
+	out    backend.AudioFormat
 
 	mu            sync.Mutex
 	started       bool
@@ -184,8 +187,12 @@ func NewManager(parent context.Context, clock *ids.Clock, logs *logbus.Bus, dev 
 	if opts.WatchdogPollMS <= 0 {
 		opts.WatchdogPollMS = 1000
 	}
+	out := opts.OutputFormat
+	if out.Format == "" || out.RateHz <= 0 || out.Channels <= 0 {
+		out = dev.PlaybackFormat()
+	}
 	return &Manager{
-		ctx: ctx, cancel: cancel, clock: clock, logs: logs, dev: dev, opts: opts,
+		ctx: ctx, cancel: cancel, clock: clock, logs: logs, dev: dev, opts: opts, out: out,
 		volume: 0.6, playbacks: map[string]*Playback{}, captures: map[string]*capture{},
 		conversations: map[string]conversation{},
 		dspEnabled:    !opts.CaptureDSP.Disabled && captureDSPSupported(dev.CaptureFormat()),
@@ -521,7 +528,7 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 		feedFrames: (format.RateHz*mixFrameMS+999)/1000 + 2,
 		events:     make(chan PlaybackEvent, 16), in: make(chan []byte, playbackQueue),
 		ctl: make(chan string, 4), done: make(chan struct{}),
-		conv: newResampler(format, outFmt()), gain: 1, trim: 1, mgr: m,
+		conv: newResampler(format, m.outFmt()), gain: 1, trim: 1, mgr: m,
 	}
 	m.mu.Lock()
 	open := 0
@@ -536,7 +543,7 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 	}
 	m.playbacks[p.id] = p
 	m.mu.Unlock()
-	p.emit(PlaybackEvent{Started: &Started{StreamID: p.id, Format: outFmt()}})
+	p.emit(PlaybackEvent{Started: &Started{StreamID: p.id, Format: m.outFmt()}})
 	m.logs.Infof("audio", appID, "playback stream=%s opened input=%s/%d/%d conversation=%s",
 		p.id, format.Format, format.RateHz, format.Channels, conversationID)
 	return p, nil
@@ -553,9 +560,7 @@ func (m *Manager) closePlayback(id string) {
 	}
 }
 
-func outFmt() backend.AudioFormat {
-	return backend.AudioFormat{Format: backend.S16LE, RateHz: outRate, Channels: outChannels}
-}
+func (m *Manager) outFmt() backend.AudioFormat { return m.out }
 
 // masterLimiter is the soft limiter on the master bus. It is one small value
 // state machine rather than inline locals so its contract is testable without a
@@ -617,18 +622,20 @@ func (l *masterLimiter) next(peak float32) float32 {
 }
 
 func (m *Manager) mixLoop() {
-	frames := outRate * mixFrameMS / 1000
+	rate := m.out.RateHz
+	channels := m.out.Channels
+	frames := rate * mixFrameMS / 1000
 	ticker := time.NewTicker(time.Duration(mixFrameMS) * time.Millisecond)
 	defer ticker.Stop()
-	pcm := make([]byte, frames*outChannels*2)
-	mix := make([]float32, frames*outChannels)
+	pcm := make([]byte, frames*channels*2)
+	mix := make([]float32, frames*channels)
 	// Per-app accumulation scratch: each app's streams are summed here and the
 	// sum is clamped before it reaches the master mix, so the master volume is
 	// a ceiling on every app's contribution rather than a gain applied after
 	// all apps have already added themselves into one buffer.
-	appMix := make([]float32, frames*outChannels)
+	appMix := make([]float32, frames*channels)
 	fadeStep := float64(mixFrameMS) / float64(m.opts.DuckFadeMS)
-	lim := newMasterLimiter(outRate)
+	lim := newMasterLimiter(rate)
 	// Reused across ticks: the steady-state mixer path allocates nothing.
 	playbacks := make([]*Playback, 0, 16)
 	apps := make([]string, 0, 8)
@@ -1376,7 +1383,7 @@ func (m *Manager) CaptureDroppedFrames(appID string) uint64 {
 }
 
 func (m *Manager) CaptureFormat() backend.AudioFormat  { return m.dev.CaptureFormat() }
-func (m *Manager) PlaybackFormat() backend.AudioFormat { return m.dev.PlaybackFormat() }
+func (m *Manager) PlaybackFormat() backend.AudioFormat { return m.out }
 
 // CaptureProcessingTap reports the processing tap an application capture
 // actually receives on CaptureEndpoint. An empty result means the physical

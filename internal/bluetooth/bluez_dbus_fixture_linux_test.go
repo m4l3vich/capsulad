@@ -22,6 +22,8 @@ package bluetooth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -51,6 +53,65 @@ func (f *fixtureObjects) GetManagedObjects() (map[dbus.ObjectPath]map[string]map
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.objs, nil
+}
+
+// fixtureAdapter implements org.freedesktop.DBus.Properties for the fake
+// adapter. BlueZ persists Adapter1.Alias, so Set updates both the property map
+// and the object manager's view, which is what b.refresh reads back.
+type fixtureAdapter struct {
+	mu      sync.Mutex
+	path    dbus.ObjectPath
+	objects *fixtureObjects
+	props   map[string]dbus.Variant
+	sets    []string
+}
+
+func (f *fixtureAdapter) Get(_ string, name string) (dbus.Variant, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.props[name], nil
+}
+
+func (f *fixtureAdapter) GetAll(string) (map[string]dbus.Variant, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]dbus.Variant, len(f.props))
+	for name, value := range f.props {
+		out[name] = value
+	}
+	return out, nil
+}
+
+func (f *fixtureAdapter) Set(iface, name string, value dbus.Variant) *dbus.Error {
+	if iface != "org.bluez.Adapter1" {
+		return dbus.MakeFailedError(fmt.Errorf("unexpected interface %s", iface))
+	}
+	f.mu.Lock()
+	f.props[name] = value
+	f.sets = append(f.sets, name)
+	f.mu.Unlock()
+	f.objects.update(f.path, iface, name, value)
+	return nil
+}
+
+func (f *fixtureAdapter) alias() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.props["Alias"].Value().(string)
+}
+
+func (f *fixtureAdapter) setCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sets...)
+}
+
+func (f *fixtureObjects) update(path dbus.ObjectPath, iface, name string, value dbus.Variant) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if props, ok := f.objs[path][iface]; ok {
+		props[name] = value
+	}
 }
 
 type fixtureMediaControl struct {
@@ -135,6 +196,7 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 		adapter: {"org.bluez.Adapter1": {
 			"Address": dbus.MakeVariant("8A:7C:50:49:22:22"), "Powered": dbus.MakeVariant(true),
 			"Discoverable": dbus.MakeVariant(false), "Pairable": dbus.MakeVariant(true),
+			"Alias": dbus.MakeVariant("Capsula"),
 		}},
 	}
 	fixtureControlSource(objs, fixtureDevice, "AA:BB:CC:DD:EE:FF")
@@ -146,6 +208,13 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 	if err := conn.Export(&exportedControl{ctl: control, path: fixtureDevice}, fixtureDevice, "org.bluez.MediaControl1"); err != nil {
 		t.Fatalf("export media control: %v", err)
 	}
+	adapterProps := &fixtureAdapter{
+		path: adapter, objects: objects,
+		props: map[string]dbus.Variant{"Alias": dbus.MakeVariant("Capsula")},
+	}
+	if err := conn.Export(adapterProps, adapter, "org.freedesktop.DBus.Properties"); err != nil {
+		t.Fatalf("export adapter properties: %v", err)
+	}
 
 	b := &BlueZ{conn: conn, connected: map[string]string{}, subs: map[int]chan Event{}}
 	// A controllable wall clock: each phase starts with any earlier commanded
@@ -155,6 +224,34 @@ func TestBlueZDbusMediaControlFixture(t *testing.T) {
 	b.now = func() time.Time { return now }
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
+	// The advertised name is an administrator-only Adapter1.Alias write.
+	// BlueZ persists the alias, so the manager must not power-cycle or touch
+	// the incoming/discoverable policy; only the property write is expected.
+	if err := b.SetAdapterName(ctx, "  Kitchen Speaker  "); err != nil {
+		t.Fatalf("set adapter name: %v", err)
+	}
+	if got := adapterProps.alias(); got != "Kitchen Speaker" {
+		t.Fatalf("Adapter1.Alias = %q, want the trimmed name", got)
+	}
+	if got := adapterProps.setCalls(); len(got) != 1 || got[0] != "Alias" {
+		t.Fatalf("adapter property writes = %v, want only Alias", got)
+	}
+	if status, err := b.Status(ctx); err != nil || status.Name != "Kitchen Speaker" {
+		t.Fatalf("observed status name = %q, err=%v", status.Name, err)
+	}
+	if !b.status.Powered || b.status.Discoverable {
+		t.Fatalf("rename changed adapter policy: %+v", b.status)
+	}
+	// An invalid name is refused before any bus round trip.
+	for _, bad := range []string{"", "bad\x00name", strings.Repeat("a", 249)} {
+		if err := b.SetAdapterName(ctx, bad); !errors.Is(err, ErrInvalidName) {
+			t.Fatalf("SetAdapterName(%q) error = %v, want ErrInvalidName", bad, err)
+		}
+	}
+	if got := adapterProps.setCalls(); len(got) != 1 {
+		t.Fatalf("a refused name reached the bus: %v", got)
+	}
 
 	// The source exposes no MediaPlayer1.Status. Receipt evidence says it is
 	// playing, so a toggle must reach the device object's MediaControl1.Pause.

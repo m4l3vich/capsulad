@@ -1,9 +1,11 @@
-//! Capsula native SDK: a stable C ABI over the framework's UDS gRPC engine.
+//! Capsulad native SDK: a stable C ABI over the framework's UDS gRPC engine,
+//! plus the outbound networking apps would otherwise bundle.
 //!
 //! The library owns one bounded Tokio runtime, protobuf reflection for every
 //! framework service, all four gRPC call shapes, the managed AppBus session,
-//! and a raw-PCM audio fast path. Handles crossing the ABI are integers; no
-//! Rust objects are exposed to callers.
+//! a raw-PCM audio fast path, a verified HTTP/1.1 client, remote gRPC channels
+//! (TLS/h2 or h2c) and small encoding/crypto/URL primitives. Handles crossing
+//! the ABI are integers; no Rust objects are exposed to callers.
 
 pub mod api;
 pub mod audio;
@@ -12,9 +14,14 @@ pub mod call;
 pub mod client;
 pub mod dynamic;
 pub mod ffi;
+pub mod grpc_remote;
+pub mod headers;
+pub mod http;
+pub mod primitives;
 pub mod registry;
 pub mod runtime;
 pub mod threads;
+pub mod tls;
 
 #[cfg(unix)]
 pub fn runtime_monotonic_ns() -> u64 {

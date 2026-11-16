@@ -50,7 +50,7 @@ architecture = "aarch64"
 abi = "linux-gnu"
 
 [[interfaces]]
-service = "capsula.contracts.media.v1.MediaPlayerService"
+service = "capsulad.contracts.media.v1.MediaPlayerService"
 version = "1.0.0"
 EOF
 

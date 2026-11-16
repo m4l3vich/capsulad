@@ -8,7 +8,7 @@ import { session } from './session.js'
 export const MAX_ASSET_BYTES = 32 * 1024 * 1024
 
 // Mirrors the daemon's staging-file prefix; such names are never published.
-const STAGING_PREFIX = '.capsula-upload-'
+const STAGING_PREFIX = '.capsulad-upload-'
 
 /** Client-side copy of the store's path rules. Empty string means valid. */
 export function assetPathError(value) {
@@ -86,7 +86,7 @@ export function uploadAsset(file, target, { onProgress } = {}) {
     xhr.open('POST', `/api/assets?path=${encodeURIComponent(target)}`)
     xhr.withCredentials = true
     xhr.setRequestHeader('Accept', 'application/json')
-    xhr.setRequestHeader('X-Capsula-CSRF', session.csrf)
+    xhr.setRequestHeader('X-Capsulad-CSRF', session.csrf)
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
     if (xhr.upload && typeof onProgress === 'function') {
       xhr.upload.onprogress = (event) => {
@@ -114,7 +114,7 @@ export async function deleteAsset(target) {
   const resp = await fetch(`/api/assets?path=${encodeURIComponent(target)}`, {
     method: 'DELETE',
     credentials: 'same-origin',
-    headers: { Accept: 'application/json', 'X-Capsula-CSRF': session.csrf }
+    headers: { Accept: 'application/json', 'X-Capsulad-CSRF': session.csrf }
   })
   if (!resp.ok) throw new Error(await readError(resp))
 }

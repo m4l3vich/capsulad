@@ -2,7 +2,7 @@
 # End-to-end script-runtime smoke.
 #
 # Proves, on a simulator daemon, that both interpreter hosts:
-#   * connect through the public libcapsula ABI and report APP_READY;
+#   * connect through the public libcapsulad ABI and report APP_READY;
 #   * receive AppBus invocations;
 #   * make a permitted unary framework call;
 #   * exchange routed unary calls with each other;
@@ -34,8 +34,8 @@ cleanup() {
   "$CLI" -data-dir "$DATA" app stop "${TARGET_RUN:-}" >/dev/null 2>&1 || true
   kill "${DAEMON_PID:-0}" >/dev/null 2>&1 || true
   sleep 1
-  pkill -f "$LIB/capsula-quickjs" >/dev/null 2>&1 || true
-  pkill -f "$LIB/capsula-micropython" >/dev/null 2>&1 || true
+  pkill -f "$LIB/capsulad-quickjs" >/dev/null 2>&1 || true
+  pkill -f "$LIB/capsulad-micropython" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -43,16 +43,16 @@ mkdir -p "$BIN"
 if [ "$SKIP_INTERPRETER_BUILD" != "1" ]; then
   sh "$ROOT/interpreter/build.sh"
 fi
-[ -x "$LIB/capsula-quickjs" ] || die "missing $LIB/capsula-quickjs; run make interpreter"
-[ -x "$LIB/capsula-micropython" ] || die "missing $LIB/capsula-micropython; run make interpreter"
+[ -x "$LIB/capsulad-quickjs" ] || die "missing $LIB/capsulad-quickjs; run make interpreter"
+[ -x "$LIB/capsulad-micropython" ] || die "missing $LIB/capsulad-micropython; run make interpreter"
 
 say "host terminal-event queue test"
 CC=${CC:-cc}
 "$CC" -std=c11 -Wall -Wextra -pthread \
   -I"$ROOT/sdk/native/include" -I"$ROOT/interpreter/common" \
-  "$ROOT/interpreter/common/capsula_host_test.c" \
-  -o "$OUT/capsula-host-test"
-"$OUT/capsula-host-test" || die "host terminal-event queue test failed"
+  "$ROOT/interpreter/common/capsulad_host_test.c" \
+  -o "$OUT/capsulad-host-test"
+"$OUT/capsulad-host-test" || die "host terminal-event queue test failed"
 
 say "building daemon and CLI"
 (cd "$ROOT" && go build -ldflags '-linkmode=external' -o "$DAEMON" ./cmd/capsulad)
@@ -166,8 +166,8 @@ wait "$DAEMON_PID" 2>/dev/null || true
 wait_gone "$PROBE_PID"
 wait_gone "$TARGET_PID"
 sleep 1
-if pgrep -f "$LIB/capsula-quickjs" >/dev/null 2>&1 ||
-   pgrep -f "$LIB/capsula-micropython" >/dev/null 2>&1; then
+if pgrep -f "$LIB/capsulad-quickjs" >/dev/null 2>&1 ||
+   pgrep -f "$LIB/capsulad-micropython" >/dev/null 2>&1; then
   die "interpreter host survived daemon shutdown"
 fi
 
