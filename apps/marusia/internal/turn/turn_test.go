@@ -920,3 +920,38 @@ func TestTurnCompletesOnTerminalFrameWithTextAndCommands(t *testing.T) {
 		t.Fatalf("played url = %q, want none", result.PlayedURL)
 	}
 }
+
+// The no-answer line is the one an operator sees when recognition still fails:
+// it must name the keyword policy and the capability payload that was sent.
+func TestTurnNoAnswerNamesTheInitFacts(t *testing.T) {
+	var stream *fakeStream
+	stream = newFakeStream(func() {
+		stream.events <- &vkclient.Event{Kind: vkclient.EventInit, PhraseID: "p-4"}
+		stream.events <- &vkclient.Event{Kind: vkclient.EventFinish, Finish: vkclient.FinishResult}
+		stream.events <- &vkclient.Event{Kind: vkclient.EventEOS}
+	})
+	chunks := make(chan []byte, 8)
+	for range 3 {
+		chunks <- loudFrame()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := Run(ctx, Options{
+		Endpoint:   &fakeEndpoint{stream: stream},
+		Speech:     vkclient.SpeechOptions{Format: vkclient.FormatWave},
+		Chunks:     chunks,
+		Player:     &fakePlayer{},
+		Indicator:  &fakeIndicator{},
+		EndSilence: 40 * time.Millisecond,
+	})
+	if result.Outcome != NoAnswer {
+		t.Fatalf("outcome = %v (%s)", result.Outcome, result.Detail)
+	}
+	for _, want := range []string{"keyword_mode=no_kw",
+		fmt.Sprintf("capabilities=%dB", len(vkclient.DefaultCapabilitiesJSON)),
+		"terminal frame: result"} {
+		if !strings.Contains(result.Detail, want) {
+			t.Fatalf("detail = %q; it must contain %q", result.Detail, want)
+		}
+	}
+}

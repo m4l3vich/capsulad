@@ -108,7 +108,7 @@ session, and `xtoken_id` is a manufacturing credential this unit does not hold.
 | `device_id` | empty | stable `x-device-id`, masked; also the HTTP identity |
 | `audio_format` | `wave` | upload framing; `ogg_opus` is declared but refused |
 | `client_version` | `44.91` | advertised client/firmware version |
-| `keyword_mode` | `no_kw` | `no_kw` asks the service to transcribe the command directly; `kw_params` claims the phrase begins with the keyword and is only valid for audio that actually does |
+| `keyword_mode` | `no_kw` | `no_kw` asks the service to transcribe the command directly; `kw_params` is applied to wake-word activations only, the one origin whose capture starts with the spoken keyword (touch and API turns always send `no_kw`) |
 | `keyword` | `marusya` | keyword name used when `keyword_mode=kw_params` |
 | `hw_id` | `9F25725B` | keyword id used when `keyword_mode=kw_params` |
 | `capabilities_json` | `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}` | `RequestClientOptions.capabilities.json`; the default is the recovered Capsula Mini token, documented as a model default rather than a proven vendor schema |
@@ -315,10 +315,18 @@ MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV=/path/16k-mono.wav \
 
 `MARUSIA_PROBE_CAPABILITIES_JSON` overrides the init capability payload (default:
 the recovered Capsula Mini token), `MARUSIA_PROBE_CLIENT_DATA_JSON` sets
-`client_data` (empty by default), and `MARUSIA_PROBE_KEYWORD_MODE` is `kw_params`
-by default because the probe sends a whole utterance, wake word included: the
-prompts in `/tmp/marusia-prompts` (`Маруся, как дела?` and friends) are exactly
-that. Use `no_kw` for a prompt without the wake word.
+`client_data` (empty by default), and `MARUSIA_PROBE_KEYWORD_MODE` defaults to
+`no_kw` — the same policy the app's own turns send, so a probe run reproduces a
+real turn. For a prompt whose audio starts with the wake word (the ones in
+`/tmp/marusia-prompts`: `Маруся, как дела?`, `Маруся, включи музыку`), set
+`MARUSIA_PROBE_KEYWORD_MODE=kw_params` to exercise the wake-word path:
+
+```
+MARUSIA_PROBE_SESSION=… MARUSIA_PROBE_SECRET=… MARUSIA_PROBE_DEVICE=… \
+MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV="/tmp/marusia-prompts/Маруся, как дела?.wav" \
+MARUSIA_PROBE_KEYWORD_MODE=kw_params \
+  go run ./cmd/marusia-probe
+```
 
 It prints the keyword policy and the capability/client-data payload sizes before
 the turn, then the init QoS, the chunk accounting, every `text_so_far`, every
@@ -385,13 +393,17 @@ both from recoverable evidence rather than a guess:
   model default
   `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}`
   (`capabilities_json` overrides it).
-- **The keyword policy was wrong by construction.** `kw_params` makes the
-  service confirm the keyword from the audio it receives. This app starts
-  capturing when the wake word has already been spoken, so the phrase it
-  uploads never begins with the keyword and `kw_params` could only ever end in
-  "keyword not confirmed". The default is now `no_kw`; `kw_params` is opt-in and
-  warns that the phrase must begin with the keyword. The probe keeps
-  `kw_params` because it uploads a whole utterance.
+- **The keyword policy was applied to the wrong activations.** `kw_params` makes
+  the service confirm the keyword from the audio it receives. A wake-word
+  capture does begin with the keyword, because the framework attaches up to 1 s
+  of pre-activation audio to it (`internal/audio` `prerollMS`, emitted on the
+  activation grant). Touch and API activations receive the same pre-roll, but
+  for them it is room audio ahead of the command, so their phrase never starts
+  with the keyword and claiming one can only end in "keyword not confirmed".
+  The policy is now per-activation: `kw_params` is sent for wake-word
+  activations when `keyword_mode=kw_params`, and every other origin always sends
+  `no_kw`. The default stays `no_kw`, since the wake-word pre-roll path is the
+  only unproven part of the claim.
 
 What is *not* recovered: the exact JSON schema the vendor puts in
 `capabilities.json` (`bytes json = 1`). The binary sets the field present but its
@@ -406,8 +418,10 @@ Unproven, and therefore not claimed by the app:
 - **Recognition itself.** No live turn has been run since the capability payload
   and the `no_kw` default landed, because no session credential is available in
   this tree. The remaining gate is one real probe turn: with the recovered
-  capability payload and `no_kw`, the terminal frame must carry `text_so_far` or
-  a `play_url`. Every earlier attempt — `kw_params` (which aborts "keyword not
+  capability payload and `no_kw` the terminal frame must carry `text_so_far` or
+  a `play_url`; a prompt whose audio starts with the wake word should also be
+  run once with `MARUSIA_PROBE_KEYWORD_MODE=kw_params` to confirm the wake-word
+  path. Every earlier attempt — `kw_params` (which aborts "keyword not
   confirmed", including for a real human recording of "Маруся"),
   `strict_kw`/`no_kw` with no capability payload, 20/80/160 ms chunks, 8 and
   16 kHz, Ogg-Opus as one chunk and as Ogg pages, silence padding,

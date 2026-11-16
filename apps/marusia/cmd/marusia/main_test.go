@@ -397,32 +397,48 @@ func TestPumpMicStopsAfterCancel(t *testing.T) {
 	}
 }
 
-// A turn's keyword policy is a configuration choice, not a property of the
-// activation: this app starts capturing after the wake word, so kw_params could
-// never be confirmed. The default states no_kw explicitly, and kw_params is sent
-// only when the operator selects it.
+// kw_params is claimed only for a wake-word activation when the operator opted
+// in, because that is the only capture that begins with the spoken keyword.
+// Touch and API turns start at the command — their 1 s pre-roll is room audio
+// ahead of it — and always send no_kw.
 func TestSpeechOptionsKeywordPolicy(t *testing.T) {
 	config := settings.Config{
-		Format:  vkclient.FormatWave,
-		Keyword: "marusya",
-		HWID:    "9F25725B",
+		Format:      vkclient.FormatWave,
+		Keyword:     "marusya",
+		HWID:        "9F25725B",
+		KeywordMode: settings.KeywordModeParams,
 	}
-	init := vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
-	if init.GetKeywordOptions().GetNoKw() == nil {
-		t.Fatalf("default init = %+v, want no_kw", init.GetKeywordOptions())
-	}
-	if init.GetKeywordOptions().GetKwParams() != nil {
-		t.Fatalf("default init carried kw_params: %+v", init.GetKeywordOptions().GetKwParams())
-	}
-
-	config.KeywordMode = settings.KeywordModeParams
-	init = vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	wake := &capsulad.Activation{Origin: capsulad.ActivationOriginWakeword, MatchedModelID: "word"}
+	init := vkclient.BuildInit(speechOptionsFor(config, wake), "serial", "version")
 	params := init.GetKeywordOptions().GetKwParams()
 	if params == nil || params.GetKeyword() != "marusya" || params.GetHwId() != "9F25725B" {
-		t.Fatalf("kw_params init = %+v", params)
+		t.Fatalf("wake-word kw_params = %+v", params)
 	}
 	if params.GetMediaState() != clientpb.MediaState_MEDIA_STATE_STOP {
 		t.Fatalf("media_state = %v, want STOP", params.GetMediaState())
+	}
+
+	for name, activation := range map[string]*capsulad.Activation{
+		"touch":       {Origin: capsulad.ActivationOriginTouch},
+		"api":         {Origin: capsulad.ActivationOriginAPI},
+		"nil":         nil,
+		"unspecified": {},
+	} {
+		options := speechOptionsFor(config, activation)
+		if options.Keyword != "" || options.KeywordInAudio {
+			t.Fatalf("%s: options claim a keyword (%+v); only a wake-word activation may", name, options)
+		}
+		got := vkclient.BuildInit(options, "serial", "version").GetKeywordOptions()
+		if got.GetNoKw() == nil || got.GetKwParams() != nil {
+			t.Fatalf("%s: keyword_options = %+v, want no_kw", name, got)
+		}
+	}
+
+	// no_kw (the default) never claims a keyword, even for a wake-word turn.
+	config.KeywordMode = settings.KeywordModeNoKeyword
+	options := speechOptionsFor(config, wake)
+	if options.Keyword != "" || options.KeywordInAudio {
+		t.Fatalf("no_kw options claim a keyword: %+v", options)
 	}
 }
 
@@ -435,14 +451,14 @@ func TestSpeechOptionsCarryCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	init := vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	init := vkclient.BuildInit(speechOptionsFor(config, nil), "serial", "version")
 	if got := string(init.GetClientOptions().GetCapabilities().GetJson()); got != settings.DefaultCapabilitiesJSON {
 		t.Fatalf("capabilities = %q, want the model default %q", got, settings.DefaultCapabilitiesJSON)
 	}
 
 	custom := `{"capabilities_hex":"deadbeef"}`
 	config.CapabilitiesJSON = []byte(custom)
-	init = vkclient.BuildInit(speechOptionsFor(config), "serial", "version")
+	init = vkclient.BuildInit(speechOptionsFor(config, nil), "serial", "version")
 	if got := string(init.GetClientOptions().GetCapabilities().GetJson()); got != custom {
 		t.Fatalf("capabilities = %q, want %q", got, custom)
 	}

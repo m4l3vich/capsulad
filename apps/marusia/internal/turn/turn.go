@@ -465,7 +465,9 @@ func Run(ctx context.Context, opts Options) (result Result) {
 			// service declining to answer. Reporting it as success would
 			// claim a turn that said nothing. The init facts are included
 			// because "no text" is the symptom of an init the service would
-			// not recognize: this is the line a probe turn has to move.
+			// not recognize: the keyword policy and the capability payload
+			// this turn actually sent. This is the line a probe run has to
+			// move.
 			detail := fmt.Sprintf("the service returned no answer: recognition produced no text and no command "+
 				"(keyword_mode=%s, capabilities=%dB)", opts.Speech.KeywordMode(), effectiveCapabilitiesLen(opts.Speech))
 			if finish != "" {

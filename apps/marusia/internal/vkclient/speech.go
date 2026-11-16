@@ -155,9 +155,11 @@ type SpeechOptions struct {
 	Keyword string
 	// KeywordInAudio states that the uploaded phrase begins with the wake
 	// word. kw_params is sent only when it is true: the service confirms the
-	// keyword from the phrase audio it receives, so a capture that starts
-	// after the wake word (this app's activation) can never be confirmed and
-	// the service ends the phrase with "keyword not confirmed".
+	// keyword from the phrase audio it receives, so a capture that starts at
+	// the command — a touch or API activation, whose pre-roll is room audio
+	// ahead of it, or a wake-word capture whose pre-roll never arrived — can
+	// never be confirmed and the service ends the phrase with "keyword not
+	// confirmed".
 	KeywordInAudio bool
 	HWID           string
 	// MediaState is required inside keyword_params: the service rejects an init

@@ -138,7 +138,7 @@ default = "9F25725B"
 [[settings]]
 key = "keyword_mode"
 label = "Keyword policy"
-description = "no_kw transcribes the command directly. kw_params requires the uploaded phrase to begin with the keyword: the service confirms the keyword from the received audio, so a capture that starts after the wake word is answered \"keyword not confirmed\". Keep no_kw unless you are testing a whole utterance that starts with the wake word."
+description = "no_kw transcribes the command directly. kw_params claims the uploaded phrase begins with the keyword; it is applied to wake-word activations only, because that is the only capture that starts with the spoken keyword. Touch and API activations always send no_kw (their 1 s pre-roll is room audio ahead of the command). If a wake-word phrase still answers \"keyword not confirmed\", the pre-roll did not reach the stream: keep no_kw."
 type = "select"
 default = "no_kw"
 [[settings.choices]]
@@ -151,7 +151,7 @@ label = "Keyword params (phrase must start with the wake word)"
 [[settings]]
 key = "capabilities_json"
 label = "Client capabilities payload"
-description = "JSON sent as RequestClientOptions.capabilities.json in the phrase init. The default carries the capability token the shipped Capsula Mini firmware sent on /connect (31c0255a004201d1408a235de880400000); the vendor's exact JSON schema was not recoverable, so override this with the exact vendor payload if you have it. An empty value is rejected: a phrase opened without capabilities never produced text."
+description = "JSON sent as RequestClientOptions.capabilities.json in the phrase init. The default carries the capability token the shipped Capsula Mini firmware sent on /connect (31c0255a004201d1408a235de880400000); the vendor's exact JSON schema was not recoverable, so override this with the exact vendor payload if you have it. An empty value falls back to that model default; a malformed value is rejected and the previous configuration is kept."
 type = "text"
 default = "{\"capabilities_hex\":\"31c0255a004201d1408a235de880400000\"}"
 

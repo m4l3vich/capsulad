@@ -600,12 +600,13 @@ func (a *app) runActivation(activation *capsulad.Activation) {
 	}()
 
 	hold := activation.Origin == capsulad.ActivationOriginTouch && activation.HoldToTalk
-	speech := speechOptionsFor(config)
-	// One line per turn: kw_params is only valid when the uploaded phrase
-	// begins with the keyword, which a post-wake capture never does; the
-	// capability payload is what the service gates recognition on.
-	log.Printf("marusia: phrase keyword_mode=%s capabilities=%dB client_data=%dB",
-		speech.KeywordMode(), len(speech.CapabilitiesJSON), len(speech.ClientDataJSON))
+	speech := speechOptionsFor(config, activation)
+	// One line per turn: kw_params is claimed only for a wake-word activation,
+	// the one origin whose capture begins with the spoken wake word; every
+	// other origin states no_kw. The capability payload is what the service
+	// gates recognition on.
+	log.Printf("marusia: phrase keyword_mode=%s origin=%s capabilities=%dB client_data=%dB",
+		speech.KeywordMode(), activation.Origin, len(speech.CapabilitiesJSON), len(speech.ClientDataJSON))
 	result := turn.Run(ctx, turn.Options{
 		Endpoint:   endpoint{client: protocol},
 		Speech:     speech,
@@ -657,14 +658,16 @@ func logTurnCompleted(activationID string, result turn.Result) {
 
 // speechOptionsFor builds one turn's init fields.
 //
-// kw_params is only sent when the operator selects keyword_mode=kw_params *and*
-// the uploaded phrase begins with the keyword. The service confirms the keyword
-// from the audio it receives, so a wake-word activation — where capture starts
-// after the wake word — can never be confirmed and ends with "keyword not
-// confirmed". The default is therefore no_kw, which asks the service to
-// transcribe the command directly. media_state is always set inside kw_params
-// because the service refuses an unspecified state.
-func speechOptionsFor(config settings.Config) vkclient.SpeechOptions {
+// kw_params is sent only when the operator selects keyword_mode=kw_params *and*
+// the activation was produced by a wake word. The service confirms the keyword
+// from the audio it receives, and only a wake-word capture starts with the
+// spoken wake word: the framework attaches up to one second of pre-activation
+// audio to any capture carrying the activation id (internal/audio prerollMS),
+// but for a touch or API activation that pre-roll is room audio ahead of the
+// command, not the keyword — so claiming a keyword there can only end with
+// "keyword not confirmed" and those origins always send no_kw. media_state is
+// set inside kw_params because the service refuses an unspecified state.
+func speechOptionsFor(config settings.Config, activation *capsulad.Activation) vkclient.SpeechOptions {
 	options := vkclient.SpeechOptions{
 		Format:           config.Format,
 		Timezone:         timezone(),
@@ -674,7 +677,8 @@ func speechOptionsFor(config settings.Config) vkclient.SpeechOptions {
 		CapabilitiesJSON: config.CapabilitiesJSON,
 		ClientDataJSON:   config.ClientDataJSON,
 	}
-	if config.KeywordMode == settings.KeywordModeParams {
+	if config.KeywordMode == settings.KeywordModeParams &&
+		activation != nil && activation.Origin == capsulad.ActivationOriginWakeword {
 		options.Keyword = config.Keyword
 		options.KeywordInAudio = true
 	}

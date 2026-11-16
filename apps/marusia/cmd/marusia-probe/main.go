@@ -15,8 +15,8 @@
 //	MARUSIA_PROBE_CAPABILITIES_JSON  init capabilities payload; defaults to the
 //	                        recovered Capsula Mini token
 //	MARUSIA_PROBE_CLIENT_DATA_JSON   init client_data payload; empty by default
-//	MARUSIA_PROBE_KEYWORD_MODE       kw_params (default; a whole utterance that
-//	                        starts with the wake word) or no_kw
+//	MARUSIA_PROBE_KEYWORD_MODE       no_kw (default) or kw_params for a whole
+//	                        utterance that starts with the wake word
 //
 // What it reports: the init phrase id and QoS, the chunk accounting, every
 // text_so_far, every command, the play_url, and then the HTTP status,
@@ -94,7 +94,7 @@ func main() {
 	if err := vkclient.ValidateClientDataJSON(clientData); err != nil {
 		log.Fatalf("probe: client_data: %v", err)
 	}
-	keywordMode := env("MARUSIA_PROBE_KEYWORD_MODE", "kw_params")
+	keywordMode := env("MARUSIA_PROBE_KEYWORD_MODE", "no_kw")
 	speech := vkclient.SpeechOptions{
 		Format:           vkclient.FormatWave,
 		Timezone:         "Europe/Moscow",
@@ -106,8 +106,10 @@ func main() {
 	}
 	switch keywordMode {
 	case "kw_params":
-		// The probe sends a whole utterance; the supplied prompts start with
-		// the wake word, so kw_params can be confirmed.
+		// Opt-in: the probe sends a whole utterance, so a prompt that starts
+		// with the wake word can be confirmed. The default stays no_kw, which
+		// is what the app's touch and API turns always send, and what its
+		// wake-word turns send unless keyword_mode=kw_params.
 		speech.Keyword = env("MARUSIA_PROBE_KEYWORD", "marusya")
 		speech.KeywordInAudio = true
 	case "no_kw":

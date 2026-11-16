@@ -46,9 +46,9 @@ const (
 	// firmware this app targets. Its only recovered evidence is the hex token
 	// the shipped agent sent on /connect; see vkclient.DefaultCapabilitiesHex.
 	DefaultCapabilitiesJSON = `{"capabilities_hex":"` + vkclient.DefaultCapabilitiesHex + `"}`
-	// DefaultKeywordMode is no_kw: this app starts capturing after the wake
-	// word, so the phrase it uploads never begins with the keyword and
-	// kw_params can only end in "keyword not confirmed".
+	// DefaultKeywordMode is no_kw: only a wake-word capture begins with the
+	// spoken keyword, so claiming one for touch and API activations can only
+	// end in "keyword not confirmed".
 	DefaultKeywordMode = KeywordModeNoKeyword
 	// DefaultSessionFile is where the shipped vendor agent left its own
 	// session and device identity on the device. The path is a manifest
@@ -61,9 +61,11 @@ const (
 	// KeywordModeNoKeyword sends no_kw: the service must transcribe the
 	// command without waiting for a keyword.
 	KeywordModeNoKeyword = "no_kw"
-	// KeywordModeParams sends kw_params. It is only correct when the uploaded
-	// phrase begins with the keyword (the probe sends a whole utterance
-	// including the wake word; the app's own capture does not).
+	// KeywordModeParams sends kw_params, for wake-word activations only: the
+	// service confirms the keyword from the received audio, and only a
+	// wake-word capture starts with the keyword — the 1 s pre-roll attached to
+	// any activation-id capture (internal/audio prerollMS) is room audio
+	// ahead of the command for touch and API turns.
 	KeywordModeParams = "kw_params"
 )
 
@@ -402,9 +404,11 @@ func Build(values Values, fallback Fallback) (Config, []string, error) {
 			KeyKeywordMode, KeywordModeParams, KeyKeyword)
 	}
 	if keywordMode == KeywordModeParams {
-		warnings = append(warnings, "keyword_mode=kw_params requires the uploaded phrase to begin with the "+
-			"keyword; a capture that starts after the wake word is answered with \"keyword not confirmed\". "+
-			"The default "+DefaultKeywordMode+" is correct for this app's post-wake capture.")
+		warnings = append(warnings, "keyword_mode=kw_params is applied to wake-word activations only, because the "+
+			"service confirms the keyword from the received audio and only a wake-word capture starts with the "+
+			"spoken keyword; touch and API activations always send no_kw (their 1 s pre-roll is room audio ahead "+
+			"of the command). If a wake-word phrase still ends with \"keyword not confirmed\", the pre-roll did "+
+			"not reach the stream: use "+DefaultKeywordMode+".")
 	}
 
 	// Recognition cannot start without the client capability payload: it is

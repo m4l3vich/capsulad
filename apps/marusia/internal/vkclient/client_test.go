@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1390,16 +1391,17 @@ func TestBuildInitUsesAnOverriddenCapabilitiesAndClientData(t *testing.T) {
 }
 
 // kw_params is only valid when the uploaded phrase begins with the keyword;
-// the service confirms the keyword from the received audio, so a post-wake
-// capture can only ever be answered with "keyword not confirmed".
+// the service confirms the keyword from the received audio, so a capture whose
+// audio starts at the command (a touch or API activation) can only ever be
+// answered with "keyword not confirmed".
 func TestBuildInitKeywordRequiresTheKeywordInAudio(t *testing.T) {
-	postWake := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", HWID: "9F25725B"},
+	commandFirst := BuildInit(SpeechOptions{Format: FormatWave, Keyword: "marusya", HWID: "9F25725B"},
 		testSerial, "44.91")
-	if postWake.GetKeywordOptions().GetNoKw() == nil {
-		t.Fatalf("post-wake keyword init = %+v, want no_kw", postWake.GetKeywordOptions())
+	if commandFirst.GetKeywordOptions().GetNoKw() == nil {
+		t.Fatalf("command-first keyword init = %+v, want no_kw", commandFirst.GetKeywordOptions())
 	}
-	if params := postWake.GetKeywordOptions().GetKwParams(); params != nil {
-		t.Fatalf("post-wake init claimed kw_params: %+v", params)
+	if params := commandFirst.GetKeywordOptions().GetKwParams(); params != nil {
+		t.Fatalf("command-first init claimed kw_params: %+v", params)
 	}
 	if got := (SpeechOptions{Keyword: "marusya"}).KeywordMode(); got != "no_kw" {
 		t.Fatalf("KeywordMode = %q, want no_kw", got)
@@ -1441,5 +1443,52 @@ func TestValidateCapabilitiesJSON(t *testing.T) {
 				t.Fatalf("ValidateCapabilitiesJSON(%q) = %v", tc.payload, err)
 			}
 		})
+	}
+}
+
+// TestBuildInitWireBytes pins the complete init message, not just a
+// marshal/unmarshal round trip through the same descriptor: a round trip cannot
+// detect a divergence from the vendor's schema, but an exact byte comparison
+// fails the moment a field number, ordering, default or payload changes.
+//
+// The reference message is BuildInit(SpeechOptions{Format: FormatWave,
+// Timezone: "Europe/Moscow", StatusIntervalMS: 1000}, "SN-TEST-0001", "44.91"),
+// decoded field by field:
+//
+//	0a 02 08 01              audio_options.format = AUDIO_FORMAT_WAVE (field 1)
+//	12 03 08 e8 07           qos_options.status_interval_ms = 1000 (field 2)
+//	1a 6b                    client_options (field 3, 107 bytes)
+//	  0a 3b                    capabilities (field 1, 59 bytes)
+//	    0a 39                    json (field 1, 57 bytes)
+//	                              {"capabilities_hex":"31c0255a…"}
+//	  12 06 0a 04 1a 02 20 01  state (field 2) → capsule mic_on
+//	  22 0d Europe/Moscow      timezone (field 4)
+//	  62 15 0a 0c … 12 05 …    device_info (field 12) → serial, version
+//	20 01                    mode = SPEECH_MODE_GENERAL (field 4)
+//	32 02 22 00              keyword_options (field 6) → no_kw (field 4)
+const wantInitWireHex = "0a020801120308e8071a6b0a3b0a397b226361706162696c69746965735f686578223a2233316330323535613030343230316431343038613233356465383830343030303030227d12060a041a022001220d4575726f70652f4d6f73636f7762150a0c534e2d544553542d30303031120534342e3931200132022200"
+
+func TestBuildInitWireBytes(t *testing.T) {
+	init := BuildInit(SpeechOptions{
+		Format:           FormatWave,
+		Timezone:         "Europe/Moscow",
+		StatusIntervalMS: 1000,
+	}, "SN-TEST-0001", "44.91")
+	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(init)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := hex.EncodeToString(payload); got != wantInitWireHex {
+		t.Fatalf("init bytes changed:\n got %s\nwant %s", got, wantInitWireHex)
+	}
+
+	// The capability payload must sit at client_options(3).capabilities(1).json(1).
+	capabilitiesField := init.GetClientOptions().GetCapabilities().ProtoReflect().
+		Descriptor().Fields().ByName("json")
+	if capabilitiesField == nil || capabilitiesField.Number() != 1 {
+		t.Fatalf("capabilities.json field = %+v, want number 1", capabilitiesField)
+	}
+	if got := init.ProtoReflect().Descriptor().Fields().ByName("client_options").Number(); got != 3 {
+		t.Fatalf("client_options field number = %d, want 3", got)
 	}
 }

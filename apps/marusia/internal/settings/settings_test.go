@@ -387,8 +387,10 @@ func TestBuildCarriesTheCapabilitiesPayload(t *testing.T) {
 	}
 }
 
-// This app captures after the wake word, so kw_params can never be confirmed.
-// The default policy is no_kw; kw_params is opt-in and validated.
+// kw_params is only valid for audio that begins with the keyword, and this app
+// only gets that for wake-word captures (the 1 s pre-roll attached to any
+// activation-id capture is room audio ahead of the command for touch and API
+// turns). The default policy is no_kw; kw_params is opt-in and validated.
 func TestBuildKeywordMode(t *testing.T) {
 	config, warnings, err := Build(Values{Endpoint: "prod", AudioFormat: "wave", DeviceID: "dev-1",
 		Serial: "SN1"}, Fallback{})
