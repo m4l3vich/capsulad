@@ -602,6 +602,39 @@ Proof level: the vendor service accepted the session credential and the upload f
 recognition of the captured speech, the codec of a returned `play_url` body, playback of that body,
 any latency figure, and one complete spoken turn. Those are open gate 16.
 
+### 2026-11-17 deployment and probe
+
+Deployment proof and live probes recorded on 2026-11-17, at their separate proof levels.
+
+- **Deployed stack.** HEAD `77f5c85` was built for aarch64 / glibc ≤ 2.33 and deployed to the
+  Capsula Mini rev 4 over ADB (`/data/capsdemo`). The boot hook's health gate returned 0; the
+  installed daemon reports `0.1.0-dev` and the apps report `org.capsulad.marusia 0.1.0` and
+  `org.capsulad.dumbassistant 0.2.0`. The default assistant was migrated to `org.capsulad.marusia`
+  and existing credentials and settings were preserved. The deployed build is HEAD `77f5c85` and
+  did not include the unrelated uncommitted peer changes in the working tree.
+- **Device serial (identity hygiene).** The serial setting was corrected from
+  `11bfcbc5…` to the unit's real serial `03104B1D…` (hostname/backup evidence). The
+  probe with the correct serial still produced no text, so this is identity hygiene, not a
+  recognition fix.
+- **Live probe matrix.** Four prompts with `no_kw` all ended `finish result` with zero
+  `text_so_far`, no commands and no `play_url`; the service accepted the init/QoS and counted
+  13 chunks / 1040 ms, then 25 chunks / 2000 ms (status_num 1, 2). Both `Маруся,` prompts with
+  `kw_params` aborted with "keyword not confirmed". Extra controls were identical in outcome:
+  activation_type `listen_command` / `button` / `keyword`, an independent Milena TTS utterance,
+  and an open `/connect` WebSocket changed nothing. `/connect` returned 101 with zero pushes.
+- **Vendor ground truth.** The vendor packer does not set `use_asrld_recognize` or `kws_context`,
+  and the device control plane supplies no `client_data`, `grpc_mainflow` or `grpc_flowmode`. The
+  vendor's older session `b1903f9f…` is Unauthenticated; the only accepted session `f775c474…`
+  belongs to a different account than the unit's historical pairing. The remaining blocker is
+  service-side provisioning / account pairing, not a missing app init field; recognition is not
+  shown to work.
+
+Proof level: the vendor service accepted the supplied app-settings session and the upload framing.
+Not proven: recognition, TTS, and any `play_url` body (none observed). The probes ran through the
+host native SDK against `https://vc.go.mail.ru`; there is no device acoustic measurement and no
+claim that the app is fixed. The safe next action is to re-link/provision the unit under the
+accepted session's account, then re-run the probe.
+
 ## Explicitly unavailable on this hardware
 
 - **User, PID, network and IPC namespaces and seccomp filters.** The stock kernel offers mount

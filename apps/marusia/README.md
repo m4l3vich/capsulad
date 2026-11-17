@@ -317,7 +317,18 @@ MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV=/path/16k-mono.wav \
 the recovered Capsula Mini token), `MARUSIA_PROBE_CLIENT_DATA_JSON` sets
 `client_data` (empty by default), and `MARUSIA_PROBE_KEYWORD_MODE` defaults to
 `no_kw` — the same policy the app's own turns send, so a probe run reproduces a
-real turn. For a prompt whose audio starts with the wake word (the ones in
+real turn. `MARUSIA_PROBE_ACTIVATION_TYPE` sets `client_options.activation_type`
+and is empty by default, which is also what the app's own turns send; the vendor's
+shipped client always names one of its four wire values (`listen_command`,
+`keyword`, `button`, `flowmode`), so an operator reproducing that init sets the
+knob explicitly:
+
+```
+MARUSIA_PROBE_ACTIVATION_TYPE=listen_command … \
+  go run ./cmd/marusia-probe
+```
+
+For a prompt whose audio starts with the wake word (the ones in
 `/tmp/marusia-prompts`: `Маруся, как дела?`, `Маруся, включи музыку`), set
 `MARUSIA_PROBE_KEYWORD_MODE=kw_params` to exercise the wake-word path:
 
@@ -328,8 +339,9 @@ MARUSIA_PROBE_KEYWORD_MODE=kw_params \
   go run ./cmd/marusia-probe
 ```
 
-It prints the keyword policy and the capability/client-data payload sizes before
-the turn, then the init QoS, the chunk accounting, every `text_so_far`, every
+It prints the keyword policy, the activation type and the capability/client-data
+payload sizes before the turn, then the init QoS, the chunk accounting with the
+service's own status counter, every `text_so_far`, every
 command, the `play_url` (shortened to `scheme://host/path`, because the query is
 the signature), and then the HTTP status, `Content-Type`, size and first bytes of
 that URL. No credential is written to disk or to the log; the probe is refused

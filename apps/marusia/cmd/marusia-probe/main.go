@@ -17,6 +17,9 @@
 //	MARUSIA_PROBE_CLIENT_DATA_JSON   init client_data payload; empty by default
 //	MARUSIA_PROBE_KEYWORD_MODE       no_kw (default) or kw_params for a whole
 //	                        utterance that starts with the wake word
+//	MARUSIA_PROBE_ACTIVATION_TYPE    init client_options.activation_type; empty
+//	                        by default, otherwise one of the vendor's own wire
+//	                        values: listen_command, keyword, button, flowmode
 //
 // What it reports: the init phrase id and QoS, the chunk accounting, every
 // text_so_far, every command, the play_url, and then the HTTP status,
@@ -45,6 +48,23 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// speechOptions is the init the probe sends, assembled from the environment:
+// the app's own defaults (wave framing, Europe/Moscow, the recovered Capsula
+// Mini capability token) plus the operator knobs. It is separate from main so a
+// test can pin the wire values without a credential or a live service.
+func speechOptions(capabilities, clientData []byte) vkclient.SpeechOptions {
+	return vkclient.SpeechOptions{
+		Format:           vkclient.FormatWave,
+		Timezone:         "Europe/Moscow",
+		ActivationType:   env("MARUSIA_PROBE_ACTIVATION_TYPE", ""),
+		HWID:             env("MARUSIA_PROBE_HWID", "9F25725B"),
+		MediaState:       clientpb.MediaState_MEDIA_STATE_STOP,
+		StatusIntervalMS: 1000,
+		CapabilitiesJSON: capabilities,
+		ClientDataJSON:   clientData,
+	}
 }
 
 func main() {
@@ -95,15 +115,7 @@ func main() {
 		log.Fatalf("probe: client_data: %v", err)
 	}
 	keywordMode := env("MARUSIA_PROBE_KEYWORD_MODE", "no_kw")
-	speech := vkclient.SpeechOptions{
-		Format:           vkclient.FormatWave,
-		Timezone:         "Europe/Moscow",
-		HWID:             env("MARUSIA_PROBE_HWID", "9F25725B"),
-		MediaState:       clientpb.MediaState_MEDIA_STATE_STOP,
-		StatusIntervalMS: 1000,
-		CapabilitiesJSON: capabilities,
-		ClientDataJSON:   clientData,
-	}
+	speech := speechOptions(capabilities, clientData)
 	switch keywordMode {
 	case "kw_params":
 		// Opt-in: the probe sends a whole utterance, so a prompt that starts
@@ -116,8 +128,8 @@ func main() {
 	default:
 		log.Fatalf("MARUSIA_PROBE_KEYWORD_MODE: want kw_params or no_kw, got %q", keywordMode)
 	}
-	log.Printf("probe: init keyword_mode=%s capabilities=%dB client_data=%dB",
-		speech.KeywordMode(), len(capabilities), len(clientData))
+	log.Printf("probe: init keyword_mode=%s activation_type=%q capabilities=%dB client_data=%dB",
+		speech.KeywordMode(), speech.ActivationType, len(capabilities), len(clientData))
 
 	stream, err := client.OpenSpeech(ctx, speech)
 	if err != nil {
@@ -150,8 +162,8 @@ func main() {
 				log.Printf("probe: init phrase=%s chunk_hint=%dms status_interval=%dms",
 					event.PhraseID, event.ChunkLengthHintMS, event.StatusIntervalMS)
 			case vkclient.EventStatus:
-				log.Printf("probe: status chunks=%d audio=%dms", event.Status.ChunksReceived,
-					event.Status.AudioReceivedMS)
+				log.Printf("probe: status chunks=%d audio=%dms status_num=%d", event.Status.ChunksReceived,
+					event.Status.AudioReceivedMS, event.Status.StatusNum)
 			case vkclient.EventTextSoFar:
 				result.text = event.Text
 				log.Printf("probe: text_so_far %q", event.Text)

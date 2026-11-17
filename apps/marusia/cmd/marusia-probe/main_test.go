@@ -55,6 +55,29 @@ func TestReadWAVReturnsThePCMPayload(t *testing.T) {
 	}
 }
 
+// The activation type the operator passes must reach the init the service sees:
+// the vendor's own client always names one (listen_command, keyword, button,
+// flowmode), and the live probe needs to reproduce that to be evidence about
+// the service's answer.
+func TestActivationTypeKnobReachesTheInit(t *testing.T) {
+	capabilities := vkclient.DefaultCapabilitiesJSON
+
+	t.Setenv("MARUSIA_PROBE_ACTIVATION_TYPE", "")
+	if got := speechOptions(capabilities, nil).ActivationType; got != "" {
+		t.Fatalf("default activation type = %q, want the app's empty default", got)
+	}
+
+	t.Setenv("MARUSIA_PROBE_ACTIVATION_TYPE", "listen_command")
+	opts := speechOptions(capabilities, nil)
+	if opts.ActivationType != "listen_command" {
+		t.Fatalf("activation type = %q, want listen_command", opts.ActivationType)
+	}
+	init := vkclient.BuildInit(opts, "sn", "44.91")
+	if got := init.GetClientOptions().GetActivationType(); got != "listen_command" {
+		t.Fatalf("init client_options.activation_type = %q, want listen_command", got)
+	}
+}
+
 // The probe must refuse audio the service would reject instead of uploading it.
 func TestReadWAVRejectsOtherFormats(t *testing.T) {
 	for _, tc := range []struct {
