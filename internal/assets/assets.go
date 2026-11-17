@@ -64,6 +64,10 @@ var (
 	ErrInvalidPath = errors.New("invalid asset path")
 	ErrTooLarge    = errors.New("asset exceeds the maximum size")
 	ErrStoreFull   = errors.New("asset store is full")
+	// ErrDeleted reports that the asset was deleted while its replacement was
+	// still streaming. The write is refused instead of silently undoing a
+	// successful deletion.
+	ErrDeleted = errors.New("asset was deleted while it was being written")
 )
 
 // DefaultMediaType is used for extensions outside the explicit table.
@@ -125,6 +129,22 @@ type Catalog struct {
 	// publication must not interleave.
 	mu sync.Mutex
 
+	// pending is the sum of the byte budgets reserved by in-flight writes and
+	// pendingIDs counts them per asset id. The published tree plus pending is
+	// bounded by storeLimit at every instant, and a body that publishes is never
+	// larger than its reservation, so the store's physical footprint (published
+	// + staging) stays within storeLimit while uploads are accepted. The one
+	// exception is a writer that is rejected after reading reserve+1 bytes: its
+	// staging file holds that single probe byte until the deferred removal, so a
+	// measurement taken mid-rejection can see at most one extra byte per
+	// in-flight writer. The reservation still bounds the accepted data.
+	pending    int64
+	pendingIDs map[string]int
+	// generations detects a delete that lands while a write for the same id is
+	// in flight. The write refuses to publish, so a successful delete is never
+	// silently undone by a rename that was already on its way.
+	generations map[string]uint64
+
 	cacheMu sync.Mutex
 	hashes  map[string]hashEntry
 	// hashFile is the hash computation seam (tests count reads through it).
@@ -160,11 +180,13 @@ func Open(root string) (*Catalog, error) {
 		return nil, fmt.Errorf("assets: set store root mode: %w", err)
 	}
 	return &Catalog{
-		root:       abs,
-		limit:      MaxFileBytes,
-		storeLimit: MaxStoreBytes,
-		hashes:     make(map[string]hashEntry),
-		hashFile:   hashFile,
+		root:        abs,
+		limit:       MaxFileBytes,
+		storeLimit:  MaxStoreBytes,
+		hashes:      make(map[string]hashEntry),
+		hashFile:    hashFile,
+		pendingIDs:  make(map[string]int),
+		generations: make(map[string]uint64),
 	}, nil
 }
 
@@ -312,37 +334,30 @@ func (c *Catalog) Lookup(rel string) (Info, error) {
 // hash of the bytes actually written. Bodies over the per-file limit are
 // rejected with ErrTooLarge, bodies that would exceed the aggregate store
 // budget with ErrStoreFull, and the partial file is discarded in both cases.
+//
+// The body is copied *outside* c.mu: it is paced by the caller, and holding the
+// store lock across it would stall every other writer, List and Remove for as
+// long as a slow client takes. Before the copy the write reserves its byte
+// budget under the lock, so the published tree plus every in-flight reservation
+// (including the bytes about to be staged for a replacement) stays within
+// storeLimit; concurrent staged uploads therefore cannot fill the data
+// partition with staging files. Replacing a file therefore needs free budget
+// equal to the new body: the old bytes are still on disk until the rename, and
+// a replacement that does not fit is refused with ErrStoreFull. The physical
+// bound is exact for accepted writes; a rejected body can leave its single
+// probe byte on disk until the deferred removal (see the pending accounting).
+// The reservation is released on every exit path (success, copy error, publish
+// refusal), and the lock is taken again only for publication, where a delete
+// that landed meanwhile wins over the rename.
 func (c *Catalog) Write(rel string, body io.Reader) (Info, error) {
 	id, full, err := c.resolve(rel)
 	if err != nil {
 		return Info{}, err
 	}
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.mkdirParents(id); err != nil {
-		return Info{}, err
-	}
-	if info, statErr := os.Lstat(full); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return Info{}, fmt.Errorf("%w: %s is a symlink", ErrInvalidPath, id)
-		}
-		if !info.Mode().IsRegular() {
-			return Info{}, fmt.Errorf("%w: %s already exists and is not a regular file", ErrInvalidPath, id)
-		}
-	} else if !errors.Is(statErr, fs.ErrNotExist) {
-		return Info{}, statErr
-	}
-
-	current, err := c.currentSizeExcluding(id)
-	if err != nil {
-		return Info{}, err
-	}
-	storeRemaining := c.storeLimit - current
-	if storeRemaining < 0 {
-		storeRemaining = 0
-	}
-
-	staging, err := os.CreateTemp(filepath.Dir(full), stagingPrefix+"*")
+	staging, reserve, generation, storeBound, err := c.beginWriteLocked(id, full)
+	c.mu.Unlock()
 	if err != nil {
 		return Info{}, err
 	}
@@ -350,22 +365,18 @@ func (c *Catalog) Write(rel string, body io.Reader) (Info, error) {
 	// A successful rename consumes the staging name; afterwards this is a
 	// harmless ENOENT that guarantees no partial file survives a failure.
 	defer func() { _ = os.Remove(stagingName) }()
-	if err := staging.Chmod(fileMode); err != nil {
-		_ = staging.Close()
-		return Info{}, err
-	}
-	// The copy is bounded by the tighter of the per-file limit and what is
-	// left in the aggregate store budget, so an oversized body is rejected
-	// without filling the data partition first.
-	limit := c.limit
-	storeBound := false
-	if storeRemaining < limit {
-		limit = storeRemaining
-		storeBound = true
-	}
+	defer func() {
+		c.mu.Lock()
+		c.releaseReservationLocked(id, reserve)
+		c.mu.Unlock()
+	}()
+
+	// The copy is bounded by the reservation: the tighter of the per-file limit
+	// and what the store budget could still admit. A body one byte over is
+	// enough to report the exact reason, and an empty body is always accepted.
 	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(staging, hasher), io.LimitReader(body, limit+1))
-	if copyErr == nil && written > limit {
+	written, copyErr := io.Copy(io.MultiWriter(staging, hasher), io.LimitReader(body, reserve+1))
+	if copyErr == nil && written > reserve {
 		if storeBound {
 			copyErr = ErrStoreFull
 		} else {
@@ -381,6 +392,14 @@ func (c *Catalog) Write(rel string, body io.Reader) (Info, error) {
 	if copyErr != nil {
 		return Info{}, copyErr
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A delete of this id while the body streamed wins: the rename must not
+	// resurrect an asset the administrator successfully removed.
+	if c.generations[id] != generation {
+		return Info{}, ErrDeleted
+	}
 	if err := os.Rename(stagingName, full); err != nil {
 		return Info{}, err
 	}
@@ -392,6 +411,96 @@ func (c *Catalog) Write(rel string, body io.Reader) (Info, error) {
 		SHA256:    hex.EncodeToString(hasher.Sum(nil)),
 		Size:      written,
 	}, nil
+}
+
+// beginWriteLocked prepares one staged write: it creates parent directories,
+// checks the target, reserves the byte budget and opens the staging file. It
+// returns the reservation, the delete generation the write must still observe
+// at publish, and whether the reservation was bounded by the store rather than
+// the per-file limit. Callers hold c.mu.
+func (c *Catalog) beginWriteLocked(id, full string) (*os.File, int64, uint64, bool, error) {
+	if err := c.mkdirParents(id); err != nil {
+		return nil, 0, 0, false, err
+	}
+	if info, statErr := os.Lstat(full); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, 0, 0, false, fmt.Errorf("%w: %s is a symlink", ErrInvalidPath, id)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, 0, 0, false, fmt.Errorf("%w: %s already exists and is not a regular file", ErrInvalidPath, id)
+		}
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return nil, 0, 0, false, statErr
+	}
+
+	reserve, generation, storeBound, err := c.reserveLocked(id)
+	if err != nil {
+		return nil, 0, 0, false, err
+	}
+	staging, err := os.CreateTemp(filepath.Dir(full), stagingPrefix+"*")
+	if err != nil {
+		c.releaseReservationLocked(id, reserve)
+		return nil, 0, 0, false, err
+	}
+	if err := staging.Chmod(fileMode); err != nil {
+		_ = staging.Close()
+		c.releaseReservationLocked(id, reserve)
+		return nil, 0, 0, false, err
+	}
+	return staging, reserve, generation, storeBound, nil
+}
+
+// reserveLocked admits one write to id and returns the byte budget it may use.
+// It performs the write path's single filesystem scan and bounds the published
+// tree plus every in-flight reservation by the store budget. The target's old
+// bytes stay counted while the replacement stages: the atomic rename frees them
+// only at publication, so a replacement needs staging headroom on top of the
+// published tree. A replacement that does not fit is refused with ErrStoreFull
+// instead of filling the data partition (free space or delete the target first);
+// an empty replacement stages nothing and is always admitted.
+func (c *Catalog) reserveLocked(id string) (int64, uint64, bool, error) {
+	if c.pendingIDs == nil {
+		c.pendingIDs = make(map[string]int)
+	}
+	if c.generations == nil {
+		c.generations = make(map[string]uint64)
+	}
+	if c.pendingIDs[id] == 0 {
+		// No write for this id is in flight, so no writer can still hold an
+		// older generation; start the next one from the current value.
+		delete(c.generations, id)
+	}
+	current, err := c.publishedBytes()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	available := c.storeLimit - current - c.pending
+	if available < 0 {
+		available = 0
+	}
+	reserve, storeBound := c.limit, false
+	if available < reserve {
+		reserve, storeBound = available, true
+	}
+	c.pending += reserve
+	c.pendingIDs[id]++
+	return reserve, c.generations[id], storeBound, nil
+}
+
+// releaseReservationLocked returns an in-flight write's budget. Callers hold
+// c.mu. The generation entry is scoped to the writes that were in flight when a
+// delete landed, so it is dropped once the last one is gone.
+func (c *Catalog) releaseReservationLocked(id string, reserve int64) {
+	c.pending -= reserve
+	if c.pending < 0 {
+		c.pending = 0
+	}
+	if n := c.pendingIDs[id] - 1; n > 0 {
+		c.pendingIDs[id] = n
+		return
+	}
+	delete(c.pendingIDs, id)
+	delete(c.generations, id)
 }
 
 // Remove deletes one regular file. A directory (and therefore a directory
@@ -418,6 +527,14 @@ func (c *Catalog) Remove(rel string) error {
 	}
 	if err := os.Remove(full); err != nil {
 		return err
+	}
+	// A replacement may be streaming right now. Record that the delete happened
+	// so its pending rename is refused instead of resurrecting the asset.
+	if c.pendingIDs[id] > 0 {
+		if c.generations == nil {
+			c.generations = make(map[string]uint64)
+		}
+		c.generations[id]++
 	}
 	c.invalidateHashes(id)
 	return nil
@@ -518,11 +635,14 @@ func (c *Catalog) mkdirParents(id string) error {
 	return nil
 }
 
-// currentSizeExcluding sums regular-file sizes below the store, except the
-// target being replaced. Callers hold c.mu so writes cannot race the budget.
-func (c *Catalog) currentSizeExcluding(exclude string) (int64, error) {
+// publishedBytes sums the regular files currently published in the store.
+// Staging files and symlinks are skipped, so the result is exactly the tree the
+// aggregate budget accounts for: there is no "excluding the target" variant,
+// because a replacement's old bytes stay counted until its rename publishes.
+// Callers hold c.mu so writes cannot race the budget.
+func (c *Catalog) publishedBytes() (int64, error) {
 	var total int64
-	err := filepath.WalkDir(c.root, func(full string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(c.root, func(_ string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -533,14 +653,7 @@ func (c *Catalog) currentSizeExcluding(exclude string) (int64, error) {
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		id, err := c.relativeID(full)
-		if err != nil {
-			return err
-		}
-		if id != exclude {
+		if info.Mode().IsRegular() {
 			total += info.Size()
 		}
 		return nil

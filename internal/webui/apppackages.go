@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -51,43 +52,7 @@ func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(packageUploadReadBudget))
 	body := http.MaxBytesReader(w, r.Body, artifact.MaxArchiveBytes)
 
-	client := frameworkv1.NewApplicationServiceClient(s.Conn)
-	stream, err := client.InstallApplication(r.Context())
-	if err != nil {
-		s.writePackageError(w, err)
-		return
-	}
-	// The stream's first message is the open frame; it names the archive for
-	// diagnostics only. The daemon never installs from a client-named location.
-	if err := stream.Send(&frameworkv1.InstallApplicationRequest{
-		Chunk: &frameworkv1.InstallApplicationRequest_Open{Open: &frameworkv1.InstallApplicationOpen{}},
-	}); err != nil {
-		s.writePackageError(w, err)
-		return
-	}
-	buf := make([]byte, packageUploadChunk)
-	for {
-		n, readErr := body.Read(buf)
-		if n > 0 {
-			if err := stream.Send(&frameworkv1.InstallApplicationRequest{
-				Chunk: &frameworkv1.InstallApplicationRequest_Content{Content: buf[:n]},
-			}); err != nil {
-				s.writePackageError(w, err)
-				return
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			// The upload stopped early: abandon the stream so the daemon does
-			// not treat a truncated archive as a package.
-			_ = stream.CloseSend()
-			s.writePackageError(w, readErr)
-			return
-		}
-	}
-	res, err := stream.CloseAndRecv()
+	res, err := s.installArchive(r.Context(), body, "")
 	if err != nil {
 		s.writePackageError(w, err)
 		return
@@ -100,6 +65,46 @@ func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {
 		"display_name":     app.GetDisplayName(),
 		"version":          app.GetVersion(),
 	})
+}
+
+// installArchive streams one package archive to the daemon's
+// InstallApplication RPC. The browser upload route and the MCP install tool
+// share it, so the open frame, chunking and truncation handling live once: a
+// short read abandons the stream instead of letting the daemon treat a
+// truncated archive as a package.
+func (s *Server) installArchive(ctx context.Context, body io.Reader, filename string) (*frameworkv1.InstallApplicationResult, error) {
+	stream, err := frameworkv1.NewApplicationServiceClient(s.Conn).InstallApplication(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The stream's first message is the open frame; it names the archive for
+	// diagnostics only. The daemon never installs from a client-named location.
+	if err := stream.Send(&frameworkv1.InstallApplicationRequest{
+		Chunk: &frameworkv1.InstallApplicationRequest_Open{Open: &frameworkv1.InstallApplicationOpen{FileName: filename}},
+	}); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, packageUploadChunk)
+	for {
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			if err := stream.Send(&frameworkv1.InstallApplicationRequest{
+				Chunk: &frameworkv1.InstallApplicationRequest_Content{Content: buf[:n]},
+			}); err != nil {
+				return nil, err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			// The upload stopped early: abandon the stream so the daemon does
+			// not treat a truncated archive as a package.
+			_ = stream.CloseSend()
+			return nil, readErr
+		}
+	}
+	return stream.CloseAndRecv()
 }
 
 // removeApp removes one installed package. Settings are deliberately retained.
@@ -122,15 +127,29 @@ func packageTooLargeMessage() string {
 // (the running-app explanation is the actionable part); an unexpected failure
 // is logged and reported generically, so no host path or package layout ever
 // reaches the browser.
-func (s *Server) writePackageError(w http.ResponseWriter, err error) {
+// packageFailureClass is the shared classification of a package refusal. The
+// browser route and the MCP install tool both consume it, so their status and
+// error-code taxonomies cannot drift apart.
+type packageFailureClass uint8
+
+const (
+	packageFailureInternal packageFailureClass = iota
+	packageFailureInvalid
+	packageFailureTooLarge
+	packageFailureNotFound
+	packageFailureConflict
+	packageFailureForbidden
+	packageFailureBusy
+	packageFailureUnavailable
+)
+
+func classifyPackageFailure(err error) (packageFailureClass, string) {
 	var tooLarge *http.MaxBytesError
 	switch {
 	case errors.As(err, &tooLarge):
-		writeJSONError(w, http.StatusRequestEntityTooLarge, packageTooLargeMessage())
-		return
+		return packageFailureTooLarge, packageTooLargeMessage()
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
-		writeJSONError(w, http.StatusBadRequest, "the upload ended before the archive was complete; try again")
-		return
+		return packageFailureInvalid, "the upload ended before the archive was complete; try again"
 	}
 	st, _ := status.FromError(err)
 	message := st.Message()
@@ -139,23 +158,50 @@ func (s *Server) writePackageError(w http.ResponseWriter, err error) {
 	}
 	switch st.Code() {
 	case codes.InvalidArgument, codes.OutOfRange:
-		writeJSONError(w, http.StatusBadRequest, message)
+		return packageFailureInvalid, message
 	case codes.NotFound:
-		writeJSONError(w, http.StatusNotFound, message)
+		return packageFailureNotFound, message
 	case codes.FailedPrecondition, codes.AlreadyExists, codes.Aborted:
-		writeJSONError(w, http.StatusConflict, message)
+		return packageFailureConflict, message
 	case codes.PermissionDenied, codes.Unauthenticated:
-		writeJSONError(w, http.StatusForbidden, "the device refused this operation")
+		return packageFailureForbidden, "the device refused this operation"
 	case codes.ResourceExhausted:
 		// Another package holds the single staging slot, or the device is out
 		// of room for it. Both are retryable once the current upload ends.
-		writeJSONError(w, http.StatusTooManyRequests, message)
+		return packageFailureBusy, message
 	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
-		writeJSONError(w, http.StatusServiceUnavailable, "the device is not answering; try again")
+		return packageFailureUnavailable, "the device is not answering; try again"
+	default:
+		return packageFailureInternal, "the package operation failed"
+	}
+}
+
+// writePackageError maps a package refusal onto the browser's status
+// vocabulary. A daemon message for a client-visible refusal is shown verbatim
+// (the running-app explanation is the actionable part); an unexpected failure
+// is logged and reported generically, so no host path or package layout ever
+// reaches the browser.
+func (s *Server) writePackageError(w http.ResponseWriter, err error) {
+	class, message := classifyPackageFailure(err)
+	switch class {
+	case packageFailureInvalid:
+		writeJSONError(w, http.StatusBadRequest, message)
+	case packageFailureTooLarge:
+		writeJSONError(w, http.StatusRequestEntityTooLarge, message)
+	case packageFailureNotFound:
+		writeJSONError(w, http.StatusNotFound, message)
+	case packageFailureConflict:
+		writeJSONError(w, http.StatusConflict, message)
+	case packageFailureForbidden:
+		writeJSONError(w, http.StatusForbidden, message)
+	case packageFailureBusy:
+		writeJSONError(w, http.StatusTooManyRequests, message)
+	case packageFailureUnavailable:
+		writeJSONError(w, http.StatusServiceUnavailable, message)
 	default:
 		if s.Logs != nil {
 			s.Logs.Warnf("webui", "", "package operation failed: %v", err)
 		}
-		writeJSONError(w, http.StatusInternalServerError, "the package operation failed")
+		writeJSONError(w, http.StatusInternalServerError, message)
 	}
 }

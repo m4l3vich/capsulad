@@ -9,14 +9,24 @@ const (
 	rtcpRTPFeedback    = 205 // RFC 4585, FMT 1 is a generic NACK
 )
 
+// receiverReportBlocks is the number of report blocks ReceiverReport emits. The
+// receiver report header's report count field is the number of blocks that
+// follow the sender SSRC (RFC 3550 6.4.2), so the two must agree.
+const receiverReportBlocks = 1
+
 // ReceiverReport builds a minimal RTCP receiver report (32 bytes, version 2,
 // payload type 201, one report block) describing s. ssrc is the SSRC of the
 // sender of the report, source the SSRC that is being reported on. The last
 // sender report fields (LSR/DLSR) are left zero: the buffer does not track
 // sender reports.
+//
+// This is a RAOP helper: the AirPlay 2 control plane uses the sender's own
+// 0xD4-0xD7 datagrams on the UDP control socket (see
+// internal/session/controlpackets.go), not RTCP, so nothing in the AirPlay 2
+// path calls this.
 func ReceiverReport(ssrc, source uint32, s Stats) []byte {
 	b := make([]byte, 32)
-	b[0] = 0x80 // version 2, no padding, one report block
+	b[0] = 0x80 | receiverReportBlocks // version 2, no padding, one report block
 	b[1] = rtcpReceiverReport
 	binary.BigEndian.PutUint16(b[2:4], 7) // length in 32-bit words, minus one
 	binary.BigEndian.PutUint32(b[4:8], ssrc)
@@ -46,6 +56,11 @@ func ReceiverReport(ssrc, source uint32, s Stats) []byte {
 // returned packet carries a single feedback control information word and
 // therefore covers at most 17 sequence numbers, the packet it names plus the
 // 16 bits of its bitmask.
+//
+// This is a RAOP helper: AirPlay 2 asks for a resend with the sender's own
+// 0xD5 request on the UDP control socket (see
+// internal/session/controlpackets.go), consistently with the 0xD6 responses it
+// receives, so nothing in the AirPlay 2 path calls this.
 func NACKPacket(ssrc, source uint32, missing []uint16) [][]byte {
 	if len(missing) == 0 {
 		return nil

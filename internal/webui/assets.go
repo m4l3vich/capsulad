@@ -90,6 +90,8 @@ func (s *Server) writeAssetError(w http.ResponseWriter, err error) {
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "asset exceeds the 32 MiB limit")
 	case errors.Is(err, assets.ErrStoreFull):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "asset store is full")
+	case errors.Is(err, assets.ErrDeleted):
+		writeJSONError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, syscall.ENOSPC):
 		writeJSONError(w, http.StatusInsufficientStorage, "device storage is full")
 	case errors.Is(err, assets.ErrInvalidPath):

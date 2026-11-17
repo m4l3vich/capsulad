@@ -40,6 +40,26 @@ const (
 	maxAppSettingValueBytes = 8 << 10
 )
 
+// opSink is the frontend-facing boundary of one dispatched operation.
+// It is what makes the daemon's operation semantics frontend-independent: the
+// WebSocket browser frontend encodes results, errors, live progress and
+// mutation events as protobuf frames, while the MCP frontend collects them into
+// a tool-call reply. Both drive the same allowlisted dispatch, so a new
+// frontend never re-implements an operation and never gets a private endpoint.
+//
+// The training slot lives on the sink because it is connection state: one
+// active wakeword run per frontend connection, cancelled when that connection's
+// owner goes away.
+type opSink interface {
+	sendError(reqID uint64, code webv1.ErrorCode, message string)
+	sendResult(reqID uint64, res *webv1.Result)
+	sendProgress(reqID uint64, p *webv1.Progress)
+	sendEvent(ev *webv1.Event)
+	beginTraining(id string, cancel context.CancelFunc) bool
+	finishTraining(id string)
+	cancelTraining(id string) bool
+}
+
 // browserOperationVocabulary is the closed set of Command oneof fields this
 // server understands. A test compares it with the proto descriptor, and the
 // set contains no capture, audio, asset, presentation, ForceRelease or generic
@@ -54,7 +74,7 @@ var browserOperationVocabulary = []string{
 // dispatch is an explicit allowlist: each typed command maps to one fixed
 // daemon call. There is no caller-supplied service name, RPC name, or raw
 // protobuf payload, and no capture/audio/asset/generic AppBus operation.
-func (s *Server) dispatch(c *wsConn, reqID uint64, cmd *webv1.Command, ctx context.Context) {
+func (s *Server) dispatch(c opSink, reqID uint64, cmd *webv1.Command, ctx context.Context) {
 	if cmd == nil || cmd.GetOp() == nil {
 		c.sendError(reqID, webv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "empty command")
 		return
@@ -101,7 +121,7 @@ func (s *Server) dispatch(c *wsConn, reqID uint64, cmd *webv1.Command, ctx conte
 
 func (s *Server) daemonVersion() string { return versionString() }
 
-func (s *Server) opSettings(c *wsConn, reqID uint64, upd *webv1.SettingsUpdate) {
+func (s *Server) opSettings(c opSink, reqID uint64, upd *webv1.SettingsUpdate) {
 	if upd == nil || upd.GetGroup() == nil {
 		c.sendError(reqID, errInvalid, "settings group is required")
 		return
@@ -300,7 +320,7 @@ func (s *Server) opSettings(c *wsConn, reqID uint64, upd *webv1.SettingsUpdate) 
 	c.sendEvent(&webv1.Event{Topic: webv1.Topic_TOPIC_SETTINGS, Body: &webv1.Event_Settings{Settings: view}})
 }
 
-func (s *Server) opLaunch(c *wsConn, reqID uint64, launch *webv1.LaunchApp) {
+func (s *Server) opLaunch(c opSink, reqID uint64, launch *webv1.LaunchApp) {
 	appID := strings.TrimSpace(launch.GetAppId())
 	if appID == "" {
 		c.sendError(reqID, errInvalid, "app id is required")
@@ -336,7 +356,7 @@ func (s *Server) opLaunch(c *wsConn, reqID uint64, launch *webv1.LaunchApp) {
 	}}})
 }
 
-func (s *Server) opStop(c *wsConn, reqID uint64, stop *webv1.StopRun) {
+func (s *Server) opStop(c opSink, reqID uint64, stop *webv1.StopRun) {
 	appID, runID := strings.TrimSpace(stop.GetAppId()), strings.TrimSpace(stop.GetRunId())
 	if appID == "" || runID == "" {
 		c.sendError(reqID, errInvalid, "app id and run id are required")
@@ -387,7 +407,7 @@ func (s *Server) opStop(c *wsConn, reqID uint64, stop *webv1.StopRun) {
 	}}})
 }
 
-func (s *Server) opAction(c *wsConn, reqID uint64, action *webv1.TriggerAppAction) {
+func (s *Server) opAction(c opSink, reqID uint64, action *webv1.TriggerAppAction) {
 	appID, actionID := strings.TrimSpace(action.GetAppId()), strings.TrimSpace(action.GetActionId())
 	if appID == "" || actionID == "" {
 		c.sendError(reqID, errInvalid, "app id and action id are required")
@@ -406,7 +426,7 @@ func (s *Server) opAction(c *wsConn, reqID uint64, action *webv1.TriggerAppActio
 	}}})
 }
 
-func (s *Server) opAppSettings(c *wsConn, reqID uint64, upd *webv1.AppSettingsUpdate) {
+func (s *Server) opAppSettings(c opSink, reqID uint64, upd *webv1.AppSettingsUpdate) {
 	appID := strings.TrimSpace(upd.GetAppId())
 	if appID == "" {
 		c.sendError(reqID, errInvalid, "app id is required")
@@ -472,7 +492,7 @@ func (s *Server) opAppSettings(c *wsConn, reqID uint64, upd *webv1.AppSettingsUp
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_AppSettings{AppSettings: result}})
 }
 
-func (s *Server) opMedia(c *wsConn, reqID uint64, media *webv1.MediaCommand) {
+func (s *Server) opMedia(c opSink, reqID uint64, media *webv1.MediaCommand) {
 	// The framework provider has no app identity: its commands go straight to
 	// the public BluetoothMediaService, the same surface the physical key uses.
 	if media.GetKind() == webv1.MediaProviderKind_MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA {
@@ -533,7 +553,7 @@ func (s *Server) opMedia(c *wsConn, reqID uint64, media *webv1.MediaCommand) {
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Media{Media: result}})
 }
 
-func (s *Server) opBluetooth(c *wsConn, reqID uint64, cmd *webv1.BluetoothCommand) {
+func (s *Server) opBluetooth(c opSink, reqID uint64, cmd *webv1.BluetoothCommand) {
 	if cmd == nil || cmd.GetAction() == nil {
 		c.sendError(reqID, errInvalid, "bluetooth action is required")
 		return
@@ -656,7 +676,7 @@ func (s *Server) opBluetooth(c *wsConn, reqID uint64, cmd *webv1.BluetoothComman
 	s.publish(uichanges.Bluetooth)
 }
 
-func (s *Server) opRecordSample(c *wsConn, reqID uint64, record *webv1.RecordSample, parent context.Context) {
+func (s *Server) opRecordSample(c opSink, reqID uint64, record *webv1.RecordSample, parent context.Context) {
 	label := strings.TrimSpace(record.GetLabel())
 	switch label {
 	case "word", "speech", "room", "background":
@@ -689,7 +709,7 @@ func (s *Server) opRecordSample(c *wsConn, reqID uint64, record *webv1.RecordSam
 	}}})
 }
 
-func (s *Server) opDeleteSample(c *wsConn, reqID uint64, del *webv1.DeleteSample) {
+func (s *Server) opDeleteSample(c opSink, reqID uint64, del *webv1.DeleteSample) {
 	id := strings.TrimSpace(del.GetSampleId())
 	if id == "" {
 		c.sendError(reqID, errInvalid, "sample id is required")
@@ -705,7 +725,7 @@ func (s *Server) opDeleteSample(c *wsConn, reqID uint64, del *webv1.DeleteSample
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Deleted{Deleted: &webv1.Empty{}}})
 }
 
-func (s *Server) opFalseDetection(c *wsConn, reqID uint64, cmd *webv1.FalseDetection) {
+func (s *Server) opFalseDetection(c opSink, reqID uint64, cmd *webv1.FalseDetection) {
 	id := strings.TrimSpace(cmd.GetDetectionId())
 	if id == "" {
 		c.sendError(reqID, errInvalid, "detection id is required")
@@ -725,7 +745,7 @@ func (s *Server) opFalseDetection(c *wsConn, reqID uint64, cmd *webv1.FalseDetec
 
 // opDeleteWakeword removes one trained word. Recordings are kept: they are
 // shared training data, not owned by a single artifact.
-func (s *Server) opDeleteWakeword(c *wsConn, reqID uint64, del *webv1.DeleteWakeword) {
+func (s *Server) opDeleteWakeword(c opSink, reqID uint64, del *webv1.DeleteWakeword) {
 	id := strings.TrimSpace(del.GetModelId())
 	if id == "" {
 		c.sendError(reqID, errInvalid, "model id is required")
@@ -744,7 +764,7 @@ func (s *Server) opDeleteWakeword(c *wsConn, reqID uint64, del *webv1.DeleteWake
 	s.publish(uichanges.Wakeword)
 }
 
-func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
+func (s *Server) opTrain(c opSink, reqID uint64, train *webv1.TrainWakeword) {
 	word := strings.TrimSpace(train.GetDisplayName())
 	if word == "" {
 		c.sendError(reqID, errInvalid, "name the wake word before training")
@@ -754,27 +774,22 @@ func (s *Server) opTrain(c *wsConn, reqID uint64, train *webv1.TrainWakeword) {
 	if language == "" {
 		language = "ru"
 	}
-	c.trainingMu.Lock()
-	if len(c.training) >= 1 {
-		c.trainingMu.Unlock()
+	trainingID := newTrainingID()
+	ctx, cancel := context.WithCancel(context.Background())
+	if !c.beginTraining(trainingID, cancel) {
+		cancel()
 		c.sendError(reqID, errConflict, "a training run is already active")
 		return
 	}
-	trainingID := newTrainingID()
-	ctx, cancel := context.WithCancel(context.Background())
-	c.training[trainingID] = cancel
-	c.trainingMu.Unlock()
 
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Training{Training: &webv1.TrainingHandle{TrainingId: trainingID}}})
 
 	go func() {
 		defer func() {
 			cancel()
-			c.trainingMu.Lock()
-			delete(c.training, trainingID)
-			c.trainingMu.Unlock()
+			c.finishTraining(trainingID)
 		}()
-		stream, err := frameworkv1.NewAssistantServiceClient(c.srv.Conn).TrainWakewordClassifier(ctx, &frameworkv1.TrainWakewordClassifierRequest{
+		stream, err := frameworkv1.NewAssistantServiceClient(s.Conn).TrainWakewordClassifier(ctx, &frameworkv1.TrainWakewordClassifierRequest{
 			ModelId: train.GetModelId(), DisplayName: word, Language: language, Seed: train.GetSeed(),
 			WordSampleIds: train.GetWordSampleIds(), RoomSampleIds: train.GetRoomSampleIds(),
 			SpeechSampleIds: train.GetSpeechSampleIds(), FalseSampleIds: train.GetFalseSampleIds(),
@@ -883,25 +898,20 @@ func trainingStreamInterrupted(err error) bool {
 	return ok && (st.Code() == codes.Canceled || st.Code() == codes.DeadlineExceeded)
 }
 
-func (s *Server) opCancelTraining(c *wsConn, reqID uint64, cancelReq *webv1.CancelTraining) {
+func (s *Server) opCancelTraining(c opSink, reqID uint64, cancelReq *webv1.CancelTraining) {
 	id := strings.TrimSpace(cancelReq.GetTrainingId())
 	if id == "" {
 		c.sendError(reqID, errInvalid, "training id is required")
 		return
 	}
-	c.trainingMu.Lock()
-	cancel := c.training[id]
-	delete(c.training, id)
-	c.trainingMu.Unlock()
-	if cancel == nil {
+	if !c.cancelTraining(id) {
 		c.sendError(reqID, errNotFound, "training run is not active")
 		return
 	}
-	cancel()
 	c.sendResult(reqID, &webv1.Result{Value: &webv1.Result_Deleted{Deleted: &webv1.Empty{}}})
 }
 
-func (s *Server) opClock(c *wsConn, reqID uint64, cmd *webv1.ClockCommand) {
+func (s *Server) opClock(c opSink, reqID uint64, cmd *webv1.ClockCommand) {
 	appID := strings.TrimSpace(cmd.GetAppId())
 	if appID != clockAppID {
 		c.sendError(reqID, errForbidden, "clock controls are only available for the built-in clock app")
@@ -1022,7 +1032,7 @@ func clockScheduleFromMask(hour, minute, days uint32) string {
 	return fmt.Sprintf("%d %d * * %s", minute, hour, strings.Join(parts, ","))
 }
 
-func (s *Server) opCreateKey(c *wsConn, reqID uint64, create *webv1.CreateApiKey) {
+func (s *Server) opCreateKey(c opSink, reqID uint64, create *webv1.CreateApiKey) {
 	name := strings.TrimSpace(create.GetName())
 	if name == "" {
 		c.sendError(reqID, errInvalid, "key name is required")
@@ -1050,7 +1060,7 @@ func (s *Server) opCreateKey(c *wsConn, reqID uint64, create *webv1.CreateApiKey
 	s.publish(uichanges.Access)
 }
 
-func (s *Server) opRevokeKey(c *wsConn, reqID uint64, revoke *webv1.RevokeApiKey) {
+func (s *Server) opRevokeKey(c opSink, reqID uint64, revoke *webv1.RevokeApiKey) {
 	name := strings.TrimSpace(revoke.GetName())
 	if name == "" {
 		c.sendError(reqID, errInvalid, "key name is required")

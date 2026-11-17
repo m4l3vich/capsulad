@@ -389,6 +389,9 @@ func (s *Server) accessView() *webv1.AccessView {
 	for _, k := range s.Auth.ListAPIKeys() {
 		view.Keys = append(view.Keys, &webv1.ApiKeyView{
 			Name: k.Name, Prefix: k.Prefix, CreatedUnixMs: k.CreatedAt.UnixMilli(), Revoked: k.Revoked,
+			// The grant is what tells an operator key from a status key; the
+			// Access page cannot describe its own list truthfully without it.
+			Scopes: append([]string(nil), k.Scopes...),
 		})
 	}
 	return view

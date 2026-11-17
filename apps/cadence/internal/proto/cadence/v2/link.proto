@@ -1,0 +1,96 @@
+// The cadence.v2 link envelope and handshake messages this client speaks
+// (upstream proto/cadence/v2/link.proto). The oneof carries only the arms this
+// client sends or reads, at their upstream field numbers; an arm this client
+// does not declare arrives as an unknown field and is skipped.
+syntax = "proto3";
+
+package cadence.v2;
+
+import "cadence/v2/capability.proto";
+import "cadence/v2/session.proto";
+import "cadence/v2/stream.proto";
+
+option go_package = "capsulad/apps/cadence/internal/proto/cadencev2;cadencev2";
+
+message Envelope {
+  oneof body {
+    Hello hello = 1;
+    Welcome welcome = 2;
+    CapabilityReport capability_report = 3;
+    ConfigSet config_set = 4;
+    ConfigApplied config_applied = 5;
+    StateDelta state_delta = 6;
+    SessionStart session_start = 7;
+    MicAudio mic_audio = 8;
+    SessionCancel session_cancel = 9;
+    SessionEvent session_event = 10;
+    SessionClose session_close = 11;
+    StreamStart stream_start = 12;
+    AudioDown audio_down = 13;
+    StreamEnd stream_end = 14;
+    CapabilityCommand capability_command = 15;
+    CommandResult command_result = 16;
+    VoiceLevel voice_level = 24;
+    Duck duck = 25;
+    MicOpen mic_open = 26;
+    DeviceInfo device_info = 28;
+  }
+}
+
+message Hello {
+  uint32 protocol = 1;
+  string daemon_version = 2;
+  string audiod_version = 3;
+  string board = 4;
+  bytes capabilities_hash = 5;
+  // the device's lan addresses; a voice-only client reports none
+  repeated string lan_addresses = 6;
+}
+
+message Welcome {
+  string server_version = 1;
+  bool send_full_report = 2;
+  DeviceInfo device_info = 3;
+}
+
+// server -> device: what the owner set for this device. shown, never logged
+message DeviceInfo {
+  string name = 1;
+  string room_id = 2;
+  string room_name = 3;
+}
+
+// server -> device: microphone and reply levels of a turn shown on a screen,
+// about 25 a second while it listens or speaks. Not a speaker-facing signal.
+message VoiceLevel {
+  string turn_id = 1;
+  uint32 mic = 2;
+  uint32 output = 3;
+}
+
+enum DuckReason {
+  DUCK_REASON_UNSPECIFIED = 0;
+  DUCK_REASON_ASSISTANT = 1;
+  DUCK_REASON_ANNOUNCEMENT = 2;
+  DUCK_REASON_ALARM = 3;
+}
+
+// server -> device: lower the device's own mix while a turn in its room listens
+// or speaks; the device applies it, so a duck never raises a level. active
+// false ends it
+message Duck {
+  bool active = 1;
+  float level = 2;
+  uint32 ramp_ms = 3;
+  DuckReason reason = 4;
+  string turn_id = 5;
+  string session_id = 6;
+}
+
+// server -> speaker: open the microphone for a press on a screen in this room.
+// A speaker-facing client has no screen to press, so it answers within its own
+// rules or ignores it; it never opens the microphone for a foreign press.
+message MicOpen {
+  string session_id = 1;
+  string origin_device_id = 2;
+}

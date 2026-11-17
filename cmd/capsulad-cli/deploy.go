@@ -34,7 +34,8 @@ import (
 // The deployment contract (boot service, bundle limits and free-space floors)
 // comes from the device profile.
 var (
-	deployProfile = profile.RK3308Rev4Stock.Deploy
+	deployProfile      = profile.RK3308Rev4Stock.Deploy
+	deployArchitecture = profile.RK3308Rev4Stock.Architecture
 
 	defaultInitScript = deployProfile.InitScript
 	bootHookName      = deployProfile.BootHookName
@@ -46,6 +47,13 @@ var (
 	watchdogFeederPID = "watchdog.feeder"
 	watchdogHandback  = "watchdog.handback"
 	shellFeederMarker = "shell"
+
+	// feederArgvMarker and legacyFeederArgvMarker identify a feeder in its
+	// command line: the current shell feeder's argv[0] and the hidden
+	// subcommand of the Go feeder shipped before it. A pid file whose pid runs
+	// neither is stale, not a pinned inode.
+	feederArgvMarker       = "capsulad-watchdog-feeder"
+	legacyFeederArgvMarker = "__capsulad_watchdog_feeder"
 
 	daemonBinaryName = "capsulad"
 	cliBinaryName    = "capsulad-cli"
@@ -73,6 +81,61 @@ var bundleLimits = artifact.Limits{
 	MaxFileBytes:  int64(deployProfile.BundleMaxFileBytes),
 	MaxTotalBytes: int64(deployProfile.BundleMaxTotalBytes),
 	MaxEntries:    deployProfile.BundleMaxEntries,
+}
+
+// deployProfiles maps a -platform selection to its deployment contract. The
+// bundle format is identical on every target; only the boot service, the hook
+// name and the free-space floors differ.
+var deployProfiles = map[string]profile.Profile{
+	"rockchip-stock": profile.RK3308Rev4Stock,
+	"rockchip":       profile.RK3308Rev4Stock,
+	"amlogic-stock":  profile.AmlogicA113XStock,
+	"amlogic-alpine": profile.AmlogicA113XAlpine,
+}
+
+// selectDeployProfile points the package-level deployment contract at one
+// target. It is called once per deployment from runDeploy, so a process that
+// deploys one bundle always works from one profile.
+func selectDeployProfile(platform string) (profile.Profile, error) {
+	p, ok := deployProfiles[platform]
+	if !ok {
+		return profile.Profile{}, fmt.Errorf("-platform must be rockchip-stock, amlogic-stock or amlogic-alpine, got %q", platform)
+	}
+	dep := p.Deploy
+	deployProfile = dep
+	defaultInitScript = dep.InitScript
+	bootHookName = dep.BootHookName
+	extractionRatio = dep.ExtractionRatio
+	stagingReserve = dep.StagingReserveBytes
+	dataReserve = dep.DataReserveBytes
+	bundleLimits = artifact.Limits{
+		MaxFileBytes:  int64(dep.BundleMaxFileBytes),
+		MaxTotalBytes: int64(dep.BundleMaxTotalBytes),
+		MaxEntries:    dep.BundleMaxEntries,
+	}
+	deployArchitecture = p.Architecture
+	return p, nil
+}
+
+// platformFlag reads -platform from the command line before the flag set exists,
+// because the flag's value decides the default boot service the other flags are
+// created with. Both the `-platform X` and `-platform=X` forms are accepted,
+// and a missing value is a parse error the flag set reports later.
+func platformFlag(args []string) string {
+	platform := "rockchip-stock"
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-platform" || args[i] == "--platform":
+			if i+1 < len(args) {
+				platform = args[i+1]
+			}
+		case strings.HasPrefix(args[i], "-platform="):
+			platform = strings.TrimPrefix(args[i], "-platform=")
+		case strings.HasPrefix(args[i], "--platform="):
+			platform = strings.TrimPrefix(args[i], "--platform=")
+		}
+	}
+	return platform
 }
 
 // deployment is one validated bundle plus the state needed to apply it.
@@ -115,14 +178,25 @@ type deployment struct {
 // the boot hook, restart through the boot service and gate on a healthy daemon.
 // Nothing is written before the bundle has been fully validated.
 func runDeploy(args []string, dataDir, socket string) error {
+	// The platform decides the boot service, the hook name and the space floors,
+	// and it has to be known before -init-script gets its default value.
+	platform := platformFlag(args)
+	if _, err := selectDeployProfile(platform); err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	platformName := fs.String("platform", platform, "deployment target: rockchip-stock, amlogic-stock or amlogic-alpine")
 	initScript := fs.String("init-script", defaultInitScript, "boot service invoked to stop and restart the daemon")
 	restartMode := fs.String("restart", "auto", "restart policy: auto, always or never")
 	dryRun := fs.Bool("dry-run", false, "print the plan without changing installed state")
 	stagingDir := fs.String("staging", "", "staging parent directory (default: the operating system temporary directory)")
 	timeout := fs.Duration("timeout", 45*time.Second, "time to wait for a healthy daemon after restart")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]
+		dataPartition := "the data partition"
+		if deployProfile.DataPartitionMiB > 0 {
+			dataPartition = fmt.Sprintf("the %.1f MiB data partition", deployProfile.DataPartitionMiB)
+		}
+		fmt.Fprintf(fs.Output(), `usage: capsulad-cli deploy PATH [-platform rockchip-stock|amlogic-stock|amlogic-alpine] [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]
 
 PATH is a bundle directory or a .tar.gz containing:
   capsulad              daemon binary (installed as <data-dir>/capsulad, 0755)
@@ -133,12 +207,12 @@ PATH is a bundle directory or a .tar.gz containing:
 
 Only those top-level entries are meaningful; anything else is reported and
 ignored. The bundle is staged under -staging (default: the temporary
-directory), never inside <data-dir>: the %.1f MiB data partition cannot hold a
+directory), never inside <data-dir>: %s cannot hold a
 second copy of the daemon while the installed one is still there. Nothing is
 written outside <data-dir> except the boot hook bundled at boot/%s.
 
 Flags:
-`, bootHookName, deployProfile.DataPartitionMiB, bootHookName)
+`, bootHookName, dataPartition, bootHookName)
 		fs.PrintDefaults()
 	}
 	positional, err := parseSubcommandFlags(fs, args)
@@ -149,7 +223,11 @@ Flags:
 		return err
 	}
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]")
+		return fmt.Errorf("usage: capsulad-cli deploy PATH [-platform rockchip-stock|amlogic-stock|amlogic-alpine] [-init-script PATH] [-restart auto|always|never] [-dry-run] [-staging DIR] [-timeout DURATION]")
+	}
+	// The parsed value is authoritative; the pre-scan only seeded the defaults.
+	if _, err := selectDeployProfile(*platformName); err != nil {
+		return err
 	}
 	switch *restartMode {
 	case "auto", "always", "never":
@@ -261,6 +339,9 @@ func (d *deployment) prepare() error {
 	if err := d.scanBundle(); err != nil {
 		return err
 	}
+	if err := d.checkBundleELF(); err != nil {
+		return err
+	}
 	// The bundle (or the tree extracted from it) is already in staging, and a
 	// directory bundle is read in place. Copying the daemon again would need a
 	// second 40 MiB in staging for no benefit: activation installs this file
@@ -307,6 +388,155 @@ func (d *deployment) prepare() error {
 			}
 			fmt.Fprintf(os.Stderr, "deploy: warning: %v\n", err)
 		}
+	}
+	return nil
+}
+
+// checkBundleELF validates every native artifact this deployment would install:
+// the lib/ tree (runtime and its dependencies), the daemon and CLI binaries, and
+// every file inside a staged app package. It runs before the daemon is stopped,
+// so a wrong-libc, wrong-glibc or non-ELF artifact is refused with the old stack
+// still running. Only bundle content is scanned, never device state.
+func (d *deployment) checkBundleELF() error {
+	want := sandbox.LibcForABI(deployArchitecture.ABIContains)
+	maxGLIBC := deployArchitecture.MaxGLIBC
+	if d.libSrc != "" {
+		if err := checkELFTree(d.libSrc, want, maxGLIBC, deployArchitecture.Target, true, ""); err != nil {
+			return err
+		}
+	}
+	for _, pkg := range d.packages {
+		if pkg.Dir == "" {
+			continue
+		}
+		// An entrypoint that needs the shared runtime must be dynamic on musl.
+		needDynamic := ""
+		if pkg.Manifest.NativeSDK != nil && want == sandbox.LibcMusl && pkg.Manifest.Entrypoint.Path != "" {
+			needDynamic = filepath.Join(pkg.Dir, pkg.Manifest.Entrypoint.Path)
+		}
+		if err := checkELFTree(pkg.Dir, want, maxGLIBC, deployArchitecture.Target, false, needDynamic); err != nil {
+			return fmt.Errorf("app %s: %w", pkg.Manifest.ID, err)
+		}
+	}
+	for _, bin := range []string{d.daemonSrc, d.cliSrc} {
+		if bin == "" {
+			continue
+		}
+		ok, err := sandbox.IsELF(bin)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// The daemon/CLI probe executes this file before activation, so a
+			// host binary is caught there; only ELF artifacts get ELF checks.
+			continue
+		}
+		if err := checkELFFile(bin, want, maxGLIBC, deployArchitecture.Target, false, true, false, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkELFTree walks one bundle subtree. Only regular files are considered; a
+// shared library that is not an ELF file is an error (that is how a Darwin build
+// would otherwise pass), while a script with a shebang is skipped. When
+// requireLibc is true, a dynamically linked library must match the target libc.
+func checkELFTree(root string, want sandbox.LibcClass, maxGLIBC, targetArch string, requireRuntime bool, needDynamic string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return err
+			}
+			base, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				return err
+			}
+			if !insideDir(base, resolved) {
+				return fmt.Errorf("bundle entry %s resolves outside the bundle (%s)", path, root)
+			}
+			path = resolved
+			if info, err = os.Stat(path); err != nil {
+				return err
+			}
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		name := entry.Name()
+		isLib := strings.HasPrefix(name, "lib") && (strings.Contains(name, ".so") || strings.HasSuffix(name, ".dylib"))
+		isRuntime := isLib && strings.HasPrefix(name, "libcapsulad.so.")
+		if ok, err := sandbox.IsELF(path); err != nil {
+			return err
+		} else if !ok {
+			if isLib {
+				return fmt.Errorf("%s is not an ELF file; a %s target cannot load it", path, want)
+			}
+			// Executable with a shebang is a script, not a native artifact.
+			if info.Mode()&0o111 != 0 {
+				f, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				var magic [2]byte
+				_, _ = io.ReadFull(f, magic[:])
+				f.Close()
+				if string(magic[:]) == "#!" {
+					return nil
+				}
+				return fmt.Errorf("%s is executable but neither ELF nor a script", path)
+			}
+			return nil
+		}
+		exec := info.Mode()&0o111 != 0 && !isLib
+		strict := isRuntime || (requireRuntime && isLib)
+		required := needDynamic != "" && path == needDynamic
+		return checkELFFile(path, want, maxGLIBC, targetArch, isLib, exec, strict, required)
+	})
+}
+
+// checkELFFile applies the libc and glibc ceilings. A statically linked binary
+// has no libc dependency and is accepted; a shared object is required to name
+// the target libc.
+// checkELFFile applies architecture, libc, interpreter and glibc ceilings to one
+// artifact. Executables must have an interpreter matching the target libc when
+// they are dynamic (static passes); shared objects may be self-contained, but
+// the installed runtime must be dynamically linked.
+func checkELFFile(path string, want sandbox.LibcClass, maxGLIBC, targetArch string, isLib, exec, strictRuntime, needDynamic bool) error {
+	if err := sandbox.CheckMachine(path, targetArch); err != nil {
+		return err
+	}
+	if isLib {
+		if strictRuntime {
+			if err := sandbox.CheckLibcRuntime(path, want); err != nil {
+				return err
+			}
+		} else if err := sandbox.CheckLibc(path, want); err != nil {
+			return err
+		}
+	}
+	if exec {
+		if needDynamic {
+			if err := sandbox.CheckInterpRequired(path, want); err != nil {
+				return err
+			}
+		} else if err := sandbox.CheckInterp(path, want); err != nil {
+			return err
+		}
+	}
+	if want == sandbox.LibcGNU && maxGLIBC != "" {
+		return sandbox.CheckGLIBC(path, maxGLIBC)
 	}
 	return nil
 }
@@ -1168,6 +1398,15 @@ func (d *deployment) releaseLegacyFeeder() error {
 	if strings.Contains(string(body), shellFeederMarker) {
 		return nil
 	}
+	if live, known := feederPIDLive(string(body)); known && !live {
+		// The feeder was killed, the pid file survived a reboot, or the pid was
+		// reused by another process. Nothing pins the replaced inode, so waiting
+		// for a handback that can never arrive would abort a deployment for
+		// nothing.
+		_ = os.Remove(pidFile)
+		_ = os.Remove(filepath.Join(runDir, watchdogHandback))
+		return nil
+	}
 	handback := filepath.Join(runDir, watchdogHandback)
 	if err := os.WriteFile(handback, []byte("handback"), 0o644); err != nil {
 		return fmt.Errorf("ask the watchdog feeder to release %s: %w", pidFile, err)
@@ -1182,6 +1421,34 @@ func (d *deployment) releaseLegacyFeeder() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("the watchdog feeder in %s is still running after %s; the previous daemon's space is still pinned", pidFile, watchdogHandbackWait)
+}
+
+// feederPIDLive reports whether the pid recorded in a feeder's pid file still
+// runs a capsulad feeder. A live pid that runs something else is a reused pid,
+// not a pinned inode, so the file is stale all the same. known is false where
+// the host exposes no procfs (the CLI is built for the host too); the caller
+// then keeps waiting for the pid file to disappear instead of guessing.
+func feederPIDLive(body string) (live, known bool) {
+	if fi, err := os.Stat("/proc"); err != nil || !fi.IsDir() {
+		return false, false
+	}
+	fields := strings.Fields(body)
+	if len(fields) == 0 {
+		return false, false
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 0 {
+		return false, false
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, true
+		}
+		return false, false
+	}
+	argv := string(cmdline)
+	return strings.Contains(argv, feederArgvMarker) || strings.Contains(argv, legacyFeederArgvMarker), true
 }
 
 // rollback restores the binaries and boot hook that were replaced and restarts

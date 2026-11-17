@@ -66,7 +66,7 @@ func wifiScanViews(results []wifi.ScanResult) []*webv1.WifiScanResult {
 	return out
 }
 
-func (s *Server) opWifi(c *wsConn, reqID uint64, cmd *webv1.WifiCommand) {
+func (s *Server) opWifi(c opSink, reqID uint64, cmd *webv1.WifiCommand) {
 	if s.Wifi == nil {
 		c.sendError(reqID, errNotFound, "Wi-Fi is not configured on this daemon")
 		return

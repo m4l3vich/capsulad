@@ -3,7 +3,6 @@ package rockchip
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/linuxdev"
 )
 
 // sinkPinTimeout bounds each pactl invocation used to pin and verify the
@@ -50,15 +50,11 @@ func (p *pulseAudio) OpenOutput() (backend.Sink, error) {
 		"--device="+p.cfg.AudioSink,
 		"--format=s16le", "--rate=48000", "--channels=2", "--raw",
 		"--latency-msec=120")
-	stdin, err := cmd.StdinPipe()
+	sink, err := linuxdev.NewPipeSink(cmd)
 	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("pacat: %w", err)
 	}
-	return &pulseSink{cmd: cmd, w: stdin}, nil
+	return sink, nil
 }
 
 func (p *pulseAudio) OpenInput() (backend.Source, error) {
@@ -71,14 +67,11 @@ func (p *pulseAudio) OpenInput() (backend.Source, error) {
 		"--device="+p.cfg.AudioSource,
 		"--format=s16le", "--rate=16000", "--channels=1", "--raw",
 		"--latency-msec=20")
-	stdout, err := cmd.StdoutPipe()
+	src, err := linuxdev.NewPipeSource(cmd)
 	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("parec: %w", err)
 	}
-	return &pulseSource{cmd: cmd, r: stdout}, nil
+	return src, nil
 }
 
 // SetMasterVolume pins the PulseAudio sink gain at unity. The mixer owns the
@@ -257,53 +250,4 @@ func (p *pulseAudio) Close() error {
 	p.closed = true
 	p.mu.Unlock()
 	return nil
-}
-
-type pulseSink struct {
-	cmd *exec.Cmd
-	w   io.WriteCloser
-	mu  sync.Mutex
-}
-
-func (s *pulseSink) WritePCM(p []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.w.Write(p)
-	return err
-}
-
-func (s *pulseSink) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_ = s.w.Close()
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	return s.cmd.Wait()
-}
-
-type pulseSource struct {
-	cmd *exec.Cmd
-	r   io.ReadCloser
-	mu  sync.Mutex
-}
-
-func (s *pulseSource) ReadPCM(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, err := io.ReadFull(s.r, p)
-	if err == io.ErrUnexpectedEOF || err == io.EOF {
-		return n, nil
-	}
-	return n, err
-}
-
-func (s *pulseSource) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_ = s.r.Close()
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	return s.cmd.Wait()
 }

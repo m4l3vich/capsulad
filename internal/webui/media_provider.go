@@ -126,7 +126,7 @@ func frameworkBluetoothCommand(action webv1.MediaAction) (frameworkv1.BluetoothM
 // provider. It is separate from opMedia because there is no application to look
 // up, authorize or route to: the command is the public BluetoothMediaService on
 // this socket, the same surface the physical circle key uses.
-func (s *Server) opFrameworkMedia(c *wsConn, reqID uint64, media *webv1.MediaCommand) {
+func (s *Server) opFrameworkMedia(c opSink, reqID uint64, media *webv1.MediaCommand) {
 	if playerID := strings.TrimSpace(media.GetPlayerId()); playerID != frameworkBluetoothPlayerID {
 		c.sendError(reqID, errInvalid, fmt.Sprintf("unknown framework media player %q", playerID))
 		return

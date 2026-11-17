@@ -89,13 +89,26 @@ say "homeassistant: building for $GOOS/$GOARCH (cgo=$CGO_ENABLED cc=$CC)"
   die "native build failed; a cross build needs a matching C compiler/sysroot (CC=...)"
 
 cp "$HERE/manifest.toml" "$dir/manifest.toml"
+# Stamp the package ABI for the target libc (source manifest stays the default).
+if [ "${GOOS:-}" = linux ]; then
+    sh "$HERE/../../tools/stage-manifest-abi.sh" "$dir/manifest.toml" "${TARGET_ABI:-linux-gnu}"
+fi
 cp "$HERE/proto/homeassistant.proto" "$dir/proto/homeassistant.proto"
 cp "$HERE/proto/homeassistant.protoset" "$dir/proto/homeassistant.protoset"
 cp "$HERE/docs/bridge.md" "$dir/docs/bridge.md"
 say "homeassistant: staged $dir"
 
 if [ "$PACKAGE" = "1" ]; then
-  ( cd "$OUT" && "$CLI" app package "$APP_ID" ) ||
+if [ "${GOOS:-}" = linux ]; then
+    staged_bin=$(find "$dir" -maxdepth 1 -type f -perm -u+x | head -1)
+    [ -n "$staged_bin" ] || { echo "error: no staged executable to ABI-check" >&2; exit 1; }
+    sh "$HERE/../../tools/check-elf-interp.sh" "$staged_bin" "${TARGET_ABI:-linux-gnu}"
+fi
+  if [ "${GOOS:-}" = linux ]; then
+    ( cd "$OUT" && "$CLI" app package "$APP_ID" -target-abi "${TARGET_ABI:-linux-gnu}" -max-glibc "${CAPSULAD_MAX_GLIBC:-}" -target-arch "${CAPSULAD_TARGET_ARCH:-}" )
+  else
+    ( cd "$OUT" && "$CLI" app package "$APP_ID" )
+  fi ||
     die "packaging failed with $CLI; set CAPSULAD_CLI to a host-executable CLI"
   say "homeassistant: package and archive under $OUT"
   say "  install: capsulad-cli app install $OUT/$APP_ID-*.tar.gz"

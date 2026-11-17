@@ -1,0 +1,78 @@
+// The cadence.v2 session messages this client speaks. Field numbers, names and
+// wire types are the upstream device-link definition
+// (https://git.shino.boo/devilreef/cadence/, proto/cadence/v2/session.proto);
+// messages this client never sends or reads are omitted, which protobuf treats
+// as unknown fields. Do not renumber: an interop change here breaks the wire.
+syntax = "proto3";
+
+package cadence.v2;
+
+option go_package = "capsulad/apps/cadence/internal/proto/cadencev2;cadencev2";
+
+enum Trigger {
+  TRIGGER_UNSPECIFIED = 0;
+  TRIGGER_WAKE = 1;
+  TRIGGER_BUTTON = 2;
+  TRIGGER_FOLLOW_UP = 3;
+  // a turn the server starts itself (task events); a device never sends it
+  TRIGGER_EVENT = 4;
+}
+
+enum SessionEventKind {
+  SESSION_EVENT_KIND_UNSPECIFIED = 0;
+  SESSION_EVENT_KIND_SPEECH_STARTED = 1;
+  SESSION_EVENT_KIND_THINKING = 2;
+  SESSION_EVENT_KIND_LISTENING = 3;
+}
+
+message SessionStart {
+  string session_id = 1;
+  Trigger trigger = 2;
+  Wake wake = 3;
+}
+
+message Wake {
+  string engine = 1;
+  float score = 2;
+}
+
+message MicAudio {
+  string session_id = 1;
+  uint32 seq = 2;
+  bytes opus = 3;
+}
+
+message SessionCancel {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message SessionEvent {
+  string session_id = 1;
+  SessionEventKind kind = 2;
+}
+
+message SessionClose {
+  string session_id = 1;
+  bool follow_up_allowed = 2;
+  string code = 3;
+  // how long the device keeps a follow-up session open; 0 = none, meaningful only with follow_up_allowed
+  uint32 follow_up_window_ms = 4;
+  // the codes-only failure detail; present when code is a failed turn's code
+  TurnFailure failure = 5;
+}
+
+// why a turn failed. every string is an id or a fixed code, never an upstream
+// error body; timings are milliseconds.
+message TurnFailure {
+  string code = 1;
+  // stt, llm, tool, tts, setup or internal
+  string stage = 2;
+  uint32 step = 3;
+  string provider = 4;
+  string model = 5;
+  string tool = 6;
+  uint32 http_status = 7;
+  int64 waited_ms = 8;
+  int64 limit_ms = 9;
+}

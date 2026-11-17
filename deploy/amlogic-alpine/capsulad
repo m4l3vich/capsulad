@@ -1,0 +1,48 @@
+#!/sbin/openrc-run
+# OpenRC service for capsulad on Alpine Linux (Amlogic A113X Capsula Mini).
+#
+# Install as /etc/init.d/capsulad and enable it in the default runlevel:
+#   rc-update add capsulad default
+# The deploy CLI installs this file as the -init-script target and starts it
+# with `rc-service capsulad start`; it is the only boot file the framework owns
+# on this target.
+#
+# Alpine has no stock vendor assistant stack: the panel and ring are kernel
+# devices and audio is ALSA (BlueALSA for Bluetooth sources), so the daemon runs
+# without -supersede. start_pre loads meson_gxbb_wdt; if the module provides no
+# /dev/watchdog the supervisor reports it and retries rather than claiming
+# protection.
+
+name="capsulad"
+description="Capsula Mini appliance daemon"
+
+: "${CAPSULAD_DATA_DIR:=/var/lib/capsulad}"
+command="${CAPSULAD_DATA_DIR}/capsulad"
+command_args="-platform amlogic-alpine -data-dir ${CAPSULAD_DATA_DIR} -web-addr 0.0.0.0:8443"
+command_background=true
+pidfile="/run/capsulad.pid"
+output_log="/var/log/capsulad.log"
+error_log="/var/log/capsulad.log"
+
+depend() {
+    need net
+    after avahi-daemon
+}
+
+start_pre() {
+    checkpath --directory --mode 0750 "${CAPSULAD_DATA_DIR}"
+    checkpath --directory --mode 0750 "${CAPSULAD_DATA_DIR}/run"
+    # The image ships meson_gxbb_wdt.ko but nothing in the default runlevel pulls
+    # it in; without it there is no /dev/watchdog at all.
+    if ! [ -e /dev/watchdog ]; then
+        if command -v modprobe >/dev/null 2>&1; then
+            modprobe meson_gxbb_wdt 2>/dev/null || \
+                ewarn "modprobe meson_gxbb_wdt failed; no hardware watchdog node"
+        else
+            ewarn "modprobe is missing; cannot load meson_gxbb_wdt"
+        fi
+        if ! [ -e /dev/watchdog ]; then
+            ewarn "meson_gxbb_wdt did not provide /dev/watchdog; capsulad will report it and retry"
+        fi
+    fi
+}

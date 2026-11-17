@@ -163,6 +163,7 @@ export interface ApiKeyView {
   prefix?: string;
   createdUnixMs?: number;
   revoked?: boolean;
+  scopes?: string[];
 }
 export declare const ApiKeyView: {
   readonly type: string;

@@ -1,14 +1,11 @@
 package rockchip
 
 import (
-	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"unsafe"
-
-	"capsulad/internal/backend"
 )
 
 func writeDTFile(t *testing.T, dir, name string, data []byte) {
@@ -62,82 +59,6 @@ func TestProbeLEDDeviceTreeAbsent(t *testing.T) {
 	dt := probeLEDDeviceTree(t.TempDir())
 	if dt.Ring != nil || dt.Segment != nil {
 		t.Fatalf("unexpected nodes: %+v", dt)
-	}
-}
-
-func TestEncodeWS2812Frame(t *testing.T) {
-	pixels := []backend.RGB{
-		{R: 255, G: 128, B: 64},
-		{R: 200, G: 100, B: 50},
-	}
-	out := encodeWS2812Frame(pixels, 1, DefaultConfig().LEDWS2812Channels)
-	if len(out) != DefaultConfig().LEDWS2812Channels {
-		t.Fatalf("len = %d", len(out))
-	}
-	// Logical channel i lands at physical ws2812ChannelMap[i], after the
-	// perceptual curve.
-	want := map[int]byte{
-		ws2812ChannelMap[0]: ws2812GammaTable[255],
-		ws2812ChannelMap[1]: ws2812GammaTable[128],
-		ws2812ChannelMap[2]: ws2812GammaTable[64],
-		ws2812ChannelMap[3]: ws2812GammaTable[200],
-		ws2812ChannelMap[4]: ws2812GammaTable[100],
-		ws2812ChannelMap[5]: ws2812GammaTable[50],
-	}
-	for idx, value := range want {
-		if out[idx] != value {
-			t.Fatalf("channel %d = %d, want %d", idx, out[idx], value)
-		}
-	}
-	for idx, value := range out {
-		if _, expected := want[idx]; !expected && value != 0 {
-			t.Fatalf("channel %d = %d, want black (unused pixels)", idx, value)
-		}
-	}
-}
-
-func TestEncodeWS2812FrameBrightness(t *testing.T) {
-	pixel := []backend.RGB{{R: 255, G: 255, B: 255}}
-	for _, tc := range []struct {
-		name       string
-		brightness float64
-		want       byte
-	}{
-		{"negative", -1, 0},
-		{"nan", math.NaN(), 0},
-		{"above one", 2, ws2812GammaTable[255]},
-		{"full", 1, ws2812GammaTable[255]},
-		{"half", 0.5, ws2812GammaTable[128]},
-		{"auto floor", 0.05, ws2812GammaTable[13]},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out := encodeWS2812Frame(pixel, tc.brightness, DefaultConfig().LEDWS2812Channels)
-			if got := out[ws2812ChannelMap[0]]; got != tc.want {
-				t.Fatalf("R = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestWS2812GammaCurve pins the perceptual behaviour rather than the table: the
-// endpoints are fixed, the curve is monotonic, and mid tones are darker than a
-// linear ramp would make them.
-func TestWS2812GammaCurve(t *testing.T) {
-	if ws2812GammaTable[0] != 0 || ws2812GammaTable[255] != 255 {
-		t.Fatalf("gamma endpoints = %d..%d", ws2812GammaTable[0], ws2812GammaTable[255])
-	}
-	prev := byte(0)
-	for i := 0; i < 256; i++ {
-		if ws2812GammaTable[i] < prev {
-			t.Fatalf("gamma table is not monotonic at %d", i)
-		}
-		prev = ws2812GammaTable[i]
-	}
-	if mid := ws2812GammaTable[128]; mid >= 128 || mid < 40 {
-		t.Fatalf("gamma(128) = %d, want a mid tone well below the linear 128", mid)
-	}
-	if low := ws2812GammaTable[32]; low >= 32 {
-		t.Fatalf("gamma(32) = %d, want below the linear 32", low)
 	}
 }
 
@@ -226,28 +147,6 @@ func TestMultiCtrlChannelMapIsPermutation(t *testing.T) {
 		if !used {
 			t.Fatalf("channel %d is not assigned to any segment", ch)
 		}
-	}
-}
-
-func TestWS2812ChannelMapIsPermutation(t *testing.T) {
-	seen := make([]bool, len(ws2812ChannelMap))
-	for _, v := range ws2812ChannelMap {
-		if v < 0 || v >= len(ws2812ChannelMap) || seen[v] {
-			t.Fatalf("ws2812ChannelMap is not a permutation at index %d", v)
-		}
-		seen[v] = true
-	}
-}
-
-func TestNaturalLess(t *testing.T) {
-	if !naturalLess("top-led2", "top-led10") {
-		t.Fatal("top-led2 must sort before top-led10")
-	}
-	if naturalLess("top-led10", "top-led2") {
-		t.Fatal("top-led10 must sort after top-led2")
-	}
-	if !naturalLess("clock-led9", "top-led1") {
-		t.Fatal("different prefixes keep lexicographic order")
 	}
 }
 

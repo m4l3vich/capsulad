@@ -273,15 +273,12 @@ mod unix {
             iov_base: body.as_ptr() as *mut libc::c_void,
             iov_len: body.len(),
         };
-        let msg = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut iov,
-            msg_iovlen: 1,
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
+        // musl's msghdr carries private padding fields, so a struct literal does
+        // not compile there. An all-zero header is valid; assign the public
+        // fields afterwards.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
         loop {
             let sent = unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) };
             if sent >= 0 {

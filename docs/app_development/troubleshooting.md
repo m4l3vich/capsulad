@@ -26,6 +26,7 @@ a field.
 | Invalid or missing `id`, blank `name`, empty `version` | Fix the top-level fields. The ID must match `^[a-z0-9][a-z0-9._-]{0,127}$`. |
 | Path is absolute, escapes through `..`, or is `.` | Use a relative path inside the package root. |
 | `native` without `architecture`/`abi`, or a script runtime with them | Match the runtime: native needs both; QuickJS needs a `.js` path; MicroPython needs a `.py` path. |
+| Install/launch fails with `package ABI "…" does not match this target` | The package was built for the other libc. Rebuild with `TARGET_ABI=linux-gnu` (stock) or `linux-musl` (Alpine) so the manifest `abi` matches. |
 | Script path not a regular file, or a symlink escaping the package | Store a regular file, not a link. |
 | Duplicate/empty setting key, select without choices, `min > max`, bad default | Fix the setting definition; defaults are validated against their own type and bounds. |
 | `[settings_ui]` missing, not `.html`, over 512 KiB, invalid UTF-8, or no settings declared | Fix the document and declare at least one `[[settings]]`. |
@@ -279,7 +280,7 @@ Publications disappear on their own when the run exits; that is cleanup, not a b
 
 | Area | Simulator | Device |
 |---|---|---|
-| Binary ABI | Host binary accepted | `aarch64`/`arm64`, Linux ABI, glibc 2.33 or older |
+| Binary ABI | Host binary accepted | `aarch64`/`arm64`, ABI containing the target libc (`linux` on stock, `musl` on Alpine), glibc 2.33 or older on RK3308 and 2.28 or older on Amlogic stock |
 | Native library | Host `libcapsulad` | Target `libcapsulad` and `capsulad-native.json` |
 | Sandbox | Whatever the host kernel probes | `mountns` on stock firmware; no user namespace, no seccomp |
 | Framework socket | `<data-dir>/run/hal.sock`, host path | Host path `<data-dir>/run/hal.sock`; `/run/capsulad/hal.sock` in the sandbox |

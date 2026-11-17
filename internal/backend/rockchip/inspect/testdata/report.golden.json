@@ -1,5 +1,6 @@
 {
   "root": "\u003cROOT\u003e",
+  "platform": "rockchip-stock",
   "model": "Capsula-mini (RK3308, from stock image metadata)",
   "soc": "Rockchip RK3308",
   "firmware": "Capsula Stock 1.0",

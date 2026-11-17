@@ -20,9 +20,9 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// The implemented target is the Capsula Mini rev 4 Rockchip stock
-// configuration. The Amlogic values are reserved wire values with no backend
-// in this build; the large Capsula / Neo remain out of scope for
+// The implemented targets are the Capsula Mini rev 4 Rockchip stock
+// configuration and the Capsula Mini Amlogic A113X in its stock Buildroot
+// image and on Alpine Linux. The large Capsula / Neo remain out of scope for
 // implementation v0.1.
 type TargetPlatform int32
 

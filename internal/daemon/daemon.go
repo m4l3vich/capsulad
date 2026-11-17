@@ -194,6 +194,10 @@ type Daemon struct {
 	wake       *wakeword.Manager
 	wd         *watchdogSupervisor
 	wakeCancel func()
+	// live is the core runtime's progress gauge. The hardware watchdog feeds
+	// the timer only while the output loop keeps stepping, so a hung daemon
+	// resets the board instead of being kept alive by a live goroutine.
+	live *liveness
 	// wkArtifacts caches the scanned model directory: settings writes are
 	// frequent and only an install/delete changes the installed set.
 	wkArtifacts wakewordCache
@@ -329,8 +333,15 @@ func profileOrDefault(p *profile.Profile, platform string) *profile.Profile {
 	if p != nil {
 		return p
 	}
-	if platform == "rockchip-stock" || platform == "rockchip" {
+	switch platform {
+	case "rockchip-stock", "rockchip":
 		v := profile.RK3308Rev4Stock
+		return &v
+	case "amlogic-stock":
+		v := profile.AmlogicA113XStock
+		return &v
+	case "amlogic-alpine":
+		v := profile.AmlogicA113XAlpine
 		return &v
 	}
 	v := profile.Simulator
@@ -433,7 +444,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	switch cfg.Platform {
 	case "simulator", "":
 		d.dev = backend.NewSimulator(backend.SimulatorOptions{DeviceID: cfg.DeviceID, Model: cfg.DeviceModel})
-	case "rockchip-stock", "rockchip":
+	case "rockchip-stock", "rockchip", "amlogic-stock", "amlogic-alpine":
 		if cfg.NewBackend == nil {
 			logs.Close()
 			cancel()
@@ -454,7 +465,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	default:
 		logs.Close()
 		cancel()
-		return nil, fmt.Errorf("unknown platform %q (simulator, rockchip-stock)", cfg.Platform)
+		return nil, fmt.Errorf("unknown platform %q (simulator, rockchip-stock, amlogic-stock, amlogic-alpine)", cfg.Platform)
 	}
 
 	if cfg.Platform == "simulator" {
@@ -603,7 +614,8 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	d.startWakewordEngine()
 
 	d.autoLvl = map[string]float64{}
-	d.wd = newWatchdogSupervisor(cfg.RunDir, logs, cfg.Watchdog, cfg.Profile.Watchdog, cfg.WatchdogOpen)
+	d.live = newLiveness()
+	d.wd = newWatchdogSupervisor(cfg.RunDir, logs, cfg.Watchdog, cfg.Profile.Watchdog, cfg.WatchdogOpen, d.live)
 
 	if err := d.audio.Start(); err != nil {
 		logs.Warnf("daemon", "", "audio service unavailable: %v", err)
@@ -820,11 +832,12 @@ func (d *Daemon) Run() error {
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
 	go d.outputLoop()
-	// Arm the hardware timer only after the daemon is serving: an armed timer
-	// cannot be disarmed on this kernel, so a startup failure must not leave
-	// the board in a reset loop.
-	// Start the retry loop first: it cannot open /dev/watchdog while the
-	// vendor still holds it, and the moment the vendor exits it takes over.
+	// Arm the hardware timer only after the daemon is serving: on a nowayout
+	// driver an armed timer cannot be disarmed, so a startup failure must not
+	// leave the board in a reset loop.
+	// Start the retry loop first (it does not block): it cannot open
+	// /dev/watchdog while the vendor still holds it, and the moment the vendor
+	// exits it takes over.
 	d.wd.Start(d.ctx)
 	d.supersedeVendor()
 
@@ -1013,7 +1026,11 @@ func (d *Daemon) shutdown() {
 			_ = d.bt.Close()
 		}
 		if d.wd != nil {
+			// disarm is a barrier and Wait covers an open or release that was
+			// still in flight: the process must not exit between arming the
+			// hardware timer and giving it an owner.
 			d.wd.disarm()
+			d.wd.Wait()
 		}
 		if d.pidPath != "" {
 			_ = os.Remove(d.pidPath)
@@ -1133,6 +1150,10 @@ func (d *Daemon) platformProto() frameworkv1.TargetPlatform {
 		return frameworkv1.TargetPlatform_TARGET_PLATFORM_UNSPECIFIED
 	case backend.PlatformRockchipStock:
 		return frameworkv1.TargetPlatform_CAPSULA_MINI_ROCKCHIP_STOCK
+	case backend.PlatformAmlogicStock:
+		return frameworkv1.TargetPlatform_CAPSULA_MINI_AMLOGIC_STOCK
+	case backend.PlatformAmlogicAlpine:
+		return frameworkv1.TargetPlatform_CAPSULA_MINI_AMLOGIC_ALPINE
 	default:
 		return frameworkv1.TargetPlatform_TARGET_PLATFORM_UNSPECIFIED
 	}
@@ -1156,14 +1177,17 @@ func (d *Daemon) deviceInfo(bootID string) *frameworkv1.DeviceInfo {
 		st := d.wd.State()
 		status := backend.Unavailable
 		switch {
-		case st.armed:
+		case st.armed && st.healthy:
 			status = backend.Available
-		case st.enabled:
+		case st.armed, st.enabled:
 			status = backend.Partial
 		}
 		detail := st.detail
-		if st.armed && st.timeout > 0 {
-			detail = fmt.Sprintf("%s armed, timeout %s; framework keeps the hardware timer alive instead of the vendor agent", st.path, st.timeout)
+		switch {
+		case st.armed && st.healthy && st.timeout > 0:
+			detail = fmt.Sprintf("%s armed, timeout %s; the framework feeds the hardware timer while the daemon makes progress instead of the vendor agent", st.path, st.timeout)
+		case st.armed && !st.healthy:
+			detail = fmt.Sprintf("%s armed but no longer fed; the board will reset: %s", st.path, st.detail)
 		}
 		out.SubsystemBackends = append(out.SubsystemBackends, &frameworkv1.BackendAvailability{
 			Subsystem: "watchdog", BackendId: d.profile().Watchdog.StatusID,

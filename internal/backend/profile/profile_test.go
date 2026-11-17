@@ -56,6 +56,7 @@ func TestRK3308Rev4StockLiterals(t *testing.T) {
 			Path:           "/dev/watchdog",
 			DefaultTimeout: 30 * time.Second,
 			StatusID:       "rockchip.syswatchdog",
+			Nowayout:       true,
 		},
 		Wifi: Wifi{
 			StockConfigPaths:  []string{"/etc/wpa_supplicant.conf", "/etc/wpa_supplicant/wpa_supplicant.conf"},
@@ -79,6 +80,7 @@ func TestRK3308Rev4StockLiterals(t *testing.T) {
 			Target:      "aarch64",
 			Accepted:    []string{"aarch64", "arm64"},
 			ABIContains: "linux",
+			MaxGLIBC:    "2.33",
 		},
 		Memory: Memory{PhysicalMiB: 240, HeapLimitMB: 80, GCPercent: 50},
 		Brightness: Brightness{

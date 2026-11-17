@@ -1,9 +1,12 @@
-# Capsula Mini hardware (RK3308 stock image)
+# Capsula Mini hardware (RK3308 stock image and Amlogic A113X)
 
-Hardware, firmware and interface facts for the supported target, Capsula Mini rev 4 (serial family
-`03104B1D40E15C55`, jailbroken stock Rockchip image). Every measurement below states its proof
-level: probe result (kernel/device state), backend submission (what the daemon wrote to a driver),
-digital output (a captured PCM/monitor stream), or electrical/acoustic/optical measurement.
+Hardware, firmware and interface facts for the supported targets: the Capsula Mini rev 4
+(serial family `03104B1D40E15C55`, jailbroken stock Rockchip image) and the VK Capsula Mini
+on Amlogic A113X, in both its jailbroken stock Buildroot image and Alpine Linux. Every
+measurement below states its proof level: probe result (kernel/device state), backend submission
+(what the daemon wrote to a driver), digital output (a captured PCM/monitor stream), or
+electrical/acoustic/optical measurement. Facts borrowed from a published third-party survey or
+project are labelled as such; they are not measurements taken here.
 
 ## Platform
 
@@ -33,16 +36,23 @@ processes, architecture/ABI acceptance, memory envelope and the ambient brightne
 I/O and no interfaces.
 
 Generic packages (daemon, Wi-Fi, audio, CLI) consume those values through their existing `Config`
-structs. `internal/backend/rockchip` keeps device knowledge that is not a knob: recovered ioctls,
-the measured ring channel permutation and segment calibration map. The simulator is a sibling
-backend with the neutral `profile.Simulator` profile, which deliberately has no device paths, stock
-supplicant files, vendor processes or watchdog opener.
+structs. `internal/backend/linuxdev` is the board-agnostic Linux device layer both board backends
+share (device-tree/sysfs helpers, evdev input, IIO/thermal sensors, LED-class devices, the vendor
+WS2812B char device and the generic hardware watchdog). `internal/backend/rockchip` keeps device
+knowledge that is not a knob: recovered ioctls and the measured segment calibration map.
+`internal/backend/amlogic` keeps the two Amlogic panel paths and the stock/Alpine audio selection;
+the ring channel map it needs is the same recovered table, so it lives in `linuxdev` with both
+sources cited. `internal/backend/syswatchdog` owns the generic `/dev/watchdog` opener. The simulator
+is a sibling backend with the neutral `profile.Simulator` profile, which deliberately has no device
+paths, stock supplicant files, vendor processes or watchdog opener.
 
 | Selection | Backend | Status |
 |---|---|---|
 | `-platform simulator` (default) | in-memory simulator | supported |
 | `-platform rockchip-stock` (alias `rockchip`) | RK3308 stock backend | supported; unvalidated vendor paths report `PARTIAL`/`UNVERIFIED` |
-| `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE` | none | wire enum values only; defined but unsupported/reserved. No internal platform constant, selection branch or backend exists |
+| `-platform amlogic-stock` | Amlogic A113X stock backend | supported; the clock panel is `UNVERIFIED` because its vendor ABI is unrecovered |
+| `-platform amlogic-alpine` | Amlogic A113X Alpine backend | supported; the panel and ring are probed, not assumed |
+| `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE` | the two Amlogic backends | now reported by the daemon; the wire enum values are no longer reserved |
 
 ## Displays and LED ring
 
@@ -248,8 +258,8 @@ key the framework also reads) and `/dev/watchdog`; `btctl` and `tgclient` inheri
 descriptor. Two owners of the key and three of the timer are not workable.
 
 `capsulad -supersede=auto` (the default on `*-stock` platforms) stops `sysmon` and `voice-agent`,
-escalates to SIGKILL when SIGTERM is ignored, stops every remaining `/dev/watchdog` holder, then
-arms the timer itself:
+escalates to SIGKILL when SIGTERM is ignored, asks the framework's own watchdog feeder to release
+the device and stops every other `/dev/watchdog` holder, then arms the timer itself:
 
 ```
 INFO daemon    superseding voice-agent pid=418 (SIGTERM)
@@ -556,27 +566,49 @@ voice-agent` failure within that window. On a settled unit neither flag exists a
 immediately.
 
 Because `SETOPTIONS` and the magic close are both unavailable, an armed timer on this kernel can
-only be **kept alive**, never stopped. The framework therefore treats the timer as a system liveness
-contract:
+only be **kept alive**, never stopped; the RK3308 stock profile records that as
+`Watchdog.Nowayout: true` and the supervisor's `Close` is not treated as a stop button. (Other
+profiles keep the field false until their own disarm semantics are measured, so a graceful stop
+there closes the handle and uses no feeder.) The framework therefore treats the timer as a system
+liveness contract:
 
 - `capsulad` starts the retry loop before superseding the vendor stack, so the framework owns the
-  descriptor the moment the vendor releases it; it reports `BACKEND_PARTIAL` until then.
-- Once armed it feeds at `timeout/3`, capped at 2 s, and reports `BACKEND_AVAILABLE`.
+  descriptor the moment the vendor releases it; it reports `BACKEND_PARTIAL` until then. A device
+  held by another process is `backend.ErrWatchdogBusy`: the supervisor retries it and asks a
+  framework feeder to hand the timer back instead of killing the holder.
+- Once armed it feeds **only while the output loop keeps stepping**. The keepalive cadence and the
+  stall window are derived per arm from the interval the driver reports (`WDIOC_GETTIMEOUT`):
+  cadence `min(timeout/3, 2 s)`, window `min(timeout/2, 10 s)`, both strictly inside the armed
+  timer; a driver that reports nothing falls back to the profile's declared interval and says so in
+  the state. Opening the device arms the timer, so a keepalive is written before the open returns,
+  and the loop then ticks at that same derived cadence — faster than the probe interval for a short
+  timer — so the effective keepalive period is the cadence itself. A stalled loop, or a
+  failed keepalive, latches the supervisor off, reports `BACKEND_PARTIAL` with the reason, and
+  leaves the timer to reset the board. A live goroutine that stops completing steps is not health,
+  and a broken daemon's timer is never handed to a feeder.
 - A graceful stop hands the descriptor to a detached BusyBox `sh` feeder that holds only the
-  inherited descriptor (fd 3) and writes a keepalive every 2 s, so planned restarts and upgrades
-  do not reset the board; the next `capsulad` reclaims it. The feeder is a shell on purpose: a
-  process running a copy of the daemon would keep the old binary's inode alive on `/data` after
-  the daemon exits, which leaves no room to stage a 40 MiB replacement on the 78.5 MiB partition.
-  Its pid file (`run/watchdog.feeder`) records `<pid> shell`; a feeder left by an older release is
-  a daemon copy (`__capsulad_watchdog_feeder`) and is asked to hand the timer back through
-  `run/watchdog.handback` before its binary is replaced.
-- A crash or OOM kill of `capsulad` leaves nobody feeding, so the board resets. That is the
-  intended fail-safe: the supervisor owns the timer and its death returns the device to a known
-  state.
+  inherited descriptor (fd 3) and writes a keepalive every 2 s **for at most 5 minutes**, so planned
+  restarts and upgrades do not reset the board while a speaker whose framework never comes back
+  still resets instead of running unmanaged. The next `capsulad` reclaims it through
+  `run/watchdog.handback`; `S99btctl.sh start` and the deploy tool do the same, and `disable`
+  releases it before the vendor chain takes over. The feeder is a shell on purpose: a process
+  running a copy of the daemon would keep the old binary's inode alive on `/data` after the daemon
+  exits, which leaves no room to stage a 40 MiB replacement on the 78.5 MiB partition. Its pid file
+  (`run/watchdog.feeder`) records `<pid> shell`; a feeder left by an older release is a daemon copy
+  (`__capsulad_watchdog_feeder`). `run/` is persistent, so a pid file whose process is gone — or
+  whose pid now belongs to another process — is cleared by the daemon, the boot script and the
+  deploy tool rather than waited on.
+- A crash or OOM kill of `capsulad` leaves nobody feeding, so the board resets within one armed
+  timeout. That is the intended fail-safe: the supervisor owns the timer and its death returns the
+  device to a known state.
+- Proof limits: the driver facts (21 s, ignored magic close, `ENOTTY` disable, no
+  `/sys/class/watchdog`) are probe results on this unit, and the health-gated reset itself has not
+  been observed on hardware. Host tests pin the supervisor's decisions, the feeder lifetime, the
+  handback path and the stale-pid cleanup, not a real reset.
 
 Killing a vendor watchdog holder by hand without giving the timer a new owner resets the board after
 the 21 s timeout (`dw_wdt: keepalive missed, machine will reset`); handover is always the daemon's
-job.
+job. Never `SIGKILL` a framework feeder for the same reason: ask for the handback marker instead.
 
 ## Ambient-light brightness
 
@@ -607,6 +639,214 @@ The built-in clock system app takes the timezone from the daemon's device timezo
 `capsulad.clock` app-configuration `timezone` key overrides it; the sandbox does not force `TZ=UTC`,
 and `/etc/localtime` and `/usr/share/zoneinfo` are bind-mounted so a scripted or native app can
 resolve zones.
+
+## Amlogic A113X (stock Buildroot and Alpine Linux)
+
+A second Capsula Mini board family runs the same product on an Amlogic A113X. It is a different
+SoC, a different amplifier, a different Wi-Fi module and a different display controller; nothing
+from the RK3308 sections above transfers except the framework contracts.
+
+**Evidence level.** Board facts now come from the supplied offline images (device trees and kernel
+config), plus a published hardware survey and two third-party projects. The offline DT/config facts
+are first-hand but not a boot test; nothing here is claimed as live proof.
+
+Supplied images inspected read-only (provenance; no user data or keys are reproduced):
+
+| Artifact | SHA-256 |
+|---|---|
+| stock `device.dtb` (from the after-jailbreak dump) | `928710fd7b975194259a9b4ab3879ee698f5a2db1353ec206210ea35dd86caa2` |
+| Alpine `fw_alpine/vk-mini-a113x.dtb` | `35284a73514d35fdf199a8694e417c7af22457feaebf3f3d55d1893e5ee5f7f5` |
+| Alpine `fw_alpine/Image` (6.18.44) | `5b906997a6594dd1452e8ca3edbdacc27c2ba1615d81a36866ff1908b0c7ba0a` |
+| Alpine kernel `config_alpine` | `7f4b544a97ab7961971ed188c0b9032a22aefa7ee174c414f793577b0e4dc1cc` |
+
+From the device trees: the stock root model is `Amlogic` (compatible `amlogic,axg`) and the Alpine
+root is `vk,capsula-mini` / `amlogic,a113d` / `amlogic,meson-axg`, model “VK Capsula Mini (Amlogic
+A113X)”; the Alpine memory node reports 256 MiB. Stock: `/ws2812b@00` (`compatible = "ws2812b"`,
+`device-name = "topleds"`), two clock controllers `issi,is31fl3236` (0x3c) and `awinic,aw21036`
+(0x34, `device-name = "is31fl32xx"`), input `csk05t` (0x15), `rohm,bh1730fvc` (0x29), watchdog
+`amlogic,meson-wdt`. Alpine: SPI `topleds@0` (`rohm,dh2228fv`, no vendor char device), the same two
+clock controllers with 30 per-segment labels `clock:dN:a..g` plus `clock:colon:top|bottom`, input
+`hynitron,csk05t` (0x15), `rohm,bh1730fvc`, watchdog `amlogic,meson-gxbb-wdt`, and audio
+`amlogic,axg-sound-card` with `neofidelity,ntp8910a`/`ntp8918` or `acmesemi,acm8615` codecs.
+Alpine `config_alpine`: `CONFIG_LED_IS31FL32XX`/`CONFIG_LEDS_AW21036`/`CONFIG_BH1730`/
+`CONFIG_LINEDISP` built in, `CONFIG_WATCHDOG_SYSFS=y`, `CONFIG_WATCHDOG_NOWAYOUT` **not set**,
+`CONFIG_WATCHDOG_CORE=m`.
+
+Third-party sources for the facts the images do not settle:
+
+- cmp18, "VK Капсула Мини (на Amlogic A113X), часть 1" (debianlive.ru, 2026-08-23): board photos,
+  UART console, the part list, and an Alpine 3.24.1 image on a mainline 6.18 kernel;
+- `ryysel/capsula-mini-airplay2`: the recovered `/dev/topleds` ABI and the 36-channel map it says
+  the stock `voice-agent` uses on this board;
+- `ryysel/marusya-hw`: Alpine device paths (`/dev/topleds`, `/usr/local/bin/ringled`,
+  `/usr/local/bin/clockdisp`, `/usr/local/bin/capsule-ipc`, the BH1730 IIO attribute);
+- `byrbyrka/capsula-mini-tweaker`: the line-display sysfs interface (`message`, `map_seg7`,
+  `brightness`, `clock:colon:{top,bottom}`) and the ALSA mixer usage.
+
+No Amlogic unit was probed for this change, so every subsystem below reports what the code can
+prove locally. A `PARTIAL` here means "the interface exists and is driven, one hardware check
+pending", not "measured".
+
+| Fact | Value | Source |
+|---|---|---|
+| SoC | Amlogic A113X, 4x Cortex-A53, ARMv8, aarch64 | survey |
+| RAM | 256 MB DDR3 (ESMT M15T2G16128A-DEB) | survey |
+| Storage | 256 MB NAND (Kioxia TC58NVG1S3HTA00), TSOP48 ONFI | survey |
+| Wi-Fi/BT | Fn-Link K255B-SR SDIO module (Amlogic W155S1), Wi-Fi AC + BT 5.0 | survey |
+| Amplifier | NeoFidelity NTP8910A, I2C/I2S class-D, 5 W | survey |
+| Microphones | four PDM microphones wired to the SoC | survey |
+| Light sensor | ROHM BH1730FVC, IIO `in_illuminance_*` | survey + marusya-hw |
+| Ring | 12-pixel WS2812B on a 36-channel chain, `/dev/topleds` on stock | airplay2 |
+| Clock panel | 4 digits x 7 segments + 2 colon dots; ISSI IS31FL3236A **or** Awinic AW21036 depending on the batch | survey |
+| Stock userland | Buildroot, **glibc 2.28** (`/lib/libc-2.28.so` in the supplied system image), PulseAudio, `/rom` + `/data` overlay (`S02datamount.sh`, `S04overlaymount.sh`); init also runs `S59disable_led_animation.sh`, `S50pulseaudio`, `S97voice-agent.sh`, `S99sysmon.sh`, `S99btctl.sh` | supplied image |
+| Stock audio | `/etc/pulse/device.pa`: sink `master` (default; also `alarm`, `call`, `ring`, `output`, `alsa_playback`, `rtp`, `snapcast`), source `speex` (default; also `mics`, `mics_loopback`, `call_src`, `input`, `loopback`, `uroc`); `/usr/lib/libopus.so.0.8.0` | supplied image |
+| Alpine userland | Alpine 3.24.1, **musl 1.2.6-r2**, kernel 6.18.63-vk-mini-a113x, OpenRC, ALSA + BlueALSA, `iwd` and `wpa_supplicant` installed; helpers `/usr/local/bin/{ringled,clockdisp,lightmon,touch-keys,bt-pair}`; `/usr/lib/libopus.so.0` → 0.11.1 (opus 1.6.1) | supplied image |
+
+### Displays
+
+- **Alpine ring.** The Alpine DTB exposes the chain as `spi@13000/topleds@0`
+  (`rohm,dh2228fv`), and the image's `ringled` drives **`/dev/spidev0.0` at 3,340,000 Hz**
+  (`--speed HZ` default; it also rebinds `meson-spicc` and can use PIO/8-bit words). There is no
+  `/dev/topleds` on Alpine. The backend therefore has a spidev WS2812B encoder (four SPI bits per
+  symbol, GRB, reset gap) selected by `profile.LED.SPIDevPath/SPISpeedHz/SPIBitsPerWord`; it does
+  not rebind the SPI controller, so a bus held by the kernel is reported rather than forced. Pixel
+  order and GRB mapping are unverified on hardware.
+- **Stock ring.** Stock's DTB confirms `/ws2812b@00` (`device-name = "topleds"`); it exposes
+  `/dev/topleds` with the same vendor ABI recovered for the RK3308
+  (`LEDS_WS2812B_IOCTL_MULTI_SET`, 36 channels) and the same channel permutation; the backend
+  drives it through `internal/backend/linuxdev`, which validates the driver-reported channel count
+  before the first frame. When the char device is absent (or unopenable) the backend falls back to
+  LED-class `multi_intensity` pixels, and only then to an in-memory `UNVERIFIED` frame path.
+- **Clock panel.** The stock image exposes the IS31FL3236A as the LED class array `clock-led1..30`,
+  and the MicroPython hardware layer on this board documents both paths: frames are written with one
+  private ioctl to `/dev/is31fl32xx`, while the 30 values are read from the LED class array
+  (`micro_hal/hal_display.py`: `COUNT = 30`, `DEVICE = /dev/is31fl32xx`, `SYSFS_DIR` = the LED class
+  root, `STOCK_MAX = 153`). The backend drives the array through `brightness` and applies the
+  **channel table published by that same source** (`STOCK_MAP`/`LAYOUT`: cell-major a..g, colon
+  top = channel index 16, bottom = 15). That published table is byte-identical to the RK3308
+  IS31FL3236 table, which was calibrated on hardware with `cmd/ledmap`; the Amlogic copy is
+  third-party evidence until the same walk is run on a unit.
+  The private ioctl is still unrecovered, so the daemon does not use `/dev/is31fl32xx`; when the LED
+  class array is absent it publishes **no segment resource** and reports the char device
+  `UNVERIFIED` — an app can never route a frame into a no-op. Alpine instead exposes either the
+  kernel line display (`linedisp.*/message` + `map_seg7`, each segment mask reverse-looked-up in
+  the device's own 128-byte glyph table; a panel-level `brightness` attribute is probed in the node
+  dir and then the parent, and when neither exists brightness is applied as on/off with 0 blanking
+  the panel) or per-segment LED class devices
+  (`clock:dN:a`..`g` plus `clock:colon:top|bottom`), both probed. The panel can be an IS31FL3236A or
+  an AW21036. On the supplied stock DTB both controllers are `status = okay`; only the AW21036 node
+  carries `device-name = "is31fl32xx"`, so that char device name is the AW21036 variant, while both
+  expose the same 30 `clock-ledN` LED class channels the stock backend drives. On Alpine both
+  controllers are `status = fail-needs-probe` and each carries 30 labeled children
+  (`clock:d1:a` … `clock:d4:g`, `clock:colon:top|bottom`), matching the per-segment pattern in the
+  profile.
+  Stock content brightness is capped at 153/255 by the vendor UI; the framework writes the frame's
+  resolved level instead, so a stock-parity ceiling is a calibration choice, not a hidden limit.
+
+### Audio
+
+- **Stock** keeps PulseAudio. The image's `/etc/pulse/device.pa` names `master` as the mixed output and `speex` as the processed capture source, so the profile uses those instead of the PulseAudio defaults.
+
+- **Alpine** has no PulseAudio: the backend runs `aplay`/`arecord` on the ALSA PCM named by the
+  profile (`default`). The image's `asound.conf` makes `default` asym: playback `plug:mastervol`
+  (softvol, "Master Playback Volume", card 0) and capture `plug:micboost` (hw:0,1, "Mic Boost
+  Capture Volume"). The profile pins `Master Playback Volume` at unity (`MixerCard`/`MixerVolume`)
+  so the framework mixer is the only gain; capture conversion from the native four channels to the
+  requested mono is the image's own `plug` mapping, not a channel choice made by the daemon.
+  No simple-mixer control name is published, so the profile names none: the framework mixer is the
+  only gain stage and no hardware gain is pinned until a control is measured.
+- Microphone mute is the capture-source mute (stock) or the configured mixer mute (Alpine). No
+  microphone gate GPIO is documented for this board, so the profile leaves `MicEnableGPIO` at zero
+  and `SetHardwareMute` reports hardware muting only when a gate actually exists.
+
+### Input and sensors
+
+Input is a capacitive panel (marusya-hw names the controller "Hynitron CSK05T") read through
+evdev, not a gpio-keys node: `KEY_VOLUMEUP` 115, `KEY_VOLUMEDOWN` 114, `KEY_MICMUTE` 248 and
+`KEY_VOICECOMMAND` 582 (primary source: `marusya-hw/internal/backend/capsula/evdev.go`). On this
+board 582 is the assistant/action key, whereas the RK3308 panel uses the same code for its neutral
+centre, so the distinction is board data (`profile.Input.KeyOverrides`), not a code branch. The
+backend reports coordinates only if the node advertises absolute axes; nothing claims a coordinate
+surface for it. The BH1730FVC and the SoC thermal zones are surfaced exactly as on the RK3308
+(`sensor.ambient_light`, `sensor.soc_temperature`, …).
+
+### Brightness
+
+The stock Amlogic ambient-brightness curve has **not been measured**. The Amlogic profiles use the
+framework's own policy curve (the same numbers the simulator uses) so automatic brightness has a
+defined response; the profile makes no claim of matching the vendor agent, and the auto floor,
+deadband and animation constants are framework policy, not device facts.
+
+### Watchdog
+
+The stock board has a hardware watchdog, and `voice-agent` holds it: stopping that process can reset
+the speaker. The profile therefore names `/dev/watchdog`, and `Watchdog.Nowayout` stays **false**
+because disarm semantics (magic close, `WDIOC_SETOPTIONS`) are unmeasured on this kernel — it records
+only measured facts, and RK3308 is the only board where `true` is known. Safety does not depend on
+that field: the supervisor never trusts a `Close` for an armed timer, it `Detach`s the descriptor to
+a feeder on a graceful stop whenever the platform exposes one, so a planned stop never depends on
+guessing the driver: the feeder keeps the board up for its bounded window (5 min) and, if no daemon
+returns within it, the armed timer expires and the board resets by design. Alpine names `/dev/watchdog` (30 s default, `amlogic.syswatchdog`) from its DTB node
+(`amlogic,meson-gxbb-wdt`), `CONFIG_MESON_GXBB_WATCHDOG=m`, `WATCHDOG_SYSFS=y`, `WATCHDOG_NOWAYOUT`
+unset and the module in its rootfs; the OpenRC service loads it and the supervisor retries and
+reports a missing node, so `-watchdog auto` arms when the module loads.
+
+### Deployment and boot
+
+- **Stock.** `deploy/amlogic-stock/S99sysmon.sh`, installed as `/etc/init.d/S99sysmon.sh`. The
+  stock list is BusyBox `rcS`, which expands `/etc/init.d/S??*` **before** `/data` is mounted and
+  before the overlay pivots, so a new overlay-only name never runs. Replacing an already-expanded
+  name does, because the name is in the list and the file resolved at run time comes from the
+  overlay. `S99sysmon.sh` is the vendor supervisor (`sysmon` → `voice-agent`) that this framework
+  replaces, so it is the name the hook wraps; `S99btctl.sh` keeps `btctl` untouched. `disable`
+  writes the stock `S99sysmon.sh` back verbatim and starts `sysmon` again; `enable` restores the
+  saved wrapper (`boot/S99sysmon.sh.wrapper`); the embedded rollback copy matches the extracted
+  vendor script byte-for-byte (354 bytes, verified offline). Both are idempotent, and the daemon's
+  `-supersede auto` still stops `voice-agent`/`sysmon` at runtime and reaps a respawned copy.
+  Data directory: `/data/local/capsulad`.
+- **Alpine.** `deploy/amlogic-alpine/capsulad` is an OpenRC service installed as
+  `/etc/init.d/capsulad`; enable it with `rc-update add capsulad default`. Data directory:
+  `/var/lib/capsulad`.
+- `make deploy-bundle DEPLOY_PLATFORM=amlogic-stock` (or `amlogic-alpine`) copies the matching hook
+  into `boot/`; pass the same value to `capsulad-cli deploy -platform`. The bundle layout, limits and
+  rollback path are identical on every target; only the boot service, hook name and free-space
+  floors come from the profile.
+
+### Bring-up tooling
+
+`capsulad-cli platform ledtest` and `cmd/ledmap` are RK3308 tools: they open the vendor
+`/dev/led_multi_ctrl`/`/dev/topleds` nodes with `profile.RK3308Rev4Stock` hard-coded, so they do
+not drive an Amlogic panel and cannot perform the `clock-led1..30` walk. Until an Amlogic/sysfs-LED
+walk target exists, that check is a manual one and the panel map stays third-party evidence.
+
+### Build and ABI
+
+Both Amlogic userlands are aarch64. The RK3308 stock image is glibc 2.33; the supplied Amlogic stock image is glibc 2.28, so package ABIs must contain
+`linux` (the supplied stock image ships **glibc 2.28**, so native packages must not require newer
+symbols; the RK3308 image ships glibc 2.33); Alpine is musl 1.2.6, so its profile accepts only ABIs containing `musl`. A glibc-linked native
+app package is rejected on Alpine by the existing architecture gate, not by a second rule.
+`make daemon GOOS=linux GOARCH=arm64` cross-builds both binaries. The native SDK needs its own Rust
+target: `aarch64-unknown-linux-gnu` for stock, `aarch64-unknown-linux-musl` for Alpine. `make
+deploy-bundle DEPLOY_PLATFORM=amlogic-alpine` defaults `NATIVE_TARGET` to the musl triple and refuses
+to assemble a bundle whose `lib/libcapsulad.so` does not look musl-linked (the reverse for
+`amlogic-stock`), so a glibc runtime cannot be installed on Alpine by accident. **Proof level:** the musl shared runtime was built on the host (arm64 Alpine container) with
+`-C target-feature=-crt-static`; its ELF `DT_NEEDED` names `libc.musl-aarch64.so.1`, and an Alpine
+`dlopen`/`dlsym("capsulad_abi_major")` smoke resolved the symbol. No device loaded it.
+
+For **Amlogic stock** the glibc runtime must be linked against the image's glibc 2.28. A
+bullseye-era build needs `GLIBC_2.29`/`2.30` and the device loader rejects it
+(`libm.so.6: version GLIBC_2.29 not found`), even though app packages built for 2.28 load. Build it
+with `tools/build-native-glibc228.sh` (Debian buster, archived repos, verifies the symbol ceiling and
+writes `build/lib` plus metadata). The deploy gate independently refuses a runtime above
+`Architecture.MaxGLIBC` (2.28 here, 2.33 on RK3308), so a 2.33 build cannot be installed on this
+board by accident. Verified build: Rust 1.100 in buster produced 6,313,560 B,
+`DT_NEEDED` = `libgcc_s.so.1`, `libpthread.so.0`, `libm.so.6`, `libdl.so.2`, `libc.so.6`, and the
+highest symbol version is **GLIBC_2.28** (sha256 `620297dd…c895354f4a3db9`); the same binary loads
+on a buster (2.28) image and the app reaches its first framework call (`connect failed (7)` for a
+nonexistent socket). The independently built app package also maxes at 2.28, so runtime and package
+are coherent on the stock rootfs. A superseded 2.33-era build (`7b6c7a6c…`, max `GLIBC_2.30`) is
+rejected by the loader at `libm.so.6: version GLIBC_2.29 not found` and by the deploy gate with the
+same reason.
 
 ## Open hardware gates
 
@@ -649,9 +889,27 @@ resolve zones.
    invalid name keeps the prior name and reports the collision. With the label active, a Settings GET
    and a daemon restart must produce zero `SetHostName` calls (`dbus-monitor --system
    "interface=org.freedesktop.Avahi.Server,member=SetHostName"`) and no warning.
-7. **Capture DSP.** Confirm the live `speex` source is S16LE mono 16 kHz so the chain is active, that
-   the microphone tap and wakeword feed report `framework.dsp.v1` while only `.raw` stays
-   unprocessed, that mute/reopen produces a clean discontinuity, and that output length is invariant
-   across chunk sizes. Real fan/traffic/music behaviour, quiet speech, subjective suppression benefit
-   and acoustic transparency remain listening/acoustic gates; current cleanup evidence is 2.9 dB on
-   the consumed mostly-music recording with 6/6 raw and 6/6 processed warm replay.
+8. **Amlogic ring and panel.** On a unit, confirm `/dev/topleds` reports 36 channels and that the
+   recovered permutation renders the ring clockwise from the top on this board too; confirm the
+   `clock-led1..30` array accepts `brightness` writes (the documented read path) and that the
+   published table lights the expected segments, including the colon; confirm which panel is fitted
+   (IS31FL3236A or AW21036) and, on Alpine, whether the line display, the per-segment LED class
+   devices or both exist. Only if no LED class array exists on a stock unit does recovering the
+   private `/dev/is31fl32xx` ioctl become the gate.
+9. **Amlogic audio and watchdog.** On Alpine, confirm `Master Playback Volume` (the `mastervol`
+   softvol) exists only after the first playback stream has opened `default`: the first `amixer
+   sset` may fail, the pin retries on the next `SetMasterVolume`, and until it lands the framework
+   volume is multiplied by the image's softvol — verify the pin lands and the level matches before
+   trusting volume. Measure capture latency on the PDM array. On stock, measure whether
+   `/dev/watchdog` can be disarmed (magic close, `WDIOC_SETOPTIONS`) and record it in
+   `Watchdog.Nowayout`. The flag records a measured fact only and does not gate the handoff: a
+   transferable descriptor is always handed to a feeder, and `Close` is used only when the
+   platform exposes none, where the flag chooses the wording of that release path.
+10. **Amlogic stock autostart.** Confirm whether `/etc/init.d/S??*` really is expanded before the
+   overlay mounts on firmware 44.90 (the AirPlay 2 package replaces `S50avahi-daemon` for exactly
+   this reason), and choose the supported autostart mechanism: base-image hook, or a stock script
+   that starts it. Service restarts alone do not satisfy this gate.
+11. **Amlogic brightness.** Measure the stock ambient-brightness response before claiming automatic
+   brightness parity; today the Amlogic profiles use the framework policy curve deliberately.
+
+

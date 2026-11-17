@@ -1,0 +1,141 @@
+id = "org.capsulad.airplay"
+name = "AirPlay"
+version = "0.1.0"
+description = "AirPlay 2 audio receiver: iPhones, iPads and Macs see the speaker in their AirPlay output list, and the daemon's mixer, ring and media contract carry the session. Decodes ALAC, AAC-LC and PCM; AAC uses FFmpeg's libavcodec, linked at build time."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+provides = ["media_player"]
+
+[entrypoint]
+runtime = "native"
+path = "airplay"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app links only the Go SDK, which dlopens the shared Capsulad engine. The
+# engine is injected by the launcher and is never bundled into this package.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[interfaces]]
+service = "capsulad.contracts.media.v1.MediaPlayerService"
+version = "v1"
+descriptor = "proto/media.protoset"
+docs = "docs/media.md"
+
+# --- receiver ---------------------------------------------------------------
+
+[[settings]]
+key = "name"
+label = "Receiver name"
+description = "The name iPhones, iPads and Macs show in their AirPlay output list, limited to 63 UTF-8 bytes. Changing it re-advertises immediately and ends a live session, because the advertisement is part of the session identity."
+type = "text"
+default = "AirPlay Receiver"
+
+[[settings]]
+key = "receiver_model"
+label = "Advertised model"
+description = "The AirPlay model string published in mDNS and in /info. AudioAccessory5,1 makes senders draw the compact speaker icon the upstream receiver uses; set another value only when you know what a sender does with it. This is a compatibility string, not a claim about the hardware."
+type = "text"
+default = "AudioAccessory5,1"
+
+[[settings]]
+key = "rtsp_port"
+label = "RTSP port"
+description = "Requested inbound control port. 7000 is the conventional AirPlay port; 0 asks the daemon for an ephemeral port. The daemon allocates the listener in both cases, and when a requested port is refused the receiver falls back to an ephemeral port and advertises the port it actually got. Ports 5353 and the Web UI port are always refused by the daemon."
+type = "integer"
+default = 7000
+min = 0
+max = 65535
+
+[[settings]]
+key = "buffer_ms"
+label = "Playback cushion"
+description = "How far ahead of the sender's timestamps the receiver plays, in milliseconds. Larger values survive more network jitter but add latency; smaller values tighten the delay. The daemon's mixer bounds how much can be queued, so this is a target rather than a guarantee."
+type = "integer"
+default = 1500
+min = 300
+max = 4000
+
+[[settings]]
+key = "volume_trim"
+label = "Volume trim"
+description = "Extra linear attenuation applied after the sender's volume, 0.1 to 1.0. The framework's master volume still multiplies on top of it, so this cannot raise the receiver above the device level; a supervised app cannot move the device master volume itself."
+type = "number"
+default = 1.0
+min = 0.1
+max = 1.0
+
+[[settings]]
+key = "pairing_pin"
+label = "Pairing setup code"
+description = "The HomeKit setup code this receiver answers during pair-setup, for both the transient and the normal flow. It defaults to 3939, which is what the upstream receiver uses when no AirPlay password is configured, so existing senders keep working. A paired sender becomes an administrator and can add, list or remove other pairings over the encrypted pairing endpoints. Changing the code means every sender must pair again; empty restores the default."
+type = "text"
+default = "3939"
+
+[[settings]]
+key = "ring_artwork"
+label = "Cover art on the ring"
+description = "While a session is live, present the cover art's colours as a gradient on the LED ring with brightness following the outgoing audio level. Without cover art the ring shows a dim neutral breath. Turning it off leaves the ring to the device's configured default app."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "source_version"
+label = "Advertised srcvers"
+description = "The AirPlay source version published in mDNS and returned by /info. Senders change behaviour on it (remote control, realtime versus buffered streams, stream-key delivery), so change it only against a specific interoperability problem. See the app README for the values that were considered and the evidence behind them."
+type = "text"
+default = "366.0"
+
+[[settings]]
+key = "features"
+label = "Feature bits override"
+description = "Decimal override for the advertised AirPlay feature bit mask. Empty uses the receiver's default set: realtime PCM/ALAC audio, AAC-LC when the build links the FFmpeg decoder, encrypted control channel, plist/DMAP metadata, transient HomeKit pairing and remote control. It deliberately omits buffered audio (40) and PTP (41) unless a multicast listener is granted. Set a number only to test a sender against a different capability set."
+type = "text"
+default = ""
+
+[[settings]]
+key = "ptp"
+label = "Use PTP timing"
+description = "Receive the sender's IEEE 1588 clock when the runtime grants a multicast listener on the PTP ports, and use it to pace playback. When the runtime cannot join the PTP multicast group the receiver logs that once and falls back to arrival-time pacing; nothing is faked."
+type = "boolean"
+default = true
+
+# --- app-managed state ------------------------------------------------------
+
+[[settings]]
+key = "device_identity"
+label = "AirPlay device identity (managed)"
+description = "Generated on first run: the HomeKit pairing identifier and the ed25519 long-term key senders verify during pair-verify. It is stored masked because a sender that paired once must find the same key next time; clearing it forces every sender to pair again. Managed by the app; do not edit."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "pairings"
+label = "Paired senders (managed)"
+description = "Generated while pairing: the long-term public key of each sender that completed pair-setup, used to verify its pair-verify signature. Cleared when the app is reinstalled, which is also how an administrator revokes a paired sender. Managed by the app; do not edit."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "raop_key"
+label = "Legacy RAOP key (managed)"
+description = "Generated on first run: the RSA key the legacy RAOP path publishes as 'pk' and uses to decrypt the sender's AES key during ANNOUNCE. Stored masked; replacing it makes a sender repeat the legacy setup. Managed by the app; do not edit."
+type = "text_masked"
+default = ""
+
+# --- actions ----------------------------------------------------------------
+
+[[actions]]
+id = "end_session"
+label = "End the current session"
+description = "Disconnect the sender that is currently playing. The receiver stays advertised; the sender can connect again."
+
+[[actions]]
+id = "readvertise"
+label = "Re-advertise the receiver"
+description = "Withdraw and republish the mDNS advertisements. Use it after a sender cached a stale name, port or icon. A live session is not interrupted."

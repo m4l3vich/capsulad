@@ -23,6 +23,11 @@ type ListenerOptions struct {
 	Port int
 	// Backlog is the TCP accept queue (1..128); 0 uses the native default 64.
 	Backlog int
+	// JoinGroup joins an IPv4 multicast group on a receive-only UDP socket.
+	// The daemon accepts it only for Protocol "udp" with Bind "0.0.0.0" and
+	// Port 319 or 320 (the PTP event and general ports), which is what the
+	// AirPlay PTP clock needs. Empty is an ordinary listener.
+	JoinGroup string
 }
 
 func (o ListenerOptions) encode() ([]byte, error) {
@@ -48,6 +53,12 @@ func (o ListenerOptions) encode() ([]byte, error) {
 	}
 	if o.Backlog > 0 {
 		options["backlog"] = o.Backlog
+	}
+	if o.JoinGroup != "" {
+		if o.Protocol != "udp" {
+			return nil, errors.New("capsulad: ListenerOptions.JoinGroup requires Protocol \"udp\"")
+		}
+		options["join_group"] = o.JoinGroup
 	}
 	return json.Marshal(options)
 }

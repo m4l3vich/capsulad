@@ -88,17 +88,26 @@ host. The Makefile therefore builds a host-executable `build/bin/capsulad-cli-ho
 `CAPSULAD_CLI=/path/to/capsulad-cli`).
 
 ```sh
-# Device target: aarch64, glibc 2.33 or older.
+# Device target: aarch64; glibc 2.33 or older on RK3308, 2.28 or older on Amlogic stock.
 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc make dumbassistant
+
+# Amlogic on Alpine (musl): same layout, different libc.
+GOOS=linux GOARCH=arm64 TARGET_ABI=linux-musl CC=aarch64-linux-musl-gcc make dumbassistant
 
 # Native runtime for the same target must be built for that ABI.
 GOOS=linux GOARCH=arm64 NATIVE_TARGET=aarch64-unknown-linux-gnu make deploy-bundle
+GOOS=linux GOARCH=arm64 DEPLOY_PLATFORM=amlogic-alpine make deploy-bundle
 ```
 
+`make deploy-bundle` derives `TARGET_ABI` from `DEPLOY_PLATFORM` (`linux-musl` for
+`amlogic-alpine`, `linux-gnu` otherwise) and refuses an app archive whose manifest `abi`
+does not name the bundle's libc, so a glibc package cannot ride an Alpine bundle.
+
 The device rejects a native entrypoint whose `architecture` is not `aarch64`/`arm64` or whose
-`abi` does not contain `linux`. The simulator accepts host binaries, so a `darwin` or `x86_64`
-build works there and fails on the device. Build native binaries with the target ABI and with a
-compatible glibc; a newer glibc fails at process startup.
+`abi` does not contain the profile's requirement (`linux` on the stock images, `musl` on
+Alpine). The simulator accepts host binaries, so a `darwin` or `x86_64` build works there and
+fails on the device. Build native binaries for the target libc; a newer glibc fails at process
+startup, and a glibc binary fails to load on Alpine.
 
 ## Install, update and remove
 

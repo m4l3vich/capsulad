@@ -172,5 +172,8 @@ the SDK shim).
   not the device setting.
 - **mDNS discovery is device-only.** The simulator has no Avahi responder, so
   `broker_discover` cannot find anything there; configure `broker_host` instead.
-- **No amlogic target.** This build has no Amlogic backend, matching the rest of
-  the platform.
+- **Amlogic panels may render nothing.** On `amlogic-stock` the clock panel's vendor ABI is
+  unrecovered, so a segment presentation reports `UNVERIFIED` and never reaches the panel; on
+  `amlogic-alpine` the panel works only when the kernel line display or per-segment LED class
+  devices are present. Ring, keys, audio and sensors are implemented on both Amlogic targets and
+  report their own status, but no Amlogic unit has been probed, so they are not device-verified.

@@ -1,0 +1,131 @@
+AirPlay receiver (`org.capsulad.airplay`) — notices and attributions
+
+1. Shairport Sync — FairPlay reply constants (MIT/X11)
+
+internal/session/fairplay.go reproduces the four fixed `POST /fp-setup` replies
+that every third-party AirPlay receiver serves. Those constants are taken from
+Shairport Sync's rtsp.c, function handle_fp_setup (upstream
+https://github.com/mikebrady/shairport-sync; reference tree 5.6.3, rtsp.c:1895).
+Shairport Sync's source files — including rtsp.c and the pair_ap/ sources —
+carry an MIT/X11 (Expat) notice, not the GPL. The permission notice below is
+copied verbatim from that file's header:
+
+Copyright (c) James Laird 2013
+Modifications, including those associated with audio synchronization,
+multithreading and metadata handling, copyright (c) Mike Brady 2014-2026
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+2. FFmpeg — libavcodec / libavutil (LGPL-2.1-or-later)
+
+AAC-LC decoding links FFmpeg's libavcodec and libavutil through cgo
+(`internal/aac/aac.go`: `#cgo pkg-config: libavcodec libavutil`), the same
+decoder the upstream receiver uses for AAC buffered streams. FFmpeg is licensed
+under the GNU Lesser General Public License, version 2.1 or later (upstream
+https://github.com/FFmpeg/FFmpeg). Only a single decoder is used.
+
+The device packages are built from the FFmpeg 7.1 release tarball, which is the
+source of record (no git checkout is involved; the tarball's own `VERSION` and
+`RELEASE` files read `7.1`):
+
+    url:    https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+    sha256: 40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
+
+`apps/airplay/target/pins.sh` pins that URL and digest; the tarball is verified
+against the digest before it is built, and `apps/airplay/target/container/ffmpeg.sh`
+is the single source of the configure line:
+
+    --prefix=/opt/ffmpeg --enable-static --disable-shared --disable-programs --disable-doc
+    --disable-network --disable-everything --enable-decoder=aac --enable-parser=aac
+    --disable-zlib --disable-bzlib --disable-lzma --disable-iconv --disable-xlib --disable-sdl2
+    --disable-avdevice --disable-swscale --disable-swresample --disable-postproc --disable-avfilter
+    --disable-avformat --disable-autodetect --enable-pic --cc=gcc
+
+No GPL-only FFmpeg component is enabled, and the build produces only
+`libavcodec.a` and `libavutil.a` (the recipe fails if a shared libavcodec or
+libavutil appears in the prefix).
+
+LGPL obligations for this link — **the branch is static**:
+
+- The device packages (`apps/airplay/target/`) link `libavcodec.a` and
+  `libavutil.a` statically. `readelf -d` on the packaged binary shows no
+  `libavcodec`/`libavutil` entry, and the FFmpeg prefix contains no shared
+  object. The dynamic branch of LGPL §6 (ship the `.so` files and a loader
+  path) therefore does not apply to them.
+- Because the link is static, LGPL-2.1+ section 6 is a **distribution
+  precondition**: alongside every package the build publishes the relinkable
+  object archive, the exact archives that were linked, the corresponding FFmpeg
+  source (URL and sha256 above), the configure line, and the relink procedure
+  (`RELINK.md`). The layout is listed under "Relinking the statically linked
+  decoder" below. Shipping the package without that directory is not compliant.
+- A host (development) build in `apps/airplay/build.sh` still links FFmpeg
+  dynamically where the host's FFmpeg provides shared libraries; nothing in the
+  repository forces static linking or hidden symbol resolution.
+- The FFmpeg library is not modified by this project; if it ever were, the
+  modifications would have to be provided under the LGPL as well.
+
+3. Repository licence status
+
+This repository has no project-wide licence: there is no root LICENSE or
+COPYING, and apps/airplay carries no licence of its own beyond the notices
+above. The upstream project this app was compared against and derives its
+protocol facts from, capsula-mini-airplay2, is attributed only as a reference;
+explicit attribution, and any redistribution terms for that project, are
+pending agreement with its author. Consequently nothing in this file grants
+redistribution rights beyond the specific notices reproduced above.
+
+
+## Relinking the statically linked decoder (LGPL-2.1+ obligation)
+
+The device packages link FFmpeg's `libavcodec.a` and `libavutil.a` statically
+(the AAC decoder only; the build is `apps/airplay/target/build-target.sh`). Under
+LGPL-2.1+ section 6, distribution of a work that statically links those
+libraries requires that the recipient be able to relink the work against a
+modified version of the libraries. Each target package's build therefore also
+publishes, beside the package, this exact layout:
+
+```
+<OUT>/lgpl/<abi>/
+  objects.tar.gz        every object file and package archive the link consumed,
+                        in the bNNN/ layout the Go toolchain used, with
+                        build-commands.log (the verbatim `go build -work -x`
+                        transcript, including the final `gcc` link line) and
+                        b001/importcfg.link
+  libavcodec.a          the exact archives that were linked
+  libavutil.a
+  ffmpeg-7.1.tar.xz     the corresponding FFmpeg source (sha256 above)
+  SOURCE.txt            version, url, sha256, tarball RELEASE/VERSION
+  configure-line.txt    the exact configure line quoted in §2
+  RELINK.md             both relink procedures: relink the objects, or rebuild
+                        from source against a modified FFmpeg
+  NOTICE                this file
+```
+
+The archive is built with the same flags as the packaged binary, so replacing
+`libavcodec.a`/`libavutil.a` with a modified build and re-running the recorded
+link command (or rebuilding the app from source against the modified prefix)
+produces a working replacement binary. There is no written-offer fallback: the
+material itself ships with the package.
+
+The offer is valid for three years from distribution, and nothing here claims
+FFmpeg is licensed under this repository's terms: FFmpeg remains
+LGPL-2.1-or-later, Copyright its authors.

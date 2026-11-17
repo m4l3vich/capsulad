@@ -28,6 +28,9 @@ pub struct ListenerOptions {
     pub bind: String,
     pub port: u16,
     pub backlog: u32,
+    /// IPv4 multicast group to join for a receive-only UDP socket. The daemon
+    /// restricts this to the PTP ports 319 and 320.
+    pub join_group: String,
 }
 
 impl Default for ListenerOptions {
@@ -37,6 +40,7 @@ impl Default for ListenerOptions {
             bind: "127.0.0.1".to_string(),
             port: 0,
             backlog: 64,
+            join_group: String::new(),
         }
     }
 }
@@ -99,6 +103,16 @@ impl ListenerOptions {
                     }
                     options.backlog = backlog as u32;
                 }
+                "join_group" => {
+                    // Parsed before validating against the protocol: the JSON
+                    // object iterates in sorted key order, so "join_group"
+                    // always precedes "protocol" and a check here would reject
+                    // every valid multicast request.
+                    let text = value.as_str().ok_or_else(|| {
+                        SdkError::new(INVALID_ARGUMENT, "listener join_group must be a string")
+                    })?;
+                    options.join_group = text.to_string();
+                }
                 other => {
                     return Err(SdkError::new(
                         INVALID_ARGUMENT,
@@ -106,6 +120,12 @@ impl ListenerOptions {
                     ))
                 }
             }
+        }
+        if !options.join_group.is_empty() && options.protocol != "udp" {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "listener join_group requires protocol \"udp\"",
+            ));
         }
         Ok(options)
     }
@@ -117,6 +137,7 @@ impl ListenerOptions {
             "bind": self.bind,
             "port": self.port,
             "backlog": self.backlog,
+            "join_group": self.join_group,
         })
     }
 }
@@ -128,6 +149,13 @@ enum ListenerSocket {
 
 pub struct ListenerInner {
     protocol: String,
+    /// Non-empty for a multicast group receiver. Such a socket joined the group
+    /// for receiving only: sending from it would let an app transmit from a
+    /// root-bound privileged port, so core_api's listener_send refuses.
+    join_group: String,
+    /// Daemon allocation id, released with an explicit close request so the
+    /// daemon's live-listener accounting follows the app's real lifetime.
+    allocation: u64,
     info: Value,
     socket: ListenerSocket,
     closed: AtomicBool,
@@ -192,6 +220,12 @@ impl ListenerInner {
         data: &[u8],
         timeout_ms: u32,
     ) -> SdkResult<usize> {
+        if !self.join_group.is_empty() {
+            return Err(SdkError::new(
+                INVALID_ARGUMENT,
+                "a multicast listener is receive-only; listener_send is refused",
+            ));
+        }
         let ListenerSocket::Udp(socket) = &self.socket else {
             return Err(SdkError::new(
                 INVALID_ARGUMENT,
@@ -274,6 +308,11 @@ pub fn open(options_json: &[u8], timeout_ms: u32) -> SdkResult<(u64, Vec<u8>)> {
             return Err(err);
         }
     };
+    let allocation = reply
+        .json
+        .get("allocation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     // Adopt the descriptor immediately: every later failure closes it through
     // the owning std socket instead of leaking it.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -289,6 +328,8 @@ pub fn open(options_json: &[u8], timeout_ms: u32) -> SdkResult<(u64, Vec<u8>)> {
             let (closed_tx, _) = watch::channel(false);
             ListenerInner {
                 protocol: "tcp".to_string(),
+                join_group: String::new(),
+                allocation,
                 info,
                 socket: ListenerSocket::Tcp(listener),
                 closed: AtomicBool::new(false),
@@ -308,6 +349,8 @@ pub fn open(options_json: &[u8], timeout_ms: u32) -> SdkResult<(u64, Vec<u8>)> {
             let (closed_tx, _) = watch::channel(false);
             ListenerInner {
                 protocol: "udp".to_string(),
+                join_group: options.join_group.clone(),
+                allocation,
                 info,
                 socket: ListenerSocket::Udp(Arc::new(socket)),
                 closed: AtomicBool::new(false),
@@ -335,10 +378,57 @@ pub fn close(handle: u64) -> SdkResult<()> {
     let inner = LISTENERS
         .remove(handle)
         .ok_or_else(|| SdkError::new(crate::ffi::NOT_FOUND, "unknown listener handle"))?;
+    if inner.allocation != 0 {
+        // Release the daemon's live-listener accounting. Best effort and
+        // bounded: a daemon that is gone must not stop the socket from
+        // closing, and the daemon treats an unknown allocation as a no-op.
+        let request = serde_json::json!({
+            "id": 0,
+            "op": "close",
+            "allocation": inner.allocation,
+        });
+        let _ = control::request(&request, Duration::from_millis(250));
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::runtime::runtime().spawn(async move { inner.close().await });
     } else {
         crate::runtime::runtime().block_on(inner.close());
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_group_parses_before_protocol_validation() {
+        // serde_json::Map iterates in sorted key order, so join_group is seen
+        // before protocol; the parse must not depend on that order.
+        let options = ListenerOptions::parse(
+            br#"{"protocol":"udp","bind":"0.0.0.0","port":320,"join_group":"224.0.0.1"}"#,
+        )
+        .expect("a multicast listener request must parse");
+        assert_eq!(options.protocol, "udp");
+        assert_eq!(options.join_group, "224.0.0.1");
+        assert_eq!(options.port, 320);
+    }
+
+    #[test]
+    fn join_group_rejects_non_udp_and_keeps_the_default_protocol() {
+        assert!(ListenerOptions::parse(
+            br#"{"protocol":"tcp","port":320,"join_group":"224.0.0.1"}"#
+        )
+        .is_err());
+        // No protocol key: the default is tcp, so a group join is refused.
+        assert!(ListenerOptions::parse(br#"{"join_group":"224.0.0.1","port":320}"#).is_err());
+    }
+
+    #[test]
+    fn join_group_empty_is_an_ordinary_listener() {
+        let options = ListenerOptions::parse(br#"{"protocol":"udp","port":0}"#)
+            .expect("ordinary listener");
+        assert!(options.join_group.is_empty());
+    }
 }

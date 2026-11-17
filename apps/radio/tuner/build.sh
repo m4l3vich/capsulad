@@ -79,10 +79,23 @@ say "radio-tuner: building $APP_ID for $GOOS/$GOARCH (cgo=$CGO_ENABLED cc=$CC)"
     $GO build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$APP_ID/bin/tuner" ./cmd/tuner ) ||
   die "build failed; a device build needs a matching C compiler (CC=aarch64-linux-gnu-gcc)"
 cp "$HERE/manifest.toml" "$OUT/$APP_ID/manifest.toml"
+# Stamp the package ABI for the target libc (source manifest stays the default).
+if [ "${GOOS:-}" = linux ]; then
+    sh "$HERE/../../../tools/stage-manifest-abi.sh" "$OUT/$APP_ID/manifest.toml" "${TARGET_ABI:-linux-gnu}"
+fi
 say "radio-tuner: staged $OUT/$APP_ID"
 
 if [ "$PACKAGE" = "1" ]; then
-  ( cd "$OUT" && "$CLI" app package "$APP_ID" ) || die "packaging failed with $CLI"
+if [ "${GOOS:-}" = linux ]; then
+    staged_bin=$(find "$OUT/$APP_ID" -maxdepth 1 -type f -perm -u+x | head -1)
+    [ -n "$staged_bin" ] || { echo "error: no staged executable to ABI-check" >&2; exit 1; }
+    sh "$HERE/../../../tools/check-elf-interp.sh" "$staged_bin" "${TARGET_ABI:-linux-gnu}"
+fi
+  if [ "${GOOS:-}" = linux ]; then
+    ( cd "$OUT" && "$CLI" app package "$APP_ID" -target-abi "${TARGET_ABI:-linux-gnu}" -max-glibc "${CAPSULAD_MAX_GLIBC:-}" -target-arch "${CAPSULAD_TARGET_ARCH:-}" )
+  else
+    ( cd "$OUT" && "$CLI" app package "$APP_ID" )
+  fi || die "packaging failed with $CLI"
   say "radio-tuner: install with: capsulad-cli app install $OUT/$APP_ID-<version>.tar.gz"
 else
   say "radio-tuner: PACKAGE=0, no archive written"

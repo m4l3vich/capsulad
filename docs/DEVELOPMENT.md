@@ -30,8 +30,8 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
 | `make web` | `npm ci && npm run build` into `internal/webui/dist` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
-| `make devapps` / `make dumbassistant` / `make marusia` | development apps and the two optional assistants: package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
-| `make simon` / `make pa` / `make radio` / `make radio-tuner` / `make homeassistant` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio front end with its native tuner companion, and the Home Assistant bridge (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
+| `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (the Cadence client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
+| `make simon` / `make pa` / `make radio` / `make radio-tuner` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio front end with its native tuner companion, the Home Assistant bridge and the AirPlay 2 receiver (`product-apps` is the six together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
 | `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps` |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
@@ -40,7 +40,9 @@ Makefile keys this off the target `GOOS`, not the build host.
 
 ## Cross build for the device
 
-The Capsula Mini is aarch64 with glibc 2.33; it does not use musl.
+The Capsula Mini rev 4 (RK3308) is aarch64 with glibc 2.33. The Amlogic A113X Mini is
+aarch64 with **glibc 2.28** on its stock image and **musl** on Alpine; see
+[Amlogic A113X targets](#amlogic-a113x-targets) for the musl build and its current limit.
 
 ```sh
 make daemon GOOS=linux GOARCH=arm64                         # daemon + CLI only
@@ -61,7 +63,7 @@ For a reproducible glibc baseline, build inside an arm64 Bullseye container:
 daemon-release GOOS=linux GOARCH=arm64` (the daemon) and the same form with
 `rust:1.85-slim-bullseye` for `make native … NATIVE_TARGET=aarch64-unknown-linux-gnu`.
 
-Check the result before installing anything; every symbol must be glibc 2.33 or older:
+Check the result before installing anything; every symbol must be at or below the target's glibc (2.33 on RK3308, 2.28 on Amlogic stock):
 
 ```sh
 readelf --version-info build/bin/capsulad | grep -o 'GLIBC_[0-9.]*' | sort -u
@@ -100,6 +102,16 @@ cookies from `localhost`.
 `sh tools/dev-media.sh build/dev-web` installs the stopped `dev.media` fixture, which the
 Overview media bar can start through the normal routed contract.
 
+The same listener also serves the daemon's MCP frontend at `https://HOST:8443/mcp`: an
+API-key surface exposing the same operations as the browser, with no separate port, flag
+or process. It needs no Web UI rebuild. Create an `operator`-scoped key to use it and a
+`status`-scoped key for read-only polling; the browser's Access page keeps minting
+`status` keys, and a legacy key is never promoted. See [MCP.md](MCP.md).
+
+```sh
+./build/bin/capsulad-cli -data-dir build/dev-web auth key create agent --scope operator
+```
+
 ## Application artifacts
 
 An app package is a gzip-compressed tar with `manifest.toml` at the root, sorted entries,
@@ -113,8 +125,10 @@ Packaging runs on the build host, never on the device. Each app build target com
 and then packages it with `capsulad-cli app package DIR`, which writes `<id>-<version>.tar.gz`
 beside the package directory: `make dumbassistant` leaves
 `build/apps/org.capsulad.dumbassistant-<version>.tar.gz`, `make marusia` leaves
-`build/apps/org.capsulad.marusia-<version>.tar.gz`, and `make devapps` leaves one archive per
-development app under `build/devapps`. The product apps follow the same layout:
+`build/apps/org.capsulad.marusia-<version>.tar.gz`, `make cadence` leaves
+`build/apps/org.capsulad.cadence-<version>.tar.gz` (add `TARGET_ABI=linux-musl` for the
+Alpine board, which also rewrites the staged manifest and checks the binary's loader), and
+`make devapps` leaves one archive per development app under `build/devapps`. The product apps follow the same layout:
 `make simon` leaves `build/apps/org.capsulad.simon-<version>.tar.gz`, `make pa`
 `org.capsulad.pa-<version>.tar.gz`, `make radio` `org.capsulad.radio-<version>.tar.gz` and
 `make radio-tuner` `org.capsulad.radio.tuner-<version>.tar.gz`. `apps/devtools/build.sh` takes
@@ -331,19 +345,85 @@ app/web checks pass; a reset during the direct daemon write can leave a truncate
 
 ### The watchdog window
 
-`S99btctl.sh stop` hands `/dev/watchdog` to a detached feeder, so the hardware timer stays
-armed but is only fed for about 21 s after the last keepalive. A feeder left behind by an older
-daemon is a copy of that daemon and pins its 40 MiB inode on `/data`. The order matters:
-`deploy` first compresses the replaced binary into staging while the feeder is still feeding,
-then asks it to hand the timer back (`run/watchdog.handback`), waits for
-`run/watchdog.feeder` to disappear — which is what releases the replaced inode's space — and
-removes the marker. So the gzip does not consume the window; only removing the old file,
-writing the new binary and restarting do. If the feeder is still there after the wait, the
-deployment aborts before removing the daemon (its space is pinned, so the write could not
-succeed), drops the useless backup and restarts the previous stack. A same-filesystem rename lands instantly; the
-cross-filesystem write is the slow part, and a watchdog reset during it leaves a truncated
-target. Re-run the deployment after the board reboots rather than assuming the binary is
-complete.
+`capsulad` owns `/dev/watchdog` while it runs and feeds it **only while the output loop keeps
+stepping**. Both the keepalive cadence and the gate are derived from the interval the driver
+actually reports (`WDIOC_GETTIMEOUT`): the cadence is a third of it, capped at 2 s, and the stall
+window is half of it, capped at 10 s, so both stay strictly inside the timer the hardware runs —
+a fixed window would either miss a short timer or reset a long one. A driver that reports nothing
+falls back to the profile's declared interval and the state says so. If the output loop stops
+completing steps, or a keepalive write fails, the supervisor stops feeding and leaves the armed
+timer to reset the board. A live goroutine is not liveness — this is the case the hardware timer
+exists for. Opening the device arms the timer, so the supervisor writes a keepalive before it
+returns from the open. The loop then ticks at that same derived cadence — for a timer shorter than
+the 500 ms probe interval it wakes faster than the probe cadence instead of rounding the keepalive
+up to it — so the effective keepalive period is the cadence itself.
+
+On this kernel the timer cannot be disarmed at all: the magic close (`'V'`) is ignored and
+`WDIOC_SETOPTIONS(WDIOS_DISABLECARD)` returns `ENOTTY`. That is
+`profile.Watchdog.Nowayout: true`, and it means `Close` is not a stop button. A graceful stop
+(`SIGTERM`, `S99btctl.sh stop`) therefore hands the descriptor to a detached BusyBox `sh`
+feeder (`run/watchdog.feeder`, `run/watchdog.handback`) instead of closing it.
+
+The release rule is deliberately conservative and does not depend on that field: a close is only
+proven to stop the timer on a driver measured to honour the magic close, and `Nowayout` records a
+measured fact rather than a guess. Any driver whose disarm semantics are unmeasured — Amlogic
+stock, until someone measures it — is handed off as well, so a wrong guess can never reset the
+board during a planned restart or deployment. `Close` is used only when the platform exposes no
+descriptor to transfer, and the outcome is reported as it is: `closed; the hardware timer is
+disarmed`, or `closed, but this driver ignores the magic close; the timer is still armed and the
+board will reset`. The same honesty applies to a failed handoff or close: the state goes
+`healthy=false` and the detail says the board will reset instead of claiming a release happened.
+
+The feeder writes a keepalive every 2 s for at most `feederWindow` (5 min), then stops feeding
+and exits. That bound is deliberate, not a bug: a planned stop does not leave the speaker running
+indefinitely — with no daemon back within the window, the armed timer expires and the board
+resets, into a fresh boot that the boot service owns. The feeder runs `/bin/sh`, never a capsulad
+image, so it pins no inode on `/data`; a feeder left by an older release is a copy of that daemon
+and pins its 40 MiB inode.
+
+`S99btctl.sh start` asks the feeder for the timer back before it launches the daemon, and the
+daemon asks again before its first `open`, so the boot service never starts into an `EBUSY`
+open. `disable` and the vendor fallback release the feeder before starting the vendor chain,
+which then owns the timer again.
+
+The release is ordered, not best-effort. `disarm` is idempotent *and blocking*: the first caller
+performs the release and every other caller waits for it, and the daemon's shutdown calls
+`disarm` and then waits for the supervisor goroutine, so the process cannot exit between spawning
+a feeder and that feeder existing. An open that completes after the supervisor was released is
+handed off the same way instead of being stored as an armed timer nobody feeds. Within the daemon
+the paths are serialized: a release stops the loop from opening or feeding any further, and it
+runs exactly once with every other caller waiting on it, so the device never has two owners inside
+this process.
+
+Deployment ordering: `deploy` first compresses the replaced binary into staging while the
+feeder is still feeding, then asks it to hand the timer back (a shell feeder pins nothing and
+is skipped; a legacy Go feeder is asked), waits for `run/watchdog.feeder` to disappear — which
+is what releases the replaced inode's space — and removes the marker. So the gzip does not
+consume the window; only removing the old file, writing the new binary and restarting do, and
+whatever owner arms the device next has the remaining armed timeout (~21 s) to do it. If the
+feeder is still there after the wait, the deployment aborts before removing the daemon (its
+space is pinned, so the write could not succeed), drops the useless backup and restarts the
+previous stack. A same-filesystem rename lands instantly; the cross-filesystem write is the
+slow part, and a watchdog reset during it leaves a truncated target. Re-run the deployment
+after the board reboots rather than assuming the binary is complete.
+
+Operating consequences:
+
+- `S99btctl.sh stop` alone does not leave the speaker running indefinitely. The feeder covers a
+  restart, an upgrade and a short inspection window (5 min); after that the board resets. To
+  take the framework out of service, run `disable`, which releases the feeder and gives the
+  timer back to the vendor chain.
+- Never `kill -9` a feeder: on a nowayout timer the last feeder is the only thing keeping the
+  board alive, and killing it is the reset path. `capsulad stop`, `S99btctl.sh` and the deploy
+  tool all use the handback marker instead. `supersedeVendor` skips any process whose argv
+  carries `capsulad-watchdog-feeder` (or the legacy `__capsulad_watchdog_feeder`) and asks it
+  to release rather than signalling it.
+- `run/watchdog.feeder` is on the persistent partition, so it survives a reboot or a hard kill.
+  A file whose pid is gone (or whose pid now belongs to another process) is stale: the daemon,
+  the boot script and the deploy tool clear it instead of waiting for a handback that cannot
+  arrive.
+- `-watchdog off` leaves the timer entirely to the vendor agent; `-watchdog /path` arms a
+  different device. Both are diagnostic switches, not a supported deployment mode.
 
 ## Device layout and boot hook
 
@@ -409,14 +489,27 @@ selection case and no backend for them, so any other `-platform` value fails wit
 ## Tests
 
 ```sh
-make test              # every Go module: root, sdk/go, both assistants, the tuner and the bridge,
-                       # the Rust binding, the native crate and the C++ header compile
+make test              # every Go module: root, sdk/go, the three assistants, the tuner, the bridge and
+                       # the AirPlay receiver, the Rust binding, the native crate and the C++ header compile
 make test-race         # root Go module with -race
 make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia      # the apps/marusia module's tests from the repository root
+make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine
 make test-radio-tuner  # the nested apps/radio/tuner Go module
 make test-homeassistant # the nested apps/homeassistant Go module
+make test-airplay      # the nested apps/airplay Go module (protocol, codecs, session)
 ```
+
+`make test-cadence` needs no daemon, device or Cadence server: it decodes the upstream
+`cadence.v2` golden frames as interoperability vectors, runs an in-process websocket peer and a
+fake-codec turn state machine, and performs one real libopus encode/decode round trip. The Opus
+test skips with a clear message when the host has no libopus; the device loads `libopus.so.0`
+at run time, so the app has no link-time codec dependency.
+
+`make test-airplay` needs neither a daemon nor a device: the protocol layers are pure Go and the
+one end-to-end session test drives the receiver over in-memory transports. Its ALAC fixtures were
+produced by ffmpeg and are checked in with their reference PCM, so the decoder is verified against
+a real encoder rather than against itself.
 
 The script-app suites need Node or CPython, so they are not part of `make test`;
 `make test-apps` runs them together with the two Go modules above:
@@ -460,6 +553,7 @@ go test -run 'TestDumbAssistant|TestSupervisor' ./internal/daemon
 (cd sdk/go && CGO_ENABLED=1 go test ./...)
 (cd apps/dumbassistant && CGO_ENABLED=1 go test ./...)
 (cd apps/marusia && go test ./...)        # no test reaches the network; TLS listeners are loopback
+(cd apps/cadence && go test ./...)        # upstream golden frames, in-process peers, fake-codec state machine
 cargo test --manifest-path sdk/native/Cargo.toml
 sdk/go/regenerate-abi.sh --check
 ```
@@ -523,10 +617,12 @@ staged directory under `build/apps`. None of them is part of `all`, `release` or
 | `make radio` | `org.capsulad.radio` | Internet Radio, a MicroPython front end: station list, segment display, the standard media contract, and no network or decoder of its own. |
 | `make radio-tuner` | `org.capsulad.radio.tuner` | The native companion that fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and pushes 200 ms PCM chunks to the radio app over the app bus. |
 | `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant bridge, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
+| `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the legacy RAOP setup, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor and `docs/media.md`. |
 
 ```sh
-make native                                            # the tuner and the bridge link the shared SDK
-make product-apps                                      # all five: simon, pa, radio, radio-tuner, homeassistant
+make native                                            # the native apps link the shared SDK
+# make airplay additionally needs FFmpeg's libavcodec/libavutil development files
+make product-apps                                      # all six: simon, pa, radio, radio-tuner, homeassistant, airplay
 sh apps/radio/tuner/build.sh                           # tuner alone; OUT=/PACKAGE=/CAPSULAD_CLI= honored
 capsulad-cli app install build/apps/org.capsulad.radio.tuner-<version>.tar.gz
 ```
@@ -536,9 +632,20 @@ before `make deploy-bundle` when Simon ships in the bundle: the bundle's `lib/` 
 the device, and an older host makes the app log `unavailable: this QuickJS host has no
 Call.tryRecv; rebuild the interpreter host` and stop rather than play.
 
+`make airplay` additionally requires FFmpeg's `libavcodec`/`libavutil` development files. Its
+`PACKAGE` default is `auto`: a Linux target packages, and a host build stages the directory only
+(`PACKAGE=0`), because a Darwin binary is not a device package. `PACKAGE=1` on a host is refused
+unless `AIRPLAY_ALLOW_HOST_PACKAGE=1` is set for a local packaging smoke test. For a device
+package, pass `TARGET_ABI=linux-gnu` or `TARGET_ABI=linux-musl` together with
+`AIRPLAY_FFMPEG_PREFIX` pointing at that target's FFmpeg: the app links a native decoder, so a
+glibc-linked library can never be relabelled as a musl build. The build stamps the requested `abi`
+into the staged manifest through `tools/stage-manifest-abi.sh`, runs
+`tools/check-elf-interp.sh` on the staged binary before packaging, and fails without the target
+prefix or a matching cross compiler.
+
 Each app's own entrypoint is authoritative for its package contents:
 `apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/Makefile` (`make -C apps/radio package`),
-`apps/radio/tuner/build.sh` and `apps/homeassistant/build.sh` — all of them honor `OUT=`,
+`apps/radio/tuner/build.sh`, `apps/homeassistant/build.sh` and `apps/airplay/build.sh` — all of them honor `OUT=`,
 `PACKAGE=0` and `CAPSULAD_CLI=` where they package. The three script apps compile nothing; the
 tuner and the bridge are native and need the host native runtime (`make native`) because their
 binaries link the shared SDK.
@@ -569,6 +676,7 @@ capsulad-cli -data-dir build/demo status          # device, resources, runs, aud
 capsulad-cli -data-dir build/demo auth init -hostname localhost -ip 127.0.0.1
 capsulad-cli -data-dir build/demo auth set-password
 capsulad-cli -data-dir build/demo auth key create automation
+capsulad-cli -data-dir build/demo auth key create agent --scope operator
 capsulad-cli -data-dir build/demo auth key list
 capsulad-cli -data-dir build/demo auth key revoke automation
 capsulad-cli -data-dir build/demo cert status
@@ -587,3 +695,106 @@ Global flags precede the command: `-data-dir DIR`, `-socket PATH`, `-security-di
 they parse and as strings otherwise. `cert renew` requires a daemon restart to reload the
 listener certificate; `auth` changes apply live because the daemon watches the security
 store.
+## Amlogic A113X targets
+
+The Amlogic A113X board runs two supported userlands, and the same binaries serve both:
+`-platform amlogic-stock` (jailbroken stock Buildroot, glibc 2.28) and
+`-platform amlogic-alpine` (Alpine 3.24.1, musl 1.2.6, kernel 6.18). The profile carries the boot service, hook name,
+audio path, panel naming and free-space floors; the composition root only wires
+`profile.AmlogicA113XStock` / `profile.AmlogicA113XAlpine` into `backend/amlogic`.
+
+```sh
+# Daemon and CLI for either Amlogic userland (Go only).
+make daemon GOOS=linux GOARCH=arm64
+
+# Amlogic stock is glibc 2.28: a bullseye-era build links GLIBC_2.29+ and cannot
+# load there. Build the runtime against buster (archived repos) with the helper;
+# it verifies the symbol ceiling and writes build/lib + metadata.
+sh tools/build-native-glibc228.sh
+make deploy-bundle DEPLOY_PLATFORM=amlogic-stock BUNDLE_NATIVE=0   # lib/ already staged
+
+# Native SDK: the Rust target follows the libc the image actually has.
+# DEPLOY_PLATFORM also defaults NATIVE_TARGET (gnu for stock, musl for Alpine),
+# so the two lines below are what the bundle targets do implicitly.
+make native GOOS=linux GOARCH=arm64 NATIVE_TARGET=aarch64-unknown-linux-gnu   # stock
+make native GOOS=linux GOARCH=arm64 NATIVE_TARGET=aarch64-unknown-linux-musl  # Alpine
+
+# Bundle with the matching boot hook, then deploy with the matching -platform.
+make deploy-bundle DEPLOY_PLATFORM=amlogic-stock
+capsulad-cli deploy build/deploy-bundle.tar.gz -platform amlogic-stock
+
+make deploy-bundle DEPLOY_PLATFORM=amlogic-alpine
+capsulad-cli deploy build/deploy-bundle.tar.gz -platform amlogic-alpine
+```
+
+`-platform` on `deploy` selects the boot service (`/etc/init.d/S99sysmon.sh` on stock,
+`/etc/init.d/capsulad` on Alpine), the hook name inside `boot/` and the free-space floors. The
+bundle layout, validation, rollback and health gate are unchanged. `make deploy-bundle` without
+`DEPLOY_PLATFORM` still assembles the Rockchip hook.
+
+A native SDK shared library is not the only libc-sensitive artifact: a native **app** package
+carries its own binary, and a glibc-linked one cannot exec under musl however its manifest reads.
+An app's manifest `entrypoint.abi` must therefore agree with the binary. `apps/cadence` builds to
+`TARGET_ABI` (`linux-gnu` by default, `linux-musl`/`musl` for Alpine): it defaults the cross
+compiler to `aarch64-linux-musl-gcc`, writes `abi = "linux-musl"` into the staged manifest, and
+`make check-abi` reads the binary's ELF interpreter and refuses a package whose libc disagrees.
+
+The bundle gate is libc-aware: with `DEPLOY_PLATFORM=amlogic-alpine` (or `amlogic-stock`) it
+requires `lib/libcapsulad.so` and runs `tools/check-native-libc.sh`, which reads the ELF dynamic
+section (`DT_NEEDED` via `readelf`, or an ELF-capable `objdump`) and rejects a runtime linked against
+the other libc, or a static one with no libc dependency. It never guesses from a string inside the
+file.
+
+Building the musl runtime works; it needs one target-specific flag, already in the Makefile:
+
+```sh
+# arm64 host; the image is pulled into the local Docker store, no privileged change
+docker run --rm --platform linux/arm64 -v "$PWD":/src -w /src/sdk/native rust:alpine \
+  sh -c 'apk add --no-cache build-base; \
+         RUSTFLAGS="-C target-feature=-crt-static" \
+         cargo build --locked --release --target aarch64-unknown-linux-musl'
+```
+
+Rust musl targets default to `crt-static`, and a static runtime drops the `cdylib` crate type;
+`-C target-feature=-crt-static` links the library against the dynamic musl and produces
+`libcapsulad.so` (SONAME `libcapsulad.so.1`, `NEEDED libc.musl-aarch64.so.1`, `libgcc_s.so.1`).
+`make native` applies that flag **only** for a `*-linux-musl` `NATIVE_TARGET`
+(`NATIVE_RUSTFLAGS`), so glibc and Darwin builds are unchanged. The emitted
+`capsulad-native.json` is the usual `{abi_major:1, abi_minor:0, library:"libcapsulad.so.1"}`.
+
+Verified in an arm64 Alpine container: `tools/check-native-libc.sh` reports `libc=musl`, `ldd`
+shows `/lib/ld-musl-aarch64.so.1`, and a C `dlopen("libcapsulad.so.1")` + `dlsym("capsulad_abi_major")`
+smoke loads the runtime and resolves the symbol. Host proof only: no device ran it.
+
+The container recipe used for the investigation (arm64 host, no privileged changes; the image is
+pulled into the local Docker store):
+
+```sh
+docker run --rm --platform linux/arm64 -v "$PWD":/src -w /src/sdk/native rust:alpine \
+  sh -c 'cargo check --locked --release --target aarch64-unknown-linux-musl'
+```
+
+App packages are built per target: `make deploy-bundle DEPLOY_PLATFORM=amlogic-alpine` exports
+`TARGET_ABI=linux-musl` (and `linux-gnu` otherwise), each app build stages that value in its
+manifest `abi`, and the bundle refuses an archive whose `abi` does not name the target libc. The
+packager never rewrites the field. `BUNDLE_NATIVE=0` remains available for a deliberately
+runtime-free bundle (static Go/script apps), but it is not the Alpine default. The ABI is
+unchanged (`1.0`).
+
+Boot hooks:
+
+- Stock: `deploy/amlogic-stock/S99sysmon.sh`, installed over the already-expanded vendor
+  supervisor script of the same name. `rcS` expands the list before the overlay pivots, so a new
+  overlay-only name never runs; replacing an expanded name does. `S99btctl.sh` (btctl) is untouched;
+  `disable` restores the stock `S99sysmon.sh` byte-for-byte (embedded copy verified against the
+  extracted image) and `enable` restores the wrapper.
+- Alpine: `deploy/amlogic-alpine/capsulad` is an OpenRC service. Install it as
+  `/etc/init.d/capsulad` and `rc-update add capsulad default`. The deploy CLI's
+  `-init-script /etc/init.d/capsulad` uses OpenRC's `start`/`stop`/`restart`.
+
+Data directories: `/data/local/capsulad` on stock (overlay-backed), `/var/lib/capsulad` on Alpine.
+
+Offline inspection identifies the platform from the rootfs (stock init scripts, `alpine-release`/
+`openrc-run`, Rockchip overlay/boot markers) and reports it in `capsulad-cli platform inspect`
+before applying any board-specific reading; an unrecognised tree reports `platform unknown`
+instead of Rockchip statuses.

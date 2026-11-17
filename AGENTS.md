@@ -33,11 +33,14 @@ pass does not establish a coherent user experience.
 ## Keep hardware specifics in the board profile (non-negotiable)
 
 Board and firmware specifics belong to the data-only `internal/backend/profile`, applied by
-`internal/backend/rockchip` and `deploy/rockchip-stock`. Hardware-agnostic packages
+`internal/backend/rockchip`, `internal/backend/amlogic` and the `deploy/` targets. Device knowledge
+that is not a knob (recovered ABIs, measured tables, evdev/IIO/LED-class plumbing) is shared
+through `internal/backend/linuxdev` and `internal/backend/syswatchdog`. Hardware-agnostic packages
 (`internal/wifi`, `internal/audio`, `internal/webui`, …) take configuration from the
 composition root and must not import a board profile. The supported configurations are the
-Rockchip Capsula Mini rev 4 stock profile and the neutral simulator profile; Amlogic has no
-backend and its wire enum values stay reserved.
+Rockchip Capsula Mini rev 4 stock profile, the Amlogic A113X stock and Alpine profiles, and the
+neutral simulator profile. The Amlogic clock panel's vendor ABI is unrecovered: report it
+`UNVERIFIED` rather than inventing a mapping.
 
 ## Use the shared SDK for app networking (non-negotiable)
 

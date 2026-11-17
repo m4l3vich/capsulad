@@ -136,15 +136,19 @@ Commands:
   auth init                      initialize admin password, certificate and first API key
   auth set-password              change the admin password
   auth key create NAME           create a static API key (printed once)
-  auth key list                  list API keys and revocation state
+                                 [--scope status|operator] (repeatable; default status)
+  auth key list                  list API keys, revocation state and scopes
   auth key revoke NAME           revoke an API key
   auth status                    show password/API-key/certificate status
-  platform inspect -root DIR     inspect an extracted firmware tree offline
+  platform inspect -root DIR     inspect an extracted firmware tree offline (detects
+                                 rockchip-stock, amlogic-stock or amlogic-alpine)
   platform ledtest [flags]       drive the display channels directly (bring-up)
   dev <wakeword|gesture|key|raw|state>  simulator injection (development)
 
-Deploy flags: -init-script PATH, -restart auto|always|never, -dry-run, -staging DIR,
--timeout D. The bundle is staged under the temporary directory (or -staging), never inside
+Deploy flags: -platform rockchip-stock|amlogic-stock|amlogic-alpine, -init-script PATH,
+-restart auto|always|never, -dry-run, -staging DIR, -timeout D. The platform selects the
+boot service, the hook name and the space floors; the bundle layout is identical.
+The bundle is staged under the temporary directory (or -staging), never inside
 the data directory and on the data filesystem only with room for the largest staged tree;
 the data partition is checked for the space the binary writes cannot free themselves
 before the daemon is stopped.
@@ -407,6 +411,9 @@ func runApp(args []string, dataDir, socket, nativeLibDir string) error {
 func runAppPackage(args []string) error {
 	fs := flag.NewFlagSet("app package", flag.ContinueOnError)
 	out := fs.String("out", "", "output file (default <id>-<version>.tar.gz)")
+	maxGlibc := fs.String("max-glibc", os.Getenv("CAPSULAD_MAX_GLIBC"), "reject a package binary importing GLIBC symbols above this version")
+	targetABI := fs.String("target-abi", os.Getenv("TARGET_ABI"), "target ABI (linux-gnu|linux-musl); gates every ELF executable and shared library")
+	targetArch := fs.String("target-arch", os.Getenv("CAPSULAD_TARGET_ARCH"), "target architecture (aarch64); rejects other ELF machines")
 	positional, err := parseSubcommandFlags(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -422,6 +429,23 @@ func runAppPackage(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *targetABI != "" {
+		if err := checkPackageELF(dir, *targetABI, *maxGlibc, *targetArch); err != nil {
+			return err
+		}
+		// A package that needs the shared runtime must be dynamically linked:
+		// a fully static musl binary cannot dlopen it.
+		if m.NativeSDK != nil && sandbox.LibcForABI(*targetABI) == sandbox.LibcMusl && m.Entrypoint.Path != "" {
+			bin := filepath.Join(dir, m.Entrypoint.Path)
+			if ok, err := sandbox.IsELF(bin); err != nil {
+				return err
+			} else if ok {
+				if err := sandbox.CheckInterpRequired(bin, sandbox.LibcMusl); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	if *out == "" {
 		*out = m.ID + "-" + m.Version + ".tar.gz"
 	}
@@ -430,6 +454,15 @@ func runAppPackage(args []string) error {
 	}
 	fmt.Printf("wrote %s (%s %s)\n", *out, m.ID, m.Version)
 	return nil
+}
+
+// checkPackageELF enforces the target libc and the glibc ceiling on every ELF
+// executable and shared library in a staged package. Scripts with a shebang are
+// skipped; a non-ELF shared library or executable is rejected (that is how a
+// host build would otherwise slip into a Linux package). Assets are untouched.
+func checkPackageELF(dir, abi, max, arch string) error {
+	want := sandbox.LibcForABI(abi)
+	return checkELFTree(dir, want, max, arch, false, "")
 }
 
 func runSettings(args []string, socket string, jsonOut bool) error {
@@ -778,13 +811,20 @@ func runAuth(args []string, dataDir, securityDir string) error {
 		switch args[1] {
 		case "create":
 			if len(args) < 3 {
-				return fmt.Errorf("usage: capsulad-cli auth key create NAME")
+				return fmt.Errorf("usage: capsulad-cli auth key create NAME [--scope status|operator]...")
 			}
-			token, info, err := store.CreateAPIKey(args[2])
+			fs := flag.NewFlagSet("auth key create", flag.ContinueOnError)
+			var scopes stringList
+			fs.Var(&scopes, "scope", "key scope: status (read-only status/certificate) or operator (full daemon administration, including the MCP tools); repeatable, default status")
+			if err := fs.Parse(args[3:]); err != nil {
+				return err
+			}
+			token, info, err := store.CreateAPIKeyWithScopes(args[2], scopes)
 			if err != nil {
 				return err
 			}
 			fmt.Printf("created API key %q (%s…): %s\n", info.Name, info.Prefix, token)
+			fmt.Printf("scopes:       %s\n", strings.Join(info.Scopes, ", "))
 			fmt.Println("store it now; only its hash is saved")
 			return nil
 		case "list":
@@ -798,7 +838,8 @@ func runAuth(args []string, dataDir, securityDir string) error {
 				if k.Revoked {
 					state = "revoked"
 				}
-				fmt.Printf("%-24s %s… created=%s %s\n", k.Name, k.Prefix, k.CreatedAt.Format(time.RFC3339), state)
+				fmt.Printf("%-24s %s… created=%s %s scopes=%s\n", k.Name, k.Prefix,
+					k.CreatedAt.Format(time.RFC3339), state, strings.Join(k.Scopes, ","))
 			}
 			return nil
 		case "revoke":
@@ -882,6 +923,7 @@ func runPlatform(args []string, jsonOut bool) error {
 	if jsonOut {
 		return printJSON(report)
 	}
+	fmt.Printf("platform   %s\n", report.Platform)
 	fmt.Printf("model      %s\nSoC        %s\nfirmware   %s\n", report.Model, report.SoC, report.Firmware)
 	fmt.Printf("ring       %d RGB pixels\ndisplay    %d monochrome LEDs\nmic GPIO   %d\n", report.RingPixels, report.DisplayLEDs, report.MicEnableGPIO)
 	fmt.Printf("daemons    %s\n", strings.Join(report.VendorDaemons, ", "))

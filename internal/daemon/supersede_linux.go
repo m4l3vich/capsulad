@@ -67,7 +67,16 @@ func (d *Daemon) stopVendor(names []string) {
 	}
 	watchdogPath := d.profile().Watchdog.Path
 	if watchdogPath != "" {
+		// A feeder this framework detached on a graceful stop owns an armed
+		// nowayout timer: killing it drops the last keepalive and resets the
+		// board the handoff exists to keep alive. Ask it to release and let the
+		// supervisor's own retry take the device over.
+		requestFeederHandback(d.cfg.RunDir)
 		for _, p := range watchdogHolders(watchdogPath) {
+			if owned, known := feederOwnsPID(p.PID); known && owned {
+				d.logs.Infof("daemon", "", "asking the framework watchdog feeder pid=%d to release %s", p.PID, watchdogPath)
+				continue
+			}
 			d.logs.Infof("daemon", "", "superseding %s pid=%d (holds %s)", p.Name, p.PID, watchdogPath)
 			_ = syscall.Kill(p.PID, syscall.SIGTERM)
 			time.Sleep(150 * time.Millisecond)

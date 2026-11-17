@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1034,14 +1035,18 @@ func TestReleaseLegacyFeederRequestsHandbackOnlyForTheLegacyFeeder(t *testing.T)
 		t.Fatalf("shell feeder pid file removed: %v", err)
 	}
 
-	// The legacy feeder watches for the marker and clears its pid file.
-	if err := os.WriteFile(pidFile, []byte("4242"), 0o644); err != nil {
+	// The legacy feeder watches for the marker and clears its pid file. The pid
+	// must be live *and* carry the feeder marker: a pid file naming a dead
+	// process, or a live one that belongs to something else, is a stale file
+	// rather than a pinned inode (covered below).
+	live := fakeLegacyFeeder(t)
+	if err := os.WriteFile(pidFile, []byte(live), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			if _, err := os.Stat(handback); err == nil {
 				_ = os.Remove(pidFile)
 				return
@@ -1063,7 +1068,7 @@ func TestReleaseLegacyFeederRequestsHandbackOnlyForTheLegacyFeeder(t *testing.T)
 	// A feeder that never exits reports failure: the old daemon's inode is
 	// still pinned, so the caller must not remove the target.
 	watchdogHandbackWait = 200 * time.Millisecond
-	if err := os.WriteFile(pidFile, []byte("4242"), 0o644); err != nil {
+	if err := os.WriteFile(pidFile, []byte(live), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	err := d.releaseLegacyFeeder()
@@ -1072,6 +1077,84 @@ func TestReleaseLegacyFeederRequestsHandbackOnlyForTheLegacyFeeder(t *testing.T)
 	}
 	if _, err := os.Stat(handback); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("stale handback marker left behind by the failed wait")
+	}
+}
+
+// A pid file whose feeder is gone pins nothing: the deployment must clear it
+// and continue instead of aborting on a handback that can never arrive. run/
+// lives on the persistent partition, so such a file survives a reboot or a hard
+// kill. The check needs procfs, which only the device has.
+func TestReleaseLegacyFeederClearsADeadFeeder(t *testing.T) {
+	if fi, err := os.Stat("/proc"); err != nil || !fi.IsDir() {
+		t.Skip("no procfs on this host")
+	}
+	dataDir := t.TempDir()
+	runDir := filepath.Join(dataDir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(runDir, watchdogFeederPID)
+	handback := filepath.Join(runDir, watchdogHandback)
+	// Above the largest Linux pid_max (4 194 304), so the pid is free.
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(1<<29)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := &deployment{dataDir: dataDir}
+	if err := d.releaseLegacyFeeder(); err != nil {
+		t.Fatalf("releaseLegacyFeeder: %v", err)
+	}
+	if _, err := os.Stat(pidFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("stale feeder pid file survived")
+	}
+	if _, err := os.Stat(handback); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a handback was requested from a dead feeder")
+	}
+}
+
+// fakeLegacyFeeder starts a stand-in for the legacy Go feeder: a live process
+// whose argv carries the feeder marker, so the ownership check treats it as
+// ours. The shell keeps a loop as its command, so it never execs the loop body
+// and the marker stays in the process's command line.
+func fakeLegacyFeeder(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "while :; do sleep 1; done", legacyFeederArgvMarker)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	return strconv.Itoa(cmd.Process.Pid)
+}
+
+// A pid file whose pid was reused by an unrelated live process pins nothing
+// either. The docs promise the deploy tool clears it, and it needs procfs to
+// tell a feeder from a bystander, so this is device-only.
+func TestReleaseLegacyFeederClearsAReusedPID(t *testing.T) {
+	if fi, err := os.Stat("/proc"); err != nil || !fi.IsDir() {
+		t.Skip("no procfs on this host")
+	}
+	dataDir := t.TempDir()
+	runDir := filepath.Join(dataDir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(runDir, watchdogFeederPID)
+	handback := filepath.Join(runDir, watchdogHandback)
+	// This process is alive but is not a feeder: a reused pid.
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := &deployment{dataDir: dataDir}
+	if err := d.releaseLegacyFeeder(); err != nil {
+		t.Fatalf("releaseLegacyFeeder: %v", err)
+	}
+	if _, err := os.Stat(pidFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("pid file of a reused pid survived")
+	}
+	if _, err := os.Stat(handback); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a handback was requested from a bystander process")
 	}
 }
 

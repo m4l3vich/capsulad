@@ -115,6 +115,7 @@ export const SCHEMA = Object.freeze({
     { no: 2, name: "prefix", kind: "string" },
     { no: 3, name: "createdUnixMs", kind: "int64" },
     { no: 4, name: "revoked", kind: "bool" },
+    { no: 5, name: "scopes", kind: "string", repeated: true },
   ] },
   "capsulad.web.v1.AppConfigSchemaView": { name: "capsulad.web.v1.AppConfigSchemaView", fields: [
     { no: 1, name: "appId", kind: "string" },

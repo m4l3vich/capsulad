@@ -66,7 +66,7 @@ only the daemon itself holds; a peer that merely shares the daemon PID (the Web 
 | `firmware` | string | Firmware description. |
 | `daemon_version` | string | Running `capsulad` version. |
 | `boot_id` | string | Boot identity; changes on restart. |
-| `target_platform` | enum | `CAPSULA_MINI_ROCKCHIP_STOCK`, or `TARGET_PLATFORM_UNSPECIFIED` for the simulator. `CAPSULA_MINI_AMLOGIC_STOCK` and `CAPSULA_MINI_AMLOGIC_ALPINE` are defined but unsupported/reserved wire values: this build has no Amlogic platform constant or backend, so no daemon reports them and `-platform` rejects them. |
+| `target_platform` | enum | `CAPSULA_MINI_ROCKCHIP_STOCK`, `CAPSULA_MINI_AMLOGIC_STOCK` or `CAPSULA_MINI_AMLOGIC_ALPINE`, or `TARGET_PLATFORM_UNSPECIFIED` for the simulator. The Amlogic values are reported when the daemon runs `-platform amlogic-stock` or `-platform amlogic-alpine`; each board's subsystem backends and statuses differ, so read `subsystem_backends` rather than inferring capability from this enum. |
 | `subsystem_backends` | `BackendAvailability[]` | `{subsystem, backend_id, status, detail}`; status is `BACKEND_AVAILABLE`, `BACKEND_PARTIAL`, `BACKEND_UNAVAILABLE` or `BACKEND_UNVERIFIED`. |
 | `hardware_serial` | string | The SoC serial as the host kernel reports it (`/proc/cpuinfo` `Serial` on ARM), read once by the daemon at startup. Empty when the host cannot report it. It is not a secret and it is not the vendor-compatible `device_id`. |
 

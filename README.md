@@ -10,13 +10,17 @@ bind a listening socket of their own and never write hardware directly: outbound
 mDNS run through the shared SDK and the daemon's responder, and a fixed inbound TCP or UDP port
 exists only as a listener the daemon allocated and handed to the app.
 
-The only supported hardware configuration is the Capsula Mini rev 4 running the stock
-Rockchip firmware (RK3308, aarch64 glibc 2.33). Its board specifics are inert data in
-`internal/backend/profile`; the backend and deployment layer (`internal/backend/rockchip`,
-`deploy/rockchip-stock`) applies them, and hardware-agnostic packages take the values they
-need from the composition root. A complete virtual backend (`-platform simulator`, neutral
-profile) implements the same contracts for development and tests. Amlogic is unsupported: no
-backend exists and its protocol enum values are reserved.
+Three hardware configurations are supported. The Capsula Mini rev 4 runs the stock Rockchip
+firmware (RK3308, aarch64 glibc 2.33); the Capsula Mini on Amlogic A113X runs either its
+jailbroken stock Buildroot image (aarch64 glibc 2.33) or Alpine Linux (aarch64 musl). Their board
+specifics are inert data in `internal/backend/profile`; the backends and deployment layers
+(`internal/backend/rockchip`, `internal/backend/amlogic`, `deploy/rockchip-stock`,
+`deploy/amlogic-stock`, `deploy/amlogic-alpine`) apply them, and hardware-agnostic packages take
+the values they need from the composition root. Device knowledge that is not a knob is shared by
+both boards through `internal/backend/linuxdev`. A complete virtual backend (`-platform
+simulator`, neutral profile) implements the same contracts for development and tests. Amlogic
+targets are selected with `-platform amlogic-stock` and `-platform amlogic-alpine`; the stock
+clock panel's vendor ABI is unrecovered and is reported `UNVERIFIED` rather than guessed.
 
 The administrative CLI is `capsulad-cli` (`capsulad-cli status`, `app`, `deploy`, `auth`,
 `cert`, `settings`, `logs`, `media`, `platform`, `dev`). The daemon-to-app wire protocol may
@@ -101,8 +105,16 @@ version.
   service's `Command`. The physical circle key and swipes use the same service when no media
   app is playing or paused, so a phone works with no media package installed.
 - **HTTPS Web UI.** An embedded Vue SPA served by the daemon, authenticated with an
-  Argon2id admin password and server-side sessions; static API keys are limited to status
-  and certificate endpoints. Browser traffic uses the binary protobuf `/ws` protocol.
+  Argon2id admin password and server-side sessions; static API keys carry explicit scopes
+  (`status` is read-only; `operator` is full daemon administration, including the MCP tools),
+  and the Access page now shows each key's grant. Browser traffic uses the binary protobuf
+  `/ws` protocol.
+- **MCP frontend.** The daemon also serves a Model Context Protocol server at `/mcp` on the
+  same HTTPS listener — no app, no extra port or process. It is an API-key surface that
+  exposes the same allowlisted operations and snapshots as the browser, through one shared
+  frontend operation boundary, not a second control plane. Keys carry explicit scopes:
+  `status` keeps the legacy read-only grant and `operator` is full administration; a key
+  minted before scopes existed is never promoted.
 - **Boot ownership.** On the stock Rockchip image one removable hook,
   `/etc/init.d/S99btctl.sh`, prepares state, starts and health-gates the daemon, and
   manages the vendor assistant scripts.
@@ -176,7 +188,8 @@ version.
   exactly like a detection. The delivery target is always reported in
   `AssistantActivation.app_id`. See [docs/WAKEWORD.md](docs/WAKEWORD.md#multiple-wakewords-and-app-binding).
 - **Shipped app packages:** optional first-party apps are built and packaged on the build host
-  (`make simon`, `make pa`, `make radio`, `make radio-tuner`, `make homeassistant`) and installed
+  (`make simon`, `make pa`, `make radio`, `make radio-tuner`, `make homeassistant`,
+  `make airplay`) and installed
   like any other package. `org.capsulad.simon` is a QuickJS memory game that owns the segment
   display and a full-panel capture while it runs; `org.capsulad.pa` is a background MicroPython
   service that plays one streamed WAV per routed `Play` call and replies after the queued audio
@@ -186,8 +199,17 @@ version.
   decodes it, because a script host has neither a network binding nor an audio decoder; and
   `org.capsulad.homeassistant` is a native MQTT bridge that publishes the speaker to Home
   Assistant through discovery, publishes its state and applies Home Assistant's commands to the
-  ring, the display and the Bluetooth source. None is compiled into the daemon, and none is
-  installed by default.
+  ring, the display and the Bluetooth source; `org.capsulad.airplay` is a native AirPlay 2 audio
+  receiver — the daemon allocates its RTSP, audio and event listeners, Avahi publishes
+  `_airplay._tcp` and `_raop._tcp`, sender audio is decoded by the app and mixed by the
+  framework, the ring shows the cover-art palette, and the standard media contract carries the
+  household controls back to the sender; and `apps/cadence` — optional voice-assistant client
+  for a self-hosted Cadence server: framework wake-word and talk-key activation only (an
+  API/automation activation is refused rather than fabricating a physical press, because
+  cadence.v2 grants owner privileges only for a heard wake word or a press), ring capture
+  indication, Opus mic uplink, streamed Opus reply playback, follow-up, dismiss/cancel/error
+  cleanup; credentials in masked settings and never logged. None is compiled into the daemon, and none
+  is installed by default.
 - **Web UI:** six destinations — Main, Apps, Settings, Assets, Access and Diagnostics. The Apps
   page lists installed packages with their running/system state and installs, updates or removes
   one through the session-authenticated `/api/apps` routes (a raw `.tar.gz` upload, refused while
@@ -200,6 +222,12 @@ version.
   green `connected` chip beside the speaker-mode toggle when any `pairedDevices` row has
   `connected === true`; its tooltip and `aria-label` read `Connected: <names>`, and the chip
   disappears when no device is connected. This is snapshot state, not a Bluetooth-policy cache.
+  The Access page labels each static key "status only" or "full administration".
+- **MCP:** one Streamable HTTP JSON-RPC endpoint at `https://HOST:8443/mcp` with
+  `initialize`/`tools/list`/`tools/call`/`DELETE` sessions, scope-filtered tools and the same
+  operations as the Web UI (settings, apps, media, Bluetooth, Wi-Fi, wakeword training, clock,
+  assets and package install/remove). Input schemas are generated from the protobuf
+  descriptors. See [docs/MCP.md](docs/MCP.md).
 - **Operations:** in-place daemon upgrade through the boot service with a health gate,
   a 512 KiB rotating log, bounded storage guard, and deployment bundles applied by
   `capsulad-cli deploy`.
@@ -257,7 +285,7 @@ A deployment bundle is a directory or `.tar.gz` with exactly these top-level ent
 `capsulad`, `capsulad-cli`, `lib/` (native runtime and headers), `apps/*.tar.gz`, and
 `boot/S99btctl.sh`. `make deploy-bundle` assembles that directory from ready-made host-built
 archives — build them first with `make dumbassistant`, `make marusia`, `make product-apps` (the
-five product apps) or `make devapps` — and never packages an app. `capsulad-cli deploy PATH`
+six product apps) or `make devapps` — and never packages an app. `capsulad-cli deploy PATH`
 validates the whole bundle before changing installed state, stages it outside the data partition,
 stops the daemon, installs or updates packages and managed runtime files, replaces both binaries,
 optionally installs the boot hook, restarts through the boot service and gates on
@@ -320,9 +348,16 @@ before the next turn.
   segment presentation at non-zero brightness and a microphone-live cue the mixer consumed
   and drained. Missing output, zero volume, mute, a blank indication or an undeliverable cue
   deny capture rather than record quietly.
-- **Web UI boundary.** Sessions use a self-signed HTTPS certificate, an Argon2id password
-  and CSRF/origin checks. Static API keys reach only `GET /api/status` and the public
-  certificate. There is no generic AppBus, capture, audio or asset proxy for the browser.
+- **Web UI and MCP boundary.** Sessions use a self-signed HTTPS certificate, an Argon2id
+  password and CSRF/origin checks. Static API keys carry explicit scopes: `status` reaches
+  only `GET /api/status`, the public certificate and the two matching MCP read tools;
+  `operator` reaches the MCP administration tools. The browser's Access page mints
+  `status` keys, and a key created before scopes existed stays read-only. MCP accepts only an
+  API key (never a session cookie) and checks Origin. The Access page lists every key with its
+  scope, so a status key and an administration key can be told apart; the page itself mints
+  status-only keys, and an `operator` key is created on the device with
+  `capsulad-cli auth key create NAME --scope operator`. There is no generic AppBus, capture,
+  audio or asset proxy for either frontend.
 - **Asset store.** `<data-dir>/assets` is a plain directory catalog: every regular,
   non-symlink file below the root is an asset, addressed by its slash-relative path and
   visible read-only at `/assets`. Only the session-authenticated admin API writes it.
@@ -374,6 +409,15 @@ before the next turn.
     call with `PERMISSION_DENIED`. The request's own `player_app_id` is validated but is not the
     authorization; see
     [routed calls and trust](docs/app_development/security.md#routed-calls-and-trust).
+  - `apps/airplay`, the AirPlay 2 receiver. It is the one first-party app with inbound
+    network surface, and every part of it is daemon-mediated: the RTSP control port, each audio
+    channel, the event channel and the PTP multicast receiver are listeners the daemon allocated
+    and bound under its policy (PTP group joins are restricted to 224.0.0.1 on ports 319/320),
+    and `_airplay._tcp`/`_raop._tcp` are published by the daemon's Avahi responder. The app never
+    binds a socket and never reaches the internet: it writes RTCP reports and remote-control
+    commands only to the sender that connected to it, and it decodes the sender's audio locally.
+    A sender on the local link is as trusted as the operator's network makes it; there is no
+    password and no pairing code, matching the upstream receiver's transient-pairing behaviour.
 
 ## Current limits
 
@@ -398,11 +442,18 @@ before the next turn.
   per-app network namespace and no per-destination egress allowlist. Listener binds are
   daemon-policed, but a compromised app can still reach anything the device routes. Treat
   native apps as trusted code.
-- **Amlogic is unsupported and has no backend.** `-platform amlogic-stock` and
-  `-platform amlogic-alpine` are rejected as unknown platforms
-  (`unknown platform "…" (simulator, rockchip-stock)`), and the historical
-  `CAPSULA_MINI_AMLOGIC_*` protocol enum values are reserved only: no code path tests them
-  and no parity is claimed. `SystemService.ControlUnit` returns `UNIMPLEMENTED`.
+- **The Amlogic A113X clock panel is unverified.** Both Amlogic targets are implemented
+  (`-platform amlogic-stock`, `-platform amlogic-alpine`, wire enums
+  `CAPSULA_MINI_AMLOGIC_STOCK` / `CAPSULA_MINI_AMLOGIC_ALPINE`). The stock vendor panel char device
+  (`/dev/is31fl32xx`, ISSI IS31FL3236A or Awinic AW21036 depending on the batch) has no recovered
+  ioctl ABI, so segment frames stay in memory and the subsystem reports `UNVERIFIED`; on Alpine the
+  panel is driven through the kernel line display or per-segment LED class devices when present.
+  Amlogic audio and brightness behaviour are host-verified only, and the Amlogic **watchdog
+  timer** is unverified — pending image inspection, with the supervisor's release behaviour
+  host-verified rather than the driver's; see
+  [docs/HARDWARE.md](docs/HARDWARE.md#amlogic-a113x-stock-buildroot-and-alpine-linux). No parity
+  with the Rockchip board is claimed.
+- **`SystemService.ControlUnit` returns `UNIMPLEMENTED`.**
 - **No app-facing Wi-Fi service.** Wi-Fi is owned by the authenticated Web UI and the
   isolated captive portal; apps cannot read or change network configuration.
 - **Bluetooth media has no provider app.** The daemon ships no Bluetooth media application and
@@ -429,7 +480,9 @@ before the next turn.
   streaming a connected source, so the next connection cannot land on its Headset endpoint.
 - **The Web UI binds TCP and uses a self-signed certificate.** Set `-web-addr`
   deliberately and trust the fingerprint shown by `capsulad-cli cert status`; browsers
-  warn until then. API keys never reach the console, AppBus, captures or audio.
+  warn until then. API keys never reach the console, AppBus, captures or audio; `-web-addr`
+  also exposes the MCP endpoint, which requires an `operator`-scoped key for anything beyond
+  status reads.
 - **Memory and `/data` are the binding constraints.** The board has 240 MiB RAM without
   swap, the data partition is 78.5 MB, and the daemon defaults to an 80 MiB soft heap
   limit. A package may be at most 64 MiB unpacked with no file above 48 MiB; one asset may
@@ -531,13 +584,13 @@ before the next turn.
 | `internal/assets` | shared read-only asset store |
 | `internal/websecurity` | self-signed TLS, Argon2id password, API keys, sessions |
 | `internal/provenance` | Sigstore/GitHub attestation verification |
-| `internal/webui`, `web` | HTTPS server, embedded SPA and its protobuf WebSocket |
+| `internal/webui`, `web` | HTTPS server, MCP frontend, embedded SPA and its protobuf WebSocket |
 | `internal/sounds` | embedded framework UI cues and their CC BY-SA `COPYING` |
 | `sdk/native` | Rust shared engine behind the C ABI: UDS gRPC, HTTP/TLS, remote gRPC, primitives, header and C example |
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
 | `apps/devtools`, `apps/dumbassistant`, `apps/marusia` | development apps and the two optional assistants |
-| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio plus its native tuner companion, and the Home Assistant bridge |
+| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio plus its native tuner companion, the Home Assistant bridge, and the AirPlay 2 receiver |
 | `deploy/rockchip-stock` | the single boot hook and bring-up scripts |
 | `proto` | framework and standard contract schemas (media, clock, ring, web) |
 | `docs` | application manual, development, verification, hardware, behavior, wakeword and glossary |
@@ -547,6 +600,7 @@ before the next turn.
 | Document | Read it for |
 |---|---|
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | prerequisites, build targets, cross builds, packaging, deployment, simulator, tests, admin commands |
+| [docs/MCP.md](docs/MCP.md) | the daemon's MCP frontend: enablement, key scopes and provisioning, protocol and error surface, the tool catalogue, upload limits and proof level |
 | [docs/app_development/README.md](docs/app_development/README.md) | the application manual: supported targets, prerequisites, a complete native app and the page index |
 | [manifest](docs/app_development/manifest.md), [lifecycle](docs/app_development/lifecycle.md), [sdk](docs/app_development/sdk.md), [network](docs/app_development/network.md), [app bus](docs/app_development/app-bus.md) | artifact and manifest fields, launch/identity/restart, the native SDK including HTTP/TLS, remote gRPC, streams, UDP, listeners and primitives, the `<label>.local`/mDNS surface, and script hosts, routed calls between apps |
 | [services](docs/app_development/services.md), [output & input](docs/app_development/output-input.md), [audio](docs/app_development/audio.md), [settings & actions](docs/app_development/settings-actions.md) | every framework service and method, presentations/captures/keys/gestures, audio streams and indication, typed settings and actions |
@@ -556,8 +610,52 @@ before the next turn.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Capsula Mini rev 4 hardware evidence and firmware findings |
 | [docs/WAKEWORD.md](docs/WAKEWORD.md) | detection, enrollment, training and model evidence |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | project terms as this codebase uses them |
-| [apps/radio/README.md](apps/radio/README.md), [apps/radio/tuner/README.md](apps/radio/tuner/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md) | the internet radio's station list, controls, display states and player/tuner wire contract; the tuner's build, codecs and its `Tune` caller authorization; the Home Assistant bridge's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, rejections and limits |
+| [apps/radio/README.md](apps/radio/README.md), [apps/radio/tuner/README.md](apps/radio/tuner/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md), [apps/airplay/README.md](apps/airplay/README.md), [apps/airplay/docs/media.md](apps/airplay/docs/media.md) | the internet radio's station list, controls, display states and player/tuner wire contract; the tuner's build, codecs and its `Tune` caller authorization; the Home Assistant bridge's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, rejections and limits; the AirPlay receiver's supported sender flows, its explicit AAC/FairPlay/PTP gaps, settings and the unproven device gate; and the media player it provides |
 | [AGENTS.md](AGENTS.md) | repository working rules, lifecycle invariants and verification gates |
+
+## Attribution
+
+- **capsula-mini-airplay2** (https://github.com/ryysel/capsula-mini-airplay2) — the AirPlay
+  receiver behaviour this app reimplements: the compact-speaker model string, the stock-profile
+  latency intent, the cover-art ring rendering and the single-volume transport interaction.
+  Upstream packages Shairport Sync 5.6.2 and NQPTP 1.2.9 plus its own installers; none of that
+  is included or redistributed here, and `apps/airplay` is an independent Go implementation.
+  **Attribution to the upstream author is explicitly pending exact agreement with that
+  author**; this repository claims no affiliation with or endorsement by the project.
+- **Hardware sources** — the Amlogic A113X facts come from cmp18's published survey
+  (debianlive.ru, 2026-08-23), `ryysel/capsula-mini-airplay2`, `ryysel/marusya-hw` and
+  `byrbyrka/capsula-mini-tweaker`; [docs/HARDWARE.md](docs/HARDWARE.md) names them and marks what
+  is third-party evidence rather than a measurement in this repository.
+- **Shairport Sync** (https://github.com/mikebrady/shairport-sync) and **NQPTP**
+  (https://github.com/mikebrady/nqptp) — the reference for AirPlay wire behaviour (RTSP method
+  handling, HAP pairing key derivation, RTP/RTCP and timing packet layouts, PTP message layout).
+  The AirPlay receiver reproduces the fixed FairPlay handshake reply constants from
+  `rtsp.c` (`handle_fp_setup`), which is MIT-licensed: "Copyright (c) James Laird 2013;
+  modifications copyright (c) Mike Brady 2014–2026. Permission is hereby granted, free of
+  charge, to any person obtaining a copy of this software and associated documentation files
+  (the 'Software'), to deal in the Software without restriction … The above copyright notice
+  and this permission notice shall be included in all copies or substantial portions of the
+  Software." No other code from either tree is included; NQPTP is GPLv2 and nothing GPL is
+  linked or copied.
+- **FFmpeg** (https://ffmpeg.org) — the AirPlay receiver links `libavcodec`/`libavutil` for AAC
+  decoding, the same decoder the upstream receiver links. FFmpeg is LGPL-2.1-or-later; the app
+  uses only the AAC decoder and links the libraries, and the deployment ships them as separate
+  shared objects where the platform does not already provide them.
+- **Canonical** — the `ubuntu-sounds` 0.3 set used for the framework's UI cues
+  (`internal/sounds`), licensed CC BY-SA. The licence text is
+  [internal/sounds/COPYING](internal/sounds/COPYING) and the files are unmodified.
+- **station-wakeword** (https://github.com/tangenx/station-wakeword) — reference material for
+  the station wake-word work that the personal wake-word pipeline was developed and validated
+  against. No source from that project is vendored here; the detection and training evidence
+  is in [docs/WAKEWORD.md](docs/WAKEWORD.md).
+- **Cadence** — the voice-assistant platform the `apps/cadence` client speaks to (device link
+  protocol `cadence/v2`: WebSocket `GET /v2/device`, protobuf `Envelope` frames, bearer device
+  token, Opus 16 kHz mono uplink, Opus reply streams). Source:
+  https://git.shino.boo/devilreef/cadence/ (self-hosted, GitLab). The client implements the
+  wire protocol against that upstream definition; no upstream source code is vendored and no
+  vendor binary is redistributed. Its protobuf files are an independently written subset of
+  cadence.v2 (same field numbers and enums), and its `.binpb` test vectors are upstream-generated
+  data from upstream `main` commit `f9571ad0d89acd7326414adf04a85ea1c9dec131`.
 
 ## Quick start
 

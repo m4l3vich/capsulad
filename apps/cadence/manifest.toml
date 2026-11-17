@@ -1,0 +1,71 @@
+id = "org.capsulad.cadence"
+name = "Cadence"
+version = "0.1.0"
+description = "Voice-assistant client for a self-hosted Cadence server: streams the microphone as Opus over the cadence.v2 device link and plays the server's streamed reply, with the ring as the capture indication."
+background = false
+start_on_boot = false
+restart_on_failure = true
+single_instance = true
+provides = ["voice_assistant"]
+
+[entrypoint]
+runtime = "native"
+path = "cadence"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app links only the Go SDK, which dlopens the shared Capsulad engine. It
+# also dlopens libopus at run time; no codec or engine is bundled.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[actions]]
+id = "dismiss"
+label = "Dismiss the current turn"
+description = "Cancels the running Cadence session, aborts reply playback, releases the microphone and ring, and drops activations queued behind it. The process stays running and ready."
+
+[[settings]]
+key = "server_url"
+label = "Cadence server URL"
+description = "Base URL of the self-hosted Cadence server, for example https://cadence.example.com. The device link is opened at <server_url>/v2/device. http:// is allowed for a LAN or development server but sends the device token and microphone audio unencrypted, and logs one warning."
+type = "text"
+default = ""
+
+[[settings]]
+key = "device_token"
+label = "Device token"
+description = "Bearer token of this device as the Cadence server enrolled it. Never logged. device_token_file wins when set."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "device_token_file"
+label = "Device token file"
+description = "Path to a file holding the device token, re-read on every settings change so it can be rotated. Takes precedence over device_token; an unreadable or empty file is rejected and the previous configuration kept."
+type = "text"
+default = ""
+
+[[settings]]
+key = "ca_pem"
+label = "Extra CA certificate (PEM)"
+description = "PEM certificate(s) appended to the system trust store for a self-hosted CA. Empty uses the system store only. There is no insecure mode: verification is always required."
+type = "text"
+default = ""
+
+[[settings]]
+key = "hold_release_tail_ms"
+label = "Hold-release silence tail (ms)"
+description = "After a hold-to-talk release the client stops capturing and streams this much digital silence, paced at real time, so the server's recognizer closes the utterance; cadence.v2 has no device end-of-utterance message. Bounded 0-5000. It is dead air the user hears as latency."
+type = "integer"
+default = 1000
+min = 0
+max = 5000
+
+[[settings]]
+key = "follow_up"
+label = "Follow-up windows"
+description = "When the server offers a follow-up window after a complete reply, keep the microphone and indication open and start a follow-up session. Turn off to end every turn at the server's close."
+type = "boolean"
+default = true

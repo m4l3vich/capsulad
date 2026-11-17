@@ -19,10 +19,12 @@ stop, settings, diagnostics, media listing, firmware inspection, display bring-u
 deployment-bundle application. It reaches the daemon over the same Unix socket as apps, with
 administrator identity.
 
-**Capsula Mini** — the supported physical target: an RK3308 speaker with a five-key panel, a
-12-pixel RGB ring and a 30-cell segment display, running the stock Rockchip firmware. Its
-`rk3308-capsula-mini-rev4-stock` board profile is the only hardware configuration; the simulator
-emulates the same contracts, and Amlogic has no backend.
+**Capsula Mini** — the product. Two board families run it: the Rockchip RK3308 rev 4 (five-key
+panel, 12-pixel RGB ring, 30-cell segment display, stock Rockchip firmware) and the Amlogic A113X
+(volume/mute/action keys, 12-pixel WS2812B ring, four-digit seven-segment clock panel, in a stock
+Buildroot image or Alpine Linux). Their board profiles (`rk3308-capsula-mini-rev4-stock`,
+`amlogic-a113x-capsula-mini-stock`, `amlogic-a113x-capsula-mini-alpine`) are the hardware
+configurations; the simulator emulates the same contracts.
 
 **HAL** — hardware abstraction layer: the `internal/backend` interfaces through which the daemon
 drives displays, rings, input, audio, sensors and Bluetooth. It is not a separate process, and apps
@@ -37,20 +39,22 @@ role; framework services are the only supported way for an app to affect the dev
 **Device settings** — daemon-wide typed settings (volume, brightness, timezone, hostname, provider
 defaults, Bluetooth policy, …) owned by `SettingsService`, distinct from an app's settings.
 
-**Target platform** — the backend family declared at startup: `simulator` or `rockchip-stock`
-(`rockchip` is accepted as an alias). Any other value, including `amlogic-stock` and
-`amlogic-alpine`, is rejected as an unknown platform. A backend advertises only the resources
-and capabilities it implements; unsupported platforms fail explicitly, and the historical
-`CAPSULA_MINI_AMLOGIC_*` wire enum values are reserved.
+**Target platform** — the backend family declared at startup: `simulator`, `rockchip-stock`
+(`rockchip` is accepted as an alias), `amlogic-stock` or `amlogic-alpine`. Any other value is
+rejected as an unknown platform. A backend advertises only the resources and capabilities it
+implements; unsupported subsystems fail explicitly instead of being faked. The
+`CAPSULA_MINI_AMLOGIC_*` wire enum values are reported by the corresponding Amlogic backends.
 
 **Board profile** — the inert data record in `internal/backend/profile` describing one
 supported configuration: model and SoC fallbacks, serial location, audio topology, LED and
 segment geometry, input paths, watchdog, stock Wi-Fi files, deployment budgets, architecture,
 memory envelope and brightness curve. It has no I/O, no interfaces and no build tags. The
 composition root selects it and passes values into generic packages; board paths and quirks
-live in `internal/backend/rockchip` and `deploy/rockchip-stock`, and hardware-agnostic
-packages such as `internal/wifi` must not import a profile. The supported profiles are
-Rockchip stock (`rk3308-capsula-mini-rev4-stock`) and the neutral simulator profile.
+live in `internal/backend/rockchip`, `internal/backend/amlogic` and the `deploy/` targets, and
+hardware-agnostic packages such as `internal/wifi` must not import a profile. The supported
+profiles are Rockchip stock (`rk3308-capsula-mini-rev4-stock`), Amlogic A113X stock and Alpine
+(`amlogic-a113x-capsula-mini-stock`, `amlogic-a113x-capsula-mini-alpine`) and the neutral
+simulator profile.
 
 **Sandbox mode** — the isolation level the daemon actually probed: `namespaces` (user+mount+PID,
 distinct UID), `mountns` (root mount namespace, distinct UID), `uid` (distinct UID only) or `none`

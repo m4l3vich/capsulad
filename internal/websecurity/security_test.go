@@ -113,6 +113,80 @@ func TestPasswordAndAPIKeys(t *testing.T) {
 	}
 }
 
+func TestAPIKeyScopesAreExplicitAndLegacyKeysStayRestricted(t *testing.T) {
+	dir := t.TempDir()
+	store := Open(dir, DefaultOptions())
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A key created without scopes is the legacy grant: status only.
+	legacy, legacyInfo, err := store.CreateAPIKey("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacyInfo.Scopes) != 1 || legacyInfo.Scopes[0] != ScopeStatus {
+		t.Fatalf("legacy scopes = %v, want [status]", legacyInfo.Scopes)
+	}
+	_, scopes, ok := store.APIKeyScopes(legacy)
+	if !ok || !ScopesAllow(scopes, ScopeStatus) || ScopesAllow(scopes, ScopeOperator) {
+		t.Fatalf("legacy key resolves to %v (ok=%v)", scopes, ok)
+	}
+
+	// An operator key must be requested explicitly and implies status.
+	operator, operatorInfo, err := store.CreateAPIKeyWithScopes("agent", []string{ScopeOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operatorInfo.Scopes) != 1 || operatorInfo.Scopes[0] != ScopeOperator {
+		t.Fatalf("operator scopes = %v", operatorInfo.Scopes)
+	}
+	_, scopes, ok = store.APIKeyScopes(operator)
+	if !ok || !ScopesAllow(scopes, ScopeOperator) || !ScopesAllow(scopes, ScopeStatus) {
+		t.Fatalf("operator scopes = %v (ok=%v)", scopes, ok)
+	}
+	if !store.VerifyAPIKey(legacy) || !store.VerifyAPIKey(operator) {
+		t.Fatal("a valid key stopped verifying")
+	}
+
+	// Unknown scopes are refused instead of being persisted.
+	if _, _, err := store.CreateAPIKeyWithScopes("bad", []string{"root"}); err == nil {
+		t.Fatal("unknown scope accepted")
+	}
+	// Duplicates are canonicalized.
+	_, deduped, err := store.CreateAPIKeyWithScopes("dedup", []string{ScopeStatus, ScopeStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deduped.Scopes) != 1 || deduped.Scopes[0] != ScopeStatus {
+		t.Fatalf("deduped scopes = %v", deduped.Scopes)
+	}
+
+	// A reload from disk keeps both grants; the legacy key's record has no
+	// scopes field at all, so it must resolve exactly as it did before the
+	// field existed.
+	reloaded := Open(dir, DefaultOptions())
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	_, scopes, ok = reloaded.APIKeyScopes(legacy)
+	if !ok || len(scopes) != 1 || scopes[0] != ScopeStatus {
+		t.Fatalf("reloaded legacy scopes = %v (ok=%v)", scopes, ok)
+	}
+	_, scopes, ok = reloaded.APIKeyScopes(operator)
+	if !ok || len(scopes) != 1 || scopes[0] != ScopeOperator {
+		t.Fatalf("reloaded operator scopes = %v (ok=%v)", scopes, ok)
+	}
+
+	// Revocation is immediate for the scope lookup too.
+	if err := reloaded.RevokeAPIKey("agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := reloaded.APIKeyScopes(operator); ok {
+		t.Fatal("revoked key still resolves")
+	}
+}
+
 func TestSessionsExpireAndPasswordChangeRevokes(t *testing.T) {
 	store := Open(t.TempDir(), Options{SessionIdle: 50 * time.Millisecond, SessionAbsolute: 150 * time.Millisecond})
 	if err := store.Load(); err != nil {

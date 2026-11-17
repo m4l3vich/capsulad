@@ -59,6 +59,9 @@ type lastWrite struct {
 func (d *Daemon) outputLoop() {
 	ticker := time.NewTicker(33 * time.Millisecond)
 	defer ticker.Stop()
+	// Seed the gauge with the loop's own start so a slow daemon bootstrap does
+	// not read as a hung runtime before the first tick.
+	d.live.beat()
 	last := map[string]*lastWrite{}
 	for {
 		select {
@@ -66,6 +69,10 @@ func (d *Daemon) outputLoop() {
 			return
 		case <-ticker.C:
 		}
+		// The hardware watchdog reads this as the daemon's liveness: the output
+		// loop is the physical writer, so a step that stops completing is
+		// exactly the failure the timer exists to end.
+		d.live.beat()
 		d.updateSystemRing()
 		for _, info := range d.resources {
 			var (

@@ -242,6 +242,9 @@ typedef int32_t (*capsulad_fn_call_send_json)(capsulad_handle call,
 typedef int32_t (*capsulad_fn_call_send_proto)(capsulad_handle call,
                                               const uint8_t *proto, size_t len);
 typedef int32_t (*capsulad_fn_call_half_close)(capsulad_handle call);
+/* timeout_ms as for stream_read: 0 polls once, 0xFFFFFFFF waits forever,
+ * other values bound the wait. A timeout returns CAPSULAD_STATUS_TIMEOUT and
+ * leaves the call open; CAPSULAD_STATUS_END_OF_STREAM is a clean end. */
 typedef int32_t (*capsulad_fn_call_recv_json)(capsulad_handle call,
                                              uint32_t timeout_ms,
                                              capsulad_buf *out_json);

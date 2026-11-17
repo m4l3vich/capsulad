@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newCatalog(t *testing.T) (*Catalog, string) {
@@ -399,15 +401,286 @@ func TestAssetWriteEnforcesStoreBudget(t *testing.T) {
 	if len(staged) != 0 {
 		t.Fatalf("staging files survived a rejected write: %v", staged)
 	}
-	// Replacing the target counts the store without that target's old size.
-	if _, err := c.Write("a.bin", bytes.NewReader(make([]byte, 10))); err != nil {
-		t.Fatalf("replace at the aggregate limit: %v", err)
+	// A replacement stages its new bytes while the old file is still published,
+	// so it needs headroom on top of the tree. Replacing 6 bytes with 4 needs
+	// exactly the remaining 4-byte budget: accepted.
+	if _, err := c.Write("a.bin", bytes.NewReader(make([]byte, 4))); err != nil {
+		t.Fatalf("replacement exactly within the budget: %v", err)
 	}
-	if _, err := c.Write("c.bin", bytes.NewReader(make([]byte, 1))); !errors.Is(err, ErrStoreFull) {
+	// A larger replacement has no staging headroom: refused, target untouched.
+	if _, err := c.Write("a.bin", bytes.NewReader(make([]byte, 7))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("replacement without staging headroom = %v, want ErrStoreFull", err)
+	}
+	if entry, err := c.Lookup("a.bin"); err != nil || entry.Size != 4 {
+		t.Fatalf("refused replacement disturbed the target: %+v %v", entry, err)
+	}
+	// Fill the store exactly; a max-size replacement at a full store is refused
+	// rather than attempting to stage past the budget.
+	if _, err := c.Write("c.bin", bytes.NewReader(make([]byte, 6))); err != nil {
+		t.Fatalf("write to fill the store: %v", err)
+	}
+	if _, err := c.Write("a.bin", bytes.NewReader(make([]byte, 16))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("max-size replacement at a full store = %v, want ErrStoreFull", err)
+	}
+	if _, err := c.Write("d.bin", bytes.NewReader(make([]byte, 1))); !errors.Is(err, ErrStoreFull) {
 		t.Fatalf("write into a full store = %v, want ErrStoreFull", err)
 	}
-	// An empty asset consumes no budget and is still accepted.
+	// An empty asset consumes no budget and is still accepted, and an empty
+	// replacement frees its target without staging anything.
 	if _, err := c.Write("empty.bin", strings.NewReader("")); err != nil {
 		t.Fatalf("empty write into a full store: %v", err)
+	}
+	if _, err := c.Write("a.bin", strings.NewReader("")); err != nil {
+		t.Fatalf("empty replacement at a full store: %v", err)
+	}
+	if entry, err := c.Lookup("a.bin"); err != nil || entry.Size != 0 {
+		t.Fatalf("empty replacement did not publish: %+v %v", entry, err)
+	}
+}
+
+// --- concurrent staging budget and delete/publish ordering -----------------
+
+func waitForPending(t *testing.T, c *Catalog, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		c.mu.Lock()
+		got := c.pending
+		c.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending reservation = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type failingReader struct{ remaining int }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, errors.New("body read failed")
+	}
+	n := len(p)
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	return n, nil
+}
+
+// TestAssetWriteReservesBudgetAcrossConcurrentBodies pins the invariant the
+// client-paced copy needs: a body that is still streaming holds its worst-case
+// budget, so a second concurrent upload cannot stage bytes the store cannot
+// eventually hold.
+func TestAssetWriteReservesBudgetAcrossConcurrentBodies(t *testing.T) {
+	c, root := newCatalog(t)
+	c.limit = 100
+	c.storeLimit = 120
+
+	firstReader, firstWriter := io.Pipe()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := c.Write("first.bin", firstReader)
+		firstDone <- err
+	}()
+	waitForPending(t, c, 100)
+
+	// The remaining budget is 20 bytes, so a second full-size body is refused
+	// up front instead of staging 100 more bytes beside the first body.
+	if _, err := c.Write("second.bin", bytes.NewReader(make([]byte, 101))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("concurrent oversized body error = %v, want ErrStoreFull", err)
+	}
+	// The bytes the budget can still admit are accepted and published.
+	if _, err := c.Write("small.bin", bytes.NewReader(make([]byte, 20))); err != nil {
+		t.Fatalf("write inside the remaining budget: %v", err)
+	}
+	if _, err := c.Write("third.bin", bytes.NewReader(make([]byte, 1))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("write beyond the reserved budget error = %v, want ErrStoreFull", err)
+	}
+
+	firstWriter.Write(make([]byte, 100))
+	firstWriter.Close()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first body: %v", err)
+	}
+	if _, err := c.Write("fourth.bin", bytes.NewReader(make([]byte, 1))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("write into a full store error = %v, want ErrStoreFull", err)
+	}
+	staged, _ := filepath.Glob(filepath.Join(root, stagingPrefix+"*"))
+	if len(staged) != 0 {
+		t.Fatalf("staging files survived the budgeted writes: %v", staged)
+	}
+	var total int64
+	for _, entry := range c.List("") {
+		total += entry.Size
+	}
+	if total != 120 {
+		t.Fatalf("published bytes = %d, want exactly the 120-byte budget", total)
+	}
+}
+
+// TestAssetWriteReleasesReservationOnFailure: a body that fails mid-stream must
+// give its whole reservation back so the space is usable again.
+func TestAssetWriteReleasesReservationOnFailure(t *testing.T) {
+	c, _ := newCatalog(t)
+	c.limit = 100
+	c.storeLimit = 100
+
+	if _, err := c.Write("broken.bin", &failingReader{remaining: 50}); err == nil {
+		t.Fatal("a failing body was published")
+	}
+	waitForPending(t, c, 0)
+	if _, err := c.Write("full.bin", bytes.NewReader(make([]byte, 100))); err != nil {
+		t.Fatalf("write after a released reservation: %v", err)
+	}
+}
+
+// TestAssetWriteReplacementNeedsStagingHeadroom: the atomic rename frees the
+// old file only at publication, so replacing a file needs budget for the new
+// body on top of the still-published target.
+func TestAssetWriteReplacementNeedsStagingHeadroom(t *testing.T) {
+	c, root := newCatalog(t)
+	c.limit = 100
+	c.storeLimit = 100
+	if _, err := c.Write("same.bin", bytes.NewReader(make([]byte, 60))); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Write("same.bin", bytes.NewReader(make([]byte, 41))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("replacement beyond the staging headroom = %v, want ErrStoreFull", err)
+	}
+	if entry, err := c.Lookup("same.bin"); err != nil || entry.Size != 60 {
+		t.Fatalf("refused replacement disturbed the target: %+v %v", entry, err)
+	}
+	// Exactly the remaining 40 bytes fit and publish atomically.
+	if _, err := c.Write("same.bin", bytes.NewReader(make([]byte, 40))); err != nil {
+		t.Fatalf("replacement within the headroom: %v", err)
+	}
+	if entry, err := c.Lookup("same.bin"); err != nil || entry.Size != 40 {
+		t.Fatalf("replacement result: %+v %v", entry, err)
+	}
+	if staged, _ := filepath.Glob(filepath.Join(root, stagingPrefix+"*")); len(staged) != 0 {
+		t.Fatalf("staging files survived the replacement: %v", staged)
+	}
+}
+
+// physicalBytes counts every regular file in the store, including the in-flight
+// staging files that List deliberately hides.
+func physicalBytes(t *testing.T, root string) int64 {
+	t.Helper()
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return total
+}
+
+// TestAssetWriteConcurrentReplacementStaysWithinPhysicalBudget is the physical
+// form of the invariant: while a replacement streams, the published file plus
+// its staging file never exceed the store budget, and a second concurrent
+// replacement has no room to stage anything.
+func TestAssetWriteConcurrentReplacementStaysWithinPhysicalBudget(t *testing.T) {
+	c, root := newCatalog(t)
+	c.limit = 100
+	c.storeLimit = 100
+	if _, err := c.Write("big.bin", bytes.NewReader(make([]byte, 60))); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Write("big.bin", reader)
+		done <- err
+	}()
+	waitForPending(t, c, 40) // the 60 published bytes stay counted
+
+	if _, err := writer.Write(make([]byte, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if got := physicalBytes(t, root); got > 100 {
+		t.Fatalf("published+staged = %d bytes, want <= the 100-byte budget", got)
+	}
+	if _, err := c.Write("big.bin", bytes.NewReader(make([]byte, 1))); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("second concurrent replacement = %v, want ErrStoreFull", err)
+	}
+	if got := physicalBytes(t, root); got > 100 {
+		t.Fatalf("refused replacement added bytes: %d", got)
+	}
+
+	if _, err := writer.Write(make([]byte, 20)); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	if got := physicalBytes(t, root); got != 40 {
+		t.Fatalf("published bytes after replacement = %d, want 40", got)
+	}
+}
+
+// TestAssetRemoveWinsOverInFlightReplacement: a delete that lands while the
+// replacement body streams must not be undone by the publish.
+func TestAssetRemoveWinsOverInFlightReplacement(t *testing.T) {
+	c, root := newCatalog(t)
+	c.limit = 64
+	// Headroom for the replacement's staging file on top of the target.
+	c.storeLimit = 120
+	if _, err := c.Write("gone.bin", bytes.NewReader(make([]byte, 40))); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Write("gone.bin", reader)
+		done <- err
+	}()
+	waitForPending(t, c, 64)
+
+	if err := c.Remove("gone.bin"); err != nil {
+		t.Fatalf("remove during a replacement: %v", err)
+	}
+	writer.Write(make([]byte, 64))
+	writer.Close()
+	if err := <-done; !errors.Is(err, ErrDeleted) {
+		t.Fatalf("publish after the delete = %v, want ErrDeleted", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "gone.bin")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a deleted asset was resurrected: %v", err)
+	}
+	for _, entry := range c.List("") {
+		if entry.ID == "gone.bin" {
+			t.Fatal("the deleted id is still listed")
+		}
+	}
+	waitForPending(t, c, 0)
+	// The deletion generation is scoped to the write that raced it: a fresh
+	// upload of the same id is a deliberate recreation and publishes.
+	if _, err := c.Write("gone.bin", bytes.NewReader(make([]byte, 40))); err != nil {
+		t.Fatalf("recreate after the delete won: %v", err)
 	}
 }

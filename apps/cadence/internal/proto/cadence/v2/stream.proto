@@ -1,0 +1,38 @@
+// The cadence.v2 reply-stream messages this client speaks (upstream
+// proto/cadence/v2/stream.proto). See session.proto for the interop rule.
+syntax = "proto3";
+
+package cadence.v2;
+
+option go_package = "capsulad/apps/cadence/internal/proto/cadencev2;cadencev2";
+
+enum StreamPurpose {
+  STREAM_PURPOSE_UNSPECIFIED = 0;
+  STREAM_PURPOSE_REPLY = 1;
+  STREAM_PURPOSE_ANNOUNCE = 2;
+  STREAM_PURPOSE_MEDIA = 3;
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_OPUS = 1;
+}
+
+message StreamStart {
+  string stream_id = 1;
+  string session_id = 2;
+  StreamPurpose purpose = 3;
+  Codec codec = 4;
+  uint32 channels = 5;
+  bool duck = 6;
+}
+
+message AudioDown {
+  string stream_id = 1;
+  uint32 seq = 2;
+  bytes opus = 3;
+}
+
+message StreamEnd {
+  string stream_id = 1;
+}

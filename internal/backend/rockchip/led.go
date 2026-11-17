@@ -3,13 +3,9 @@ package rockchip
 import (
 	"errors"
 	"math"
-	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
-	"capsulad/internal/backend"
-	"capsulad/internal/backend/profile"
+	"capsulad/internal/backend/linuxdev"
 )
 
 // The stock firmware drives two independent LED controllers. Both were
@@ -26,18 +22,9 @@ import (
 //     "*_digits.json" frames and writes through /dev/led_multi_ctrl.
 //
 // Both char devices take vendor ioctls (see led_vendor_linux.go). The ring
-// channel permutation below is copied verbatim from the stock voice-agent and
-// makes logical pixel order line up with the physical WS2812B chain. Channel
-// counts, pixel geometry and gamma come from the device profile.
-var (
-	// ws2812ChannelMap maps logical channel index (R,G,B per pixel) to the
-	// physical WS2812B channel. Stock voice-agent: buf[map[i]] = in[i].
-	ws2812ChannelMap = [...]int{
-		1, 0, 2, 34, 33, 35, 31, 30, 32, 28, 27, 29,
-		25, 24, 26, 22, 21, 23, 19, 18, 20, 16, 15, 17,
-		13, 12, 14, 10, 9, 11, 7, 6, 8, 4, 3, 5,
-	}
-)
+// channel permutation and the frame encoder live in internal/backend/linuxdev
+// because the Amlogic A113X Mini uses the same recovered 36-channel wiring.
+// Channel counts, pixel geometry and gamma come from the device profile.
 
 // errLEDOffline is returned when a vendor LED device cannot be driven in the
 // current process (non-Linux host or an offline firmware tree inspection).
@@ -63,162 +50,21 @@ type ledDeviceTree struct {
 // An offline root prefix normally has no /proc/device-tree, so the result is
 // left empty; callers then fall back to the observed vendor defaults.
 func probeLEDDeviceTree(prefix string) ledDeviceTree {
-	base := deviceTreeBase(prefix)
+	base := linuxdev.DeviceTreeBase(prefix)
 	if base == "" {
 		return ledDeviceTree{}
 	}
 	var out ledDeviceTree
-	if path := findCompatible(base, "ws2812b"); path != "" {
+	if path := linuxdev.FindCompatible(base, "ws2812b"); path != "" {
 		out.Ring = &ws2812RingNode{
 			NodePath:   path,
-			DeviceName: readTrim(filepath.Join(path, "device-name")),
-			Channels:   countLEDChildren(path),
+			DeviceName: linuxdev.ReadTrim(filepath.Join(path, "device-name")),
+			Channels:   linuxdev.CountLEDChildren(path),
 		}
 	}
-	if path := findCompatible(base, "issi,is31fl3236"); path != "" {
-		out.Segment = &multiCtrlNode{NodePath: path, Cells: countLEDChildren(path)}
+	if path := linuxdev.FindCompatible(base, "issi,is31fl3236"); path != "" {
+		out.Segment = &multiCtrlNode{NodePath: path, Cells: linuxdev.CountLEDChildren(path)}
 	}
-	return out
-}
-
-func deviceTreeBase(prefix string) string {
-	for _, candidate := range []string{"/proc/device-tree", "/sys/firmware/devicetree/base"} {
-		if st, err := os.Stat(prefix + candidate); err == nil && st.IsDir() {
-			return prefix + candidate
-		}
-	}
-	return ""
-}
-
-// findCompatible walks the flattened device tree (exposed as directories and
-// property files) and returns the first node whose compatible property
-// contains want.
-func findCompatible(base, want string) string {
-	var found string
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
-		if found != "" || depth > 6 {
-			return
-		}
-		if hasCompatible(dir, want) {
-			found = dir
-			return
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-				names = append(names, e.Name())
-			}
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			walk(filepath.Join(dir, name), depth+1)
-		}
-	}
-	walk(base, 0)
-	return found
-}
-
-func hasCompatible(dir, want string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "compatible"))
-	if err != nil {
-		return false
-	}
-	for _, value := range strings.Split(string(data), "\x00") {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-// countLEDChildren counts the ledN subnodes declared under a controller. The
-// label property is present on every stock child; a name fallback keeps the
-// probe useful for trees that omit labels.
-func countLEDChildren(dir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		child := filepath.Join(dir, e.Name())
-		if _, err := os.Stat(filepath.Join(child, "label")); err == nil {
-			count++
-			continue
-		}
-		if strings.HasPrefix(e.Name(), "led") {
-			count++
-		}
-	}
-	return count
-}
-
-func clampBrightness(v float64) float64 {
-	if math.IsNaN(v) || v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
-}
-
-func scaleChannel(v uint8, brightness float64) uint8 {
-	return uint8(math.Round(float64(v) * brightness))
-}
-
-// ws2812GammaTable is the default perceptual curve applied to ring output. The
-// stock agent only ever wrote 0 or 255 (integer JSON frames), so there is no
-// vendor evidence for a curve; 2.2 is the sRGB default and the common choice
-// for WS2812B indicators. The value comes from the device profile, and the
-// segment display is left linear because its calibration and brightness
-// behaviour were accepted on hardware as they are.
-var ws2812GammaTable = buildGammaTable(profile.RK3308Rev4Stock.LED.Gamma)
-
-func buildGammaTable(gamma float64) (table [256]uint8) {
-	for i := range table {
-		table[i] = uint8(math.Round(255 * math.Pow(float64(i)/255, gamma)))
-	}
-	return table
-}
-
-// encodeWS2812Frame expands RGB pixels into the controller's channel buffer
-// and applies the physical channel permutation with the default gamma table.
-func encodeWS2812Frame(pixels []backend.RGB, brightness float64, channels int) []byte {
-	return encodeWS2812FrameTable(pixels, brightness, channels, ws2812GammaTable)
-}
-
-// encodeWS2812FrameTable is encodeWS2812Frame with an explicit gamma table so
-// a backend built from another profile still derives the curve from its
-// configuration. Missing pixels are black.
-func encodeWS2812FrameTable(pixels []backend.RGB, brightness float64, channels int, gamma [256]uint8) []byte {
-	brightness = clampBrightness(brightness)
-	logical := make([]byte, channels)
-	pixels = pixels[:min(len(pixels), channels/3)]
-	for pixel := range pixels {
-		px := pixels[pixel]
-		// Brightness acts in linear light, then the perceptual curve is
-		// applied once per channel so dim and bright levels look even.
-		logical[pixel*3] = gamma[scaleChannel(px.R, brightness)]
-		logical[pixel*3+1] = gamma[scaleChannel(px.G, brightness)]
-		logical[pixel*3+2] = gamma[scaleChannel(px.B, brightness)]
-	}
-	out := make([]byte, channels)
-	if channels == len(ws2812ChannelMap) {
-		for i, target := range ws2812ChannelMap {
-			out[target] = logical[i]
-		}
-		return out
-	}
-	copy(out, logical)
 	return out
 }
 
@@ -254,7 +100,7 @@ const (
 // A frame on a display with an unexpected record count falls back to the linear
 // order so an unverified variant is not driven with the wrong map.
 func encodeMultiCtrlFrame(cells []uint16, colon bool, brightness float64, count, digits, segmentsPerDigit int) []multiCtrlRecord {
-	brightness = clampBrightness(brightness)
+	brightness = linuxdev.ClampBrightness(brightness)
 	logical := make([]byte, count)
 	level := uint8(math.Round(brightness * 255))
 	calibrated := count == digits*segmentsPerDigit+2

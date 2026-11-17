@@ -275,6 +275,38 @@ func (c *wsConn) cancelSessionWork() {
 	c.trainingMu.Unlock()
 }
 
+// The training slot is the wsConn half of operationSink: one active wakeword
+// run per browser socket, cancelled with the socket. The MCP frontend keeps the
+// same slot on its session, so both frontends share the operation's semantics
+// and only the owner of the slot differs.
+func (c *wsConn) beginTraining(id string, cancel context.CancelFunc) bool {
+	c.trainingMu.Lock()
+	defer c.trainingMu.Unlock()
+	if len(c.training) >= 1 {
+		return false
+	}
+	c.training[id] = cancel
+	return true
+}
+
+func (c *wsConn) finishTraining(id string) {
+	c.trainingMu.Lock()
+	delete(c.training, id)
+	c.trainingMu.Unlock()
+}
+
+func (c *wsConn) cancelTraining(id string) bool {
+	c.trainingMu.Lock()
+	cancel := c.training[id]
+	delete(c.training, id)
+	c.trainingMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
 // --- frame I/O -------------------------------------------------------------
 
 const (

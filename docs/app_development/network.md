@@ -160,6 +160,7 @@ int32_t listener_open(const uint8_t *options_json, size_t options_len,
 | `bind` | string | `"127.0.0.1"` | A local unicast address: loopback, an interface address, or the IPv4/IPv6 wildcard. Multicast and broadcast are refused. The SDK sends `127.0.0.1` when the option is omitted; pass `"0.0.0.0"` (or `"::"`) explicitly for a LAN-facing listener. |
 | `port` | integer | `0` | `0` requests an ephemeral port; otherwise `1024..65535`. **5353** (mDNS/Avahi) and the configured Web UI port are refused. |
 | `backlog` | integer | `64` | TCP only, `1..128`; ignored for UDP. |
+| `join_group` | string | — | UDP only. IPv4 multicast group to join for a receive-only socket. The daemon accepts it only with `bind` `"0.0.0.0"` and `port` `319` or `320` (the PTP event and general ports), which is the AirPlay PTP clock's single use; see [Multicast receive for PTP](#multicast-receive-for-ptp). |
 
 `out_info` receives the bound socket as JSON, for example
 `{"protocol":"tcp","address":"127.0.0.1","port":54321}` — that is how an app learns the
@@ -169,9 +170,11 @@ ephemeral port it was given.
 |---|---|
 | Listener policy | Only a supervised run can allocate a listener; the inherited control channel is the proof. |
 | Concurrency | At most **16** listeners per run. |
-| Refused ports | 5353, the configured Web UI port, and any port outside `0` or `1024..65535`. |
+| Refused ports | 5353, the configured Web UI port, and any port outside `0` or `1024..65535` — except a `join_group` request, which may use only the PTP ports 319/320. |
+| Multicast | Refused for an ordinary listener. `join_group` is the only multicast path and it is receive-only on the PTP ports. |
 | Cleanup | The app owns each transferred descriptor: run exit closes it in the kernel. The daemon closes an un-taken descriptor, the control channel and its own accounting; it cannot close a listener it already transferred. |
 | Audit | The daemon logs every allocation with app, run, protocol, address and port. |
+| Release | A successful reply carries an `allocation` id. The SDK sends one `close` control request for it when the listener is closed; the daemon then frees its retained descriptor and decrements the run's live-listener count. Closing is idempotent — an unknown or already-released allocation is a no-op — so every exit path can release without checking. The cap counts **live** listeners, so opening and closing listeners across sessions does not exhaust a run's budget. |
 
 | Call | Rule |
 |---|---|
@@ -180,6 +183,39 @@ ephemeral port it was given.
 | `listener_send(listener, peer_json, data, len, timeout_ms)` | UDP only. `peer_json` is required: a listener has no connected peer. |
 | `listener_info(listener, &json)` | Bound JSON plus `closed`. |
 | `listener_close(listener)` | Releases the listener; pending accept, receive and send return `CANCELLED`. |
+
+### Multicast receive for PTP
+
+A multicast group receiver is a distinct, receive-only socket: the daemon binds the wildcard
+address, joins the IPv4 group and transfers the descriptor exactly like any other listener. It
+exists for one purpose — the IEEE 1588 clock an AirPlay 2 sender publishes on `224.0.0.1`
+ports 319 (event) and 320 (general) — so the policy is deliberately narrow:
+
+- `protocol` must be `"udp"`, `bind` must be `"0.0.0.0"` and `port` must be `319` or `320`.
+  Any other combination is `INVALID_ARGUMENT` with the rule named.
+- The group must be exactly `224.0.0.1`, the 802.1AS/AirPlay PTP group; any other multicast
+  group is `INVALID_ARGUMENT`. The daemon binds the privileged port once (as root) with
+  `SO_REUSEADDR` and best-effort `SO_REUSEPORT`, then joins the group on every interface that is
+  up, multicast-capable and not loopback. Membership is socket state, so it ends when the
+  transferred descriptor and the daemon's own handle are closed — i.e. on app exit and daemon
+  shutdown — and the allocation is counted and logged like any other listener (the *16 listeners
+  per run* cap applies).
+- Receiving on a joined group is not a bind: a datagram socket bound to `0.0.0.0:320` alone
+  does not see the sender's Sync/Follow_Up traffic, which is why the join is a daemon
+  operation rather than something an app can fake.
+- **Receive-only is an SDK contract, not a kernel boundary.** `listener_send` refuses a
+  group listener, but the transferred descriptor is an ordinary UDP socket and an app that
+  speaks the control protocol directly could send from it. The daemon's guarantee is the
+  narrow group/port/interface policy and the authenticated control channel, not a
+  per-syscall filter; treat native apps as trusted code, as the sandbox section says.
+- There is still no group-join API for an arbitrary port. If a future protocol needs multicast
+  on another port, the policy is extended deliberately, not by widening this option.
+
+```c
+int32_t listener_open_json(const char *json, size_t len, uint32_t timeout_ms,
+                           capsulad_handle *out, capsulad_buf *out_info);
+/* json: {"protocol":"udp","bind":"0.0.0.0","port":320,"join_group":"224.0.0.1"} */
+```
 
 **`CAPSULAD_CONTROL_FD` is reserved.** It is an inherited, connected Unix descriptor owned by
 the runtime; an app must never read, write, close, duplicate over or reuse that number. It
@@ -307,6 +343,7 @@ use, permission) is `TRANSPORT`. Neither is ever downgraded to a best-effort bin
 | Listener bind | local unicast only (wildcard, loopback, interface address) |
 | Listener port | `0` (ephemeral) or `1024..65535`; 5353 and the Web UI port refused |
 | Listener backlog | 1..128, default 64 |
+| Multicast group receiver | UDP only, PTP ports 319/320, IPv4 multicast group, wildcard bind, receive-only |
 | Listeners per run | 16 |
 | mDNS instance | ≤63 UTF-8 bytes |
 | mDNS TXT | ≤16 records, ≤1024 bytes total |

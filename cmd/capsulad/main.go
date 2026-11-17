@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/amlogic"
 	"capsulad/internal/backend/profile"
 	"capsulad/internal/backend/rockchip"
+	"capsulad/internal/backend/syswatchdog"
 	"capsulad/internal/daemon"
 	"capsulad/internal/sandbox"
 	"capsulad/internal/version"
@@ -26,7 +29,7 @@ func main() {
 	cfg := daemon.Config{}
 	rk := profile.RK3308Rev4Stock
 	fs := flag.NewFlagSet("capsulad", flag.ExitOnError)
-	fs.StringVar(&cfg.Platform, "platform", "simulator", "target platform: simulator, rockchip-stock")
+	fs.StringVar(&cfg.Platform, "platform", "simulator", "target platform: simulator, rockchip-stock, amlogic-stock, amlogic-alpine")
 	fs.StringVar(&cfg.DataDir, "data-dir", "", "durable state directory (default .capsulad; production: /var/lib/capsulad)")
 	fs.StringVar(&cfg.RunDir, "run-dir", "", "runtime directory (default <data-dir>/run)")
 	fs.StringVar(&cfg.SocketPath, "socket", "", "framework Unix socket (default <run-dir>/hal.sock)")
@@ -39,7 +42,7 @@ func main() {
 	fs.StringVar(&cfg.TrustedRootPath, "trusted-root", "", "offline Sigstore trusted_root.json for provenance verification")
 	fs.StringVar(&cfg.LogFile, "log-file", "", "daemon log file (default <data-dir>/capsulad.log)")
 	fs.StringVar(&cfg.DevAdminSocket, "dev-admin", "", "development-only admin Unix socket (simulator); empty disables")
-	fs.IntVar(&cfg.MemLimitMB, "mem-limit-mb", rk.Memory.HeapLimitMB, fmt.Sprintf("soft Go heap limit in MiB (0 disables); keeps the OOM killer away on a %d MiB board", rk.Memory.PhysicalMiB))
+	fs.IntVar(&cfg.MemLimitMB, "mem-limit-mb", rk.Memory.HeapLimitMB, "soft Go heap limit in MiB (0 disables); keeps the OOM killer away on a 240-256 MiB board")
 	fs.StringVar(&cfg.WakewordModel, "wakeword-model", "", "trained keyword classifier (default <data-dir>/wakeword/model.json)")
 	fs.StringVar(&cfg.WakewordNegatives, "wakeword-negatives", "", "negative-training corpus (default <data-dir>/wakeword/negatives.bin; training input only)")
 	fs.StringVar(&cfg.Supersede, "supersede", "auto", "vendor processes to replace: auto, off, or a comma-separated list")
@@ -60,13 +63,24 @@ func main() {
 	switch cfg.Platform {
 	case "rockchip-stock", "rockchip":
 		selected = rk
-		cfg.WatchdogOpen = func(path string) (backend.Watchdog, error) { return rockchip.OpenWatchdog(path) }
+		cfg.WatchdogOpen = hardwareWatchdog(profile.RK3308Rev4Stock.Watchdog.DefaultTimeout)
 		cfg.NewBackend = func(p profile.Profile, warnf, infof func(string, ...any)) (backend.Backend, error) {
 			rc := rockchip.ConfigFor(p)
 			rc.Warnf = warnf
 			rc.Infof = infof
 			return rockchip.New(rc)
 		}
+	case "amlogic-stock":
+		selected = profile.AmlogicA113XStock
+		cfg.WatchdogOpen = hardwareWatchdog(profile.AmlogicA113XStock.Watchdog.DefaultTimeout)
+		cfg.NewBackend = amlogicBackend
+	case "amlogic-alpine":
+		// The supplied DTB has amlogic,meson-gxbb-wdt and the kernel builds the
+		// driver with WATCHDOG_SYSFS; the module may be absent at boot, which the
+		// supervisor reports and retries instead of claiming protection.
+		selected = profile.AmlogicA113XAlpine
+		cfg.WatchdogOpen = hardwareWatchdog(profile.AmlogicA113XAlpine.Watchdog.DefaultTimeout)
+		cfg.NewBackend = amlogicBackend
 	}
 	cfg.Profile = &selected
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -78,5 +92,26 @@ func main() {
 	}
 	if err := d.Run(); err != nil {
 		log.Fatalf("capsulad: %v", err)
+	}
+}
+
+// amlogicBackend builds the Amlogic backend for the selected profile.
+func amlogicBackend(p profile.Profile, warnf, infof func(string, ...any)) (backend.Backend, error) {
+	ac := amlogic.ConfigFor(p)
+	ac.Warnf = warnf
+	ac.Infof = infof
+	return amlogic.New(ac)
+}
+
+// hardwareWatchdog adapts the shared Linux watchdog opener to the daemon's
+// factory signature. The profile supplies the fallback timeout the driver may
+// refuse to report.
+func hardwareWatchdog(defaultTimeout time.Duration) func(string) (backend.Watchdog, error) {
+	return func(path string) (backend.Watchdog, error) {
+		wd, err := syswatchdog.Open(path, defaultTimeout)
+		if err != nil {
+			return nil, err
+		}
+		return wd, nil
 	}
 }

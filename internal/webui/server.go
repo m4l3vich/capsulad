@@ -84,6 +84,12 @@ type Server struct {
 
 	connMu sync.Mutex
 	conns  map[string]map[*wsConn]struct{}
+
+	// mcpMu guards the live MCP sessions. A session is created by initialize,
+	// carries the connection's single wakeword-training slot, and is dropped by
+	// an explicit DELETE, by idle expiry, or on listener shutdown.
+	mcpMu       sync.Mutex
+	mcpSessions map[string]*mcpSession
 }
 
 // wakewordSource is the narrow in-process view of daemon wakeword state the
@@ -137,6 +143,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))
 	mux.HandleFunc("DELETE /api/assets", s.sessionOnly(s.deleteAsset))
 	mux.HandleFunc("GET /ws", s.sessionOnly(s.serveWS))
+	// The MCP frontend is an API-key surface, not a browser session: it does
+	// its own authentication and never accepts a session cookie or CSRF token.
+	mux.HandleFunc("/mcp", s.serveMCP)
 	mux.Handle("/", s.static())
 	return s.middleware(mux)
 }
@@ -156,6 +165,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.Logs.Infof("webui", "", "HTTPS listening on %s (self-signed certificate, password/API-key auth; realtime WebSocket)", ln.Addr())
+	// A credential edit publishes the access topic; drop MCP sessions whose key
+	// was revoked so their staged work does not outlive the credential.
+	go s.reconcileMCPKeysOnAccess(ctx)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ServeTLS(ln, "", "") }()
 	select {
@@ -164,6 +176,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 		s.closeAllConns()
+		s.closeAllMCPSessions()
 		return nil
 	case err := <-errCh:
 		return err

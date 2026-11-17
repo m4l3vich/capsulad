@@ -26,14 +26,13 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/linuxdev"
 	"capsulad/internal/backend/profile"
 )
 
@@ -197,13 +196,13 @@ func New(cfg Config) (*Backend, error) {
 	// The live device tree is authoritative. When it is unavailable (offline
 	// inspection or an unusual boot), the observed vendor geometry is used so
 	// an existing char device is still driven with the recovered ABI.
-	if dt.Ring == nil && nodeExists(cfg.RootPrefix, cfg.LEDTopPath) {
+	if dt.Ring == nil && linuxdev.NodeExists(cfg.RootPrefix, cfg.LEDTopPath) {
 		dt.Ring = &ws2812RingNode{DeviceName: filepath.Base(cfg.LEDTopPath), Channels: cfg.LEDWS2812Channels}
 	}
-	if dt.Segment == nil && nodeExists(cfg.RootPrefix, cfg.LEDMultiCtrlPath) {
+	if dt.Segment == nil && linuxdev.NodeExists(cfg.RootPrefix, cfg.LEDMultiCtrlPath) {
 		dt.Segment = &multiCtrlNode{Cells: cfg.LEDMultiCtrlChannels}
 	}
-	ringLEDs, monoLEDs := probeSysfsLEDs(cfg.RootPrefix, cfg.LEDSysfsClassDir, cfg.LEDWS2812Pixels, cfg.LEDMultiCtrlChannels)
+	ringLEDs, monoLEDs := linuxdev.ProbeSysfsLEDs(cfg.RootPrefix, cfg.LEDSysfsClassDir, cfg.LEDWS2812Pixels, cfg.LEDMultiCtrlChannels, []string{"top-led"})
 
 	var ringErr error
 	if dt.Ring != nil {
@@ -224,10 +223,10 @@ func New(cfg Config) (*Backend, error) {
 	if b.ring == nil && len(ringLEDs) > 0 {
 		if cfg.RootPrefix == "" {
 			for _, led := range ringLEDs {
-				claimSysfsLED(led)
+				linuxdev.ClaimLED(led)
 			}
 		}
-		b.ring = &sysfsRing{leds: ringLEDs}
+		b.ring = linuxdev.NewSysfsRing(ringLEDs)
 		b.caps = append(b.caps, backend.SubsystemStatus{
 			Subsystem: "ring", BackendID: "rockchip.sysfs.led", Status: backend.Partial,
 			Detail: fmt.Sprintf("%d RGB LED class devices", len(ringLEDs)),
@@ -268,10 +267,10 @@ func New(cfg Config) (*Backend, error) {
 	if b.seg == nil && len(monoLEDs) >= cfg.LEDSegmentsPerDigit {
 		if cfg.RootPrefix == "" {
 			for _, led := range monoLEDs {
-				claimSysfsLED(led)
+				linuxdev.ClaimLED(led)
 			}
 		}
-		b.seg = &sysfsSegment{leds: monoLEDs, digits: cfg.LEDSegmentDigits, segmentsPerDigit: cfg.LEDSegmentsPerDigit, colonChannels: cfg.LEDMultiCtrlChannels}
+		b.seg = linuxdev.NewSysfsSegment(monoLEDs, cfg.LEDSegmentDigits, cfg.LEDSegmentsPerDigit, 2)
 		b.caps = append(b.caps, backend.SubsystemStatus{
 			Subsystem: "segment", BackendID: "rockchip.sysfs.led", Status: backend.Partial,
 			Detail: fmt.Sprintf("%d monochrome LED class devices mapped as %dx%d segments plus colon", len(monoLEDs), cfg.LEDSegmentDigits, cfg.LEDSegmentsPerDigit),
@@ -289,7 +288,7 @@ func New(cfg Config) (*Backend, error) {
 		}
 	}
 
-	if hasCommand(cfg.RootPrefix, "pacat") && hasCommand(cfg.RootPrefix, "parec") {
+	if linuxdev.HasCommand(cfg.RootPrefix, "pacat") && linuxdev.HasCommand(cfg.RootPrefix, "parec") {
 		b.audio = newPulseAudio(cfg)
 		b.caps = append(b.caps, backend.SubsystemStatus{
 			Subsystem: "audio", BackendID: "rockchip.pulseaudio", Status: backend.Partial,
@@ -300,7 +299,7 @@ func New(cfg Config) (*Backend, error) {
 	}
 
 	if cfg.RootPrefix == "" {
-		if nodeExists(cfg.RootPrefix, "/sys/class/bluetooth/hci0") {
+		if linuxdev.NodeExists(cfg.RootPrefix, "/sys/class/bluetooth/hci0") {
 			b.caps = append(b.caps, backend.SubsystemStatus{
 				Subsystem: "bluetooth", BackendID: "bluez", Status: backend.Partial,
 				Detail: "adapter node present; BlueZ owns profiles and media",
@@ -313,7 +312,7 @@ func New(cfg Config) (*Backend, error) {
 		}
 	}
 
-	if t := probeEvdev(cfg, probeKeyMap(cfg.RootPrefix, cfg.InputKeymapCompatible)); t != nil {
+	if t := linuxdev.ProbeEvdev(cfg.RootPrefix, cfg.InputEventDir, cfg.InputEventPrefix, linuxdev.ProbeKeyMap(cfg.RootPrefix, cfg.InputKeymapCompatible)); t != nil {
 		b.touch = t
 		caps := t.Caps()
 		status := backend.Partial
@@ -328,7 +327,7 @@ func New(cfg Config) (*Backend, error) {
 		b.caps = append(b.caps, backend.SubsystemStatus{Subsystem: "touch", Status: backend.Unavailable, Detail: "no evdev panel detected"})
 	}
 
-	b.sensors = probeSensors(cfg.RootPrefix)
+	b.sensors = linuxdev.ProbeSensors(cfg.RootPrefix)
 	if b.sensors != nil {
 		ids := make([]string, 0, 3)
 		for _, info := range b.sensors.List() {
@@ -378,14 +377,14 @@ func (b *Backend) Close() error {
 }
 
 func (b *Backend) probeInfo() backend.DeviceInfo {
-	model := readTrim(b.cfg.RootPrefix + "/proc/device-tree/model")
+	model := linuxdev.ReadTrim(b.cfg.RootPrefix + "/proc/device-tree/model")
 	if model == "" {
-		model = readTrim(b.cfg.RootPrefix + "/sys/firmware/devicetree/base/model")
+		model = linuxdev.ReadTrim(b.cfg.RootPrefix + "/sys/firmware/devicetree/base/model")
 	}
 	if model == "" {
 		model = b.cfg.ModelFallback
 	}
-	kernel := readTrim(b.cfg.RootPrefix + "/proc/version")
+	kernel := linuxdev.ReadTrim(b.cfg.RootPrefix + "/proc/version")
 	if kernel == "" {
 		kernel = b.cfg.KernelFallback
 	}
@@ -403,8 +402,8 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 	if !strings.Contains(strings.ToLower(model), b.cfg.SoCMatch) && model != "" {
 		soc = model
 	}
-	bootID := readTrim(b.cfg.RootPrefix + "/proc/sys/kernel/random/boot_id")
-	serial := readTrim(b.cfg.RootPrefix + "/proc/device-tree/serial-number")
+	bootID := linuxdev.ReadTrim(b.cfg.RootPrefix + "/proc/sys/kernel/random/boot_id")
+	serial := linuxdev.ReadTrim(b.cfg.RootPrefix + "/proc/device-tree/serial-number")
 	if serial == "" {
 		serial = bootID
 	}
@@ -412,32 +411,6 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 		DeviceID: serial, Model: model, SoC: soc, Kernel: kernel,
 		Firmware: firmware, Platform: backend.PlatformRockchipStock,
 	}
-}
-
-func readTrim(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimRight(string(data), "\x00\n ")
-}
-
-func nodeExists(prefix, path string) bool {
-	_, err := os.Stat(prefix + path)
-	return err == nil
-}
-
-func hasCommand(prefix, name string) bool {
-	for _, dir := range []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
-		if st, err := os.Stat(filepath.Join(prefix+dir, name)); err == nil && !st.IsDir() {
-			return true
-		}
-	}
-	if prefix == "" {
-		_, err := exec.LookPath(name)
-		return err == nil
-	}
-	return false
 }
 
 // probeMicEnableGPIO reads MIC_EN_GPIO from the stock S50mic-enable script so
@@ -463,155 +436,6 @@ func probeMicEnableGPIO(prefix string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-// claimSysfsLED disables a kernel trigger before the sysfs fallback writes
-// brightness. The stock S59disable_led_animation.sh does the same at boot, but
-// capsulad may start earlier or the script may be skipped.
-func claimSysfsLED(dir string) {
-	trigger := filepath.Join(dir, "trigger")
-	if _, err := os.Stat(trigger); err == nil {
-		_ = os.WriteFile(trigger, []byte("none"), 0o644)
-	}
-}
-
-// --- sysfs LED class -------------------------------------------------------
-
-type sysfsRing struct {
-	mu   sync.Mutex
-	leds []string
-}
-
-func (r *sysfsRing) Caps() backend.RingCaps {
-	return backend.RingCaps{PixelCount: len(r.leds), SupportsRGB: true}
-}
-func (r *sysfsRing) ResourceID() string { return "light.ring.main" }
-func (r *sysfsRing) WriteRing(f backend.RingFrame) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, path := range r.leds {
-		var px backend.RGB
-		if i < len(f.Pixels) {
-			px = f.Pixels[i]
-		}
-		lvl := f.Brightness
-		if lvl < 0 || lvl > 1 {
-			lvl = 1
-		}
-		val := fmt.Sprintf("%d %d %d", int(float64(px.R)*lvl), int(float64(px.G)*lvl), int(float64(px.B)*lvl))
-		if err := os.WriteFile(filepath.Join(path, "multi_intensity"), []byte(val), 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type sysfsSegment struct {
-	mu               sync.Mutex
-	leds             []string
-	digits           int
-	segmentsPerDigit int
-	colonChannels    int
-}
-
-func (s *sysfsSegment) Caps() backend.SegmentCaps {
-	return backend.SegmentCaps{DigitCount: s.digits, SupportsColon: len(s.leds) >= s.colonChannels, SupportsDecimal: false, SegmentsPerDigit: s.segmentsPerDigit}
-}
-func (s *sysfsSegment) ResourceID() string { return "display.segment.front" }
-func (s *sysfsSegment) WriteSegment(f backend.SegmentFrame) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for cell := range s.digits {
-		var mask uint16
-		if cell < len(f.Cells) {
-			mask = f.Cells[cell]
-		}
-		for seg := range s.segmentsPerDigit {
-			idx := cell*s.segmentsPerDigit + seg
-			if idx >= len(s.leds) {
-				break
-			}
-			on := mask&(1<<uint(seg)) != 0
-			v := "0"
-			if on {
-				v = strconv.Itoa(int(f.Brightness * 255))
-			}
-			if err := os.WriteFile(filepath.Join(s.leds[idx], "brightness"), []byte(v), 0o644); err != nil {
-				return err
-			}
-		}
-	}
-	if len(s.leds) >= s.colonChannels {
-		v := "0"
-		if f.Colon {
-			v = strconv.Itoa(int(f.Brightness * 255))
-		}
-		for _, idx := range []int{s.digits * s.segmentsPerDigit, s.digits*s.segmentsPerDigit + 1} {
-			_ = os.WriteFile(filepath.Join(s.leds[idx], "brightness"), []byte(v), 0o644)
-		}
-	}
-	return nil
-}
-
-// naturalLess orders LED class device names by their numeric suffix so that
-// top-led2 precedes top-led10. The kernel names stock channels led1..led36.
-func naturalLess(a, b string) bool {
-	pa, na := splitNumericSuffix(a)
-	pb, nb := splitNumericSuffix(b)
-	if pa == pb && na != nb {
-		return na < nb
-	}
-	return a < b
-}
-
-func splitNumericSuffix(s string) (string, int) {
-	i := len(s)
-	for i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
-		i--
-	}
-	if i == len(s) {
-		return s, 0
-	}
-	n, _ := strconv.Atoi(s[i:])
-	return s[:i], n
-}
-
-// probeSysfsLEDs enumerates /sys/class/leds. Devices exposing multi_intensity
-// are treated as RGB pixels; the rest as monochrome display LEDs. Ordering is
-// natural by channel number, which matches the firmware's ledN declaration.
-func probeSysfsLEDs(prefix, classDir string, ringCap, monoCap int) (ring, mono []string) {
-	entries, err := os.ReadDir(filepath.Join(prefix, classDir))
-	if err != nil {
-		return nil, nil
-	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	sort.Slice(names, func(i, j int) bool { return naturalLess(names[i], names[j]) })
-	for _, name := range names {
-		dir := filepath.Join(prefix, classDir, name)
-		if _, err := os.Stat(filepath.Join(dir, "multi_intensity")); err == nil {
-			ring = append(ring, dir)
-			continue
-		}
-		// The stock ws2812b driver registers its 36 channels as top-ledN.
-		// Those are ring channels, not monochrome display cells; writing them
-		// as a segment frame would misdrive the ring.
-		if strings.HasPrefix(name, "top-led") {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(dir, "brightness")); err == nil {
-			mono = append(mono, dir)
-		}
-	}
-	if ringCap > 0 && len(ring) > ringCap {
-		ring = ring[:ringCap]
-	}
-	if monoCap > 0 && len(mono) > monoCap {
-		mono = mono[:monoCap]
-	}
-	return ring, mono
 }
 
 // --- unverified vendor nodes ----------------------------------------------

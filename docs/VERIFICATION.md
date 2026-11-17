@@ -485,6 +485,85 @@ staged.
   Proof level: request bytes, session resolution and protocol ordering only; the diagnostic line's
   numbers are host-test evidence, not device measurements.
 
+- **`apps/cadence`: voice-assistant client for a Cadence server (host only).** The app speaks
+  the upstream `cadence.v2` device link over the shared SDK's verified TLS stream: `Hello`
+  (protocol 2) → `Welcome` → an empty `CapabilityReport`, then `SessionStart` / `MicAudio` /
+  `SessionCancel` up and `SessionEvent` / `StreamStart` / `AudioDown` / `StreamEnd` /
+  `SessionClose` down. It is a voice-only device: it advertises no capability; it refuses
+  announcements (they play outside any activation), capsulad API activations and a server
+  `MicOpen`, each with an explicit log. `cadence.v2` vouches owner privileges only for a wake
+  word or a press, and an automation trigger (or another screen's press) is neither, so sending
+  `TRIGGER_BUTTON` for them would fabricate physical owner evidence — the conservative choice
+  was made deliberately and is documented in apps/cadence/README.md. Interoperability is
+  pinned by the upstream golden frames, copied verbatim from
+  `proto/fixtures/v2/*.binpb` (upstream `main` commit `f9571ad`) into
+  `internal/proto/testdata/upstream/`: all 17 decode with this client's generated messages and all 17
+  re-encode byte-for-byte to the upstream bytes, so field numbers, wire types and enum values are the
+  real wire, not a guess. The `.binpb` files are data test vectors, not code; the proto subset
+  here is independently written to the same field numbers, and no upstream source is vendored. The websocket
+  framing (client handshake accept key, 401, no extensions, masked client frames, fragmentation,
+  ping/pong, close frames, the 16 MiB cap) is exercised against an in-process `net.Pipe` peer, and
+  the real `link.Client` plus websocket upgrade is driven end to end against an **independent
+  loopback fake upstream** (HTTP upgrade, masked frames, Hello→Welcome→empty report, then a server
+  `SessionClose` dispatched to the handler) — no remote service is involved.
+  The Opus codec is a real libopus round trip — 16 kHz mono 20 ms encode, 48 kHz decode, the
+  frame size enforced — measured with Homebrew libopus 1.6.1 on this host; on the device the
+  codec is `dlopen`ed (`libopus.so.0` is present in the stock system image's `/usr/lib`), so the
+  app has no link-time codec dependency. The turn state machine is driven against fake
+  link/audio/indication/codec seams: wake and touch triggers, mic uplink and sequence, reply
+  playback and drain versus abort, follow-up reuse of the microphone, the hold-release silence
+  tail, dismiss, error close, link loss, API refusal and expired activations. The capture
+  obligation has its own seam test: presentation → non-blank first frame → `OpenCapture` with the
+  presentation id and `CaptureModeUnspecified` → capture released before the presentation, and a
+  refused capture closes the presentation; the daemon side (selection, freshness, visible
+  content) is the framework's `internal/daemon/indication_test.go`. A local failure (codec,
+  encode, uplink, unsupported capture) shows a distinct red ring for 300 ms; mute and a lost
+  indication deliberately leave the framework's own state instead.
+
+  **Integrated host proof (real app + real daemon + loopback fake upstream).**
+  `internal/daemon/cadence_e2e_test.go::TestCadenceCaptureAndMicOverLocalServer` builds and
+  installs the actual package, selects it as the assistant, points `server_url` at a loopback
+  websocket that answers the upgrade and a hand-encoded `Welcome`, triggers a hold-to-talk touch
+  activation, and asserts, in order: the app logs `link_up`; `router.Current("light.ring.main").SelectedAppID`
+  is the app (the **capture grant**); the simulator backend shows a **non-blank teal ring frame**;
+  and `inputOpen(app)` is true (the microphone stream opened, i.e. `OpenMic` succeeded). It then
+  calls the manifest `dismiss` action and asserts the microphone is released, the capture is no
+  longer selected, and `turn_end activation=` is logged, with no `mic_failed`. Run:
+  `go test -race -ldflags '-linkmode=external' ./internal/daemon -run TestCadenceCaptureAndMicOverLocalServer`
+  (passes here, 6.25 s). This is the runtime boundary the earlier defect crossed; it is a
+  permanent regression test. Proof level: host simulator with the real app, daemon and SDK — it
+  does not prove device audio, LED gamma or a real Cadence server.
+
+  Checks actually run in this tree: `make test-cadence` (8 test packages, 0 failures) and
+  `go test -race` on `internal/turn`, `internal/link` and `internal/websocket` (0 races) on the
+  host. Genuine Linux arm64 package proof was produced in arm64 containers, not on the darwin
+  host: `golang:1.22-bullseye` (glibc 2.31) with `libopus0` built and tested the app and staged
+  `abi = "linux-gnu"`; the artifact's interpreter is `/lib/ld-linux-aarch64.so.1`, its highest
+  required symbol is **`GLIBC_2.17`** (`objdump -T`, so ≤ 2.33), and its `DT_NEEDED` entries are
+  only `libdl.so.2`, `libpthread.so.0` and `libc.so.6` — Opus is `dlopen`ed, never linked.
+  Offline inventory of the supplied images confirms the dlopen prerequisite: Rockchip stock and
+  Amlogic stock carry `/usr/lib/libopus.so.0.8.0`, Alpine 3.24 carries the `opus` apk 1.6.1-r0 at
+  `/usr/lib/libopus.so.0`; the Amlogic stock glibc is 2.28, above our `GLIBC_2.17` requirement. The
+  package was written by the host `capsulad-cli` (`build/evidence/…-linux-gnu-arm64.tar.gz`), so
+  the packager never rewrote the manifest. The darwin host binary is refused by `make package`
+  outright: the manifest declares a Linux ABI, and the mislabeled host-staged directory was
+  removed. `tools/check-elf-interp.sh` is the gate.
+  The musl counterpart was built the same way in `golang:1.22-alpine` with `gcc`, `musl-dev` and
+  `make`, and tested with the **actual device codec**: the Alpine 3.24.1 rootfs's
+  `libopus.so.0.11.1` was bind-mounted and selected with `CAPSULAD_OPUS_LIBRARY`, so the Opus
+  suite ran against the image's library (no skip). `make check-abi` printed
+  `interpreter=/lib/ld-musl-aarch64.so.1` and staged `abi = "linux-musl"`; the binary's only
+  `DT_NEEDED` is `libc.musl-aarch64.so.1` (musl 1.2.5; no `libcapsulad`, no `libopus`), and the
+  full suite passed. The archive was written by the host `capsulad-cli` to
+  `build/evidence/org.capsulad.cadence-0.1.0-linux-musl-arm64.tar.gz` (1,527,837 bytes) and the
+  extracted content re-checked (`ELF aarch64`, `/lib/ld-musl-aarch64.so.1`,
+  `abi = "linux-musl"`). `go list -deps ./cmd/cadence` names neither `net/http`,
+  `crypto/tls` nor `google.golang.org/grpc`; the only transport is `capsulad.OpenTCP` plus this
+  app's RFC 6455 framing. Proof level: protocol bytes, codec DSP and the client state machine on
+  the host. **Not** established: behaviour against a real Cadence server (none runs here), the
+  framework's real capture indication and physical audio, LED gamma, and acoustic echo during a
+  follow-up. Those need an enrolled device and a deployed server.
+
 - **Native SDK network helpers and primitives (host only).** `libcapsulad` now owns the
   outbound path: `src/http.rs` (bounded HTTP/1.1 with verified TLS 1.2+, one request per call
   and per-request `http_cancel`), `src/tls.rs` (system PEM roots plus webpki, no insecure
@@ -637,6 +716,49 @@ staged.
   failure below). No device access, and none of these tests exercises a hardware path:
   Rockchip device nodes, the vendor LED ABI or the watchdog remain device-only paths.
 
+- **Hardware watchdog supervision (host, macOS arm64, Go 1.22.6, no device).** The supervisor's
+  decisions are pinned with a fake timer and the real feeder process, all with `-ldflags
+  '-linkmode=external'`, and the daemon cases with `-race`: `TestWatchdogFeedsWhileTheDaemonMakesProgress`,
+  `TestWatchdogStopsFeedingWhenTheDaemonStalls` (a stalled progress gauge gets **zero**
+  keepalives, the state turns unhealthy, and the later graceful stop neither hands the timer to
+  a feeder nor closes it), `TestWatchdogStopsFeedingWhenTheKeepaliveFails` (breakage is not a
+  `TestWatchdogHandsOffOnGracefulStopUnderNowayout` (the descriptor reaches a
+  detached `/bin/sh` feeder and keeps receiving keepalives until the handback marker arrives),
+  `TestWatchdogHandsOffAnUnmeasuredTimer` (a driver whose disarm semantics are unmeasured is
+  handed off, never closed), `TestWatchdogClosesWhenNoDescriptorCanBeTransferred`,
+  `TestWatchdogReportsACloseThatLeavesTheTimerArmed`, `TestWatchdogReportsACloseFailure` and
+  `TestWatchdogReportsAHandoffFailure` (a release that did not stop the timer is never reported
+  as a disarm), `TestWatchdogDoesNotReopenAfterDisarm`, `TestWatchdogRetriesALateDevice`,
+  `TestWatchdogTimingStaysInsideTheArmedTimeout` (the derived cadence and gate stay strictly
+  inside the armed interval for 2 s to 1 h, including the declared and assumed fallbacks),
+  `TestWatchdogFeedsImmediatelyOnArming`, `TestWatchdogReportsAnUnreportedTimeout`,
+  `TestWatchdogTickFollowsTheDerivedCadence` (the loop ticks at the derived cadence, not the
+  probe grid), `TestWatchdogDisarmIsABarrier`, `TestWatchdogOpenResultAfterRetirementIsHandedOff`,
+  `TestWatchdogKeepaliveFailureDuringReleaseIsNotBreakage`,
+  `TestWatchdogWaitReturnsForADisabledSupervisor` and
+  `TestWatchdogReportsAHandoffFailureOnALiveSupervisor` (release ordering, driven by channels
+  rather than sleeps),
+  `TestWatchdogBusyDeviceIsRetriedAndAskedToRelease`,
+  `TestWatchdogCleansAStaleFeederPIDFile`, `TestWatchdogCleansAReusedFeederPID`, `TestFeederPIDParsing`,
+  `TestFeederTicksBoundTheWindow`, `TestHandOffWatchdogShellFeeder` and
+  `TestFeederStopsFeedingWhenItsWindowExpires` (a feeder with no daemon stops feeding and drops
+  its pid file on its own, so it cannot mask a dead framework) in `./internal/daemon`, and
+  `TestReleaseLegacyFeederRequestsHandbackOnlyForTheLegacyFeeder`,
+  `TestReleaseLegacyFeederClearsADeadFeeder` and `TestReleaseLegacyFeederClearsAReusedPID`
+  in `./cmd/capsulad-cli`. The procfs-dependent cases (`TestWatchdogCleansAReusedFeederPID`,
+  both reused/dead deploy cases) skip on macOS and were run on Linux instead
+  (`golang:alpine`, `go test`, no race detector): all passed, together with the feeder and
+  handoff tests above.
+  `TestOutputLoopReportsWatchdogLiveness` runs a full daemon and fails if the liveness gate is
+  not fed by the real output loop, which is the wiring error that would reset every board.
+  Proof level: supervisor state transitions, feeder process lifetime, handback/staleness
+  handling, the derived timing and the `EBUSY` retry path. It does **not** prove a real reset:
+  there is no `/dev/watchdog` access here, the RK3308 nowayout facts (ignored magic close,
+  `WDIOC_SETOPTIONS` → `ENOTTY`, 21 s armed timeout) are the device probe results above and are
+  not re-measured, and no host test can show that the ungated timer actually fires. The timing
+  rule (`cadence = timeout/3 ≤ 2 s`, `window = timeout/2 ≤ 10 s`) is a design bound checked as
+  arithmetic, not a measurement of any driver.
+
 - **Live application install and removal (host tests and simulator, no device).** The live path is
   exercised end to end. Focused host tests on macOS arm64 (Go 1.22.6, all with
   `-ldflags '-linkmode=external'`): `./internal/artifact`
@@ -681,9 +803,9 @@ staged.
 
 ## First-party app packages
 
-The five product app packages (`org.capsulad.simon`, `org.capsulad.pa`, `org.capsulad.radio`,
-`org.capsulad.radio.tuner`, `org.capsulad.homeassistant`) are host/simulator evidence only. No
-app package has been installed or run on the unit in this record.
+The six product app packages (`org.capsulad.simon`, `org.capsulad.pa`, `org.capsulad.radio`,
+`org.capsulad.radio.tuner`, `org.capsulad.homeassistant`, `org.capsulad.airplay`) are
+host/simulator evidence only. No app package has been installed or run on the unit in this record.
 
 - **Packaging (build host, observed here).** Each app's entrypoint stages a package directory and
   writes `<id>-<version>.tar.gz` beside it, with the pinned artifact shape (root `manifest.toml`,
@@ -1048,11 +1170,14 @@ accepted session's account, then re-run the probe.
   native apps are trusted code.
 - **Raw touch coordinates.** There is no coordinate panel, so `coordinates_available=false`
   and `full_raw_available=false`. Full-panel delivery remains available.
-- **Amlogic.** There is no Amlogic backend in this tree. `-platform amlogic-stock` and
-  `-platform amlogic-alpine` are rejected as unknown platforms
-  (`unknown platform "…" (simulator, rockchip-stock)`); the `CAPSULA_MINI_AMLOGIC_*` wire
-  enum values remain reserved and unsupported. No parity claim is made, and no Amlogic
-  hardware test is planned.
+- **Amlogic.** Both Amlogic A113X platforms are implemented: `-platform amlogic-stock` and
+  `-platform amlogic-alpine` select `profile.AmlogicA113XStock` / `profile.AmlogicA113XAlpine`
+  and `internal/backend/amlogic`, and the daemon reports
+  `CAPSULA_MINI_AMLOGIC_STOCK` / `CAPSULA_MINI_AMLOGIC_ALPINE`. Nothing on that board was probed
+  for this change: the host proof is limited to selection, capability reporting, frame encoding,
+  panel-probe fallbacks and cross compilation (see the Amlogic entry in this document's platform
+  section). The stock clock panel's vendor ioctl ABI is unrecovered and is reported `UNVERIFIED`;
+  no parity claim with the RK3308 is made.
 - **Vendor system-service control.** `SystemService.ControlUnit` returns `UNIMPLEMENTED`.
 - **Field-certified wakewords for the connected room.** Every installed word was trained
   from its own recordings and runs on the processed tap, so each word's calibrated threshold is
@@ -1125,11 +1250,43 @@ document stays stable.
    the target; verify stock AP-mode scanning or the absence of a scan path.
 9. Exercise a power cycle with the single boot hook, including `disable`/`enable` and the
    vendor fallback, and verify recovery from an overlay wipe.
-10. **Withdrawn: Amlogic parity.** No Amlogic backend exists, so there is nothing to test
-    and no parity claim to earn: `-platform amlogic-stock` and `-platform amlogic-alpine`
-    are rejected as unknown platforms, and the historical `CAPSULA_MINI_AMLOGIC_*` enum
-    values stay reserved. Do not plan an Amlogic gate; a future backend needs its own
-    profile and evidence.
+10. **Amlogic A113X bring-up.** Run `-platform amlogic-stock` and `-platform amlogic-alpine` on a
+    unit. Record the ring channel count and one rendered frame, which clock panel is fitted
+    (IS31FL3236A or AW21036) and which of the three panel interfaces exists, the real PulseAudio
+    sink/source names (stock), the ALSA mixer control (Alpine), capture latency, whether the stock
+    `/dev/watchdog` can be disarmed, and whether the stock init list really starts an overlay-only
+    hook. On Alpine, confirm the `Master Playback Volume` softvol exists only after the first
+    playback open, that the framework's pin eventually lands (`SetMasterVolume` retries because a
+    failed pin leaves `pinDone=false`), and that the framework level is not multiplied by a
+    non-unity softvol in the meantime. Disarming is a fact-gathering gate only: a planned stop is already safe because the
+    supervisor hands any armed timer to a feeder rather than trusting `Close`. Watchdog facts are
+    now image-derived, with no unit involved: the stock DT (`device.dtb`) has
+    `/watchdog@0xffd0f0d0` with `compatible = "amlogic, meson-wdt"` (a **vendor** driver — note the
+    space after the comma, which defeats a naive `amlogic,[a-z0-9-]*wdt` grep), `status = okay` and
+    vendor properties `default_timeout = 10`, `firmware_timeout = 6`, `suspend_timeout = 6`,
+    `shutdown_timeout = 10`, `reset_watchdog_time`, `reset_watchdog_method`. Those property
+    **units and whether this driver parses them at all are unknown** (the vendored tree has no
+    mainline match; the property name matches an unrelated mainline module parameter), so
+    `default_timeout` is *not* treated as a fact: the stock profile keeps its previous 30 s
+    declared interval, and the supervisor derives the keepalive cadence and the stall window from
+    the interval the driver actually reports (`WDIOC_GETTIMEOUT`), using the declared value only
+    when the driver reports nothing. In the Alpine image (`vk-mini-a113x.dtb`) the node is
+    `/soc/bus@ffd00000/watchdog@f0d0` with the mainline
+    `compatible = "amlogic,meson-gxbb-wdt"` and no `status` property (enabled), and `config_alpine`
+    (kernel 6.18.44) sets `CONFIG_MESON_GXBB_WATCHDOG=m`, `CONFIG_WATCHDOG_CORE=m`,
+    `CONFIG_WATCHDOG_SYSFS=y`, `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y`,
+    `CONFIG_WATCHDOG_OPEN_TIMEOUT=0` and leaves `CONFIG_WATCHDOG_NOWAYOUT` **unset**, with
+    `meson_gxbb_wdt.ko` present in the rootfs image. The Alpine profile therefore wires
+    `/dev/watchdog` (30 s default, `amlogic.syswatchdog`): if the module is not loaded the node is
+    absent and the supervisor retries and reports `no watchdog device yet`, so a missing timer is
+    reported rather than silently unprotected. The stock profile keeps its disarm facts unmeasured:
+    a vendor driver's magic-close/disable behaviour cannot be inferred from the Alpine/mainline
+    evidence, and `/sys/class/watchdog/watchdog*/nowayout` is readable only if the stock kernel
+    enables `CONFIG_WATCHDOG_SYSFS`. Offline items still open: which mechanism loads the Alpine
+    module at boot (mdev modalias coldplug, `/etc/modules` or an init script), and the stock
+    rootfs' watchdog holder/service. Until a unit is probed, the Amlogic panel and audio remain
+    `PARTIAL`/`UNVERIFIED` and no parity with
+    the RK3308 is claimed.
 11. Freeze protocol schemas only after generated Go/Rust bindings and script-host parity
     tests pass, including routed streaming and cancellation.
 12. Measure acoustic loudness at several master settings, including the re-encoded assistant
@@ -1263,6 +1420,25 @@ document stays stable.
     window, against `mountns` in the earlier record), and an app-level start/stop of the QuickJS
     app `org.capsulad.simon`. `build/linux-arm64/release-20261117b/verify-after-recovery.sh` runs
     those checks once the speaker is reachable.
+32. **Verify the watchdog contract on the unit**, which no host test can reach: (a) `kill -STOP`
+    the daemon and confirm the board resets about 19–21 s later — SIGSTOP freezes the supervisor
+    too, so the stall window never runs and the reset is just the tail of the 21 s armed
+    timeout after the last keepalive — with `dw_wdt: keepalive missed, machine will reset` on the
+    console; (b) with a throwaway build that wedges the **output loop** while the supervisor keeps
+    running, confirm the *health gate* causes that reset too, i.e. the log shows
+    `no core progress for 10s` (the window is `min(timeout/2, 10 s)`, so the message on this unit
+    says 10 s) while the process is still alive, and the board resets at window + ≤2 s (last
+    keepalive) + the armed timeout later (≈33 s here; the host tests prove the decision, not the
+    reset); (c) `S99btctl.sh stop` keeps the board up inside the 5 min feeder window and
+    `start` reclaims the timer with no reset and no `EBUSY` in the boot log — note the reset after
+    that window is by design, not a failure; (d) `disable` releases the feeder so the vendor chain
+    owns `/dev/watchdog` again, and the boot log shows no vendor watchdog open failure. Record the
+    timeout the driver reports (`WDIOC_GETTIMEOUT`) while there: the cadence and the window are
+    derived from it, so a unit that arms a shorter timer than the profile assumed is fed faster and
+    gated sooner. Confirm the `nowayout` facts the profile records while there (magic close
+    ignored, `WDIOC_SETOPTIONS` → `ENOTTY`, no `/sys/class/watchdog`); they only choose the wording
+    of the no-descriptor release path now, because the supervisor hands any transferable descriptor
+    to a feeder regardless, so a different result does not change the handoff decision.
 
 No device evidence exists for the networking surface described in
 [app_development/network.md](app_development/network.md): outbound streams, UDP, listener
@@ -1270,3 +1446,294 @@ allocation and mDNS publication are host-verified only, and these three gates mu
 any device support is claimed. Do not read a host loopback fixture or the fake responder as a
 device result, and do not claim Avahi visibility, LAN reachability or device TLS/DNS behavior
 from this record.
+
+## MCP frontend (2026-11-17)
+
+The daemon's MCP frontend (`/mcp` on the Web UI listener) is **host-verified only**; no
+device was accessed for this change. `go test ./internal/webui -run TestMCP` exercises the
+real HTTPS endpoint: `initialize`, scope-filtered `tools/list`, a `tools/call` driving the
+shared operation layer against the in-process fake daemon, protocol and tool errors, a
+status-scoped key refused on an operator tool, explicit key-scope provisioning, asset
+upload/list/delete, package install/remove, content negotiation, cross-origin rejection
+and session DELETE, plus version-dependent protocol
+cases (batching refused for 2025-06-18 and accepted for 2025-03-26, `MCP-Protocol-Version`
+rejection, session reuse on a repeated `initialize`, `notifications/cancelled` ending a
+live device recording). `-race` covers the session registry and lifecycle teardown: session
+`DELETE`, listener shutdown and API-key revocation (directly and through the access-topic
+watcher) cancel the daemon-side wakeword run, staged uploads and in-flight tool calls.
+Staged multi-chunk asset and package uploads are exercised end to end, with `max_bytes`
+equal to the store's 32 MiB and the artifact archive limit. Concurrency and ordering have
+dedicated regressions: completion waits for a chunk already in the pipe (no truncated
+publish), an abort releases a blocked chunk, two interleaved staged uploads publish their
+own bytes, a paused upload does not stall `list_assets`, finished uploads are reaped from
+the session's slots, and expiry reasons stay legible as failed tool calls. The asset store
+has direct regressions for the staging budget (a streaming body holds its reservation, a
+concurrent over-budget body is refused before staging anything, a failed body releases
+its reservation, a replacement needs staging headroom so a full-store replacement is
+refused, the physical published-plus-staged footprint measured on disk stays within the
+budget during a concurrent replacement, and published bytes equal the budget) and for
+delete-wins (a delete that lands during a replacement
+succeeds and the replacement is refused at both catalog and MCP level, while a later
+upload recreates the asset). The schema generator is covered with a two-oneof descriptor
+built in the test. A slow-body test proves the MCP request read deadline is extended past
+the listener's short timeout, and the shared asset store copies bodies outside its lock
+(preparation and the budget-checked rename stay serialized). The browser proof for the Access change is the WebSocket `TOPIC_ACCESS`
+snapshot carrying each key's scopes, the node test for the view's scope label helper and
+the rebuilt embedded bundle; no screenshot of a running speaker was taken. `go test
+./internal/websecurity -run TestAPIKeyScopes` covers explicit scopes,
+operator-implies-status, unknown-scope rejection and a persisted legacy (no-scope) key
+staying read-only across a reload. Not verified: a third-party MCP client or conformance
+suite, a maximum-size staged upload on the real 240 MiB board, and any MCP behavior
+against a device. See [MCP.md](MCP.md).
+
+## AirPlay 2 receiver (host proof only)
+
+`org.capsulad.airplay` was implemented without a device and without an iPhone, iPad or Mac
+sender. Everything below is host evidence; the sender-negotiation and acoustic gates are open.
+
+- **Protocol and crypto.** `make test-airplay` (also `cd apps/airplay && go test ./...` with cgo
+  and the host external linker) covers: SRP-6a/setup and pair-verify against a test-only HAP
+  client with matching channel keys, a wrong proof and an unknown controller refused; HAP block
+  framing round-trips including a tampered block; binary/XML plist and TLV8 codecs; RSA-OAEP
+  (SHA-1, the reference's mode) key exchange with an OpenSSL-generated fixture; RTSP parsing with
+  pipelining, LF-only input and size caps; DMAP metadata and progress.
+- **Codecs.** ALAC is verified bit-exactly against five checked-in fixtures produced by ffmpeg
+  (16-bit stereo 44.1 kHz, 16-bit mono 48 kHz, 24-bit stereo, the verbatim path and a silence
+  run), each with its reference PCM; the 24-bit case compares against `reference >> 8`. RTP
+  decryption uses the sender's ChaCha20-Poly1305 construction (trailing 8-byte nonce, RTP header
+  4..12 as AAD) and AES-128-CBC is checked against the NIST SP 800-38A vector; reordering,
+  duplicates, wrap, NACK and RTCP reports are covered.
+- **Session lifecycle.** One end-to-end test acts as a sender over in-memory transports:
+  pair-verify, encrypted control channel, `SETUP` of a realtime PCM stream, encrypted RTP audio,
+  sender-volume gain applied to the PCM the framework sink receives, DMAP metadata visible in the
+  media contract as canonical protobuf JSON, ring frames, then `TEARDOWN` releasing the player,
+  the ring presentation and aborting playback.
+- **AAC-LC through FFmpeg.** The receiver links `libavcodec`/`libavutil` (`-tags ffmpeg`, the
+  build script refuses to package without them), matching upstream, which links the same decoder
+  for its AAC-LC buffered formats. `go test -tags ffmpeg ./internal/aac` decodes fixtures made by
+  ffmpeg from two encodings (44.1 kHz stereo, 48 kHz mono) against ffmpeg's own decode of the same
+  file: the mono fixture is sample-for-sample identical and the stereo fixture is within one LSB,
+  the difference between two PCM quantisations. `go test -tags ffmpeg ./internal/session -run
+  TestAACStreamPlays` drives the full path — pair-verify, encrypted `SETUP` with the
+  `AAC-LC/44.1K/F24/2` mask, encrypted RTP carrying the fixture's real access units, PCM at the
+  framework sink — and `SETUP` advertises feature bit 20 and RAOP `cn=0,1,2`.
+  Verified as upstream-advertised: `rtsp.c` `bufferStreamFormats` lists AAC-LC 44.1K/48K F24
+  stereo (and 5.1/7.1, which this receiver does not accept). AAC-ELD is decodable by the same
+  FFmpeg decoder but is **not advertised**, because upstream advertises no ELD format either.
+  The packaged binary's `otool -L` records `libavcodec.63.dylib`/`libavutil.61.dylib`, so the
+  shipped artifact really contains the linked decoder rather than a stub path.
+- **Full independent pyatv loopback flow (fixed two wire defects).**
+  `PYATV_PYTHON=<venv> go test ./internal/session -run TestPyatvFullFlowStreamsPCM` starts the
+  receiver on a real loopback transport and lets pyatv 0.18 drive its own stack
+  (`AirPlayService`/`RaopService` → `pyatv.connect` → `atv.stream.stream_file`). It now passes:
+  pyatv performs ANNOUNCE and SETUP, streams the tone as RTP, and this receiver delivers
+  **611,072 bytes of PCM** to the framework sink before teardown. Reaching that required two
+  fixes the independent client exposed:
+  1. **Binary-plist dictionary layout.** `internal/plist` emitted dictionary object references
+     interleaved (key, value, key, value); the format requires all key references and then all
+     value references. Python `plistlib` rejected every multi-key document
+     (`unhashable type: 'list'` while reading a key), so `/info`, SETUP responses and event
+     documents were invalid for real senders. Encoder, decoder and the hand-written fixture now
+     use the spec layout, and `internal/plist/plistlib_test.go` (gated on `PLISTLIB_PYTHON`)
+     validates an /info-shaped, a SETUP-shaped and an `updateInfo` document with Python's
+     plistlib — an independent parser, not a round trip through our own decoder.
+  2. **Legacy RAOP transport choice.** pyatv sends
+     `RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=…;timing_port=…` and expects a
+     UDP `server_port`/`control_port` reply; the receiver now prefers the UDP path whenever the
+     Transport header contains `udp` instead of treating the presence of `interleaved` as TCP.
+     The earlier `control_port=0` finding (R1) is covered by the same path.
+  Both tests are gated on environment variables, so the default suite cannot report a skipped
+  external proof as a pass: run them explicitly with
+  `PLISTLIB_PYTHON=<python with plistlib> PYATV_PYTHON=<python with pyatv> go test ./internal/plist ./internal/session -run 'TestPlistlib|TestPyatv'`
+  (pyatv needs `srptools==1.0.1` for the current release). A CI environment should set both
+  variables, otherwise these proofs exist only when run by hand.
+- **Independent pyatv interop (A1/A2).**- **Independent pyatv interop (A1/A2).** `PYATV_PYTHON=<venv python> go test
+  ./internal/session -run TestPyatvTransientPairingKeys` runs **pyatv's own** SRP client against
+  this receiver's pair-setup server: pyatv computes A and the client proof from the receiver's M2,
+  the receiver accepts it and completes a transient setup at M4, the two sides' SRP session keys
+  (SHA-512(S), 64 bytes) are identical, and the accessory control-channel keys derived by
+  `hapcrypt.ControlChannelKeys` equal pyatv's independent HKDF derivation (outbound
+  Control-Read, inbound Control-Write). Scope recorded honestly: this proves the pairing/key
+  interop with a real third-party implementation; it is not a full pyatv HTTP session. The test
+  skips when `PYATV_PYTHON` is unset, so it cannot be mistaken for a default suite result.
+- **Transient pairing and channel keys (review A1/A2).** `go test ./internal/session -run
+  TestTransientPairingDrivesTheWholeSession` performs the exact pyatv sequence — `/pair-pin-start`,
+  M1..M4 with the transient flag, then every request and the audio channel keyed from the SRP
+  session key — and proves the channel is usable end to end (encrypted `/info`, `SETUP`,
+  encrypted RTP, PCM at the sink). `TestPairSetupTransientCompletesAtM4` pins the M4 completion
+  and that an M5 afterwards is refused. `internal/hapcrypt` now returns named `BlockKeys`
+  (outbound/inbound) per channel, and `TestKeys` pins both directions against HKDF-SHA512
+  vectors generated independently in Python: the accessory seals control with
+  `Control-Read-Encryption-Key` and events with `Events-Write-Encryption-Key`, the asymmetry
+  Shairport Sync documents. A pair-verify after an established channel never re-keys it (upstream
+  comments out that path); the non-transient path, for which upstream has no working cipher,
+  keys from the ECDH secret as a documented deviation.
+- **UDP realtime audio and the AP2 control plane (review A3/A4).** Realtime streams now bind a
+  daemon UDP data socket, and one session-wide UDP control socket is echoed in every descriptor.
+  `TestAP2ControlAnchorResendAndResponse` builds the sender's datagrams from the reference layout
+  (not from this package's encoder): a `0xD7` anchor whose `frame_2 - frame_1` latency (77,175
+  frames) and anchored frame (`frame_1 - 11,025`) are read back from the stream; a missing
+  sequence produces one `80 D5 00 01 <first> <count>` request on the control socket after the
+  reorder grace; and a `0xD6` response, whose payload starts at the RTP sequence number, is
+  decrypted and played by the normal pipeline. RTCP is no longer part of the AirPlay path: no SR,
+  RR or generic NACK is sent or expected.
+- **PTP is consumed, not just parsed.** A `0xD7` anchor plus a disciplined clock converts the
+  sender's master-clock instant to local time for each frame; without a clock the receiver paces
+  from arrival. The PTP feature bits are advertised only when a clock exists, so the
+  advertisement cannot promise timing nothing uses.
+- **Lifecycle and SDK fixes (review C1-C7, D1/D2).** Declared actions are handled and report
+  results; a closed listener is removed from the runtime registry (no growth across restarts); a
+  settings restart withdraws the old advertisement before publishing the new one and restores the
+  previous configuration when the new one cannot start; a session is capped at four audio
+  streams; board writes are generation-guarded (`internal/media` tests include a stale-write and
+  a subscriber/unsubscribe race, and a copy of the old publish path was shown to fail `-race`);
+  the native SDK parses `join_group` independently of JSON key order and refuses `listener_send`
+  on a multicast listener (Rust tests in `listener.rs`).
+- **Pairing ownership and administration.** `go test ./internal/session -run TestPairSetup` drives
+  the full controller side of pair-setup with the receiver's setup code (default `3939`, the value
+  upstream's accessory uses when no AirPlay password is configured, `pair_homekit.c`
+  `server_setup_new`), including a refused wrong code (`kTLVError_Authentication`, no controller
+  stored). Over the encrypted channel it then exercises `pair-list` (only the administrator, with
+  its public key and permission), `pair-add` of a non-admin controller, `pair-remove` of that
+  controller and of an unknown id (`kTLVError_Unknown`), a demoted-controller refusal, and removal
+  of the session's own pairing ending the session. `./internal/pair` covers the store: permissions,
+  the legacy combined format, split `device_identity`/`pairings` serialisation and the
+  compare-and-swap persistence path. Upstream keeps pairings in memory with no permissions and no
+  session check (`rtsp.c` `struct pairings`, `server_list` hard-codes admin and ignores the
+  request); this receiver is deliberately stricter, and the app README records the difference.
+- **FairPlay handshake.** `POST /fp-setup` now serves the four fixed protocol replies and the
+  header echo with upstream's selection rule (`rtsp.c` `handle_fp_setup`), including the
+  `application/octet-stream` content type, so a sender's handshake completes. No DRM content is
+  decrypted by either implementation; the constants are reproduced under Shairport Sync's MIT
+  notice, recorded in `README.md`.
+- **Group advertisement.** A sender's `gid` from `SETUP` is recorded and republished as mDNS `gid`
+  with `gcgl=0`, matching `bonjour_strings.c`; no cross-receiver playback synchronisation is
+  implemented, and none is claimed.
+- **SDK extension (multicast PTP).** A PTP clock needs the sender's multicast stream. The daemon
+  accepts a narrow `join_group` listener option: UDP only, ports 319 and 320 only, the group must
+  be exactly 224.0.0.1, the bind must be the wildcard, and the socket is receive-only. The daemon
+  (root) binds the privileged port once with `SO_REUSEADDR` (plus best-effort `SO_REUSEPORT`) and
+  joins the group on every up, multicast-capable, non-loopback interface; membership lives on the
+  socket, so it ends with the transferred descriptor and run exit, and the allocation is counted
+  against the existing per-run listener cap and logged. `go test ./internal/appcontrol` pins the
+  refusals and the interface-selection rule. Nothing else about the listener contract changed and
+  ABI 1.0 is untouched (the option is a JSON key, not a table entry).
+- **Target packages (musl/glibc).** The delivered packages were built in arm64 containers from a
+  pinned working-tree snapshot: both are dynamically linked against their target libc
+  (`interpreter /lib/ld-musl-aarch64.so.1` with `NEEDED libc.musl-aarch64.so.1` for musl;
+  `/lib/ld-linux-aarch64.so.1` with `libdl/libm/libpthread/libresolv/libc` and a maximum of
+  `GLIBC_2.28` for the stock glibc ceiling), and the AAC decoder is linked **statically**
+  (`libavcodec.a`/`libavutil.a`; no `libavcodec.so*`/`libavutil.so*` in `DT_NEEDED`). Because the
+  decoder is static, `apps/airplay/NOTICE` §6's relink package (objects archive, FFmpeg source
+  URL+sha256, configure line, relink procedure) is a **distribution precondition**, not optional.
+  The musl loader smoke with the real musl `libcapsulad` proves exactly: the loader resolved the
+  binary's `DT_NEEDED` closure and `dlopen` of the injected SDK succeeded, then execution stopped
+  at our own `run_id is required`. It does not prove a framework session, the app bus, an AirPlay
+  session, decode or output. Rebuilt artifacts from the final source, with these `DT_NEEDED` and
+  link-mode facts recorded in the same report, are tracked separately.
+- **Packaging policy.** `make airplay` stages a development build on the host and writes no
+  archive (`PACKAGE=auto`); `PACKAGE=1` on a non-Linux target is refused unless
+  `AIRPLAY_ALLOW_HOST_PACKAGE=1` is set for a packaging smoke test, so a Darwin binary can never
+  be shipped with a Linux ABI. A Linux build stamps `abi` through `tools/stage-manifest-abi.sh`,
+  runs `tools/check-elf-interp.sh` on the staged binary before packaging, and fails when the
+  interpreter does not match the manifest's libc. The host package that earlier rounds recorded
+  is therefore gone; the target artifacts and their ELF evidence are recorded below once built.
+
+Proof limits (open gates):
+
+- The pyatv proof is library-level (SRP/HKDF), not a full HTTP session; a live pyatv end-to-end
+  run over a loopback daemon seam remains the one unexecuted external proof. `pyatv` needs a
+  compatible `srptools` version (1.0.1 was required for the installed release).
+- No sender was available, so the advertisement set (`srcvers`, feature bits) has not been
+  confirmed to make a current iOS release choose a stream this build decodes. Both values are
+  app settings so a device test can settle it; the app README lists the values that were
+  considered and why.
+- The recorded package is a **host** build: no aarch64 `libavcodec`/`libavutil` and no cross
+  toolchain were available, so the device package with the AAC decoder was not produced here.
+  The build's ABI guards were exercised: `GOOS=linux` without `AIRPLAY_FFMPEG_PREFIX` fails with
+  the prefix instruction, and with a prefix but no cross compiler it fails rather than using the
+  host compiler; the staged-manifest rewrite was checked to produce exactly one
+  `abi = "linux-musl"` line, and the packaged host build still declares the source default
+  `linux-gnu`.
+  A release needs the target FFmpeg built as upstream builds it (`--disable-everything
+  --enable-decoder=aac --enable-parser=aac`, static) and pointed at with `PKG_CONFIG_PATH` or
+  `CGO_CFLAGS`/`CGO_LDFLAGS`; `apps/airplay/build.sh` fails early without it.
+- The pyatv flow covers the legacy RAOP path (pyatv's RAOP client chooses `AirPlayV1` for this
+  service advertisement). The AP2 pairing/key layer is covered by the pyatv SRP/HKDF test above;
+  an AP2 realtime SETUP driven by pyatv itself is not exercised (its AirPlay-v2 stream protocol is
+  reached only through its own mDNS/feature negotiation, which the loopback config does not
+  reproduce).
+- AAC-ELD is not advertised (upstream does not advertise it either); if a sender sends ELD the
+  FFmpeg decoder accepts it, but no ELD fixture could be produced — ffmpeg has no ELD encoder —
+  so that path is unverified.
+- Normal pairing and the administration endpoints are verified against this repository's test
+  client, not against a HomeKit administrator app: the wire format is covered, the HomeKit
+  accessory-database semantics beyond add/remove/list are not implemented.
+- FairPlay-protected content and MFi remain out of reach: only the handshake is answered, which
+  is all upstream does.
+- PTP is implemented as a slave clock over the new multicast listener, but its lock quality,
+  the sender's actual PTP profile and its effect on multi-room sync are untested; without a
+  disciplined clock the session paces from packet arrival, which is what the end-to-end test
+  exercises.
+- The four reverse transport commands over the sender's event channel are implemented to the
+  reference layout but have never been accepted by a real sender in this record.
+- Acoustic latency, ring colour fidelity on the panel and behaviour under the 240 MiB memory
+  bound are device gates.
+
+## Amlogic A113X platforms (host proof only)
+
+Both Amlogic platforms were added without a device: no Amlogic unit was connected, so every line
+below is host proof. The physical facts they depend on come from the published survey and the
+third-party projects cited in [HARDWARE.md](HARDWARE.md#amlogic-a113x-stock-buildroot-and-alpine-linux);
+they are not measurements.
+
+What was checked:
+
+- `go test ./internal/backend/amlogic` — profile→config selection (stock=pulse, Alpine=alsa,
+  `default` PCM, 48 kHz stereo playback / 16 kHz mono capture), capability reporting per
+  userland, the ring's vendor-node/`UNVERIFIED`/`UNAVAILABLE` paths, the three panel paths
+  (per-segment LED class, line display, unrecovered vendor node), the fallback when one segment
+  device is missing, and `SoC` not being replaced by the model-probe fallback.
+- `go test ./internal/backend/linuxdev` — the moved board-agnostic layer: keymap semantics,
+  kernel-timestamp decoding, IIO/thermal probes, LED-class classification/trigger claim, WS2812B
+  gamma/permutation encoding, brightness quantization.
+- `go test ./internal/backend/rockchip ./internal/backend/rockchip/inspect` — the refactor that
+  moved evdev/keymap/sensors/LED-class/WS2812 into `linuxdev` did not change the Rockchip
+  backend's behaviour, and the offline inspector now reports `platform` and identifies an
+  Amlogic rootfs instead of applying Rockchip readings.
+- `go test ./internal/daemon -run 'TestProfileOrDefault|TestPlatformProto'` — platform string →
+  profile and backend platform → wire enum for both Amlogic targets.
+- `go test ./cmd/capsulad-cli -run 'TestSelectDeployProfile|TestPlatformFlag'` — the `-platform`
+  deploy flag selects the boot service, hook name and space floors for all four selections and
+  rejects anything else.
+- `GOOS=linux GOARCH=arm64 go build ./...` — both binaries and the CLI cross-compile for the
+  target (this is a compile check, not a run).
+
+Proof limits:
+
+- No frame reached a ring, panel, mixer or watchdog on an Amlogic board. `PARTIAL` there means the
+  interface is driven and the mapping is recovered, not that the device rendered it.
+- The stock clock panel is driven through the `clock-led1..30` LED class array with the channel
+  table published in the board's own MicroPython hardware layer (`STOCK_MAP`/`LAYOUT`, colon 16/15);
+  host tests pin the mapping and the frame writes. The private `/dev/is31fl32xx` ioctl path is not
+  used, and when the LED class array is absent no segment resource is published at all (the
+  subsystem reports `UNVERIFIED`), so a frame can never reach a no-op sink.
+- The glibc stock runtime was built against glibc 2.28 (Debian buster, rustc 1.100,
+  `tools/build-native-glibc228.sh`): 6,313,560 B, sha256 `620297dd…`, `DT_NEEDED`
+  libgcc_s/libpthread/libm/libdl/libc, max `GLIBC_2.28`. On a buster image it loads and the app
+  reaches `connect failed (7)` for a nonexistent socket; a 2.30 build fails the loader at
+  `libm.so.6: version GLIBC_2.29 not found`. Proof level: host container load only, no device.
+- The musl native runtime was built and loaded on the host: `cargo build --release --target
+  aarch64-unknown-linux-musl` with `-C target-feature=-crt-static` in an arm64 Alpine container
+  produced `libcapsulad.so` (SONAME `libcapsulad.so.1`; `NEEDED libc.musl-aarch64.so.1`,
+  `libgcc_s.so.1`), `tools/check-native-libc.sh` accepted it as musl from the ELF dynamic section,
+  and a C `dlopen`/`dlsym("capsulad_abi_major")` smoke resolved the symbol under
+  `/lib/ld-musl-aarch64.so.1`. The metadata is the usual three-field JSON. No Alpine device was
+  used, so service start, app launch and audio remain device gates.
+
+- The stock Amlogic ambient-brightness curve is unmeasured; the profile uses the framework policy
+  curve and claims no vendor parity.
+- Stock autostart depends on an init-list/overlay fact that was not tested on firmware 44.90; the
+  hook's `start|stop|restart` path is what a deployment exercises in the current boot.
+- The native SDK was not cross-built for `aarch64-unknown-linux-musl`/`-gnu` here; only the Go
+  binaries were.

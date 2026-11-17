@@ -38,20 +38,20 @@ when told. The platform handles installation, sandboxing, identity, routing and 
 
 | Target | Platform value | Notes |
 |---|---|---|
-| Capsula Mini, Rockchip stock firmware | `rockchip-stock` | Primary device. aarch64, glibc 2.33. Kernel supports mount-namespace sandboxing only. |
+| Capsula Mini, Rockchip stock firmware | `rockchip-stock` | RK3308. aarch64, glibc 2.33. Kernel supports mount-namespace sandboxing only. |
+| Capsula Mini, Amlogic A113X stock firmware | `amlogic-stock` | aarch64, **glibc 2.28**. Same framework contract; the clock panel's vendor ABI is unrecovered, so it reports `UNVERIFIED`. |
+| Capsula Mini, Amlogic A113X on Alpine Linux | `amlogic-alpine` | aarch64, musl. Package ABIs must contain `musl`; a glibc-linked native package is rejected at install/launch. |
 | Host simulator | `simulator` | Full virtual segment display, LED ring, five-key panel, microphone and speaker. Runs on a development host, accepts every package a device accepts. |
 
-**Amlogic is not supported in this build.** There is no Amlogic backend:
-`-platform amlogic-stock` and `-platform amlogic-alpine` are rejected as unknown platforms
-(`unknown platform "…" (simulator, rockchip-stock)`), not accepted and then refused. The
-historical `CAPSULA_MINI_AMLOGIC_*` values remain reserved wire enums with no backend. Do
-not test, document, plan a parity milestone or claim Amlogic support; an app that must run
-on Amlogic has to wait for a backend and its own board profile.
+An Amlogic app sees the same framework contract as on the Rockchip unit; only the advertised
+subsystem backends and their status details differ. Do not assume a resource exists because the
+board has the hardware: `ListResources` and `subsystem_backends` are authoritative, and the
+Amlogic clock panel legitimately reports `UNVERIFIED` until its driver ABI is recovered.
 
-The only supported hardware profile is the Rockchip Capsula Mini rev 4 stock configuration,
-held as inert data in `internal/backend/profile`; board paths and quirks live in
-`internal/backend/rockchip` and `deploy/rockchip-stock`. An app sees the same framework
-contract on the simulator, whose profile names no device nodes.
+The three hardware profiles are held as inert data in `internal/backend/profile`; board paths and
+quirks live in `internal/backend/rockchip`, `internal/backend/amlogic` and `deploy/rockchip-stock`,
+`deploy/amlogic-stock`, `deploy/amlogic-alpine`. An app sees the same contract on the simulator,
+whose profile names no device nodes.
 
 A device advertises only what its backend implements: query `DeviceService.ListResources`
 before assuming a display, ring, panel or audio path exists. The simulator reports
@@ -84,8 +84,12 @@ Resource identifiers are stable across targets:
 The native runtime is a platform component, not something an app ships. An app declares that
 it needs it; the framework preflights that requirement and injects the library path.
 
-Native binaries must be built for the device's ABI: `aarch64`, `linux-gnu`, glibc 2.33 or
-older. Anything newer fails at startup on the device.
+Native binaries must be built for the device's ABI: `aarch64` plus the target libc —
+`linux-gnu` (RK3308, glibc 2.33 or older; Amlogic stock, **glibc 2.28 or older**) or
+`linux-musl` (Amlogic on Alpine). A package declaring the other libc is refused at install and launch. Set
+`TARGET_ABI=linux-gnu|linux-musl` in the app build and stage that value in the manifest's
+`abi`; the packager never rewrites it. Anything newer than the target's glibc (2.33 on the
+RK3308 image, 2.28 on the Amlogic stock image) fails at startup.
 
 ## Ten minutes from an empty directory
 

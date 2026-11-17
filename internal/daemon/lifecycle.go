@@ -119,7 +119,7 @@ func (d *Daemon) compatible(m *manifest.Manifest) error {
 		return fmt.Errorf("package architecture %q is not executable on this %s target", arch, d.profile().Architecture.Target)
 	}
 	if !strings.Contains(m.Entrypoint.ABI, d.profile().Architecture.ABIContains) {
-		return fmt.Errorf("package ABI %q is not a Linux ABI", m.Entrypoint.ABI)
+		return fmt.Errorf("package ABI %q does not match this target (needs an ABI containing %q)", m.Entrypoint.ABI, d.profile().Architecture.ABIContains)
 	}
 	return nil
 }

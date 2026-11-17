@@ -1,0 +1,80 @@
+// The cadence.v2 capability messages this client speaks (upstream
+// proto/cadence/v2/capability.proto). See session.proto for the interop rule.
+syntax = "proto3";
+
+package cadence.v2;
+
+import "cadence/v2/session.proto";
+
+option go_package = "capsulad/apps/cadence/internal/proto/cadencev2;cadencev2";
+
+// A report too large for one frame goes as parts 0 to parts-1, in order, each
+// with some of the descriptors and the hash of the whole report. parts 0 or 1
+// is a single frame, as a peer without parts sends it.
+message CapabilityReport {
+  repeated Descriptor descriptors = 1;
+  bytes hash = 2;
+  uint32 part = 3;
+  uint32 parts = 4;
+}
+
+message Descriptor {
+  string id = 1;
+  uint32 version = 2;
+  string config_schema = 3;
+  string state_schema = 4;
+  repeated SecretSpec secrets = 5;
+  // command name -> JSON Schema of its args
+  map<string, string> commands = 6;
+}
+
+message SecretSpec {
+  string name = 1;
+  string description = 2;
+}
+
+message ConfigSet {
+  string capability = 1;
+  int64 generation = 2;
+  string json = 3;
+  map<string, string> secrets = 4;
+}
+
+message ConfigApplied {
+  string capability = 1;
+  int64 generation = 2;
+  string error_code = 3;
+}
+
+message StateDelta {
+  string capability = 1;
+  string json = 2;
+}
+
+message CapabilityCommand {
+  string request_id = 1;
+  string capability = 2;
+  string name = 3;
+  string json = 4;
+  SessionGrant grant = 5;
+}
+
+// The server vouches that a command on this device runs for a session the user
+// began with the wake word or a press on another device (the caller).
+message SessionGrant {
+  string id = 1;
+  string caller_device_id = 2;
+  string caller_session_id = 3;
+  Trigger caller_trigger = 4;
+  string target_device_id = 5;
+  string capability = 6;
+  string command = 7;
+  int64 expires_at_unix_ms = 8;
+}
+
+// code is empty when ok
+message CommandResult {
+  string request_id = 1;
+  string code = 2;
+  string json = 3;
+}

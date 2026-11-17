@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic } from '../lib/live.js'
 import { changePassword, runAuthMutation } from '../lib/session.js'
-import { dateTime } from '../lib/format.js'
+import { dateTime, keyScopes } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 
 // Access is the only page that changes credentials. Password changes revoke
@@ -209,7 +209,7 @@ onUnmounted(() => {
         <p class="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">Security</p>
         <h1 class="text-2xl font-semibold tracking-tight">Access</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          Manage the administrator password and the keys that scripts use to read device status.
+          Manage the administrator password and the API keys that scripts and MCP clients use.
         </p>
       </div>
       <button
@@ -410,8 +410,10 @@ onUnmounted(() => {
             <div>
               <h2 class="card-title text-base">Automation keys</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-                For scripts and monitoring tools. These keys can only read basic device status — they cannot sign
-                in here, change settings, or control the speaker. Name a key after the place that will use it.
+                For scripts, monitoring tools and MCP clients. This page mints status keys, which can only read device
+                status and the server certificate; an administration key has to be created on the device with
+                <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-xs">capsulad-cli auth key create NAME --scope operator</code>.
+                No key can sign in here or change the administrator password. Name a key after the place that will use it.
               </p>
             </div>
             <span class="badge badge-outline">{{ activeKeyCount }} active</span>
@@ -469,6 +471,7 @@ onUnmounted(() => {
                 <tr class="text-xs uppercase tracking-wide text-base-content/60">
                   <th scope="col">Name</th>
                   <th scope="col">Starts with</th>
+                  <th scope="col">Scope</th>
                   <th scope="col">Added</th>
                   <th scope="col">Status</th>
                   <th scope="col"><span class="sr-only">Actions</span></th>
@@ -478,6 +481,12 @@ onUnmounted(() => {
                 <tr v-for="key in keys" :key="key.name">
                   <td class="font-mono text-xs">{{ key.name }}</td>
                   <td class="font-mono text-xs">{{ key.prefix ? key.prefix + '…' : '—' }}</td>
+                  <td class="whitespace-nowrap">
+                    <span
+                      class="badge badge-sm"
+                      :class="key.scopes?.includes('operator') ? 'badge-warning' : 'badge-ghost'"
+                    >{{ keyScopes(key.scopes) }}</span>
+                  </td>
                   <td class="whitespace-nowrap text-xs">{{ dateTime(key.createdUnixMs) }}</td>
                   <td>
                     <span class="badge badge-sm" :class="key.revoked ? 'badge-neutral' : 'badge-success'">
@@ -498,7 +507,8 @@ onUnmounted(() => {
             </table>
           </div>
           <p v-else class="rounded border border-base-300 p-4 text-sm text-base-content/70">
-            No automation keys yet. Create one only if a script needs to read status.
+            No automation keys yet. Create one only if a script needs to read status; administration keys are minted on
+            the device.
           </p>
 
           <p class="text-xs text-base-content/60">

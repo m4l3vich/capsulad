@@ -12,6 +12,7 @@
 package appcontrol
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
+	"golang.org/x/net/ipv4"
 	"golang.org/x/sys/unix"
 
 	"capsulad/internal/logbus"
@@ -167,10 +170,12 @@ type runChannel struct {
 	appID   string
 	file    *os.File
 
-	mu        sync.Mutex
-	listeners int
-	closed    bool
-	once      sync.Once
+	mu          sync.Mutex
+	listeners   int
+	allocations map[uint64]*listenerAlloc
+	nextAlloc   uint64
+	closed      bool
+	once        sync.Once
 }
 
 func (r *runChannel) close() {
@@ -179,6 +184,14 @@ func (r *runChannel) close() {
 		r.closed = true
 		r.mu.Unlock()
 		_ = r.file.Close()
+		r.mu.Lock()
+		allocations := r.allocations
+		r.allocations = nil
+		r.listeners = 0
+		r.mu.Unlock()
+		for _, alloc := range allocations {
+			_ = alloc.file.Close()
+		}
 	})
 }
 
@@ -212,9 +225,12 @@ func (r *runChannel) serve() {
 			return
 		}
 		if listener != nil {
-			// The app owns the transferred descriptor; drop the daemon's
-			// duplicate and the Go wrapper now.
-			_ = listener.file.Close()
+			// Keep the daemon's descriptor until the app releases the
+			// allocation: the close request is the release signal, and the
+			// retained file lets run cleanup reclaim it.
+			if !r.retainAllocation(listener) {
+				continue
+			}
 			r.manager.logf(r.appID, "listener allocated run=%s proto=%s address=%s port=%d",
 				r.runID, listener.protocol, net.JoinHostPort(listener.address, strconv.Itoa(listener.port)), listener.port)
 		}
@@ -269,6 +285,11 @@ type listenRequest struct {
 	Bind     string `json:"bind"`
 	Port     int    `json:"port"`
 	Backlog  int    `json:"backlog"`
+	// JoinGroup requests a multicast receive socket for that IPv4 group. It is
+	// accepted only for UDP on the PTP ports; see validate.
+	JoinGroup string `json:"join_group,omitempty"`
+	// Allocation names the listener a close request releases.
+	Allocation uint64 `json:"allocation,omitempty"`
 }
 
 type listenResponse struct {
@@ -281,6 +302,11 @@ type listenResponse struct {
 	Protocol string `json:"protocol,omitempty"`
 	Address  string `json:"address,omitempty"`
 	Port     int    `json:"port,omitempty"`
+	Group    string `json:"group,omitempty"`
+	// Allocation identifies the listener for a later close request, which is
+	// how a run's live-listener accounting is released. It is echoed only on a
+	// successful allocation.
+	Allocation uint64 `json:"allocation,omitempty"`
 }
 
 func marshalResponse(resp listenResponse) []byte {
@@ -289,10 +315,12 @@ func marshalResponse(resp listenResponse) []byte {
 }
 
 type listenerAlloc struct {
+	id       uint64
 	file     *os.File
 	protocol string
 	address  string
 	port     int
+	group    string
 }
 
 // handle decodes one request and returns the reply to send. Every reply
@@ -305,21 +333,88 @@ func (r *runChannel) handle(payload []byte) (listenResponse, *listenerAlloc) {
 		return errorResponse(0, StatusInvalidArgument, fmt.Errorf("decode control request: %w", err)), nil
 	}
 	resp := listenResponse{ID: req.ID}
+	if req.Op == "close" {
+		r.releaseAllocation(req.Allocation)
+		// Closing is idempotent: an unknown or already-released allocation is
+		// not an error, so an app can always clean up on every exit path.
+		resp.OK = true
+		return resp, nil
+	}
 	if req.Op != "listen" {
 		return errorResponse(req.ID, StatusInvalidArgument,
 			fmt.Errorf("unsupported control operation %q", req.Op)), nil
 	}
-	proto, ip, port, backlog, err := r.validate(req)
+	proto, ip, port, backlog, group, err := r.validate(req)
 	if err != nil {
 		return errorResponse(req.ID, StatusInvalidArgument, err), nil
 	}
-	alloc, err := r.listen(proto, ip, port, backlog)
+	alloc, err := r.listen(proto, ip, port, backlog, group)
 	if err != nil {
 		return errorResponse(req.ID, StatusTransport, err), nil
 	}
 	resp.OK = true
 	resp.Protocol, resp.Address, resp.Port = alloc.protocol, alloc.address, alloc.port
+	resp.Group = alloc.group
+	resp.Allocation = r.nextAllocationID()
+	alloc.id = resp.Allocation
 	return resp, alloc
+}
+
+// nextAllocationID returns the candidate id for a new allocation. The id is
+// included in the reply before the descriptor is sent; retainAllocation commits
+// it only after the send succeeded.
+func (r *runChannel) nextAllocationID() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextAlloc++
+	return r.nextAlloc
+}
+
+// retainAllocation commits a listener after its descriptor was transferred. It
+// enforces the live-listener cap at commit time (the bind pre-check can race)
+// and is the point where a failed accounting leaves no listener behind.
+func (r *runChannel) retainAllocation(alloc *listenerAlloc) bool {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		_ = alloc.file.Close()
+		return false
+	}
+	if r.listeners >= MaxListenersPerRun {
+		r.mu.Unlock()
+		_ = alloc.file.Close()
+		r.manager.logf(r.appID, "listener refused run=%s: run already holds %d live listeners",
+			r.runID, MaxListenersPerRun)
+		return false
+	}
+	if r.allocations == nil {
+		r.allocations = map[uint64]*listenerAlloc{}
+	}
+	r.allocations[alloc.id] = alloc
+	r.listeners++
+	r.mu.Unlock()
+	return true
+}
+
+// releaseAllocation frees a live listener and the daemon's retained descriptor.
+// It is idempotent, so a close that races run cleanup is harmless.
+func (r *runChannel) releaseAllocation(id uint64) {
+	if id == 0 {
+		return
+	}
+	r.mu.Lock()
+	alloc := r.allocations[id]
+	if alloc != nil {
+		delete(r.allocations, id)
+		if r.listeners > 0 {
+			r.listeners--
+		}
+	}
+	r.mu.Unlock()
+	if alloc != nil {
+		_ = alloc.file.Close()
+		r.manager.logf(r.appID, "listener released run=%s allocation=%d", r.runID, id)
+	}
 }
 
 // errorResponse is one refusal reply. The id is carried separately from the
@@ -328,28 +423,52 @@ func errorResponse(id uint64, status int32, err error) listenResponse {
 	return listenResponse{ID: id, Error: err.Error(), Status: status}
 }
 
-func (r *runChannel) validate(req listenRequest) (string, net.IP, int, int, error) {
+func (r *runChannel) validate(req listenRequest) (string, net.IP, int, int, net.IP, error) {
 	protocol := strings.ToLower(strings.TrimSpace(req.Protocol))
 	if protocol != "tcp" && protocol != "udp" {
-		return "", nil, 0, 0, fmt.Errorf("protocol must be tcp or udp")
+		return "", nil, 0, 0, nil, fmt.Errorf("protocol must be tcp or udp")
 	}
 	ip, err := validateBind(req.Bind)
 	if err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, nil, err
 	}
 	port := req.Port
+	var group net.IP
+	if strings.TrimSpace(req.JoinGroup) != "" {
+		// A group receiver is a receive-only UDP socket on a PTP port: the
+		// AirPlay timing stream arrives on the PTP event (319) and general
+		// (320) ports addressed to 224.0.0.1. Anything else is refused so this
+		// option cannot be used to open an arbitrary multicast door.
+		if protocol != "udp" {
+			return "", nil, 0, 0, nil, errors.New("join_group requires protocol \"udp\"")
+		}
+		group = net.ParseIP(strings.TrimSpace(req.JoinGroup))
+		if group == nil || group.To4() == nil || !group.IsMulticast() {
+			return "", nil, 0, 0, nil, fmt.Errorf("join_group %q is not an IPv4 multicast group", req.JoinGroup)
+		}
+		if !group.Equal(net.IPv4(224, 0, 0, 1)) {
+			return "", nil, 0, 0, nil, fmt.Errorf("join_group %q is not the AirPlay PTP group 224.0.0.1", req.JoinGroup)
+		}
+		if port != 319 && port != 320 {
+			return "", nil, 0, 0, nil, fmt.Errorf("join_group is only allowed on the PTP ports 319 and 320, not %d", port)
+		}
+		if !ip.IsUnspecified() {
+			return "", nil, 0, 0, nil, fmt.Errorf("join_group needs the wildcard bind, not %q", ip)
+		}
+		return protocol, ip, port, 0, group, nil
+	}
 	if port == 0 {
 		// ephemeral
 	} else if port < 1024 || port > 65535 {
-		return "", nil, 0, 0, fmt.Errorf("port %d must be 0 or 1024..65535", port)
+		return "", nil, 0, 0, nil, fmt.Errorf("port %d must be 0 or 1024..65535", port)
 	}
 	if port != 0 {
 		if port == 5353 {
-			return "", nil, 0, 0, errors.New("port 5353 is reserved for mDNS")
+			return "", nil, 0, 0, nil, errors.New("port 5353 is reserved for mDNS")
 		}
 		for _, reserved := range r.manager.policy.ReservedPorts {
 			if port == reserved {
-				return "", nil, 0, 0, fmt.Errorf("port %d is reserved by the daemon", port)
+				return "", nil, 0, 0, nil, fmt.Errorf("port %d is reserved by the daemon", port)
 			}
 		}
 	}
@@ -360,10 +479,10 @@ func (r *runChannel) validate(req listenRequest) (string, net.IP, int, int, erro
 			backlog = defaultBacklog
 		}
 		if backlog < 1 || backlog > 128 {
-			return "", nil, 0, 0, fmt.Errorf("backlog must be 1..128")
+			return "", nil, 0, 0, nil, fmt.Errorf("backlog must be 1..128")
 		}
 	}
-	return protocol, ip, port, backlog, nil
+	return protocol, ip, port, backlog, nil, nil
 }
 
 // validateBind accepts only local unicast addresses. An empty bind means the
@@ -439,7 +558,7 @@ func isLocalUnicast(ip net.IP) bool {
 	return false
 }
 
-func (r *runChannel) listen(protocol string, ip net.IP, port, backlog int) (*listenerAlloc, error) {
+func (r *runChannel) listen(protocol string, ip net.IP, port, backlog int, group net.IP) (*listenerAlloc, error) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -455,32 +574,21 @@ func (r *runChannel) listen(protocol string, ip net.IP, port, backlog int) (*lis
 		alloc *listenerAlloc
 		err   error
 	)
-	if protocol == "tcp" {
+	// The pre-check above keeps the common case from opening a socket at all;
+	// the authoritative live count is incremented in retainAllocation after the
+	// descriptor has actually been handed over.
+	_ = alloc
+	switch {
+	case protocol == "tcp":
 		alloc, err = r.listenTCP(ip, port, backlog)
-	} else {
+	case group != nil:
+		alloc, err = r.listenUDPGroup(group, port)
+	default:
 		alloc, err = r.listenUDP(ip, port)
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	// Count the allocation only after a successful bind, then re-check the cap:
-	// concurrent requests may both have passed the pre-check.
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		_ = alloc.file.Close()
-		return nil, errors.New("run is shutting down")
-	}
-	if r.listeners >= MaxListenersPerRun {
-		r.mu.Unlock()
-		_ = alloc.file.Close()
-		return nil, fmt.Errorf("run already holds the maximum of %d listeners", MaxListenersPerRun)
-	}
-	// A transferred fd's lifetime is not observable here, so the cap bounds
-	// allocations per run rather than live sockets.
-	r.listeners++
-	r.mu.Unlock()
 
 	return alloc, nil
 }
@@ -514,6 +622,106 @@ func (r *runChannel) listenTCP(ip net.IP, port, backlog int) (*listenerAlloc, er
 		return nil, fmt.Errorf("duplicate listening socket: %w", err)
 	}
 	return &listenerAlloc{file: file, protocol: "tcp", address: addr.IP.String(), port: addr.Port}, nil
+}
+
+// listenUDPGroup joins the PTP multicast group on a PTP port. The daemon, which
+// runs as root, binds the privileged port once and joins the group on every LAN
+// interface; the app receives datagrams the sender addresses to the group, which
+// a socket bound to the port alone never sees. Membership lives on the socket, so
+// it ends with the transferred descriptor and whatever the daemon still holds.
+func (r *runChannel) listenUDPGroup(group net.IP, port int) (*listenerAlloc, error) {
+	interfaces := selectMulticastInterfaces(mustInterfaces())
+	if len(interfaces) == 0 {
+		return nil, errors.New("no multicast-capable network interface is up")
+	}
+	listenConfig := net.ListenConfig{
+		Control: func(_, _ string, raw syscall.RawConn) error {
+			var optionErr error
+			if err := raw.Control(func(fd uintptr) {
+				optionErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				if optionErr == nil {
+					// Best effort: lets a co-resident timing service keep the
+					// port while this receiver is restarted.
+					_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				}
+			}); err != nil {
+				return err
+			}
+			return optionErr
+		},
+	}
+	packet, err := listenConfig.ListenPacket(context.Background(), "udp4", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return nil, err
+	}
+	conn, ok := packet.(*net.UDPConn)
+	if !ok {
+		_ = packet.Close()
+		return nil, errors.New("the kernel did not return a UDP socket")
+	}
+	groupAddr := &net.UDPAddr{IP: group}
+	memberships := ipv4.NewPacketConn(conn)
+	joined := 0
+	var joinErr error
+	for i := range interfaces {
+		iface := interfaces[i]
+		if err := memberships.JoinGroup(&iface, groupAddr); err != nil {
+			joinErr = err
+			continue
+		}
+		joined++
+	}
+	if joined == 0 {
+		_ = packet.Close()
+		if joinErr == nil {
+			joinErr = errors.New("no interface accepted the group membership")
+		}
+		return nil, fmt.Errorf("join %s: %w", group, joinErr)
+	}
+	if r.manager != nil && r.manager.logs != nil {
+		r.manager.logs.Infof("listener", r.appID,
+			"run %s: joined %s on port %d over %d interface(s)", r.runID, group, port, joined)
+	}
+	addr := conn.LocalAddr().(*net.UDPAddr)
+	file, err := conn.File()
+	_ = packet.Close()
+	if err != nil {
+		return nil, fmt.Errorf("duplicate the multicast socket: %w", err)
+	}
+	return &listenerAlloc{
+		file: file, protocol: "udp", address: addr.IP.String(), port: addr.Port,
+		group: group.String(),
+	}, nil
+}
+
+// mustInterfaces is net.Interfaces with a nil-on-error shape for the selector
+// used above; a host without interfaces cannot receive PTP anyway.
+func mustInterfaces() []net.Interface {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	return interfaces
+}
+
+// selectMulticastInterfaces keeps the interfaces a PTP join should use: up,
+// multicast-capable and not loopback. Virtual point-to-point links are kept,
+// because a sender may reach the speaker over one.
+func selectMulticastInterfaces(interfaces []net.Interface) []net.Interface {
+	selected := make([]net.Interface, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		selected = append(selected, iface)
+	}
+	return selected
 }
 
 func (r *runChannel) listenUDP(ip net.IP, port int) (*listenerAlloc, error) {

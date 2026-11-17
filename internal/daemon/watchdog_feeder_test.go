@@ -25,7 +25,7 @@ func TestHandOffWatchdogShellFeeder(t *testing.T) {
 		t.Fatalf("pipe: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	if err := handOffWatchdog(w, runDir); err != nil {
+	if err := handOffWatchdog(w, runDir, feederWindow); err != nil {
 		_ = w.Close()
 		t.Fatalf("handOffWatchdog: %v", err)
 	}
@@ -90,5 +90,53 @@ func TestHandOffWatchdogShellFeeder(t *testing.T) {
 		} else if err != nil {
 			t.Fatalf("waiting for feeder exit: %v", err)
 		}
+	}
+}
+
+// The feeder is a bounded stop-gap, not a second daemon. With no daemon asking
+// for the timer back it must stop feeding on its own: the board then resets
+// instead of running unmanaged forever. EOF on the pipe is the exit proof, and
+// the pid file must go with it so the next boot does not wait for a handback
+// that can never arrive.
+func TestFeederStopsFeedingWhenItsWindowExpires(t *testing.T) {
+	runDir := t.TempDir()
+	pidFile := filepath.Join(runDir, feederPIDFile)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	// One tick of window: the feeder writes its first keepalive, sleeps once and
+	// then gives the timer up.
+	if err := handOffWatchdog(w, runDir, feederTick); err != nil {
+		_ = w.Close()
+		t.Fatalf("handOffWatchdog: %v", err)
+	}
+	_ = w.Close()
+
+	waitFor(t, 5*time.Second, "feeder pid file", func() bool {
+		_, err := os.Stat(pidFile)
+		return err == nil
+	})
+	buf := make([]byte, 1)
+	if err := r.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(r, buf); err != nil {
+		t.Fatalf("keepalive byte: %v", err)
+	}
+	if err := r.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("read deadline: %v", err)
+	}
+	for {
+		if _, err := r.Read(buf); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("waiting for the bounded feeder to exit: %v", err)
+		}
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("the bounded feeder left its pid file behind: %v", err)
 	}
 }

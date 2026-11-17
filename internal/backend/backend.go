@@ -1,5 +1,5 @@
 // Package backend defines the hardware abstraction implemented per target
-// platform (simulator, Rockchip stock).
+// platform (simulator, Rockchip stock, Amlogic stock/Alpine).
 //
 // Backends own physical devices. They never implement routing or presentation
 // semantics: the framework renders built-in presets into frames and writes
@@ -20,6 +20,10 @@ type Platform string
 const (
 	PlatformSimulator     Platform = "simulator"
 	PlatformRockchipStock Platform = "CAPSULA_MINI_ROCKCHIP_STOCK"
+	// The Amlogic A113X board family shares one wire platform per userland:
+	// the jailbroken stock Buildroot image and Alpine Linux.
+	PlatformAmlogicStock  Platform = "CAPSULA_MINI_AMLOGIC_STOCK"
+	PlatformAmlogicAlpine Platform = "CAPSULA_MINI_AMLOGIC_ALPINE"
 )
 
 type Status string
@@ -229,11 +233,25 @@ type Backend interface {
 
 var ErrUnavailable = errors.New("hardware backend unavailable")
 
+// ErrWatchdogBusy reports that another process still holds the watchdog device.
+// Only one process may open /dev/watchdog at a time, so a supervisor that
+// starts while the vendor agent (or a feeder left by a previous daemon) still
+// owns it must treat this as "retry", not as a dead device.
+var ErrWatchdogBusy = errors.New("hardware watchdog held by another process")
+
 // Watchdog is a hardware liveness timer (e.g. the DesignWare /dev/watchdog on
 // the RK3308). The stock firmware's voice-agent feeds it, so a replacement
 // supervisor must take the feed over or the SoC resets when the vendor process
-// stops. Timeout reports the armed interval; Feed resets it; Close must disarm
-// the timer rather than let it fire.
+// stops. Timeout reports the armed interval; Feed resets it; Detach transfers
+// the descriptor so another process can keep feeding it.
+//
+// Close is the graceful release: it disarms the timer where the driver allows
+// it. On a nowayout driver (profile.Watchdog.Nowayout: the RK3308 stock kernel
+// ignores the magic close and refuses the disable ioctl) an armed timer cannot
+// be stopped at all. The supervisor is conservative about this: it hands the
+// descriptor to a feeder whenever Detach returns one and only closes when the
+// platform exposes none, so no planned stop has to rely on Close actually
+// disarming an unmeasured driver.
 type Watchdog interface {
 	Timeout() time.Duration
 	Feed() error

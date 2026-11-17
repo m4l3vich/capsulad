@@ -35,7 +35,9 @@ type Serial struct {
 	Fields []string
 }
 
-// Audio describes the PulseAudio topology and PCM formats.
+// Audio describes the PulseAudio topology and PCM formats. A board whose
+// userland has no PulseAudio (Alpine) uses PCMDevice/Mixer* instead: they name
+// the ALSA PCM and the mixer control the framework pins and mutes.
 type Audio struct {
 	Sink   string
 	Source string
@@ -48,6 +50,18 @@ type Audio struct {
 	CaptureFormat    string
 	CaptureRateHz    int
 	CaptureChannels  int
+
+	// PCMDevice is the ALSA PCM name the direct-ALSA backend opens for both
+	// playback and capture (empty means the ALSA "default" device).
+	PCMDevice string
+	// MixerCard is the ALSA card name/number amixer targets; empty leaves the
+	// card unset (amixer's default).
+	MixerCard string
+	// MixerVolume and MixerMute are the ALSA simple-mixer controls the
+	// framework pins and mutes. Empty means the platform exposes no known
+	// hardware gain, so the software mixer is the only gain stage.
+	MixerVolume string
+	MixerMute   string
 }
 
 // LED describes both vendor LED controllers and the fallback class devices.
@@ -68,6 +82,37 @@ type LED struct {
 	// Gamma is applied to WS2812B ring output. The segment display stays
 	// linear because its stock calibration was accepted on hardware.
 	Gamma float64
+
+	// SegmentChannelPrefix names a fixed monochrome channel array as LED class
+	// devices: the prefix plus the 1-based channel number. SegmentChannelMap
+	// maps cell*segmentsPerDigit+segment (a..g = 0..6) to the 0-based channel.
+	// The Two-colon dots are named by ColonTopLED/ColonBottomLED.
+	SegmentChannelPrefix string
+	SegmentChannelMap    []int
+	// SPIDevPath is a spidev node used to drive a WS2812B chain from userspace
+	// when the kernel has no vendor LED char device (Amlogic Alpine). SpeedHz
+	// and BitsPerWord are the SPI parameters; zero leaves them unset.
+	SPIDevPath     string
+	SPISpeedHz     int
+	SPIBitsPerWord int
+	// SPIPrimeHz is the short transfer rate used before each frame to force the
+	// divider to be reprogrammed; zero disables priming. There is deliberately
+	// no driver-rebind knob: unbinding a controller can strand it, and the primer
+	// plus SetSpeed already drive spi_setup().
+	SPIPrimeHz int
+	// SegmentLEDPattern names one monochrome segment LED class device when the
+	// panel is exposed as LED class devices: %d is the 1-based digit and %s the
+	// segment letter taken from SegmentLetters. A panel with no such devices
+	// leaves it empty.
+	SegmentLEDPattern string
+	// SegmentLetters maps segment bit 0..n to a device-name letter. The
+	// framework contract is bit i = segment i, so "abcdefg" means a..g = 0..6.
+	SegmentLetters string
+	// ColonTopLED and ColonBottomLED are LED class device names, not indices:
+	// the number in a name is 1-based while SegmentChannelMap is 0-based
+	// (clock-led17 is channel 16). They are written outside the segment pattern.
+	ColonTopLED    string
+	ColonBottomLED string
 }
 
 // Input describes evdev discovery and the device-tree keymap selector.
@@ -76,6 +121,11 @@ type Input struct {
 	EventPrefix string
 	// KeymapCompatible is the compatible string of the gpio-keys node.
 	KeymapCompatible string
+	// KeyOverrides are board-specific semantic names merged over the probed
+	// device-tree map. A panel that reports a code two boards name differently
+	// (KEY_VOICECOMMAND is the neutral centre on the RK3308 panel and the
+	// assistant key on the Amlogic panel) is decided here, not in code.
+	KeyOverrides map[int]string
 }
 
 // Watchdog describes the hardware liveness timer.
@@ -86,6 +136,11 @@ type Watchdog struct {
 	DefaultTimeout time.Duration
 	// StatusID is the subsystem_backends backend id reported for the timer.
 	StatusID string
+	// Nowayout reports that opening the device arms the timer for good: the
+	// driver ignores the magic close and refuses WDIOC_SETOPTIONS, so an armed
+	// timer can only be kept alive or handed to another process, never
+	// stopped. The supervisor must not pretend a Close disarmed it.
+	Nowayout bool
 }
 
 // Wifi describes the stock supplicant files the framework adopts and restores.
@@ -126,6 +181,9 @@ type Architecture struct {
 	Accepted []string
 	// ABIContains is the substring every accepted package ABI must contain.
 	ABIContains string
+	// MaxGLIBC is the highest GLIBC_* symbol version a glibc target accepts
+	// (empty for musl/host). Deployment and packaging check it against the ELF.
+	MaxGLIBC string
 }
 
 // Memory describes the device memory envelope. HeapLimitMB is the CLI default;
@@ -227,6 +285,10 @@ var RK3308Rev4Stock = Profile{
 		Path:           "/dev/watchdog",
 		DefaultTimeout: 30 * time.Second,
 		StatusID:       "rockchip.syswatchdog",
+		// Probed on the stock kernel: WDIOC_SETOPTIONS(WDIOS_DISABLECARD)
+		// returns ENOTTY, the magic close ('V') is ignored and feeding must
+		// continue or the board resets ~21 s later.
+		Nowayout: true,
 	},
 	Wifi: Wifi{
 		StockConfigPaths: []string{
@@ -253,6 +315,7 @@ var RK3308Rev4Stock = Profile{
 		Target:      "aarch64",
 		Accepted:    []string{"aarch64", "arm64"},
 		ABIContains: "linux",
+		MaxGLIBC:    "2.33",
 	},
 	Memory: Memory{
 		PhysicalMiB: 240,

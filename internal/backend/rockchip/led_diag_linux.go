@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"capsulad/internal/backend"
+	"capsulad/internal/backend/linuxdev"
+	"capsulad/internal/backend/profile"
 )
 
 // multiCtrlVendorMap is the permutation the stock voice-agent applies between
@@ -36,22 +38,8 @@ func WriteRingPixels(path string, pixels []backend.RGB, brightness float64) erro
 	if path == "" {
 		path = DefaultConfig().LEDTopPath
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	count, err := unix.IoctlGetInt(int(f.Fd()), ledsIoctlGetCount)
-	if err != nil {
-		return fmt.Errorf("read WS2812B channel count: %w", err)
-	}
-	buffer := encodeWS2812Frame(pixels, brightness, count)
-	request := ws2812SetRequest{Count: uint32(len(buffer)), Data: uintptr(unsafe.Pointer(&buffer[0]))}
-	if err := ioctlPointer(f, ledsWS2812BSet, unsafe.Pointer(&request)); err != nil {
-		return fmt.Errorf("set ring frame: %w", err)
-	}
-	runtime.KeepAlive(buffer)
-	return nil
+	led := profile.RK3308Rev4Stock.LED
+	return linuxdev.WriteWS2812Frame(path, pixels, brightness, linuxdev.WS2812ChannelMap[:], led.Gamma)
 }
 
 // WriteRawMultiCtrl writes arbitrary per-channel brightness to the vendor
@@ -77,7 +65,7 @@ func WriteRawMultiCtrl(path string, values []byte) error {
 			records[i].Brightness = uint32(values[i])
 		}
 	}
-	if err := ioctlPointer(f, ledsMultiCtrlSet, unsafe.Pointer(&records[0])); err != nil {
+	if err := linuxdev.IoctlPointer(f, ledsMultiCtrlSet, unsafe.Pointer(&records[0])); err != nil {
 		return fmt.Errorf("set raw frame: %w", err)
 	}
 	runtime.KeepAlive(records)

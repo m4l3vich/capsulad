@@ -31,6 +31,8 @@ DIR=/data/capsdemo
 CAPSULAD=$DIR/capsulad
 SOCKET=$DIR/run/hal.sock
 PIDFILE=$DIR/run/capsulad.pid
+FEEDER_PID=$DIR/run/watchdog.feeder
+FEEDER_HANDBACK=$DIR/run/watchdog.handback
 BOOTLOG=$DIR/boot.log
 INITDIR=/etc/init.d
 SELF=$INITDIR/S99btctl.sh
@@ -54,7 +56,8 @@ fi
 # matches on comm. A feeder left by an older release is a copy of the daemon
 # (its __capsulad_watchdog_feeder subcommand), so it shares comm and has to be
 # excluded by its cmdline: killing it can reset the board once the timer is
-# armed.
+# armed. Neither feeder may be killed here; release_feeder below asks for the
+# timer back instead.
 is_daemon() {
     [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
     [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "capsulad" ] || return 1
@@ -107,6 +110,47 @@ stop() {
     sleep 1
 }
 
+# release_feeder asks the detached watchdog feeder left by a graceful stop to
+# give /dev/watchdog back, and waits for it to exit. On this kernel an armed
+# timer cannot be disarmed, so the feeder is the only thing keeping the board
+# alive between the framework stopping and the next owner arming the device:
+# whoever takes over from here has the remaining armed timeout (~21 s) to open
+# the device and start feeding. The feeder is bounded anyway — it stops feeding
+# on its own once its deployment window runs out — but waiting here makes the
+# handover explicit instead of leaving the next owner to fail its open with
+# EBUSY for the rest of that window.
+release_feeder() {
+    [ -f "$FEEDER_PID" ] || return 0
+    set -- $(cat "$FEEDER_PID" 2>/dev/null)
+    if [ -n "$1" ]; then
+        # A pid file whose feeder is gone (or whose pid now belongs to another
+        # process) survives on /data across a reboot. Nothing will ever clear
+        # it, so clear it here instead of waiting on a handback.
+        if [ ! -d "/proc/$1" ]; then
+            rm -f "$FEEDER_PID"
+            return 0
+        fi
+        case "$(tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null)" in
+        *capsulad-watchdog-feeder* | *__capsulad_watchdog_feeder*) ;;
+        *)
+            rm -f "$FEEDER_PID"
+            return 0
+            ;;
+        esac
+    fi
+    : >"$FEEDER_HANDBACK"
+    i=0
+    while [ $i -lt 5 ]; do
+        [ -f "$FEEDER_PID" ] || break
+        sleep 1
+        i=$((i+1))
+    done
+    rm -f "$FEEDER_HANDBACK"
+    if [ -f "$FEEDER_PID" ]; then
+        log "the watchdog feeder pid=$1 still holds the timer; it stops feeding when its window runs out"
+    fi
+}
+
 # A pre-upgrade binary cannot answer -health; a running process is the best
 # available signal for that one transition, never for a normal start.
 wait_up() {
@@ -156,8 +200,12 @@ restore_vendor() {
 }
 
 # vendor_start restores and starts the preserved vendor assistant chain. This
-# is the documented recovery path when the framework cannot become healthy.
+# is the documented recovery path when the framework cannot become healthy. It
+# releases the framework's watchdog feeder first: the vendor process owns
+# /dev/watchdog again, and leaving a feeder in place would fail its open with
+# EBUSY.
 vendor_start() {
+    release_feeder
     restore_vendor
     if [ -x "$VENDOR" ]; then
         "$VENDOR" start
@@ -209,6 +257,9 @@ start() {
     fi
     mkdir -p "$DIR/run" "$DIR/boot"
     retire_vendor
+    # The previous daemon may have left the armed timer with a feeder. Release
+    # it first so the new supervisor owns /dev/watchdog on its first open.
+    release_feeder
     log "starting $CAPSULAD"
     nohup "$CAPSULAD" -platform rockchip-stock -data-dir "$DIR" \
         -web-addr 0.0.0.0:8443 >>"$BOOTLOG" 2>&1 &

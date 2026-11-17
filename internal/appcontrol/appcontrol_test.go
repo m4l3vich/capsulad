@@ -427,3 +427,73 @@ func TestControlUndecodableRequestStillReplies(t *testing.T) {
 		resp.closeFDs(t)
 	}
 }
+
+// TestListenerAllocationReleaseAccounting covers the lifetime protocol: a
+// listener is counted while live, and the explicit close request releases both
+// the count and the daemon's retained descriptor.
+func TestListenerAllocationReleaseAccounting(t *testing.T) {
+	_, child := newTestManager(t)
+	first := exchange(t, child, listenRequest{Op: "listen", Protocol: "tcp", Bind: "127.0.0.1", Port: 0})
+	if !first.body.OK || first.body.Allocation == 0 {
+		t.Fatalf("allocation reply = %+v", first.body)
+	}
+	first.closeFDs(t)
+	if resp := exchange(t, child, listenRequest{Op: "close", Allocation: first.body.Allocation}); !resp.body.OK {
+		t.Fatalf("close = %+v", resp.body)
+	}
+	// The released slot must be reusable: fill the cap exactly.
+	for i := range MaxListenersPerRun {
+		resp := exchange(t, child, listenRequest{Op: "listen", Protocol: "tcp", Bind: "127.0.0.1", Port: 0})
+		if !resp.body.OK || resp.body.Allocation == 0 {
+			t.Fatalf("allocation %d after a release = %+v", i, resp.body)
+		}
+		resp.closeFDs(t)
+	}
+	// And a second close of the same allocation is idempotent.
+	if resp := exchange(t, child, listenRequest{Op: "close", Allocation: first.body.Allocation}); !resp.body.OK {
+		t.Fatalf("repeat close = %+v", resp.body)
+	}
+	if resp := exchange(t, child, listenRequest{Op: "close", Allocation: 999999}); !resp.body.OK {
+		t.Fatalf("unknown close = %+v", resp.body)
+	}
+}
+
+// TestRetainRejectsBeyondLiveCap covers the commit-time guard and rollback: the
+// bind pre-check can race with concurrent commits, so retainAllocation must
+// refuse and close the descriptor rather than exceed the cap.
+func TestRetainRejectsBeyondLiveCap(t *testing.T) {
+	m, child := newTestManager(t)
+	_ = child
+	channel := &runChannel{manager: m, runID: "run_cap", appID: "test.app", allocations: map[uint64]*listenerAlloc{}}
+	for i := range MaxListenersPerRun {
+		file, err := os.CreateTemp(t.TempDir(), "listener")
+		if err != nil {
+			t.Fatal(err)
+		}
+		alloc := &listenerAlloc{id: channel.nextAllocationID(), file: file, protocol: "tcp"}
+		if !channel.retainAllocation(alloc) {
+			t.Fatalf("allocation %d refused before the cap", i)
+		}
+	}
+	file, err := os.CreateTemp(t.TempDir(), "listener")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alloc := &listenerAlloc{id: channel.nextAllocationID(), file: file, protocol: "tcp"}
+	if channel.retainAllocation(alloc) {
+		t.Fatal("retainAllocation exceeded the live cap")
+	}
+	if channel.listeners != MaxListenersPerRun {
+		t.Fatalf("live count = %d, want %d", channel.listeners, MaxListenersPerRun)
+	}
+	// Releasing one slot makes room again.
+	channel.releaseAllocation(1)
+	file2, err := os.CreateTemp(t.TempDir(), "listener")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !channel.retainAllocation(&listenerAlloc{id: channel.nextAllocationID(), file: file2, protocol: "tcp"}) {
+		t.Fatal("a released slot was not reusable")
+	}
+	channel.close()
+}
