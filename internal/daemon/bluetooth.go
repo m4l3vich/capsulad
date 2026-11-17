@@ -19,6 +19,7 @@ import (
 	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
+	"capsulad/internal/sounds"
 	"capsulad/internal/uichanges"
 )
 
@@ -533,6 +534,13 @@ func (d *Daemon) watchBluetooth() {
 				d.logs.Infof("bluetooth", "", "source connected name=%q address=%s", ev.DeviceName, ev.DeviceAddress)
 				d.showBluetoothPulse(ring, bluetoothPulseCount)
 				d.showBluetoothIndicator(display)
+				// A source that just joined speaker mode is acknowledged
+				// audibly as well as visually: one cue per new connection,
+				// streamed under the master gain like every other framework
+				// cue. It is fire-and-forget so the audio route bring-up is
+				// never delayed; a resync of an already-connected source and
+				// a disconnect do not replay it.
+				d.playUISound(sounds.BluetoothConnected())
 				startVerify(ev.DeviceAddress, d.connectBluetoothAudio(ev.DeviceAddress))
 				// A new source session starts with no echo memory, and its own
 				// display gets the current level as soon as its transport exists.

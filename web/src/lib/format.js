@@ -5,6 +5,20 @@ export function pct(value) {
   return Math.round((Number(value) || 0) * 100)
 }
 
+/** Human byte size using binary units, e.g. "1.4 MiB". */
+export function formatBytes(bytes) {
+  const value = Number(bytes) || 0
+  if (value < 1024) return `${value} B`
+  const units = ['KiB', 'MiB', 'GiB']
+  let scaled = value / 1024
+  let index = 0
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024
+    index += 1
+  }
+  return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[index]}`
+}
+
 export function fixed(value, digits = 2) {
   return (Number(value) || 0).toFixed(digits)
 }

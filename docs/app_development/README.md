@@ -191,7 +191,6 @@ CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
 
 capsulad-cli app package . -out hello-segment.tar.gz
 capsulad-cli -data-dir /data/capsdemo app install hello-segment.tar.gz
-/etc/init.d/S99btctl.sh restart          # capsulad reads its registry at startup
 capsulad-cli -data-dir /data/capsdemo app start com.example.hello
 capsulad-cli -data-dir /data/capsdemo app runs com.example.hello
 capsulad-cli -data-dir /data/capsdemo logs -app com.example.hello -n 50
@@ -217,10 +216,12 @@ capsulad-cli -data-dir run/demo logs -app com.example.hello -n 50
 Two things to remember:
 
 - **Packaging happens on the build host, never on the device.** The device receives `.tar.gz`
-  artifacts and installs them.
-- **A newly installed package becomes visible after `capsulad` restarts.** The registry is read
-  at startup, so `app install` prints a reminder. Installing, removing or replacing a package
-  while its app is running is refused; stop the run first.
+  artifacts and installs them, from the Web UI **Apps** page or with `capsulad-cli app install`.
+- **Installing while the daemon runs is live; a stopped daemon activates the package at its next
+  start.** With capsulad listening, an accepted install, update or removal is visible to
+  `ListApplications` at once and `app install` says so; with it stopped, the package lands in
+  `<data-dir>/apps` and the CLI prints a restart reminder. Installing, removing or replacing a
+  package while its app is running is always refused; stop the run first.
 
 The full walkthrough, including manifest fields, deployment bundles and rollback, is in
 [packaging-deployment.md](packaging-deployment.md). A complete QuickJS app is in

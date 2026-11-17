@@ -3,13 +3,19 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/artifact"
 	"capsulad/internal/bus"
 	"capsulad/internal/manifest"
 	"capsulad/internal/provenance"
@@ -55,6 +61,14 @@ func (s *applicationService) ListRuntimes(ctx context.Context, _ *frameworkv1.Li
 }
 
 func (s *applicationService) GetBinaryProvenance(ctx context.Context, req *frameworkv1.GetBinaryProvenanceRequest) (*frameworkv1.BinaryProvenanceResult, error) {
+	// The result describes exactly one package tree. A replacement sets the old
+	// tree aside and drops the cached result, so the lookup, the verification
+	// and the cache store all happen under the package mutex: otherwise a
+	// verification that began before a swap could observe a mixed tree and
+	// cache a stale result after the invalidation, and the daemon would keep
+	// reporting the old binary for the new package.
+	s.d.pkgMu.Lock()
+	defer s.d.pkgMu.Unlock()
 	app, ok := s.d.reg.Get(req.AppId)
 	if !ok {
 		return nil, status.Error(codes.NotFound, "application is not installed")
@@ -156,6 +170,230 @@ func (s *applicationService) WatchRuns(req *frameworkv1.WatchRunsRequest, stream
 			}
 		}
 	}
+}
+
+// --- package administration -------------------------------------------------
+
+// InstallApplication accepts one application package as a .tar.gz stream and
+// activates it in the live registry. It is a local-administrator operation:
+// the caller gate runs before a single byte of the stream is read, so a
+// supervised application can never install a package.
+// installOutcome is one worker result.
+type installOutcome struct {
+	install PackageInstall
+	err     error
+}
+
+// superviseInstall applies the upload bounds to one running install. A timeout
+// is reported only when the supervisor wins the commit handshake; once the
+// worker has begun its commit, the real outcome is awaited and returned, so a
+// completed install can never be reported as "nothing was installed". The
+// clock is injected so the decision is testable without waiting.
+func superviseInstall(done <-chan installOutcome, src *packageStream, commit *installCommit,
+	idle, total, interval time.Duration, now func() time.Time) (installOutcome, error) {
+	started := now()
+	abandoned := func(why string) (installOutcome, error) {
+		// A finish that raced this tick wins: never turn a completed install
+		// into a timeout.
+		if out, ok := drainInstall(done); ok {
+			return out, nil
+		}
+		if !commit.abandon() {
+			// The worker is past the point of no return: report what actually
+			// happened, however long the swap takes.
+			return <-done, nil
+		}
+		// The abandon decision is final. If the worker still produced a
+		// pre-commit result before noticing, its reason is more useful than
+		// the timeout.
+		if out, ok := drainInstall(done); ok {
+			return out, nil
+		}
+		return installOutcome{}, status.Errorf(codes.DeadlineExceeded, "%s; nothing was installed", why)
+	}
+	for {
+		select {
+		case out := <-done:
+			return out, nil
+		case <-time.After(interval):
+			if silent := now().Sub(src.lastActivity()); silent >= idle {
+				return abandoned(fmt.Sprintf("the package upload stalled for %s", silent.Round(time.Second)))
+			}
+			if elapsed := now().Sub(started); elapsed >= total {
+				return abandoned(fmt.Sprintf("the package upload exceeded %s", total))
+			}
+		}
+	}
+}
+
+// drainInstall takes a result that is already available without waiting.
+func drainInstall(done <-chan installOutcome) (installOutcome, bool) {
+	select {
+	case out := <-done:
+		return out, true
+	default:
+		return installOutcome{}, false
+	}
+}
+
+// InstallApplication accepts one application package as a .tar.gz stream and
+// activates it in the live registry. It is a local-administrator operation:
+// the caller gate runs before a single byte of the stream is read, so a
+// supervised application can never install a package.
+func (s *applicationService) InstallApplication(stream frameworkv1.ApplicationService_InstallApplicationServer) error {
+	if err := s.d.requireAdministrativeCaller(stream.Context(), "installing an application package is a local administrator operation"); err != nil {
+		return err
+	}
+	src, err := openPackageStream(stream)
+	if err != nil {
+		return err
+	}
+	// The install runs in a worker so this handler can bound how long a client
+	// that stops sending may hold the single staging slot. Returning from this
+	// handler ends the RPC and cancels the stream context, which unblocks the
+	// worker's parked transport read (verified against the pinned
+	// google.golang.org/grpc v1.67.1); the worker then aborts extraction,
+	// removes its staging tree and releases the admission slot in its own
+	// defers. A derived context alone cannot wake that read, which is why the
+	// handler-return mechanism stays, and why the swap decision uses the
+	// installCommit handshake instead of a context check.
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	commit := &installCommit{}
+	done := make(chan installOutcome, 1)
+	go func() {
+		install, err := s.d.installPackageStream(ctx, src, commit)
+		done <- installOutcome{install: install, err: err}
+	}()
+	idle := s.d.installIdleBudget
+	if idle <= 0 {
+		idle = defaultInstallIdleBudget
+	}
+	interval := idle / 10
+	if interval > 2*time.Second {
+		interval = 2 * time.Second
+	}
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	out, err := superviseInstall(done, src, commit, idle, installTotalBudget, interval, time.Now)
+	if err != nil {
+		return err
+	}
+	if out.err != nil {
+		return src.refine(out.err)
+	}
+	return stream.SendAndClose(&frameworkv1.InstallApplicationResult{
+		Application:     s.d.appProto(out.install.App),
+		Replaced:        out.install.Replaced,
+		PreviousVersion: out.install.PreviousVersion,
+	})
+}
+
+func (s *applicationService) UninstallApplication(ctx context.Context, req *frameworkv1.UninstallApplicationRequest) (*frameworkv1.UninstallApplicationResult, error) {
+	if err := s.d.requireAdministrativeCaller(ctx, "removing an application package is a local administrator operation"); err != nil {
+		return nil, err
+	}
+	if err := s.d.UninstallPackage(req.GetAppId()); err != nil {
+		return nil, err
+	}
+	return &frameworkv1.UninstallApplicationResult{AppId: req.GetAppId()}, nil
+}
+
+// packageStream adapts the install request stream to an io.Reader for the
+// artifact layer. Chunk boundaries carry no meaning, and the running total is
+// bounded by artifact.MaxArchiveBytes before any byte reaches the staging
+// tree. A transport-level refusal is remembered so the caller can report it
+// instead of the generic archive error it caused.
+type packageStream struct {
+	stream frameworkv1.ApplicationService_InstallApplicationServer
+	// limit bounds the compressed archive. It is a field so a test can prove
+	// the refusal without streaming 65 MiB; production always uses the
+	// artifact bound.
+	limit int64
+	// lastRecvNS is the wall-clock time of the last received message. The
+	// supervising handler reads it to detect a client that stopped sending
+	// without closing the stream.
+	lastRecvNS atomic.Int64
+	rest       []byte
+	total      int64
+	problem    error
+}
+
+// touch records that the client delivered something.
+func (s *packageStream) touch() { s.lastRecvNS.Store(time.Now().UnixNano()) }
+
+// lastActivity reports when the stream last delivered a message.
+func (s *packageStream) lastActivity() time.Time { return time.Unix(0, s.lastRecvNS.Load()) }
+
+// openPackageStream consumes the stream's first message, which must be the
+// open frame, and returns the archive reader for the remaining messages.
+func openPackageStream(stream frameworkv1.ApplicationService_InstallApplicationServer) (*packageStream, error) {
+	first, err := stream.Recv()
+	if err == io.EOF {
+		return nil, status.Error(codes.InvalidArgument, "the package stream carries no messages")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if first.GetOpen() == nil {
+		return nil, status.Error(codes.InvalidArgument, "the first message of an application package stream must be the open frame")
+	}
+	src := &packageStream{stream: stream, limit: artifact.MaxArchiveBytes}
+	src.touch()
+	return src, nil
+}
+
+func (s *packageStream) Read(p []byte) (int, error) {
+	for {
+		if s.problem != nil {
+			return 0, s.problem
+		}
+		if len(s.rest) > 0 {
+			n := copy(p, s.rest)
+			s.rest = s.rest[n:]
+			s.touch()
+			return n, nil
+		}
+		msg, err := s.stream.Recv()
+		if err == io.EOF {
+			return 0, io.EOF
+		}
+		if err != nil {
+			s.problem = err
+			return 0, err
+		}
+		s.touch()
+		switch chunk := msg.GetChunk().(type) {
+		case *frameworkv1.InstallApplicationRequest_Content:
+			if len(chunk.Content) == 0 {
+				continue
+			}
+			s.total += int64(len(chunk.Content))
+			if s.total > s.limit {
+				s.problem = status.Errorf(codes.InvalidArgument,
+					"the package archive exceeds the %d-byte upload limit", s.limit)
+				return 0, s.problem
+			}
+			s.rest = chunk.Content
+		default:
+			s.problem = status.Error(codes.InvalidArgument,
+				"the open frame may only be the first message of an application package stream")
+			return 0, s.problem
+		}
+	}
+}
+
+// refine replaces the archive error caused by a failed stream with the failure
+// itself, so a limit or framing violation keeps its own status and message.
+func (s *packageStream) refine(err error) error {
+	if s.problem != nil {
+		return status.Convert(s.problem).Err()
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return status.Error(codes.InvalidArgument, "the package archive is incomplete")
+	}
+	return err
 }
 
 // --- per-app configuration -------------------------------------------------

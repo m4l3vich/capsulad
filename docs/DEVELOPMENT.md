@@ -11,7 +11,8 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Go 1.22.5 or newer | daemon, CLI, tools, Go SDK |
 | Rust 1.85 or newer with Cargo | `libcapsulad`, Rust binding |
 | C compiler | Go SDK cgo shim, C/C++ example, script hosts |
-| Node.js + npm | rebuilding the Web UI (`web/`) only; the built SPA is checked in |
+| Node.js + npm | rebuilding the Web UI (`web/`) and the Simon contract tests (`node --test`); the built SPA is checked in |
+| Python 3 | the PA and Internet Radio unit tests (`make test-pa`, `make test-radio`) |
 | `protoc` | regenerating Go bindings and the embedded descriptor after schema changes |
 
 ## Build profiles and targets
@@ -30,6 +31,7 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make web` | `npm ci && npm run build` into `internal/webui/dist` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
 | `make devapps` / `make dumbassistant` / `make marusia` | development apps and the two optional assistants: package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
+| `make simon` / `make pa` / `make radio` / `make radio-tuner` / `make homeassistant` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio front end with its native tuner companion, and the Home Assistant bridge (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
 | `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps` |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
@@ -112,8 +114,15 @@ and then packages it with `capsulad-cli app package DIR`, which writes `<id>-<ve
 beside the package directory: `make dumbassistant` leaves
 `build/apps/org.capsulad.dumbassistant-<version>.tar.gz`, `make marusia` leaves
 `build/apps/org.capsulad.marusia-<version>.tar.gz`, and `make devapps` leaves one archive per
-development app under `build/devapps`. `apps/devtools/build.sh` takes `PACKAGE=0` to stage
-the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli` to choose the packager.
+development app under `build/devapps`. The product apps follow the same layout:
+`make simon` leaves `build/apps/org.capsulad.simon-<version>.tar.gz`, `make pa`
+`org.capsulad.pa-<version>.tar.gz`, `make radio` `org.capsulad.radio-<version>.tar.gz` and
+`make radio-tuner` `org.capsulad.radio.tuner-<version>.tar.gz`. `apps/devtools/build.sh` takes
+`PACKAGE=0` to stage the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli`
+to choose the packager; `apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/tuner/build.sh`
+and `apps/homeassistant/build.sh` take the same two variables plus `OUT=`; `apps/radio/Makefile`
+owns the front end's package contents and the repository target only calls
+`make -C apps/radio package` with an output directory and a build-host packager.
 A cross build packages with the host-executable `build/bin/capsulad-cli-host`
 (`make capsulad-cli-host`), because the cross-target CLI cannot run on the build host.
 
@@ -132,10 +141,40 @@ capsulad-cli app remove APP_ID
 `app install` accepts an archive and treats a package directory as a developer convenience, not
 a separate format. It validates the manifest, the settings-UI document and any `[native_sdk]`
 requirement, stages the package under `<data-dir>/apps`, and renames it into place. An
-existing installation becomes an atomic `update`; a live run must be stopped first. A new
-package becomes visible after the daemon restarts, because the registry is read at startup.
-`app remove` also requires the app to be stopped. Built-in system apps have no package and
-cannot be installed, removed or shadowed.
+existing installation becomes an atomic `update`; a live run must be stopped first. Built-in
+system apps have no package and cannot be installed, removed or shadowed.
+
+Install and remove act on the **running** daemon. `app install` dials the socket first: when the
+daemon answers, the CLI streams the archive to `ApplicationService/InstallApplication` and the
+daemon installs it into the live registry, rescanning the catalog, dropping the cached
+provenance for that id and publishing an invalidation to the Web UI, so a new or replaced
+package is usable immediately and needs no restart. `app remove` likewise reaches
+`ApplicationService/UninstallApplication`. The same operations are exposed to the
+session-authenticated Web UI as `POST /api/apps` (raw `.tar.gz` body, 65 MiB cap — the 64 MiB
+unpacked budget plus gzip slack) and `DELETE /api/apps/{appID}`, behind the Assets-style
+admin session on the Apps page; API keys are refused.
+
+Only when the socket is provably absent (`ENOENT`, `ECONNREFUSED`, `ENOTSOCK`) does the CLI fall
+back to the previous on-disk path under `<data-dir>/apps` and print that the daemon must be
+restarted to see the change. Any other dial failure (timeout, permission, transport) refuses
+rather than writing the package tree behind a daemon that may be live, and a daemon that answers
+with `UNIMPLEMENTED` is told to be redeployed or stopped, never silently downgraded. A streamed
+upload is supervised — one storage admission at a time, 60 s idle and 30 min total, with a
+free-space guard and a native-SDK preflight — so a stalled or oversized transfer is refused
+(too slow, too large, no space, malformed) instead of occupying the package tree. A compiled-in
+system app, a not-installed app and a **running** app are refused with their own message —
+`app <id> is running (run <run-id>); stop it before replacing the package`, `… before removing`,
+`app <id> is a built-in system application and cannot be replaced`/`… uninstalled`,
+`app <id> is not installed`.
+
+A fresh install is not started automatically (`start_on_boot` applies at daemon start only), an
+update never resurrects an app the user stopped, and removal keeps the app's stored settings
+under `<data-dir>/app-settings/<app-id>/settings.json` and never rewrites a persisted
+default-provider selection. With the daemon stopped or with `deploy -restart never`, the
+on-disk path above still applies: those packages become visible at the next start. (The live
+install/remove path and the Apps page are simulator-verified, with the browser session and the
+refusals recorded in
+[VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).)
 
 `app start` on a singleton app delivers an invocation instead of spawning a second process.
 
@@ -370,11 +409,47 @@ selection case and no backend for them, so any other `-platform` value fails wit
 ## Tests
 
 ```sh
-make test          # root Go module, sdk/go, Rust binding, native crate, C++ example, both assistants
-make test-race     # root Go module with -race
-make test-sdk      # ABI check, Go binding, Rust binding, native crate, C++ header compile
-make test-marusia  # the apps/marusia module's tests from the repository root
+make test              # every Go module: root, sdk/go, both assistants, the tuner and the bridge,
+                       # the Rust binding, the native crate and the C++ header compile
+make test-race         # root Go module with -race
+make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
+make test-marusia      # the apps/marusia module's tests from the repository root
+make test-radio-tuner  # the nested apps/radio/tuner Go module
+make test-homeassistant # the nested apps/homeassistant Go module
 ```
+
+The script-app suites need Node or CPython, so they are not part of `make test`;
+`make test-apps` runs them together with the two Go modules above:
+
+```sh
+make test-apps         # test-simon, test-pa, test-radio, test-radio-tuner, test-homeassistant and test-interpreter
+make test-interpreter  # python3 interpreter/micropython/sdk_test.py (host prelude + timers)
+make test-simon        # node --test apps/simon/test/*.test.mjs
+make test-pa           # python3 apps/pa/tests/test_wav.py and test_app.py
+make test-radio        # the app's own target: python3 -m unittest discover in apps/radio/tests
+```
+
+`test-interpreter` needs no built host: the MicroPython prelude is pure Python, and its self-test
+covers timer registration, the 16-callback cap, cancellation during a pass, clock safety,
+exception isolation, the poll bound and stop-on-return.
+
+`test-simon` loads the shipped `main.js` into a fake QuickJS host and asserts the app's
+observable requests, frames and terminal cleanup. `test-pa` exercises the shipped script's WAV
+parser and protobuf helpers under CPython. `test-radio` imports the shipped `main.py`
+with a scripted `capsulad` module and an independent protobuf codec, and drives settings
+snapshots, actions, launch invocations, media-contract calls and tuner pushes.
+
+The simulator end-to-end runs live with their apps and need `make capsulad capsulad-cli`,
+`make native` and `make interpreter-micropython` first:
+
+```sh
+make -C apps/radio e2e         # the radio + its test tuner fixture against a simulator daemon
+make -C apps/radio e2e-tuner   # live: the native tuner + a real MP3 station (needs network + the tuner)
+sh apps/pa/tests/e2e.sh        # install, boot, play, rejections and cancellation for the PA service
+```
+
+Each uses a test-only companion that is never installed on a device: the radio's
+`tests/fixture-tuner` and PA's `tests/caller`.
 
 `make test` does not run the interpreters or device backends. Focused commands:
 
@@ -434,6 +509,58 @@ capsulad-cli -data-dir build/demo app install \
 `make devapps` compiles and packages on the build host and needs a built native runtime
 (`make native`) plus, for cross builds, a target C compiler. See [DEV_APPS.md](DEV_APPS.md) for
 what each development app does, and for `PACKAGE=0`, `APP=`, `OUT=` and `CAPSULAD_CLI=`.
+
+### Product apps
+
+The first-party product packages use the same rule as the assistants: compile (when there is
+anything to compile) and package on the build host, one `<id>-<version>.tar.gz` beside the
+staged directory under `build/apps`. None of them is part of `all`, `release` or `debug`.
+
+| Target | Package | What it is |
+|---|---|---|
+| `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS memory game: the four side keys are the symbols, the segment display shows the sequence and the score, and holding the unmarked centre leaves the game. The package is `manifest.toml` plus `main.js`; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
+| `make pa` | `org.capsulad.pa` | PA Speaker, a background MicroPython service: another app routes one `SpeakerService/Play` (a streamed WAV) and the app plays it through the framework speaker, replying after the queued audio drains. |
+| `make radio` | `org.capsulad.radio` | Internet Radio, a MicroPython front end: station list, segment display, the standard media contract, and no network or decoder of its own. |
+| `make radio-tuner` | `org.capsulad.radio.tuner` | The native companion that fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and pushes 200 ms PCM chunks to the radio app over the app bus. |
+| `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant bridge, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
+
+```sh
+make native                                            # the tuner and the bridge link the shared SDK
+make product-apps                                      # all five: simon, pa, radio, radio-tuner, homeassistant
+sh apps/radio/tuner/build.sh                           # tuner alone; OUT=/PACKAGE=/CAPSULAD_CLI= honored
+capsulad-cli app install build/apps/org.capsulad.radio.tuner-<version>.tar.gz
+```
+
+The Simon package needs a QuickJS host with `Call.tryRecv`, so run `make interpreter-quickjs`
+before `make deploy-bundle` when Simon ships in the bundle: the bundle's `lib/` is what reaches
+the device, and an older host makes the app log `unavailable: this QuickJS host has no
+Call.tryRecv; rebuild the interpreter host` and stop rather than play.
+
+Each app's own entrypoint is authoritative for its package contents:
+`apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/Makefile` (`make -C apps/radio package`),
+`apps/radio/tuner/build.sh` and `apps/homeassistant/build.sh` — all of them honor `OUT=`,
+`PACKAGE=0` and `CAPSULAD_CLI=` where they package. The three script apps compile nothing; the
+tuner and the bridge are native and need the host native runtime (`make native`) because their
+binaries link the shared SDK.
+
+The tuner's and the bridge's build host artifacts are **simulator** binaries; a device package is
+the same script with the target toolchain, exactly like the other native apps:
+
+```sh
+GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/radio/tuner/build.sh
+GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/homeassistant/build.sh
+```
+
+Install both radio halves: the front end alone reports the `no tuner provider is running` state
+instead of pretending to play, and the tuner discovers its player from its `player_app` setting
+or the player finds it through `AppInterfaceService.ListInterfaces`. The tuner accepts `Tune` and
+`Stop` only from that player app's currently ready run — it checks the daemon-relayed caller run
+id against the run the framework reports for the app and answers `PERMISSION_DENIED` otherwise,
+so a CLI, Web UI or third-party app call is refused. The tuner refuses
+AAC/HE-AAC, Ogg/Opus/Vorbis, FLAC, MP4/M4A, WAV and HLS at `Tune` with `unsupported codec: …`, so
+the station list must be MP3 (MPEG-1/MPEG-2 Layer III). See
+[`apps/radio/README.md`](../apps/radio/README.md) for the station-list format, the actions and the
+player/tuner wire contract.
 
 ## Administration commands
 

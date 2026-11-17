@@ -1,0 +1,42 @@
+id = "org.capsulad.radio.testtuner"
+name = "Radio Test Tuner"
+version = "0.1.0"
+description = "Test-only tuner fixture for the Internet Radio app: answers Tune with a synthetic tone and pushes it over the raw-protobuf player contract. It does not open a network connection and is never shipped."
+background = false
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "micropython"
+path = "main.py"
+sdk = "0.5"
+
+[[settings]]
+key = "player"
+label = "Player app id"
+description = "Only this app id may be tuned; Tune refuses any other target."
+type = "text"
+default = "org.capsulad.radio"
+
+[[settings]]
+key = "chunks"
+label = "Chunks per tune"
+description = "How many 200 ms tone chunks are pushed for one Tune."
+type = "integer"
+default = 25
+min = 1
+max = 500
+
+[[settings]]
+key = "frequency"
+label = "Tone frequency (Hz)"
+description = "Square-wave frequency of the synthetic station audio."
+type = "integer"
+default = 220
+min = 40
+max = 2000
+
+[[interfaces]]
+service = "org.capsulad.radio.v1.RadioTunerService"
+version = "v1"

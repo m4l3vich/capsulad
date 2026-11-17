@@ -24,6 +24,12 @@ const (
 	// Bluetooth invalidates observed adapter status (incoming/discoverable/
 	// powered/name) after the backend or hardware changes it.
 	Bluetooth
+	// Apps invalidates the installed-application listing after a package was
+	// installed, replaced or removed. It carries no app id: a subscriber
+	// rebuilds the application views it currently shows from the authoritative
+	// registry through the framework API. This is the only invalidation a
+	// package mutation publishes; run transitions keep their own watch stream.
+	Apps
 )
 
 type Hub struct {

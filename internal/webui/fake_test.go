@@ -67,6 +67,14 @@ type fakeBackend struct {
 	btStatus *frameworkv1.BluetoothStatus
 	// btStatusErr fails GetBluetoothStatus so the error path is observable.
 	btStatusErr error
+
+	// installedArchive is the byte stream the fake daemon received through
+	// InstallApplication, so a route test can prove the browser's body reached
+	// the daemon unchanged. installErr/uninstallErr model a refusal.
+	installedArchive []byte
+	installErr       error
+	uninstallCalls   []string
+	uninstallErr     error
 }
 
 func newFakeBackend() *fakeBackend {
@@ -304,6 +312,55 @@ func (f *fakeApps) WatchRuns(req *frameworkv1.WatchRunsRequest, stream grpc.Serv
 }
 func (f *fakeApps) GetBinaryProvenance(context.Context, *frameworkv1.GetBinaryProvenanceRequest) (*frameworkv1.BinaryProvenanceResult, error) {
 	return &frameworkv1.BinaryProvenanceResult{Status: frameworkv1.ProvenanceStatus_PROVENANCE_NOT_PROVIDED}, nil
+}
+func (f *fakeApps) InstallApplication(stream grpc.ClientStreamingServer[frameworkv1.InstallApplicationRequest, frameworkv1.InstallApplicationResult]) error {
+	f.b.mu.Lock()
+	refusal := f.b.installErr
+	f.b.mu.Unlock()
+	if refusal != nil {
+		return refusal
+	}
+	var archive []byte
+	opened := false
+	closed := false
+	for !closed {
+		msg, err := stream.Recv()
+		switch {
+		case err == io.EOF:
+			closed = true
+		case err != nil:
+			return err
+		default:
+			switch chunk := msg.GetChunk().(type) {
+			case *frameworkv1.InstallApplicationRequest_Open:
+				opened = true
+			case *frameworkv1.InstallApplicationRequest_Content:
+				archive = append(archive, chunk.Content...)
+			}
+		}
+	}
+	if !opened {
+		return status.Error(codes.InvalidArgument, "the open frame is missing")
+	}
+	f.b.mu.Lock()
+	f.b.installedArchive = archive
+	f.b.mu.Unlock()
+	return stream.SendAndClose(&frameworkv1.InstallApplicationResult{
+		Application: &frameworkv1.InstalledApplication{
+			AppId: "org.example.new", DisplayName: "New App", Version: "1.2.0", CanUninstall: true,
+		},
+		Replaced:        true,
+		PreviousVersion: "1.1.0",
+	})
+}
+func (f *fakeApps) UninstallApplication(_ context.Context, req *frameworkv1.UninstallApplicationRequest) (*frameworkv1.UninstallApplicationResult, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	if f.b.uninstallErr != nil {
+		return nil, f.b.uninstallErr
+	}
+	f.b.uninstallCalls = append(f.b.uninstallCalls, req.GetAppId())
+	return &frameworkv1.UninstallApplicationResult{AppId: req.GetAppId()}, nil
 }
 func (f *fakeApps) Launch(context.Context, *frameworkv1.LaunchRequest) (*frameworkv1.LaunchResult, error) {
 	return &frameworkv1.LaunchResult{RunId: "run-2", InvocationId: "inv-1", SpawnedNewProcess: true}, nil

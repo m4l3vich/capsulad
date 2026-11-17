@@ -1,0 +1,139 @@
+// Companion tuner contract for org.capsulad.radio.
+//
+// The radio app is a MicroPython script app: it owns the station list, the
+// control surface (standard media contract, settings, actions, display and
+// speaker streams) but it cannot open an outbound connection and the platform
+// has no audio decoder for scripts. A companion "tuner" app does the network
+// fetch and the decode and pushes decoded PCM to the radio.
+//
+// Encoding on the app bus is raw protobuf: neither side needs a registered
+// descriptor to call or serve these methods, and PCM never pays a base64 or
+// JSON round trip. This file is the authoritative wire contract; it is also
+// published as proto/radio.protoset so DescribeInterface can serve it.
+//
+// Directions
+//   * player -> tuner:  Tune (required), Stop (optional, best effort)
+//   * tuner -> player:  Push (one routed unary call per chunk)
+//
+// Push is one call per chunk on purpose. The MicroPython host has no threads
+// and no timers, so the app cannot pump a long-lived stream: every chunk that
+// arrives is one event on the app bus, which keeps Pause/Stop/SkipNext/consume
+// responsive and gives the tuner natural backpressure (see Push below).
+
+syntax = "proto3";
+
+package org.capsulad.radio.v1;
+
+option go_package = "capsulad/apps/radio/gen/radiov1;radiov1";
+
+// Served by the radio app (app id org.capsulad.radio).
+service RadioPlayerService {
+  // Push one decoded chunk of the active session, or its last message.
+  //
+  // The player authorizes the caller, not just the payload: only the run of the
+  // tuner app it tuned (the daemon-verified caller run id resolved through
+  // AppInterfaceService) may push. Anything else is refused with
+  // `accepted=false, detail="unauthorized caller"` and changes no state. If the
+  // authorization lookup itself fails, a push from the run that is serving the
+  // session ends it with `detail="push authorization unavailable"` (the chunk is
+  // lost either way), while an unknown or foreign caller is only refused.
+  //
+  // The tuner MUST wait for the PushResult before sending the next chunk: the
+  // player writes the chunk to the framework speaker stream, so the reply is
+  // the backpressure signal. `accepted` false means "stop pushing this
+  // session now and drop it"; `detail` says why (`stale session`, `paused`,
+  // `stopped`, `superseded`, `no playback stream`, `over capacity`).
+  //
+  // Recommended chunk size 80-500 ms of audio (200 ms is a good default);
+  // the framework caps one playback chunk at 1 MiB, so keep pcm well under
+  // that (256 KiB is safe at 48 kHz stereo PCM_S16LE for 680 ms).
+  rpc Push(PushRequest) returns (PushResult);
+}
+
+message PushRequest {
+  // Tuner-side monotonic chunk counter, starting at 1. Diagnostics only.
+  uint32 sequence = 1;
+  // Required exact echo of TuneResult.session_id. A message without it, or
+  // with another session, is refused as stale and changes no state, so an
+  // aborted or superseded session can never leak audio or a terminal event
+  // into the current one.
+  string session_id = 2;
+  // Interleaved little-endian PCM in the format below. Required unless
+  // finished is set. At most 1 MiB.
+  bytes pcm = 3;
+  uint32 sample_rate_hz = 4;
+  uint32 channels = 5;
+  // capsulad.framework.v1.SampleFormat: 1 = PCM_S16LE, 2 = PCM_F32LE.
+  uint32 sample_format = 6;
+  // Frame offset of the first frame of this chunk inside the session.
+  // Diagnostics and gap accounting only; 0 is accepted.
+  uint64 first_frame = 7;
+  // A gap precedes this chunk (dropped network audio or a decode skip).
+  bool discontinuity = 8;
+  uint32 dropped_frames = 9;
+  // Optional now-playing metadata, shown through the media contract.
+  string title = 10;
+  string artist = 11;
+  // Last message of the session. May carry no pcm.
+  bool finished = 12;
+  // The session ended with an error; `detail` names it.
+  bool failed = 13;
+  string detail = 14;
+}
+
+message PushResult {
+  bool accepted = 1;
+  string detail = 2;
+}
+
+// Served by the companion tuner app.
+service RadioTunerService {
+  // Fetch, decode and start pushing one station. The tuner answers after the
+  // stream is established (or with accepted=false and a reason) and then
+  // pushes chunks to PushRequest.player_app_id until it is refused, told to
+  // stop, or the stream ends. A tuner serves one session at a time: a new
+  // Tune supersedes the previous session.
+  rpc Tune(TuneRequest) returns (TuneResult);
+  // Best effort: the player asks the tuner to drop a session (stop, pause or
+  // station change). A tuner that does not implement it must end the call
+  // with UNIMPLEMENTED; the player treats that as "refused pushes will stop
+  // it anyway" and carries on. Either way a session is also dropped when the
+  // player refuses its pushes.
+  rpc Stop(StopRequest) returns (StopResult);
+}
+
+message TuneRequest {
+  // Player-generated, opaque session id. Every push of this session carries
+  // it, and the tuner echoes it in TuneResult.session_id.
+  string session_id = 1;
+  // Station stream URL from the player's station list.
+  string url = 2;
+  // Station display name, for the tuner's own logs.
+  string station_name = 3;
+  // App id the tuner must push to (default org.capsulad.radio). This is a
+  // target hint, not the authorization: the tuner authorizes the *caller* by
+  // the daemon-verified caller run id (ServerCall.CallerRunID()) resolved
+  // through AppInterfaceService for its configured player app, and refuses
+  // anything else with PERMISSION_DENIED before dialing the URL.
+  string player_app_id = 4;
+}
+
+message TuneResult {
+  bool accepted = 1;
+  string detail = 2;
+  // Must equal TuneRequest.session_id when accepted.
+  string session_id = 3;
+  // Informational: container/codec the tuner actually used, for example
+  // "audio/mpeg". Never required by the player.
+  string content_type = 4;
+}
+
+message StopRequest {
+  string session_id = 1;
+  string detail = 2;
+}
+
+message StopResult {
+  bool accepted = 1;
+  string detail = 2;
+}

@@ -8,6 +8,7 @@ import { dismissToast, notify } from './lib/toast.js'
 import ToastHost from './components/ToastHost.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
+import AppsView from './views/AppsView.vue'
 import SettingsView from './views/SettingsView.vue'
 import AssetsView from './views/AssetsView.vue'
 import AccessView from './views/AccessView.vue'
@@ -18,6 +19,7 @@ let recovering = null
 
 const nav = [
   { path: '/', label: 'Overview' },
+  { path: '/apps', label: 'Apps' },
   { path: '/settings', label: 'Settings' },
   { path: '/assets', label: 'Assets' },
   { path: '/access', label: 'Access' },
@@ -26,6 +28,7 @@ const nav = [
 
 const views = {
   '/': OverviewView,
+  '/apps': AppsView,
   '/settings': SettingsView,
   '/assets': AssetsView,
   '/access': AccessView,
@@ -199,8 +202,8 @@ async function signOut() {
         <div class="card-body items-start gap-3">
           <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Not found</p>
           <h1 class="text-xl font-semibold">This page does not exist</h1>
-          <p class="text-sm text-base-content/70">The console has Main, Settings, Assets, Access and Diagnostics. Use the navigation above or return to Main.</p>
-          <a v-bind="link('/')" class="btn btn-primary btn-sm">Go to Main</a>
+          <p class="text-sm text-base-content/70">The console has Overview, Apps, Settings, Assets, Access and Diagnostics. Use the navigation above or return to Overview.</p>
+          <a v-bind="link('/')" class="btn btn-primary btn-sm">Go to Overview</a>
         </div>
       </section>
     </main>

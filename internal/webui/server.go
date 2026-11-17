@@ -131,6 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.anyAuth(s.apiStatus))
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
+	mux.HandleFunc("POST /api/apps", s.sessionOnly(s.installApp))
+	mux.HandleFunc("DELETE /api/apps/{appID}", s.sessionOnly(s.removeApp))
 	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
 	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))
 	mux.HandleFunc("DELETE /api/assets", s.sessionOnly(s.deleteAsset))

@@ -182,15 +182,17 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   benchmark. Loud music or lyrics can open or satisfy a turn, quiet speech can be missed, and there
   is no automatic music cancellation, AEC or speaker identification.
 - **Audio cues.** A volume step plays the embedded volume cue at the new level; the microphone key
-  plays distinct mute and unmute cues. The startup jingle plays once on installation, then only when
-  `startup_sound_enabled` is on (off by default). Cues are framework playback streams under the
-  master gain: they never block boot or input handling, and each toggle or step produces exactly one
-  cue. The master volume is a ceiling on every app's contribution, the mixer holds its output below
-  full scale with a soft limiter, and the PulseAudio **sink** is pinned at unity at startup and on
-  volume changes, so the sink stage cannot rescale framework output. That pin covers the sink
-  (device) volume only: `pacat`'s per-stream sink-input volume is a separate PulseAudio stage that
-  the pin neither sets nor reads back, so a stream volume restored by PulseAudio's stream-restore
-  module could still rescale the framework's output, and it is not part of this guarantee.
+  plays distinct mute and unmute cues; a Bluetooth source that connects while the speaker accepts
+  inbound links (speaker mode) plays the embedded connection cue (`question.wav`) once. The startup
+  jingle plays once on installation, then only when `startup_sound_enabled` is on (off by default).
+  Cues are framework playback streams under the master gain: they never block boot or input
+  handling, and each toggle or step produces exactly one cue. The master volume is a ceiling on
+  every app's contribution, the mixer holds its output below full scale with a soft limiter, and
+  the PulseAudio **sink** is pinned at unity at startup and on volume changes, so the sink stage
+  cannot rescale framework output. That pin covers the sink (device) volume only: `pacat`'s
+  per-stream sink-input volume is a separate PulseAudio stage that the pin neither sets nor reads
+  back, so a stream volume restored by PulseAudio's stream-restore module could still rescale the
+  framework's output, and it is not part of this guarantee.
 - **Wi-Fi fallback and captive portal.** When no saved network connects within the bounded startup
   attempt (or none is saved), the daemon raises the setup AP instead of leaving the speaker
   unreachable: SSID from the first 32 UTF-8 bytes (rune-aligned) of the live Bluetooth adapter
@@ -219,12 +221,14 @@ from routing to driver submission; acoustics and photons are separate, explicitl
 - **Brightness.** Global brightness affects static frames too. Automatic mode retains the visible 5 %
   floor and discards stale cache entries when its mode changes; manual zero is explicit off. Ring
   frame deduplication keys on pixels **and** brightness, so a brightness-only change is still written.
-- **Bluetooth.** Connect shows three blue ring pulses and a two-second `bt` display; disconnect shows
-  exactly one blue pulse and no glyph, and the selected display baseline is never covered by a
-  disconnect notice. The native A2DP sink is verified armed for the current adapter generation before
-  the adapter can be made connectable or discoverable; a lost registration is repaired before the next
-  connect and a failed one is reported as not ready. A connection is also verified to have an A2DP
-  transport: within about five seconds of the profile request, a source without a
+- **Bluetooth.** Connect shows three blue ring pulses, a two-second `bt` display and one play of the
+  embedded connection cue (`question.wav`); a boot-restored source and a coalesced resync do not
+  replay the cue. A disconnect shows exactly one blue pulse, no glyph and no cue, and the selected
+  display baseline is never covered by a disconnect notice. The native A2DP sink is verified armed
+  for the current adapter generation before the adapter can be made connectable or discoverable; a
+  lost registration is repaired before the next connect and a failed one is reported as not ready.
+  A connection is also verified to have an A2DP transport: within about five seconds of the profile
+  request, a source without a
   `MediaTransport1` carrying the A2DP sink UUID is reported with the sentence "audio link is not
   A2DP" and the daemon asks that source for its A2DP source profile (`Device1.ConnectProfile`,
   UUID `0000110a`) once per source — it never disconnects the source to renegotiate, so a peer that
@@ -265,6 +269,164 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   Selecting a built-in starts it immediately, while the explicit none choice leaves its output blank
   and survives restart. `Launch` on a stopped built-in starts exactly one run under its stable
   `builtin:<app_id>` ID, and stopping an unselected built-in leaves it stopped.
+- **Panel game (`org.capsulad.simon`).** A launch opens a captured `display.segment.front`
+  presentation and acquires a full-panel capture on `touch.panel.main`, shows `0000` with the
+  colon on and starts round 1. While the game runs *every* panel action belongs to it: the four
+  side keys are the four symbols (north `mic_toggle`=1, east `volume_up`=2, south `play_pause`=3,
+  west `volume_down`=4) and the framework's volume, mute, media and assistant handling is
+  suppressed. A round replays the whole growing sequence in the left cell at 320 ms on / 140 ms
+  off; while the game waits for input the four cells show the zero-padded score with the colon on;
+  a completed round shows the score with all decimal points for 250 ms; a wrong symbol shows four
+  dashes (mask `0x40`) for 900 ms and then the final score with the colon off, and any side key
+  starts a new game. Holding the unmarked centre for at least 800 ms is the documented exit, and
+  the host's `Call.tryRecv` surfaces that press within about 20 ms even mid-replay: the press
+  freezes the replay and shows the dashes, and the release exits immediately (simulator: press
+  18 ms into round 2, exit 0.5 ms after a 1018 ms release). A short tap resumes the frozen replay,
+  and side keys during a replay are ignored rather than queued. On exit the app cancels its input
+  subscription and both capture streams, sends `ClosePresentation`, awaits the stream end and
+  stops, so the configured baseline returns (verified by `capsulad.clock` regaining
+  `display.segment.front`). The game needs a `display.segment.front` with at least four digits and
+  refuses one with fewer; it omits the colon and the decimal points when the display does not
+  advertise them, so a reduced panel degrades instead of showing a wrong frame. A timed read is a
+  fatal error in that host, so the game needs one with
+  `Call.tryRecv`/`tryRecvBytes`: ship the matching `lib/capsulad-quickjs` from
+  `make interpreter-quickjs`, otherwise the app logs `unavailable: this QuickJS host has no
+  Call.tryRecv; rebuild the interpreter host` and stops cleanly instead of playing. The host closes
+  the app bus just before the process exits; the daemon's lost-connection handler
+  (`onAppDisconnect` → `StopCrashed`) then marks the run stopping and sends SIGTERM. Depending on
+  which wins, the run is recorded as 143 "stopped" (signal landed) or 0 "stopped" (process exited
+  first). Cleanup has already completed either way; the crashed path sets `restartAfterStop`, but
+  Simon declares `restart_on_failure=false` and is not a selected provider, so nothing relaunches
+  it.
+- **PA announcement (`org.capsulad.pa`).** A background service that is already running; the
+  trigger is a routed `Play` call carrying one streamed RIFF/WAVE file. Feedback is one
+  `PlayResult` per accepted clip — its `detail` names the WAV's own format (`played 3200 frames at
+  16000 Hz/1 ch`) — plus one `pa:` log line per call (`played`/`rejected`/`stalled`/`cancelled`,
+  carrying both the WAV and mixer formats) and the daemon's own playback open/close records; there
+  is no presentation, no microphone and no volume control (master volume stays administrator-only).
+  The app holds one playback stream per call at the current master gain, opens it without an
+  internal deadline so a slow but conforming caller is not cut off, and releases it on every
+  terminal path; the 15 s wait for the next request frame, the bounded drain and caller
+  cancellation are the only terminators, and a closed framework stream is reported as
+  `UNAVAILABLE`. A frame that carries no WAV bytes at all (an empty message, an empty `data`
+  field, or only other fields) is not progress: it ends the call with `INVALID_ARGUMENT` and
+  `request frame N carries no WAV bytes`, so one caller cannot hold the app — and a queued second
+  caller — for its whole routed deadline by sending no-ops; a one-byte frame is still progress.
+  A call is held for at most the caller's own routed deadline (30 s by default, 5 minutes at
+  most, enforced by the daemon as a cancel), so a second caller waits for the current clip plus
+  at most the owner's remaining deadline. The `max_seconds` bound (1–60, default 30) follows the
+  stored setting — a raised or lowered value applies to the next clip (an earlier build silently
+  reset it to the default on every boot) — and a clip over it is refused before it starts, while
+  an unknown-length stream is stopped at the bound. One call is served at a time: a second caller
+  waits, and only the caller that owns the call can end it, by cancelling. At most 1 MiB of RIFF
+  chunks may precede the `data` chunk; beyond that the call ends `INVALID_ARGUMENT` with a detail
+  naming the limit.
+- **Internet radio (`org.capsulad.radio` + `org.capsulad.radio.tuner`).** The front end owns the
+  station list, the display and the standard media contract; the native companion owns the
+  socket and the decoder. Play/tune shows the station number with a dark colon while the tuner
+  dials, a lit colon while playing, the last decimal point while paused, four dashes on error
+  until `stop`/`dismiss` or a new `play`, and no presentation at all when stopped, which restores
+  the selected baseline. While it is active the app holds a routing capture on
+  `display.segment.front`, so the station display wins over the configured default app, and it
+  releases that capture before the presentation closes. A bare launch — including the invocation
+  a boot start delivers — only makes sure the app is running and never starts audio; play needs
+  the `play` action, a `station` launch argument, the `station` setting or a media command. A
+  short circle tap follows the normal media contract (the app is a standard provider, so the Web
+  UI "Now playing" panel and the swipes drive it), and the circle key's dismissal runs the app's
+  `dismiss` action. Pause is not a parked buffer: the player answers `PLAYBACK_PAUSE` and refuses
+  further tuner pushes (`paused`), so the tuner drops its session and resuming is a fresh `Tune`
+  with a new session id. Next/previous wrap the list and persist the new `station` number with a
+  compare-and-swap update; `autoplay` plays once, at the first settings snapshot after startup,
+  and never restarts a radio the user stopped. The two halves authorize each other with the
+  daemon-verified caller run id: the tuner accepts `Tune`/`Stop` only from its configured player's
+  ready run, and the player accepts a push only from the run of the tuner app it tuned (resolved
+  through `AppInterfaceService.ListInterfaces`), refusing a foreign or unnamed caller as
+  `unauthorized caller` before anything is written. When the push-authorization lookup itself
+  fails, only the run that is *serving* this session can end it — the session fails at once with
+  `push authorization unavailable` (error state, four dashes, `PLAYBACK_STOPPED`) — while an
+  unknown or foreign caller is merely refused `unauthorized caller` and can never end playback
+  through a lookup failure. `session_id` must be an exact, non-empty echo:
+  a missing or different id is refused as `stale session` and changes no state, so a superseded or
+  foreign session's terminal message cannot end the current one. Resuming after a pause discards
+  the paused tail — the player aborts the old queue and opens a fresh session, so nothing is
+  replayed and the previous station's tail can never surface. One no-audio bound covers both
+  phases: while buffering, a session that accepts no audio within **60 s** of `Tune` returning
+  ends with `tuner did not start (no audio for 60000 ms)`; while playing, no queued audio for 60 s
+  ends it with `tuner stalled (no queued audio for 60000 ms)`. The bound follows the tuner's retry
+  budget — `(1+12)+(2+12)+(4+12) = 43 s` worst case plus a 10 s first-chunk idle — so a legitimate
+  retry window is never pre-empted while a dead or hung tuner is still bounded. A natural end
+  (`finished=1`) half-closes and drains without blocking the loop: the phase stays `playing` while
+  the queued tail plays and the session becomes `stopped` when the daemon ends the event stream,
+  but a terminal `finished` that carries no audio at all returns straight to `stopped`
+  (`station stream ended`). `Pause` during that drain is a stop — the speaker stream is already
+  half-closed, so it replies `accepted=true, detail="stream ended"`, discards the tail and reports
+  `PLAYBACK_STOPPED` instead of stranding the player in `PLAYBACK_PAUSED` with no stream;
+  `Stop`/`dismiss`/a station change abort a drain the same way, and a drain unfinished after 30 s
+  is aborted. The media contract requires a
+  non-empty `playerId` on `GetStatus`/`Play`/`Pause`/`SkipNext`/`SkipPrevious`
+  (`INVALID_ARGUMENT` when it is missing, `NOT_FOUND` for an unknown player, `UNIMPLEMENTED` for an
+  unknown method), and the script host's single-threaded loop bounds a blocking `Tune` at 25 s and
+  a best-effort `Stop` at 2 s, so a stop, dismiss or next that arrives during a dial applies when
+  the dial returns. A station switch, a player refusal, an app stop or three failed reconnects in
+  30 s ends the session and releases the socket, decoder, stream and display. A dead or stalled
+  tuner cannot leave a silent "playing" state, even with no user activity: the app registers an
+  autonomous watchdog at startup on the MicroPython host's repeating callback
+  (`capsulad.every(500, …)` with `capsulad.monotonic_ms()`, which runs between dispatched events
+  and from the idle poll timeout) and uses two independent signals. *Liveness:* every four ticks
+  (≈2 s) the run that last pushed for this session must still be the ready **run** of the tuned
+  tuner app in `ListInterfaces` — a supervisor-restarted tuner has a new run id and counts as gone
+  — checked with an 800 ms budget, and a lookup error is never treated as death; that path ends
+  with `tuner stopped (run is no longer ready)`.
+  *Dry queue:* the speaker
+  stream's own `frames_queued` — not `frames_played`, which counts mixed output frames including
+  silence — must show queued audio at least once every 60 s, which bounds a live-but-hung tuner;
+  the bound is derived from the tuner's three-reconnect budget
+  (`(1+12)+(2+12)+(4+12) = 43 s`), every successful chunk write resets that clock, and the path
+  ends with `tuner stalled (no queued audio for 60000 ms)`. Both paths end in the error state
+  (four dashes, `PLAYBACK_STOPPED` in the contract) and log
+  `radio: playback failed: <detail>` then `radio: state error <detail>`; an unexpected end of
+  stream or a `STREAM_CLOSED`/`DAEMON_SHUTDOWN` notice ends the session immediately, and a
+  framework lookup failure is never treated as tuner death. Recovery is only `play`/`stop`/
+  `dismiss`. The timer API is bounded and documented in the application manual: callbacks run on
+  the event thread between dispatched events and from the idle poll timeout, a slow callback slips
+  to `now + interval` (no catch-up storm), exceptions are logged as `timer handler failed: …`
+  without ending the run and the schedule is kept, a timer cancelled by another callback in the
+  same pass no longer fires even if it was due, a clock fault never ends the run (a raising clock
+  skips the pass and leaves the poll at its 1 s default; a backwards jump just leaves a timer not
+  yet due), at most 16
+  repeating callbacks exist per run (`ValueError` past that and below 1 ms), tokens are never
+  reused, and all of them stop when `run()` returns — QuickJS still
+  has no timers, so that host's model is unchanged. A tuner named only by the `tuner`
+  setting must still declare `RadioTunerService`, because that declaration is what resolves its
+  run for push authorization and for the watchdog (fail-closed otherwise). A failed frame closes
+  the presentation and the next state change reopens it, and a failed open is transient and
+  retried rather than becoming a permanent "no display".
+  A `SIGTERM` stop kills the
+  MicroPython host, which installs no signal handler; the framework then releases the run's
+  presentation, capture and audio stream.
+- **Home Assistant bridge (`org.capsulad.homeassistant`).** The app is installed, started and
+  configured with an MQTT broker (named, or discovered with mDNS when `broker_discover` is on);
+  a launch while it runs is an invocation that forces a discovery/state republish. Feedback is a
+  retained `online`/`offline` availability topic with a broker last will for the crash path, a
+  diagnostic "Bridge status" sensor, and one state topic per published entity; every applied
+  command republishes the state it changed, and a refused command is logged and reflected in the
+  status sensor instead of changing anything. The bridge owns the ring and the segment display
+  only while it is driving them: switching the light off or the display overlay off releases the
+  capture so the configured default resumes, and the `release_hardware` action (or its MQTT
+  button) hands both back immediately. A settings change stops the runtime, releases every
+  presentation and capture, and starts again with the new configuration. A deliberate stop
+  publishes the retained `offline` marker, then sends `DISCONNECT` (which also discards the
+  broker's last will), releases every presentation and capture, and exits 0 with the device back
+  on its baseline; an unexpected framework-connection loss is the failure path and exits 1, so
+  `restart_on_failure` is honest. A broker that stops answering fails the session instead of
+  leaving a half-online bridge: the bridge publishes `offline`, sends `DISCONNECT` and retries
+  with a paced backoff (1 s, 2 s, 4 s … capped at 1 min, reset only after a usable session held
+  30 s, so it does not flap), and its watchers run only for entities it has actually published, so
+  a disabled exposure goes quiet rather than staying silently stale. The Bluetooth source is
+  enumerated as an `enum` state sensor
+  plus a title sensor with four transport buttons on the same public command path, not as a
+  media-player entity. The optional touch capture is partial, so the framework's volume and
+  microphone gestures keep working.
 - **Lifecycle invariants.** Every terminal path — completion, cancel, error, crash, disconnect,
   dismissal, mute, watchdog expiry, daemon shutdown — releases its presentations, captures,
   microphone and conversation ownership, and the next output is a successful backend write (for a
@@ -466,6 +628,15 @@ full training run, and the self-signed TLS endpoint is reached through the proxy
 validation. Wakeword training writes one artifact per word: installing a word restarts detection
 for all words, retraining keeps that word's enabled state and binding, and a cancel racing the final
 atomic commit may still install that word's new model.
+
+The shipped app packages have their own host suites, run with `make test-apps`: the Simon
+contract suite drives the real `main.js` inside a fake QuickJS host (22 pass, 0 fail, plus a
+simulator run of the packaged app), the PA suite exercises the real `main.py`'s WAV parser and
+protobuf helpers under CPython, the Internet Radio suite imports the real `main.py` with a
+scripted `capsulad` module and an independent protobuf codec (plus its simulator `e2e` and the
+live `e2e-tuner` against a real MP3 station), and the tuner and bridge modules
+are nested Go suites. None of it is a device measurement: the tuner's fetch/decode evidence is a
+host network run, and no app package has been installed or run on the unit.
 
 ## Rockchip speaker verification
 

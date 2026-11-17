@@ -258,6 +258,70 @@ func TestBluetoothConnectNotifications(t *testing.T) {
 	})
 }
 
+// activePlaybacks counts framework/app playback streams on the mixer. Capture
+// streams are separate and are not counted.
+func activePlaybacks(d *Daemon) int {
+	n := 0
+	for _, s := range d.audio.ActiveStreams() {
+		if !s.Input {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBluetoothConnectionCue pins the audible half of the speaker-mode
+// connection feedback: a new source plays the embedded question cue once
+// through the framework mixer, and a disconnect stays silent. The installation
+// startup jingle is suppressed by its marker (newVolumeDaemon), so the only
+// playback stream in this test is the connection cue.
+//
+// Interaction contract: trigger — a source connects while the speaker accepts
+// inbound links; feedback — the authored question.wav cue under the master
+// gain, alongside the existing ring pulse and "bt" glyph; ownership — the cue
+// is an ordinary framework playback stream released when it drains;
+// interruption/dismissal — none, the cue is short and never blocks the connect
+// handler; final state — no playback stream remains, and a disconnect opens
+// none.
+func TestBluetoothConnectionCue(t *testing.T) {
+	d := newVolumeDaemon(t)
+	mem, ok := d.bt.(*bluetooth.Memory)
+	if !ok {
+		t.Fatalf("simulator Bluetooth manager is %T", d.bt)
+	}
+	sink, ok := d.dev.Audio().(outputTail)
+	if !ok {
+		t.Fatal("simulator audio has no LastOutput")
+	}
+	waitFor(t, 3*time.Second, "bluetooth watcher", func() bool { return mem.SubscriberCount() > 0 })
+
+	const address = "11:22:33:44:55:66"
+	mem.SimulateConnect(bluetooth.Device{Address: address, Name: "Mac"}, bluetooth.MediaState{Title: "Track"})
+	// The mixer keeps writing the (silent) bus, so a non-zero tail is the cue
+	// actually reaching the sink, not merely a stream being opened.
+	waitFor(t, 3*time.Second, "connect cue on the sink", func() bool {
+		out := sink.LastOutput()
+		if len(out) < 4096 {
+			return false
+		}
+		return outputPeak(out[len(out)-4096:]) > 0
+	})
+	// The cue is one framework playback stream and closes when the mixer has
+	// drained it, so an empty playback set is the drain barrier.
+	waitFor(t, 3*time.Second, "connect cue drained", func() bool { return activePlaybacks(d) == 0 })
+
+	// Disconnect is a visual notice only (one ring pulse). It must not open a
+	// playback stream, i.e. it must not play a cue.
+	mem.SimulateDisconnect(address)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := activePlaybacks(d); n != 0 {
+			t.Fatalf("disconnect opened %d playback stream(s); only a connection plays a cue", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // bluetoothWatchStream is the minimal server stream the media watcher needs:
 // it records each state and is ended through its context.
 type bluetoothWatchStream struct {

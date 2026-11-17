@@ -94,7 +94,7 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia clean
+.PHONY: all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia simon pa radio radio-tuner homeassistant product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-apps test-simon test-pa test-radio test-radio-tuner test-homeassistant test-interpreter clean
 
 all: release
 
@@ -167,7 +167,9 @@ deploy-bundle: capsulad capsulad-cli native
 	for d in $(APPDIR)/*/; do \
 		[ -f "$$d/manifest.toml" ] || continue; \
 		id=$$(basename "$$d"); \
-		bundle_app "$$id" "$(APPDIR)" "$${id#org.capsulad.}"; \
+		target=$${id#org.capsulad.}; \
+		if [ "$$id" = "org.capsulad.radio.tuner" ]; then target=radio-tuner; fi; \
+		bundle_app "$$id" "$(APPDIR)" "$$target"; \
 	done; \
 	if [ "$(BUNDLE_DEVAPPS)" = "1" ]; then \
 		staged=; \
@@ -278,11 +280,51 @@ marusia: $(PACKAGER_TARGET)
 	@rm -f $(APPDIR)/org.capsulad.marusia-*.tar.gz
 	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.marusia
 
-# `make test` runs every module that ships in this repository: the root Go
-# module, both nested Go modules, the Rust binding and the native crate (the
-# frozen C ABI), plus a compile of the public C++ example. `make test-race`
-# adds the race detector to the root module.
-test: test-go test-sdk test-dumbassistant test-marusia
+# Simon Says is a QuickJS script app: the package is its manifest plus main.js,
+# with the contract test suite deliberately left out. Same conventions as the
+# assistants (staged package directory and <id>-<version>.tar.gz side by side
+# under $(APPDIR)); the script is authoritative for OUT/PACKAGE=0/CAPSULAD_CLI.
+simon: $(PACKAGER_TARGET)
+	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/simon/build.sh
+
+# The PA Speaker MicroPython service: nothing is compiled, so its own script
+# stages the manifest, the script, the descriptor and the interface
+# documentation and packages them. It needs no native runtime, only the CLI.
+pa: $(PACKAGER_TARGET)
+	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/pa/build.sh
+
+# The Internet Radio front end. The native tuner companion is its own package
+# (`make radio-tuner`), because a script host cannot fetch or decode a stream.
+# The app's own Makefile owns its package contents, including the raw-protobuf
+# contract; the repository target only supplies the output directory and the
+# build-host packager.
+radio: $(PACKAGER_TARGET)
+	$(MAKE) -C apps/radio package OUT=$(abspath $(APPDIR))/org.capsulad.radio CLI=$(abspath $(PACKAGER))
+
+# The native tuner compiles and packages itself, and needs the host native
+# runtime (`make native`) to link the shared SDK. A device package is the same
+# script with GOOS/GOARCH/CC set for aarch64.
+radio-tuner:
+	OUT=$(abspath $(APPDIR)) sh apps/radio/tuner/build.sh
+
+# The Home Assistant bridge is a native app: the build script compiles the Go
+# binary and packages it with the manifest, its descriptor and its bridge
+# documentation beside it. It needs the host native runtime (`make native`).
+homeassistant:
+	OUT=$(abspath $(APPDIR)) sh apps/homeassistant/build.sh
+
+# All five product app packages in one step. `make native` first for the two
+# native ones; each target is also usable on its own.
+product-apps: simon pa radio radio-tuner homeassistant
+
+# `make test` runs every Go module that ships in this repository: the root Go
+# module, the nested app modules (both assistants, the radio tuner companion and
+# the Home Assistant bridge), the Rust binding and the native crate (the frozen
+# C ABI), plus a compile of the public C++ example. `make test-race` adds the
+# race detector to the root module. The script-app suites need Node or CPython,
+# so they stay out of it: run them with `make test-apps` (`test-simon`,
+# `test-pa`, `test-radio`).
+test: test-go test-sdk test-dumbassistant test-marusia test-radio-tuner test-homeassistant
 
 test-go:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...
@@ -310,6 +352,35 @@ test-dumbassistant:
 # protocol tests use in-process TLS listeners.
 test-marusia:
 	cd apps/marusia && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
+
+# The MicroPython host's prelude is pure Python, so its self-test (timer
+# registration, cancellation, clock and poll behaviour) runs under CPython
+# without building a host.
+test-interpreter:
+	python3 interpreter/micropython/sdk_test.py
+
+# Host-side suites. Simon's contract tests load the shipped main.js into a fake
+# QuickJS host under Node; the Internet Radio unit tests import the shipped
+# main.py with a scripted `capsulad` module under CPython; the tuner and bridge
+# companions are nested Go modules; and the MicroPython host's pure-Python
+# prelude has its own self-test (timers included).
+test-apps: test-simon test-radio test-radio-tuner test-homeassistant test-pa test-interpreter
+
+test-simon:
+	node --test apps/simon/test/*.test.mjs
+
+test-pa:
+	python3 apps/pa/tests/test_wav.py
+	python3 apps/pa/tests/test_app.py
+
+test-radio:
+	$(MAKE) -C apps/radio test
+
+test-radio-tuner:
+	cd apps/radio/tuner && $(CGO_GO_ENV) $(GO) test ./...
+
+test-homeassistant:
+	cd apps/homeassistant && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 # Remove generated binaries and packages but leave build/demo (operator data)
 # untouched.

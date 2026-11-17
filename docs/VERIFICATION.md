@@ -131,7 +131,9 @@ stock Rockchip image.
   four-octet SBC capability IE (host-verified layout only).
 - Connect plays three completed blue fade-in/out ring pulses and shows lowercase `bt` on the
   two rightmost segment cells for 2 s; disconnect plays exactly one pulse and no glyph, over
-  the selected baseline.
+  the selected baseline. The connection cue (`question.wav`) added with this change has simulator
+  digital-output evidence below but **no unit listening check**, so it is not part of this
+  hardware-verified record (see Open gates 25).
 - SBC decoding matches the system `sbcdec` and the Android reference sample-for-sample on the
   172-frame fixture, including cross-packet synthesis history (host fixture).
 - With the PulseAudio fallback, source latency settled at **57–111 ms** (target 68 ms) and the
@@ -189,6 +191,63 @@ stock Rockchip image.
   17.8 MiB free on `/data`.
 - The bounded log rotates at 512 KiB with one backup; wakeword recording and training refuse
   below 2 MiB free.
+
+### 2026-11-17 second deployment: aarch64 build of the working tree
+
+A coordinated `capsulad-cli deploy` of the current working tree (HEAD `33378ec` plus the
+uncommitted app-install / Web UI work) was applied to the unit over ADB on 2026-11-17, replacing
+the `77f5c85` stack recorded above. The artifacts were cross-built for aarch64 / glibc ≤ 2.33 with
+a repo-local toolchain (Apple clang 21 front end, `rust-lld` linker, an extracted Debian bullseye
+arm64 sysroot under `build/linux-arm64/sysroot/`); each ELF passed a `readelf` gate: highest
+symbol version `GLIBC_2.30`, no `RPATH`/`RUNPATH`, and every `DT_NEEDED` present in the device's
+248-soname inventory. A cross-built `hello world` executed on the unit before anything else was
+staged.
+
+- **Deployed stack (device md5s equal to the build host's).** `capsulad` 41,287,832 B
+  `368635d1…`, `capsulad-cli` 11,731,096 B `21b7fa4f…`, `lib/libcapsulad.so.1.0.0` 6,498,328 B
+  `765301c1…` (SONAME `libcapsulad.so.1`, `capsulad-native.json` ABI 1.0), `capsulad-quickjs`
+  1,236,416 B `3ec13072…`, `capsulad-micropython` 418,736 B `23af60a7…`. The deploy printed
+  `daemon healthy` and reinstalled `/etc/init.d/S99btctl.sh` byte-identically (`c1083ff9…`).
+- **Runtime proof.** Both hosts were pushed to `/tmp` and ran on the unit against the new
+  library (`quickjs-ng 0.18.0`, `micropython 1.29.0-preview`, exit 0) before the install, and
+  took the library from `/data/capsdemo/lib` afterwards; every app binary's
+  `LD_TRACE_LOADED_OBJECTS` resolved with zero missing `DT_NEEDED`. Gate 7 and gate 30 below
+  record what that does and does not settle.
+- **Apps.** Seven packages installed: `simon 1.0.0` (quickjs), `pa 0.1.0` and `radio 0.1.0`
+  (micropython), `radio.tuner 0.1.0` and `homeassistant 0.1.0` (native aarch64), plus updated
+  `dumbassistant 0.2.0` and `marusia 0.1.0`. `app list` reports the expected runtime per app, and
+  runs of the native and MicroPython apps reached `APP_READY` on the unit.
+- **User state preserved.** Settings revision 3635 unchanged (assistant `org.capsulad.marusia`,
+  master volume 10 %, `Asia/Irkutsk`, wakeword switch on, display provider `capsulad.clock`) and
+  the `<data-dir>/app-settings` files were not rewritten.
+- **Storage.** `/data` is 78.5 MiB and holds 4,259 KB free with all seven packages, both script
+  hosts and the new runtime. The first attempt aborted before replacing any binary with
+  `write /data/capsdemo/lib/.deploy-…: no space left on device`; a deployment does not revert its
+  package installs, so the retry ran after the stack was stopped through the boot service, which
+  released the pinned blocks of a library that had been moved aside while running processes still
+  mapped it. The canonical deploy then reported `deploy_rc=0` and passed its health gate. A bundle
+  deploy needs ≥ 8 MiB free on `/data` before it will replace binaries.
+- **tmpfs OOM during the deployment window.** With the 63 MiB bundle staged in `/run`, the
+  restart that ended the deployment started five apps at once and the Go apps logged
+  `fatal error: out of memory allocating heap arena map` (`radio.tuner`, `marusia` twice,
+  `homeassistant`). The supervisor restarted them to `APP_READY`, but **two `org.capsulad.marusia`
+  runs survived**. Removing the pushed bundle and its staging trees from tmpfs raised
+  MemAvailable from 42 MiB to 106 MiB. These are observations; no cause is established here.
+- **Loss of network after the follow-up restart.** One further restart through
+  `/etc/init.d/S99btctl.sh restart` (run detached, because the daemon owns the Wi-Fi station) was
+  the last device interaction. ADB then went offline and the unit did not answer again: ICMP
+  100 % loss, `arp` entry `(incomplete)`, no host on the local /24 answering 5555, an empty ADB
+  mDNS service list and no `capsula.local` resolution, against a healthy host LAN. The cause is
+  not established — the same restart path had completed successfully minutes earlier — and no
+  claim is made here about a watchdog reset, a failed start or the vendor fallback.
+- **Unverified in this deployment.** Post-restart startup behavior of the installed stack; the
+  sandbox mode of a healthy start (runs started during the OOM window reported `sandbox=none`,
+  where earlier records report `mountns`); the two duplicate `marusia` runs; and an app-level
+  QuickJS start/stop of `org.capsulad.simon`. Rollback material (`capsulad` `db1ad420…`,
+  `capsulad-cli` `fd48698b…`, runtime `bf814012…`) is kept on the build host and in
+  `/tmp/rollback-20261117/` on the unit;
+  `build/linux-arm64/release-20261117b/verify-after-recovery.sh` re-runs the whole verification
+  once the speaker is reachable. This is gate 31.
 
 ## Verified only on the simulator or host
 
@@ -302,6 +361,12 @@ stock Rockchip image.
   stale `MediaPlayer1.Status` with and without owned-transport receipts, against the two-second
   command memory (per device, bounded, expiring, never consulted by explicit commands), and
   through the real D-Bus command path on a private bus.
+- The Bluetooth connection cue is exercised end to end on the simulator:
+  `TestBluetoothConnectionCue` (run under `-race` with `-ldflags '-linkmode=external'`) proves the
+  mixer sink carries a non-zero tail after a source connects, the cue playback stream drains, and a
+  disconnect opens no playback stream. The embedded cue set also decodes as non-silent 16-bit PCM
+  (`TestEmbeddedCuesDecode`, which includes `question.wav`, under the same flags). This is
+  simulator digital output, not acoustic level, and no real source was used.
 - The centre-gated contract is covered by pure `panelPress`/`panelRelease` timelines and by the
   real input manager: `TestVolumeStepResolvesOnPressWithoutDeferral` pins that a bare volume press
   steps immediately with no deferral; `TestCentreEvidenceSelectsTheSwipe` selects the swipe from
@@ -572,6 +637,347 @@ stock Rockchip image.
   failure below). No device access, and none of these tests exercises a hardware path:
   Rockchip device nodes, the vendor LED ABI or the watchdog remain device-only paths.
 
+- **Live application install and removal (host tests and simulator, no device).** The live path is
+  exercised end to end. Focused host tests on macOS arm64 (Go 1.22.6, all with
+  `-ldflags '-linkmode=external'`): `./internal/artifact`
+  `TestOpenArchiveRoundTrip`, `TestRejectsOversize`, `TestOpenReader*` passed;
+  `./internal/webui` `TestAppsRoutesRequireBrowserSession`,
+  `TestAppInstallStreamsArchiveAndReportsOutcome`, `TestAppInstallKeepsDaemonRefusalMessage`,
+  `TestAppInstallRejectsArchiveOverTheTransportBound`, `TestAppRemoveAddressesOneApp` and
+  `TestAppInstallHidesUnexpectedFailureDetail` passed; `./internal/daemon`
+  `TestInstallPackageStreamActivatesInLiveRegistry`, `TestInstallAndRemovalRefuseRunningApp`,
+  `TestInstallPackageRefusesBuiltinAndInvalidArchive`, `TestUninstallPackageRefusesBuiltinAndUnknown`,
+  `TestInstallPackageDropsCachedProvenance`, `TestInstallApplicationServiceStreamsChunks`,
+  `TestInstallApplicationRequiresOpenFrame`, `TestInstallApplicationRejectsOversizedStream` and
+  `TestPackageRPCsRejectApplicationIdentity` passed; the `-race` run of the install/remove/RPC set
+  reported `ok capsulad/internal/daemon 21.284s` with no race; `./internal/nativedescriptor`
+  passed. Against a throwaway simulator daemon
+  (`-platform simulator -sandbox none -watchdog off -supersede off`) with a test-only
+  `test.smoke` package: a fresh install printed `installed test.smoke (1.0.0) into …` and
+  `active now: the daemon reloaded its application registry`, and `app list` showed it immediately
+  with **no restart**; reinstalling the same archive printed `reinstalled …` the same way, and a
+  package *directory* source behaved identically; installing or removing while the app ran failed
+  with exit 1 and `capsulad-cli: app test.smoke is running (run run_…); stop it before replacing
+  the package` / `… before removing`; after `app stop` both succeeded; `app remove` printed
+  `removed test.smoke` and `app list` then showed only the built-ins. A headless-Chromium session
+  against that daemon (admin session, `https://127.0.0.1:18443`) observed the `/apps` page, an
+  upload plus `Install` → toast `Installed Smoke app 1.0.0.` and a third table row, `Remove` → the
+  dialog `Remove Smoke app (test.smoke) from this speaker?` and the row disappearing, an install
+  over a running app → the inline alert `app test.smoke is running (run run_…); stop it before
+  replacing the package`, and a live row update to `Native Running` after a CLI `app start`, with
+  that row's Remove button disabled (`Stop the app on Overview before removing its package`) — no
+  page reload and no console errors at any read. The offline fallback was exercised only in its
+  no-daemon form: `installed … restart capsulad to activate the installed package`, and
+  `app remove` after the daemon was killed. The simulator lifecycle and the browser session were
+  both re-run after the later upload-supervision and route-hardening changes, with the same
+  results. A real defect this run found — the live path dialed
+  the raw `-socket` flag instead of resolving the data-directory socket — was fixed before the
+  recorded results. Limits: no device run; `-sandbox none`, so this is no evidence about Linux
+  namespaces or mounts; uploads were local and ~4 KiB, so no slow-link timing and no real 65 MiB
+  browser upload (the bound refusal is unit-tested, including that zero archive bytes reach the
+  daemon); and neither "install while the daemon is stopped, then restart and see it active" nor
+  the "cannot tell whether capsulad is running" refusal (a socket that fails for a reason other
+  than absence) was exercised.
+
+## First-party app packages
+
+The five product app packages (`org.capsulad.simon`, `org.capsulad.pa`, `org.capsulad.radio`,
+`org.capsulad.radio.tuner`, `org.capsulad.homeassistant`) are host/simulator evidence only. No
+app package has been installed or run on the unit in this record.
+
+- **Packaging (build host, observed here).** Each app's entrypoint stages a package directory and
+  writes `<id>-<version>.tar.gz` beside it, with the pinned artifact shape (root `manifest.toml`,
+  normalized modes, epoch-zero timestamps). The archives in `build/apps` were listed directly,
+  and their inventories match their manifests:
+  - `org.capsulad.simon-1.0.0.tar.gz` holds exactly `main.js` and `manifest.toml` (mode 0444) —
+    the contract test suite is deliberately not in the package.
+  - `org.capsulad.radio-0.1.0.tar.gz` (20,026 bytes, sha256
+    `49b6e7a7cc32132b822b45bf56dea094390c7de3c093d00b90ec99f5a3e54d3a`) holds `main.py`
+    (54,409 bytes), `manifest.toml` (3,352 bytes) and
+    `proto/{radio.proto,radio.protoset,radio.md,media.protoset,media.md}`.
+  - `org.capsulad.pa-0.1.0.tar.gz` holds `main.py`, `manifest.toml`,
+    `proto/{pa.proto,pa.protoset}` and `docs/speaker.md`.
+  - `org.capsulad.radio.tuner-0.1.0.tar.gz` (1,016,671 bytes, sha256
+    `95a9fcd959ea02a2afac93ac26732e67c8cbd61768e866da9250e95615c62a90`, matching the current file
+    on disk) holds `manifest.toml` (1,528 bytes) and `bin/tuner` (2,382,370 bytes, **Mach-O 64-bit
+    arm64**). The tuner's sources and rebuilds changed repeatedly during this work; this is the
+    final artifact.
+  - `org.capsulad.homeassistant-0.1.0.tar.gz` (1,077,352 bytes, sha256
+    `7058114af739a950ad82165acdbf11803a7c2e131dde6af19f38eb684906ea30`) holds `homeassistant`
+    (2,531,282 bytes, sha256 `4c84497e3d29e3f9e98c6427bd36f26a0eac0cd0ac6104e13da08b8e52a1bbff`,
+    host binary), `manifest.toml` (9,647 bytes), `proto/homeassistant.{proto,protoset}` and
+    `docs/bridge.md` (9,619 bytes).
+  Both native binaries are simulator artifacts: no aarch64 cross toolchain was present, so neither
+  a device binary nor a device install is claimed for any of these packages. Byte counts and
+  digests move with each app edit; the inventories above are the stable part. Packaging itself is
+  deterministic — `internal/artifact` sorts entries, writes epoch tar mtimes and a zero gzip
+  header mtime with normalized modes, and the headers of these archives carry `00 00 00 00` — so
+  an archive digest identifies its packaged bytes rather than the time it was packed. In this tree
+  the tuner's `8ec997c5…` → `95a9fcd9…` step is exactly that kind of content delta, and it is
+  verified entry by entry: the archive has three entries, the tuner source and the packaged
+  `manifest.toml` are identical in both (source sha256 `855f5270…`), and the only entry that
+  differs is `bin/tuner`, which embeds Go's `vcs.revision` — HEAD moved `77f5c85` → `33378ec`
+  between the two builds, so the current binary (sha256 `606a5c21…`) matches a fresh build at
+  HEAD while functionality is unchanged. Native app binaries therefore stamp the revision: two
+  consecutive builds at one commit reproduce byte-for-byte, the digests above were taken at HEAD
+  `33378ec`, and only `-buildvcs=false` would make them stable across commits (the repository
+  convention, shared with the devtools app and the assistant Makefile targets, is to leave
+  stamping on). Script packages such as the radio front end are unaffected because they compile
+  nothing.
+- **Tuner unit tests (reported by the app's author, run in `apps/radio/tuner`).**
+  `go test ./...` → `? cmd/tuner [no test files]`, `ok internal/stream 0.010s`,
+  `ok internal/tuner 0.010s`, exit 0; `go test -race ./...` and `go build ./...` pass, `gofmt -l`
+  is clean. `go list -deps ./cmd/tuner` reported 71 packages with **no** match for `net/http`,
+  `crypto/tls` or `google.golang.org/grpc`, which is the shared-SDK rule for a first-party app.
+- **Tuner fetch and decode against real stations (host).** Through `capsulad.OpenTCP` plus the
+  native verified-TLS path, `https://ice1.somafm.com/groovesalad-128-mp3` returned
+  `content-type="audio/mpeg"` with codec MP3, `icy-name="Groove Salad: … [SomaFM]"`, metaint
+  45000, 44100 Hz and a 35,280-byte 200 ms chunk; `https://stream.radioparadise.com/mp3-192`
+  returned `audio/mpeg` (MP3, icy-name `Radio Paradise (192k mp3)`, metaint 16000, 44100 Hz);
+  both default stations played again after the review fixes, and the playlist URL
+  `somafm.com/groovesalad.pls` resolved; `https://ice1.somafm.com/groovesalad-128-aac` returned
+  `audio/aac` and was refused as `unsupported codec: AAC/HE-AAC`. The temporary smoke test was
+  deleted afterwards. Proof level: real network transport and local MP3 decode on the build host —
+  **not** a device run.
+- **Tuner caller authorization (reported by the app's author).** `Tune` and `Stop` accept only the
+  configured `player_app`'s currently ready run. The handler compares the daemon-relayed caller
+  run id against the run ids `AppInterfaceService.ListInterfaces{runningOnly:true}` reports for
+  that app, and ends every other call with gRPC `PERMISSION_DENIED`, logged as
+  `radio-tuner: refusing <Service>/<Method> from run "<id>": …`. That run id is
+  `ServerCall.CallerRunID()`: the caller's `capsulad-run-id` claim, checked against the socket
+  peer credentials where the transport provides them (a mismatch is rejected before relay, and
+  the value is never taken from a request field), `pid:<pid>` for a caller with no supervised run,
+  and empty when unknown. The request's `player_app_id` is validated but is not the authorization,
+  and a caller with no supervised run of the player app (empty identity or the `pid:` fallback) is
+  refused rather than trusted. Evidence: `TestServerCallExposesCallerRunID` in `sdk/go`
+  (`go build` and `go test` pass; no C ABI change), and the tuner's tests covering accept, wrong
+  app, `pid:` caller, empty identity, not-ready player, unknown run, lookup failure and a custom
+  `player_app`. This supersedes the earlier residual-assumption wording: the routed call is no
+  longer an arbitrary-egress primitive for anything but the configured player. The general model
+  is in [security.md](app_development/security.md#routed-calls-and-trust), and the manual documents
+  `CallerRunID()` with the ListInterfaces authorization pattern. The live `e2e-tuner` run against
+  the current bytes (`95a9fcd9…`) exercised the accepted path end to end (authorized `Tune`/`Stop`,
+  a live station switch, pause/resume and the tuner-kill watchdog case) with zero `refusing …`,
+  `PERMISSION_DENIED` or `not acknowledged` lines; the earlier authorizing build's run recorded
+  authorized `Tune` for
+  both stations, and an authorized `Stop` on a station change acknowledged inside the player's 2 s
+  budget, likewise with zero refusal lines across both
+  authorizing runs; the refusal paths themselves are unit-tested, not seen in a live run.
+- **Simon contract tests (reported by the app's author).** `node --test
+  apps/simon/test/*.test.mjs` → `tests 22`, `pass 22`, `fail 0`. The suite loads the shipped
+  `main.js` in a `vm` context against a fake host that implements the documented QuickJS surface
+  (ordered JSON frames, blocking recv, `WAIT_FOREVER`) and asserts the app's observable requests,
+  frames and terminal cleanup; the test file is not packaged. Node ≥ 18 is required. Host smoke
+  runs of the new capability printed `SMOKE-TRYRECV quickjs events=7 empty=true ms=0`,
+  `SMOKE-TRYRECV-BYTES quickjs first=true empty=true`,
+  `SMOKE-TRYRECV-NEG quickjs empty=true ms=0` and `SMOKE-TRYRECV-OK quickjs`.
+- **Simon needs the rebuilt QuickJS host.** Current `main.js` calls `Call.tryRecv`/`tryRecvBytes`,
+  so the deployment must carry the matching `lib/capsulad-quickjs` from `make interpreter-quickjs`
+  (or `make interpreter`). Against an older host the app logs
+  `unavailable: this QuickJS host has no Call.tryRecv; rebuild the interpreter host` and stops
+  cleanly instead of playing — that path was observed on the host, not on the unit.
+- **Simon on the simulator (reported by the app's author).** With `-platform simulator`, the
+  staged `build/lib` runtime including `capsulad-quickjs`, and the packaged `tar.gz` installed:
+  startup reached `APP_READY`, both captures (segment presentation and full-panel touch) were
+  selected and the rendered segment frames were observed, correct and wrong presses scored as
+  designed, the centre tap hint and its restore worked, and no orphan run was left behind. The
+  documented exit was measured: a centre press 18 ms into round 2 froze the replay and showed the
+  dashes, and the release 1018 ms later exited 0.5 ms after it was seen. `sandbox=none` on that
+  host. Limits: segments only (no ring or audio), no device, optical or timing measurement beyond
+  those host timestamps.
+- **Home Assistant bridge tests and simulator lifecycle (reported by the app's author).** The
+  suite was reported race-clean (`CGO_ENABLED=1 go test -race -count=1 ./...` ok for
+  `cmd/homeassistant` and `internal/{appcfg,ha,hw,mqtt}`) and re-verified against the final
+  artifact (`CGO_ENABLED=1 go test -count=1 ./...` ok, `go vet ./...` clean, `gofmt -l .` empty);
+  `sh apps/homeassistant/build.sh` wrote the archive.
+  `go list -deps ./cmd/homeassistant` matched none of `net`, `net/http`, `crypto/tls`,
+  `crypto/x509` or `google.golang.org/grpc` (observed here): the MQTT 3.1.1 framing and the TLS
+  session run over `capsulad.OpenTCP`, and a local host:port helper replaced `net.JoinHostPort`
+  so the resolver, interface and poll packages stay out of the app's graph. Against a private
+  simulator daemon
+  (`-platform simulator -sandbox none`), the packaged final archive was installed and run: it
+  reached `APP_READY` and logged
+  `bridge node="simulator_0001" entities=17 surfaces=ring:true display:true sensors:1 bluetooth:true touch:false`,
+  an invocation reported `disconnected from mDNS discovery as node "simulator_0001"; 17
+  entities; 0 commands applied; status connecting`, and
+  `app stop` answered `stop requested: true`, then `bridge stopped; hardware released` and
+  `exited code=0 state=EXITED`. The review changed what Home Assistant
+  observes: there is **no** `media_player` entity (its MQTT integration has no such platform —
+  the Bluetooth source is `sensor/bluetooth_state` (`enum`: playing/idle/off),
+  `sensor/bluetooth_title` and four `button/bluetooth_{play,pause,next,previous}`), sensor units
+  are published in Home Assistant's vocabulary (`celsius`→`°C`, `lux`→`lx`, `fahrenheit`→`°F`,
+  `kelvin`→`K`; anything else verbatim with no device class, because an unknown unit/class pair
+  could fail setup), the ring publishes `supported_color_modes` with `color_mode: "rgb"` on ON
+  states and declares `flash`/`transition` false (a command carrying them is still applied),
+  `object_id` is no longer published (`unique_id` carries identity), `PublishEvent` answers
+  `INVALID_ARGUMENT` for a malformed/undeclared request and `FAILED_PRECONDITION` without a
+  runtime/published event entity/session, `Status.broker` names the endpoint in use including a
+  discovered broker, and every exchange is now bounded so a broker that accepts a connection and
+  then stops answering cannot leave a half-online bridge: CONNECT/CONNACK 10 s, SUBACK 10 s
+  (`TestSessionBoundsTheSubscribeExchange`), and writes through a capacity-1 channel that honours
+  the caller's context — the connect deadline, a 2 s context plus a 2 s write deadline for
+  `DISCONNECT`, and 5 s for client-originated PUBACK/PINGREQ/PINGRESP writes — so the offline
+  marker and `DISCONNECT` cannot queue behind a wedged writer
+  (`TestWedgedWriteDoesNotBlockOtherWriters`, `TestDisconnectDoesNotQueueBehindAWedgedWriter`,
+  `TestDisconnectBoundsItsWrite`). A failed session publishes `offline`, sends `DISCONNECT` and
+  retries with backoff, but the backoff is now *paced*, which is the visible part: a session counts
+  as usable only once CONNECT, the discovery publish and the command subscriptions have all
+  succeeded, and the delay is reset only when a usable session then held for at least 30 s. So a
+  broker that answers CONNACK but refuses or ignores SUBSCRIBE, one that drops immediately after
+  becoming usable, and a dial/CONNECT failure all retry at 1 s, 2 s, 4 s … capped at 1 min instead
+  of resetting to a ~1 Hz flap that republishes the whole retained discovery set once a second;
+  a deliberate reconnect (button or action) is still immediate
+  (`TestAdvanceBackoff`, `TestBackoffDecaysForABrokerThatNeverAcceptsCommands` — exactly two dial
+  attempts by 2.4 s). Two caveats belong with that: a healthy session that drops *inside* the 30 s
+  window also decays towards 1 minute (deliberate — the reset needs 30 s of usability, so a
+  flapping broker slows down instead of being retried once a second), and at
+  `keep_alive_seconds = 5` the 1.5×-keepalive watchdog can end a session before the 10 s subscribe
+  budget does (same reconnect, one extra log line; both bounds are in the app README's "Broker
+  behaviour" section). Watcher activity is derived from the published catalog rather than the
+  exposure settings (`TestWatcherGatingFollowsTheCatalog`, which asserts the loop set a bridge runs
+  — `device-state`, `sensor:<id>`, `media`, `touch`): the device-state, media and touch
+  loops and each framework-sensor watcher run only while their entity is published, the title
+  sensor is truncated rune-safely at Home Assistant's 255-byte limit with the full value in
+  attributes, and the MQTT release button calls the same
+  `Hardware.ReleaseRingAndDisplay()` as the app action. The focused suites reported those tests
+  PASS (`internal/hw` `ok …`, `internal/mqtt` `ok …`; `TestSessionBoundsTheSubscribeExchange`
+  0.20 s, `TestAdvanceBackoff` 0.00 s, `TestBackoffDecaysForABrokerThatNeverAcceptsCommands`
+  2.40 s, `TestWatcherGatingFollowsTheCatalog` 0.00 s), and the full suite was
+  race-clean on the shipped tree. Limits: no real MQTT broker
+  and no Home Assistant instance was contacted; mDNS broker discovery could not be exercised
+  because this build's daemon answered `DiscoveryService/Browse` with "unknown service" (the app
+  logged one clear failure and kept retrying); the packaged binary is darwin/arm64, so a device
+  package needs the aarch64 toolchain.
+- **Internet Radio tests and simulator end-to-end (reported by the app's author, after the review
+  fixes).** `make -C apps/radio test` (equivalent to `python3 -m unittest discover -s
+  apps/radio/tests` from the repository root, which the author verified) printed
+  `Ran 57 tests in 0.020s` and `OK`; the prelude self-test
+  (`python3 interpreter/micropython/sdk_test.py`) printed `Ran 12 tests in 0.005s` and `OK` for the
+  timer surface (cap, cancel-during-pass, clock safety, exception isolation, poll bound,
+  stop-on-return). The app suite now covers the timer and watchdog directly —
+  `test_watchdog_is_registered_at_startup`,
+  `test_dead_tuner_is_detected_by_the_watchdog_without_any_activity`,
+  `test_liveness_is_by_run_not_by_app`, `test_liveness_accepts_the_same_run`,
+  `test_liveness_lookup_uses_a_short_budget`,
+  `test_liveness_lookup_failure_does_not_kill_playback`,
+  `test_watchdog_detects_a_dry_queue_on_a_live_tuner` (50 s survives, 60 s trips),
+  `test_a_written_chunk_restarts_the_dry_queue_clock`,
+  `test_repeating_callback_limit_is_enforced`, `test_speaker_stream_end_becomes_error`,
+  `test_push_authorization_lookup_failure_ends_the_serving_session`,
+  `test_a_foreign_caller_cannot_end_the_session_on_a_lookup_failure`,
+  `test_foreign_callers_cost_one_lookup_each`,
+  `test_no_audio_bound_covers_the_tuner_retry_window`,
+  `test_finished_without_audio_returns_to_stopped`,
+  `test_pause_during_the_drain_discards_the_tail_and_stops`,
+  `test_finished_session_drains_without_blocking_then_stops` and
+  `test_drain_timeout_discards_the_tail` — plus
+  the earlier authorization, display-recovery and streaming cases. `make -C apps/radio e2e` — the
+  deterministic simulator run, whose tuner fixture is now a paced producer (one 200 ms chunk per
+  host timer tick, `Tune` replying first) and which waits for the new session's first accepted
+  chunk before the circle-key tap, so it covers pause/resume during playback and the tuner-kill
+  watchdog case in about 10 s, with the real
+  MicroPython host and a MicroPython tuner fixture speaking the raw-protobuf
+  contract — printed `PASS` and logged `radio: push authorized
+  app=org.capsulad.radio.testtuner run=…`; it covers install, boot start, the capabilities probe,
+  a launch invocation, tuner discovery, `Tune`, pushed PCM reaching the speaker stream, ICY
+  metadata, drain, a second station, a live station switch through the settings API, circle-key
+  pause via `MediaPlayerService`, resume, the media-provider listing, a display capture with the
+  daemon's rendered frames, and a clean stop.
+  `make -C apps/radio e2e-tuner` (live: native tuner, real MP3 station, needs network and the
+  tuner package) printed `e2e-tuner: PASS (simulator, native tuner, live MP3 station)` against the
+  final tuner artifact, exercising authorized `Tune`/`Stop`, a station switch, pause/resume and a
+  clean stop with zero refusal or stall lines; the run against the authorizing build logged
+  `session radio-1-28b2b5` accepting `SomaFM Groove Salad` (codec MP3),
+  `speaker stream pbs_acd7e0c6b4695ea66694e open 44100 Hz 2 ch format=1 actual=1/48000/2`,
+  `radio: session radio-1-28b2b5 playing 50 chunks`, pause as `refused by player: paused`, a live
+  station switch answered by the authorized `Stop` (`session radio-2-28b2b5 stopped (station
+  changed)`, inside the player's 2 s budget), `session radio-3-28b2b5` accepting
+  `Radio Paradise Main Mix`, `radio: state playing station audio` and a clean stop. Both e2e
+  scripts now also contain the autonomous-watchdog phase: they stop the tuner's run with no user
+  interaction and require the app to log `radio: playback failed: tuner stopped` and
+  `radio: state error tuner stopped`, asserting `watchdog left PLAYING after the tuner died, with
+  no user activity`. The live run on the current pairing (player `49b6e7a7…`, tuner
+  `95a9fcd9…`) logged `radio: push authorized app=org.capsulad.radio.tuner
+  run=run_8784a72fe4e95d8f6f438`, with authorized `Tune`/`Stop`, a live station switch,
+  circle-key pause/resume and the tuner-kill watchdog case (`radio: playback failed: tuner
+  stopped (run is no longer ready)` → `radio: state error tuner stopped (run is no longer
+  ready)`), then a clean stop — and `e2e-tuner: PASS (simulator, native tuner, live MP3
+  station)`. The reviewed behaviour this covers: symmetric caller
+  authorization on `Push`
+  (a foreign or unnamed pusher is refused `unauthorized caller` with no state change, and a
+  non-empty exact `session_id` is required), the **autonomous watchdog** (registered as
+  `capsulad.every(500, watchdog)`; liveness by **run identity** — every four ticks ≈2 s the run
+  that last pushed for this session must still be the ready run of the tuned tuner app, so a
+  supervisor-restarted tuner counts as gone — with an **800 ms** lookup budget and a lookup error
+  never treated as death, detail `tuner stopped (run is no longer ready)`; a dry-queue detector
+  requiring `frames_queued` in `PlaybackProgress` at least once per **60,000 ms** while playing,
+  derived from the tuner's three-reconnect budget, `(1+12)+(2+12)+(4+12) = 43 s`, detail
+  `tuner stalled (no queued audio for 60000 ms)`, reset by every successful write; immediate end
+  on end-of-stream, `STREAM_CLOSED`/`DAEMON_SHUTDOWN`), the push-refusal ownership rule (a failed
+  push-authorization lookup ends the *serving* run's session as `push authorization unavailable`,
+  while an unknown or foreign caller is only refused `unauthorized caller` and can never end
+  playback through a lookup failure; the resolution cache is a bounded 16-entry `run → app` table,
+  so a repeated foreign caller costs one lookup ever), the single 60 s no-audio bound for both
+  phases (`tuner did not start (no audio for 60000 ms)` while buffering — `Tune` returns only
+  after the first decoded frame — and `tuner stalled (no queued audio for 60000 ms)` while
+  playing; the bound follows the tuner's retry budget, `(1+12)+(2+12)+(4+12) = 43 s` worst case
+  plus a 10 s first-chunk idle), the terminal `finished` that carries no audio ending directly as
+  `stopped` (`station stream ended`), and the non-blocking natural end (`finished=1` half-closes
+  and drains while the phase stays `playing`; `Pause` during that drain is a stop — `accepted=true,
+  detail="stream ended"`, tail discarded, `PLAYBACK_STOPPED` — `Stop`/`dismiss`/a station change
+  abort it the same way, and a drain unfinished after 30 s is aborted), display recovery after a
+  failed frame with
+  a retried open, resume discarding the paused tail (no `PLAYBACK_RESUME`), the non-empty
+  `playerId` rule on the media contract, and the 25 s `Tune` / 2 s `Stop` blocking bounds. The
+  terminal state is `phase=error`, four dashes (`0x40` ×4, colon off) and `PLAYBACK_STOPPED`, with
+  the reason logged as `radio: error: <detail>` and served as the command `detail`; recovery is
+  only `play`/`stop`/`dismiss`. The timer capability is new platform surface, documented in the
+  application manual (`sdk.md`: the limits bullet, the member table and the lifecycle section): the
+  MicroPython host exposes `capsulad.monotonic_ms()` (the only clock in that host),
+  `capsulad.every(interval_ms, fn)` → token and `capsulad.cancel_timer(token)` → bool. Callbacks
+  run on the event thread, between dispatched events and — when the bus is idle — from the poll
+  timeout bounded by the nearest due timer, so they fire with no inbound event or call at all; a
+  callback's next due time is `now + interval_ms` after it returns and only when it actually fires
+  (slow callbacks slip, with no catch-up storm), exceptions are logged as `timer handler failed: …`
+  without ending the run and the schedule is kept, a timer cancelled by another callback in the
+  same pass no longer fires even if it was due at the start of that pass, and a clock fault never
+  ends the run: a raising `monotonic_ms()` skips that pass and leaves the poll at its 1 s default,
+  while a backwards jump simply leaves a timer not yet due (`_run_timers` iterates a snapshot and
+  re-checks registration; `_poll_timeout` returns its default on the same exception). At most 16
+  repeating callbacks are allowed per run (`ValueError` beyond that and for an interval below
+  1 ms), tokens are per-process and never reused, and every callback stops when `run()` returns —
+  the manual's "Cancellation and clock faults" bullet states the same. QuickJS still has no
+  timers, so Simon's model is unchanged. `docs/app_development/audio.md` also now defines
+  `frames_played` (mixed output frames, silence included — not usable as producer progress) and
+  `frames_queued`, and states there is no playback underrun notice. Proof level: the daemon log
+  shows routing
+  selecting the radio's capture and
+  `display.segment.front wrote presentation=… cells=[…]`, and the speaker stream accepted real
+  44.1 kHz MP3-decoded PCM — digital output, not electrical or acoustic, and no device run.
+- **PA Speaker tests and simulator run (reported by the app's author, after the review fixes).**
+  `python3 apps/pa/tests/test_wav.py` → `Ran 29 tests in 0.081s`, `OK`; the new
+  `python3 apps/pa/tests/test_app.py` (settings shapes, status mapping, handler) →
+  `Ran 28 tests in 0.081s`, `OK`. `sh apps/pa/tests/e2e.sh` (real simulator daemon, real
+  MicroPython host, real audio service) printed
+  `PASS: install, boot, play, split play, rejections, no-progress frames, stall, cancellation, queued calls, setting bound`
+  in about 21 s (phase counters `DONE main ok=15 fail=0`, `DONE settings ok=3 fail=0`): it
+  installs the archive, waits for the app to start at boot, streams a mono
+  16 kHz and a stereo 48 kHz WAV (whole and split across request frames), rejects
+  non-WAV/8-bit/96 kHz/over-length/truncated/oversized-frame with the documented statuses, proves
+  a frame carrying no WAV bytes ends `INVALID_ARGUMENT` (`request frame N carries no WAV bytes`),
+  a 15 s stall ends `DEADLINE_EXCEEDED`, discards a 3 s clip when the caller cancels (the
+  playback stream closed ~0.2 s after the cancel), serves two queued calls strictly one after
+  another (open/close alternation asserted) and honours an administrator-set bound
+  (`max_seconds=1` accepts exactly 1 s and rejects one frame over). A call is held for at most
+  the caller's own routed deadline (30 s default, 5 minutes maximum, enforced by the daemon as a
+  cancel), so a queued caller waits for the current clip plus at most the owner's remaining
+  deadline. The review fixed a real bug
+  here: `max_seconds` had been silently forced back to its default on every boot because the app
+  misread the app-private settings event; the run above shows `pa: settings revision=2
+  max_seconds=1` followed by `the WAV holds 32002 bytes of audio; max_seconds=1 allows 32000`.
+  Proof level: API behaviour, routing/ownership and PCM submission — not acoustic output. No
+  device run; the script host has no filesystem, so a caller supplies the bytes.
+
 ## Verified against the live vendor service
 
 The Marusia assistant was exercised against the real vendor service, not only against loopback
@@ -711,7 +1117,10 @@ document stays stable.
    invalid-label rejection, and confirm `avahi-resolve` after an Avahi restart.
 6. Evaluate the assistant endpointer and each wakeword against real room noise, loud music and
    quiet speech over long durations; the acoustic gate cannot be certified by simulator PCM.
-7. Run a MicroPython package on the unit, not just its host.
+7. Run a MicroPython package on the unit, not just its host. **Partly closed on 2026-11-17:**
+   `org.capsulad.pa` and `org.capsulad.radio` ran on the unit through the installed
+   `capsulad-micropython` (418,736 B `23af60a7…`) and reached `APP_READY`. What a script app does
+   after readiness on the device (audio path, station playback) is still open.
 8. Exercise a real Wi-Fi association, the setup AP, DHCP/portal detection and AP teardown on
    the target; verify stock AP-mode scanning or the absence of a scan path.
 9. Exercise a power cycle with the single boot hook, including `disable`/`enable` and the
@@ -799,6 +1208,61 @@ document stays stable.
     resolver (`/etc/resolv.conf`, `/etc/hosts`) works. The host proves verification against the
     embedded test CA and loopback sockets only; device DNS, trust-store contents and outbound
     reachability are unverified.
+25. **Bluetooth connection cue on the unit.** Simulator digital output now covers the cue:
+    `TestBluetoothConnectionCue` passed under `-race` with `-ldflags '-linkmode=external'`
+    (non-zero sink tail on connect, the cue stream drains, no playback stream on disconnect), and
+    `TestEmbeddedCuesDecode` passed under the same flags for the embedded `question.wav` PCM. Still
+    open: connect and disconnect a phone on the unit and confirm the cue plays once at the current
+    master gain with no cue on disconnect, at an audible level. The host test proves emitted PCM,
+    not acoustic level, and no real source was exercised.
+
+26. **Closed on this host (2026-11-17).** Every app-level suite now has reported output: the Simon
+    contract suite (22/22) and its simulator run, the PA unit tests (29 + 28, `OK`) and `e2e.sh`
+    (`PASS: install, boot, play, split play, rejections, no-progress frames, stall, cancellation,
+    queued calls, setting bound`; `DONE main ok=15 fail=0`, `DONE settings ok=3 fail=0`), the
+    Internet Radio unit tests (`Ran 57 tests … OK`, eighteen of them
+    timer/watchdog/authorization
+    cases) plus the
+    host prelude self-test (`Ran 12 tests … OK`), its deterministic `e2e`
+    (`PASS`, authorizing push logged) and its live `e2e-tuner` (`PASS` against the final tuner,
+    zero refusal/stall lines), both e2e scripts including the autonomous-watchdog phase (tuner
+    killed with no user interaction → `tuner stopped` error state), and the bridge's Go suite plus
+    its simulator lifecycle. `make test-apps` remains the
+    entrypoint; re-open this gate only if an app's suites change.
+27. **Close the remaining live-install gaps.** Simulator evidence now covers a fresh install, a
+    replace, the running-app refusal, removal, the browser upload/remove/live-status session and
+    the no-daemon offline fallback (see the host section). Still unexercised: installing while the
+    daemon is stopped and then restarting to see the package active, the "cannot tell whether
+    capsulad is running" refusal (a socket that fails for a reason other than absence), a real
+    65 MiB browser upload, upload timing over a slow link, and any device run. A real 65 MiB
+    upload and the device are the material ones.
+28. **Play a station on the unit.** The host side is settled, including the authorization: the live
+    `e2e-tuner` PASS was re-run against the authorizing tuner package with an authorized `Tune`, an
+    authorized `Stop` on a station change and zero refusal lines. Still open: the same path on the
+    device — the tuner's outbound TLS/DNS from inside the mount namespace, decoded PCM reaching the
+    device mixer, and the display states under real key presses.
+29. **Exercise the Home Assistant bridge against a real broker.** Point it at an MQTT broker (or
+    a Home Assistant MQTT integration), confirm the retained discovery payloads and one state
+    topic per entity, apply a command to the ring and the display and see the state republish,
+    kill the app to see the broker last will flip availability, and use `release_hardware`. All
+    bridge evidence today is host unit tests; no broker, no Home Assistant and no device was
+    contacted.
+30. **Package and run the native apps on the unit.** Build `org.capsulad.radio.tuner` and
+    `org.capsulad.homeassistant` with the aarch64 toolchain and install them, so the tuner's
+    outbound TLS/DNS path and the bridge's MQTT session are exercised from inside the mount
+    namespace. **Partly closed on 2026-11-17:** both apps were built for aarch64 / glibc ≤ 2.33,
+    installed on the unit and their runs reached `APP_READY` (see the second deployment above).
+    Their network paths — tuner outbound TLS/DNS from inside the mount namespace, bridge MQTT
+    session against a real broker — remain unexercised, and no audio was measured.
+
+31. **Confirm the 2026-11-17 second deployment's post-restart state.** Open because the unit left
+    the network during the follow-up restart and could not be reached afterwards (see that entry
+    for the observations; no cause is established): startup behavior of the installed stack, one
+    run per app (two `org.capsulad.marusia` runs survived the tmpfs OOM restart storm), the
+    sandbox mode of a healthy start (`sandbox=none` was reported by runs started during the OOM
+    window, against `mountns` in the earlier record), and an app-level start/stop of the QuickJS
+    app `org.capsulad.simon`. `build/linux-arm64/release-20261117b/verify-after-recovery.sh` runs
+    those checks once the speaker is reachable.
 
 No device evidence exists for the networking surface described in
 [app_development/network.md](app_development/network.md): outbound streams, UDP, listener

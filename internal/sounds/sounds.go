@@ -1,5 +1,6 @@
 // Package sounds embeds the framework's own UI cue audio: the installation
-// startup jingle, the volume-change tick and the microphone mute/unmute cues.
+// startup jingle, the volume-change tick, the microphone mute/unmute cues and
+// the Bluetooth source-connected cue.
 //
 // The files are the Ubuntu ubuntu-sounds 0.3 set, licensed CC BY-SA (see
 // COPYING beside them). They are compiled into the daemon rather than installed
@@ -31,6 +32,7 @@ var (
 	volume    = mustClip("generic.wav")
 	microMute = mustClip("warning.wav")
 	microLive = mustClip("info.wav")
+	btConnect = mustClip("question.wav")
 )
 
 // Startup is the installation/startup jingle.
@@ -44,6 +46,12 @@ func MicrophoneMuted() Clip { return microMute }
 
 // MicrophoneLive is the cue for a microphone that just became live.
 func MicrophoneLive() Clip { return microLive }
+
+// BluetoothConnected is the cue for a source that just connected while the
+// speaker accepts inbound links (speaker mode). It is the authored
+// question.wav clip, played once per connection by the daemon's Bluetooth
+// watcher; a resync of an already-connected source does not replay it.
+func BluetoothConnected() Clip { return btConnect }
 
 // mustClip decodes one embedded file. The inputs are build constants, so a
 // decode failure is a programming or packaging error and fails loudly at

@@ -1,0 +1,42 @@
+// PA speaker interface (org.capsulad.pa.v1).
+//
+// The application is a background MicroPython service: it accepts one
+// RIFF/WAVE file over this interface and plays it on the framework speaker
+// through AudioService.Playback. The wire form is raw protobuf; the packaged
+// pa.protoset publishes the same schema for JSON callers and the Web UI.
+syntax = "proto3";
+
+package org.capsulad.pa.v1;
+
+message PlayRequest {
+  // The next slice of one WAV file. The concatenation of the `data` field of
+  // every request message in the call is exactly one RIFF/WAVE file; the file
+  // may be split anywhere, including inside the RIFF header. PCM is never
+  // base64: this field carries raw file bytes.
+  //
+  // Every request message must carry at least one byte: the app makes progress
+  // per frame, and a frame without WAV bytes is rejected with INVALID_ARGUMENT.
+  bytes data = 1;
+}
+
+message PlayResult {
+  // True only when the whole declared audio reached the speaker and the
+  // framework drained it. A rejected or truncated file ends the call with a
+  // non-OK gRPC status instead, so a reply always means success.
+  bool played = 1;
+  // Interleaved PCM frames accepted for playback.
+  uint32 frames = 2;
+  uint32 sample_rate_hz = 3;
+  uint32 channels = 4;
+  string detail = 5;
+}
+
+service SpeakerService {
+  // Play streams one WAV file to the device speaker and replies once it has
+  // played out, been rejected, or been cancelled.
+  //
+  // The request side is a client stream: send the file as one or more
+  // PlayRequest frames and half-close to mark the end. Deleting the call
+  // (cancelling it) before the reply discards queued audio immediately.
+  rpc Play(stream PlayRequest) returns (PlayResult);
+}

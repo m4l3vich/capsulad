@@ -308,3 +308,121 @@ func TestWriteRejectsSymlink(t *testing.T) {
 		t.Fatalf("error = %v, want a symlink rejection", err)
 	}
 }
+
+// --- streaming staging ------------------------------------------------------
+//
+// OpenReader is the transport form of OpenIn: the daemon receives a package as
+// a .tar.gz stream and must stage it on the applications filesystem without
+// writing the archive twice.
+
+func TestOpenReaderStagesArchiveInsideParent(t *testing.T) {
+	src := packageDir(t)
+	archivePath := filepath.Join(t.TempDir(), "pkg.tar.gz")
+	if err := Write(src, archivePath); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	pkg, err := OpenReader(parent, bytes.NewReader(data), DefaultLimits)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	if !strings.HasPrefix(pkg.Dir, parent+string(os.PathSeparator)) {
+		t.Fatalf("staged dir %q is not inside the caller's parent %q", pkg.Dir, parent)
+	}
+	body, err := os.ReadFile(filepath.Join(pkg.Dir, "assets", "note.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hello" {
+		t.Fatalf("asset body = %q", body)
+	}
+	info, err := os.Stat(filepath.Join(pkg.Dir, "bin", "app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("streamed executable mode = %04o", info.Mode().Perm())
+	}
+	staged := pkg.Dir
+	if err := pkg.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Fatalf("staged tree survived Close: %v", err)
+	}
+}
+
+func TestOpenReaderRejectsInvalidStreams(t *testing.T) {
+	if _, err := OpenReader(t.TempDir(), strings.NewReader("not gzip"), DefaultLimits); err == nil {
+		t.Fatal("non-gzip stream was accepted")
+	}
+	if _, err := OpenReader(t.TempDir(), bytes.NewReader(nil), DefaultLimits); err == nil {
+		t.Fatal("empty stream was accepted")
+	}
+
+	// A truncated archive must not leave a staged tree behind.
+	src := packageDir(t)
+	archivePath := filepath.Join(t.TempDir(), "pkg.tar.gz")
+	if err := Write(src, archivePath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	if _, err := OpenReader(parent, bytes.NewReader(data[:len(data)/2]), DefaultLimits); err == nil {
+		t.Fatal("truncated archive was accepted")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed open left %d entries behind", len(entries))
+	}
+}
+
+func TestOpenReaderRequiresRootManifest(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "bin/app", Mode: 0o755, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("xx")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := OpenReader(t.TempDir(), bytes.NewReader(buf.Bytes()), DefaultLimits)
+	if err == nil || !strings.Contains(err.Error(), ManifestFile) {
+		t.Fatalf("missing manifest error = %v, want a %s diagnostic", err, ManifestFile)
+	}
+}
+
+func TestOpenReaderAppliesLimits(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "manifest.toml", testManifest, 0o644)
+	writeFile(t, src, "bin/app", strings.Repeat("x", 4096), 0o755)
+	archivePath := filepath.Join(t.TempDir(), "pkg.tar.gz")
+	if err := WriteLimit(src, archivePath, Limits{MaxFileBytes: 8192, MaxTotalBytes: 64 << 20, MaxEntries: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = OpenReader(t.TempDir(), bytes.NewReader(data), Limits{MaxFileBytes: 1024, MaxTotalBytes: 64 << 20, MaxEntries: 4096})
+	if err == nil || !strings.Contains(err.Error(), "per-file limit") {
+		t.Fatalf("streamed limit error = %v, want the per-file limit", err)
+	}
+}

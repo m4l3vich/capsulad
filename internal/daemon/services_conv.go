@@ -104,7 +104,7 @@ func (d *Daemon) appProto(app *registry.App) *frameworkv1.InstalledApplication {
 		RestartOnFailure: m.RestartOnFailure,
 		SystemApp:        system,
 		CanStop:          true,
-		CanUninstall:     false,
+		CanUninstall:     !system,
 		Entrypoint: &frameworkv1.ApplicationEntrypoint{
 			Runtime: runtimeProto(m.Entrypoint.Runtime), RelativePath: m.Entrypoint.Path,
 			CpuArchitecture: m.Entrypoint.Architecture, BinaryAbi: m.Entrypoint.ABI,

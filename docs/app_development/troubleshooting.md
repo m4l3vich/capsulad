@@ -44,9 +44,12 @@ started or removed by the directory name.
   logs `package directory "<dir>" does not match app id "<id>"; using manifest id` and keeps the
   manifest ID. Fix: install through `capsulad-cli app install`, which always creates
   `<data-dir>/apps/<manifest-id>`.
-- `application <id> is not installed` immediately after `app install` means the daemon has not
-  rescanned. The registry is read at startup: restart `capsulad`, or use
-  `capsulad-cli deploy`.
+- `application <id> is not installed` immediately after `app install`: while capsulad is
+  reachable the install is applied live (the daemon reloads its registry), so a missing app means
+  the install did not reach that daemon — read the command's own error, and check
+  `capsulad-cli app list`. The restart rule only applies to the offline path: if the daemon was
+  provably stopped when the package was written to `<data-dir>/apps`, it becomes visible at the
+  next start (see [packaging-deployment.md](packaging-deployment.md#install-update-and-remove)).
 - `PERMISSION_DENIED: run_id does not match the connecting process` or `unknown run_id` during
   `AppBusService.Connect` means the process sent a stale or foreign `CAPSULAD_RUN_ID`. Read
   `CAPSULAD_RUN_ID` from the environment of the current process; never cache it across runs.

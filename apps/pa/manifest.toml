@@ -1,0 +1,28 @@
+id = "org.capsulad.pa"
+name = "PA Speaker"
+version = "0.1.0"
+description = "Background MicroPython speaker service: accepts one WAV file over an app-bus interface and plays it on the device speaker."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+
+[entrypoint]
+runtime = "micropython"
+path = "main.py"
+sdk = "0.5"
+
+[[settings]]
+key = "max_seconds"
+label = "Maximum clip length"
+description = "Longest WAV the app will play, in seconds (1-60). A file whose audio is longer is rejected with RESOURCE_EXHAUSTED before anything plays, and a WAV with an unknown length is stopped when it exceeds the bound. Raise it only for announcements that need it: the run is busy for the whole clip."
+type = "integer"
+default = 30
+min = 1
+max = 60
+
+[[interfaces]]
+service = "org.capsulad.pa.v1.SpeakerService"
+version = "v1"
+descriptor = "proto/pa.protoset"
+docs = "docs/speaker.md"

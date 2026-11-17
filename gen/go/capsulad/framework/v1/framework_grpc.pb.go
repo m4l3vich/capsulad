@@ -1537,13 +1537,15 @@ var AssistantService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ApplicationService_ListApplications_FullMethodName    = "/capsulad.framework.v1.ApplicationService/ListApplications"
-	ApplicationService_ListRuntimes_FullMethodName        = "/capsulad.framework.v1.ApplicationService/ListRuntimes"
-	ApplicationService_GetBinaryProvenance_FullMethodName = "/capsulad.framework.v1.ApplicationService/GetBinaryProvenance"
-	ApplicationService_Launch_FullMethodName              = "/capsulad.framework.v1.ApplicationService/Launch"
-	ApplicationService_Stop_FullMethodName                = "/capsulad.framework.v1.ApplicationService/Stop"
-	ApplicationService_ListRuns_FullMethodName            = "/capsulad.framework.v1.ApplicationService/ListRuns"
-	ApplicationService_WatchRuns_FullMethodName           = "/capsulad.framework.v1.ApplicationService/WatchRuns"
+	ApplicationService_ListApplications_FullMethodName     = "/capsulad.framework.v1.ApplicationService/ListApplications"
+	ApplicationService_ListRuntimes_FullMethodName         = "/capsulad.framework.v1.ApplicationService/ListRuntimes"
+	ApplicationService_GetBinaryProvenance_FullMethodName  = "/capsulad.framework.v1.ApplicationService/GetBinaryProvenance"
+	ApplicationService_Launch_FullMethodName               = "/capsulad.framework.v1.ApplicationService/Launch"
+	ApplicationService_Stop_FullMethodName                 = "/capsulad.framework.v1.ApplicationService/Stop"
+	ApplicationService_ListRuns_FullMethodName             = "/capsulad.framework.v1.ApplicationService/ListRuns"
+	ApplicationService_WatchRuns_FullMethodName            = "/capsulad.framework.v1.ApplicationService/WatchRuns"
+	ApplicationService_InstallApplication_FullMethodName   = "/capsulad.framework.v1.ApplicationService/InstallApplication"
+	ApplicationService_UninstallApplication_FullMethodName = "/capsulad.framework.v1.ApplicationService/UninstallApplication"
 )
 
 // ApplicationServiceClient is the client API for ApplicationService service.
@@ -1557,6 +1559,22 @@ type ApplicationServiceClient interface {
 	Stop(ctx context.Context, in *StopRequest, opts ...grpc.CallOption) (*StopResponse, error)
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
 	WatchRuns(ctx context.Context, in *WatchRunsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AppRunEvent], error)
+	// Package administration. Both calls are local-administrator operations: a
+	// supervised application is refused, so an app can never install, replace or
+	// remove another app (or itself) even though the methods are part of the
+	// shared protocol. They live here because the browser backend and the CLI
+	// use the same local control plane as every other client; there is no second
+	// administration channel.
+	//
+	// InstallApplication takes the package as a .tar.gz stream: the first
+	// message is InstallApplicationOpen, every following message carries archive
+	// bytes. The daemon validates the artifact, refuses to replace a running
+	// app, swaps the package atomically and activates it in the live registry,
+	// so an accepted install is visible to ListApplications without a daemon
+	// restart. UninstallApplication removes an installed package after the same
+	// running-app check; app settings are deliberately retained.
+	InstallApplication(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallApplicationRequest, InstallApplicationResult], error)
+	UninstallApplication(ctx context.Context, in *UninstallApplicationRequest, opts ...grpc.CallOption) (*UninstallApplicationResult, error)
 }
 
 type applicationServiceClient struct {
@@ -1646,6 +1664,29 @@ func (c *applicationServiceClient) WatchRuns(ctx context.Context, in *WatchRunsR
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ApplicationService_WatchRunsClient = grpc.ServerStreamingClient[AppRunEvent]
 
+func (c *applicationServiceClient) InstallApplication(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallApplicationRequest, InstallApplicationResult], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ApplicationService_ServiceDesc.Streams[1], ApplicationService_InstallApplication_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[InstallApplicationRequest, InstallApplicationResult]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ApplicationService_InstallApplicationClient = grpc.ClientStreamingClient[InstallApplicationRequest, InstallApplicationResult]
+
+func (c *applicationServiceClient) UninstallApplication(ctx context.Context, in *UninstallApplicationRequest, opts ...grpc.CallOption) (*UninstallApplicationResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UninstallApplicationResult)
+	err := c.cc.Invoke(ctx, ApplicationService_UninstallApplication_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ApplicationServiceServer is the server API for ApplicationService service.
 // All implementations must embed UnimplementedApplicationServiceServer
 // for forward compatibility.
@@ -1657,6 +1698,22 @@ type ApplicationServiceServer interface {
 	Stop(context.Context, *StopRequest) (*StopResponse, error)
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
 	WatchRuns(*WatchRunsRequest, grpc.ServerStreamingServer[AppRunEvent]) error
+	// Package administration. Both calls are local-administrator operations: a
+	// supervised application is refused, so an app can never install, replace or
+	// remove another app (or itself) even though the methods are part of the
+	// shared protocol. They live here because the browser backend and the CLI
+	// use the same local control plane as every other client; there is no second
+	// administration channel.
+	//
+	// InstallApplication takes the package as a .tar.gz stream: the first
+	// message is InstallApplicationOpen, every following message carries archive
+	// bytes. The daemon validates the artifact, refuses to replace a running
+	// app, swaps the package atomically and activates it in the live registry,
+	// so an accepted install is visible to ListApplications without a daemon
+	// restart. UninstallApplication removes an installed package after the same
+	// running-app check; app settings are deliberately retained.
+	InstallApplication(grpc.ClientStreamingServer[InstallApplicationRequest, InstallApplicationResult]) error
+	UninstallApplication(context.Context, *UninstallApplicationRequest) (*UninstallApplicationResult, error)
 	mustEmbedUnimplementedApplicationServiceServer()
 }
 
@@ -1687,6 +1744,12 @@ func (UnimplementedApplicationServiceServer) ListRuns(context.Context, *ListRuns
 }
 func (UnimplementedApplicationServiceServer) WatchRuns(*WatchRunsRequest, grpc.ServerStreamingServer[AppRunEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method WatchRuns not implemented")
+}
+func (UnimplementedApplicationServiceServer) InstallApplication(grpc.ClientStreamingServer[InstallApplicationRequest, InstallApplicationResult]) error {
+	return status.Errorf(codes.Unimplemented, "method InstallApplication not implemented")
+}
+func (UnimplementedApplicationServiceServer) UninstallApplication(context.Context, *UninstallApplicationRequest) (*UninstallApplicationResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UninstallApplication not implemented")
 }
 func (UnimplementedApplicationServiceServer) mustEmbedUnimplementedApplicationServiceServer() {}
 func (UnimplementedApplicationServiceServer) testEmbeddedByValue()                            {}
@@ -1828,6 +1891,31 @@ func _ApplicationService_WatchRuns_Handler(srv interface{}, stream grpc.ServerSt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ApplicationService_WatchRunsServer = grpc.ServerStreamingServer[AppRunEvent]
 
+func _ApplicationService_InstallApplication_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ApplicationServiceServer).InstallApplication(&grpc.GenericServerStream[InstallApplicationRequest, InstallApplicationResult]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ApplicationService_InstallApplicationServer = grpc.ClientStreamingServer[InstallApplicationRequest, InstallApplicationResult]
+
+func _ApplicationService_UninstallApplication_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UninstallApplicationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApplicationServiceServer).UninstallApplication(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApplicationService_UninstallApplication_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApplicationServiceServer).UninstallApplication(ctx, req.(*UninstallApplicationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ApplicationService_ServiceDesc is the grpc.ServiceDesc for ApplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1859,12 +1947,21 @@ var ApplicationService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ListRuns",
 			Handler:    _ApplicationService_ListRuns_Handler,
 		},
+		{
+			MethodName: "UninstallApplication",
+			Handler:    _ApplicationService_UninstallApplication_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "WatchRuns",
 			Handler:       _ApplicationService_WatchRuns_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "InstallApplication",
+			Handler:       _ApplicationService_InstallApplication_Handler,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "capsulad/framework/v1/framework.proto",

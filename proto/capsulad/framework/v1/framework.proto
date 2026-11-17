@@ -805,6 +805,24 @@ service ApplicationService {
   rpc Stop(StopRequest) returns (StopResponse);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
   rpc WatchRuns(WatchRunsRequest) returns (stream AppRunEvent);
+  // Package administration. Both calls are local-administrator operations: a
+  // supervised application is refused, so an app can never install, replace or
+  // remove another app (or itself) even though the methods are part of the
+  // shared protocol. They live here because the browser backend and the CLI
+  // use the same local control plane as every other client; there is no second
+  // administration channel.
+  //
+  // InstallApplication takes the package as a .tar.gz stream: the first
+  // message is InstallApplicationOpen, every following message carries archive
+  // bytes. The daemon validates the artifact, refuses to replace a running
+  // app, swaps the package atomically and activates it in the live registry,
+  // so an accepted install is visible to ListApplications without a daemon
+  // restart. UninstallApplication removes an installed package after the same
+  // running-app check; app settings are deliberately retained.
+  rpc InstallApplication(stream InstallApplicationRequest)
+      returns (InstallApplicationResult);
+  rpc UninstallApplication(UninstallApplicationRequest)
+      returns (UninstallApplicationResult);
 }
 enum ApplicationRuntime {
   APPLICATION_RUNTIME_UNSPECIFIED = 0;
@@ -893,6 +911,10 @@ message InstalledApplication {
   // only by what the daemon reports here.
   bool system_app = 13;
   bool can_stop = 14;
+  // True when the daemon can remove this installation: every supervised
+  // package is removable, a compiled-in system application never is. A running
+  // app still refuses removal at the call; this field only says the operation
+  // is defined for the installation.
   bool can_uninstall = 15;
 }
 message DeclaredAppInterface {
@@ -941,6 +963,36 @@ message AppRun {
 }
 message ListRunsResponse { repeated AppRun runs = 1; }
 message AppRunEvent { AppRun run = 1; }
+
+// InstallApplicationRequest carries one application package. The stream's
+// first message is InstallApplicationOpen; every following message carries the
+// next slice of the gzip-compressed tar. Chunk boundaries carry no meaning.
+message InstallApplicationRequest {
+  oneof chunk {
+    InstallApplicationOpen open = 1;
+    bytes content = 2;
+  }
+}
+message InstallApplicationOpen {
+  // The artifact's file name as the client named it. It is diagnostics only:
+  // the daemon never uses it as a path and never installs from a client-named
+  // location.
+  string file_name = 1;
+}
+message InstallApplicationResult {
+  // The installed application as ListApplications now reports it.
+  InstalledApplication application = 1;
+  // True when an existing installation was replaced in place.
+  bool replaced = 2;
+  // Version that installation carried before the call; empty for a fresh
+  // install. Reported separately from `replaced` so a client can distinguish
+  // an update from a reinstall of the same version.
+  string previous_version = 3;
+}
+message UninstallApplicationRequest { string app_id = 1; }
+message UninstallApplicationResult {
+  string app_id = 1;
+}
 
 // Framework persists application settings from the manifest and renders a
 // simple form in the Web UI; buttons are actions, not persisted settings.

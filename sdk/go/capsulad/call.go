@@ -245,12 +245,13 @@ func (s *Stream) Close() error {
 
 // ServerCall is the app-side handler view of one routed call.
 type ServerCall struct {
-	handle  uint64
-	id      string
-	service string
-	method  string
-	ctx     context.Context
-	cancel  context.CancelFunc
+	handle      uint64
+	id          string
+	service     string
+	method      string
+	callerRunID string
+	ctx         context.Context
+	cancel      context.CancelFunc
 
 	mu    sync.Mutex
 	ended bool
@@ -259,12 +260,13 @@ type ServerCall struct {
 func newServerCall(handle uint64, info incomingCallInfo) *ServerCall {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ServerCall{
-		handle:  handle,
-		id:      info.CallID,
-		service: info.GRPCService,
-		method:  info.RPCName,
-		ctx:     ctx,
-		cancel:  cancel,
+		handle:      handle,
+		id:          info.CallID,
+		service:     info.GRPCService,
+		method:      info.RPCName,
+		callerRunID: info.CallerRunID,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -280,6 +282,19 @@ func (s *ServerCall) Service() string { return s.service }
 
 // Method is the bare RPC name.
 func (s *ServerCall) Method() string { return s.method }
+
+// CallerRunID is the caller's capsulad-run-id claim, which the relay checks
+// against the connection's socket peer credentials where the transport
+// provides them (the framework Unix socket): a claimed run id whose process
+// does not match the socket is rejected with PERMISSION_DENIED before the call
+// is relayed. The value is never taken from a request field. Callers with no
+// supervised run (for example the CLI or the Web UI) appear as "pid:<pid>", and
+// a caller that sent no claim appears as the empty string.
+//
+// A handler that serves a privileged local interface should authorize the
+// caller with this value rather than trusting fields in the request, for
+// example by matching it against AppInterfaceService.ListInterfaces run ids.
+func (s *ServerCall) CallerRunID() string { return s.callerRunID }
 
 // Recv returns the next serialized request message; io.EOF indicates the
 // caller half-closed.

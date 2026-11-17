@@ -1,0 +1,77 @@
+// org.capsulad.homeassistant.v1 is the local interface the Home Assistant
+// bridge publishes on the app bus. It is the app-facing contract for other
+// supervised apps (and for an administrator running capsulad-cli): it reports
+// the bridge's state, asks for a discovery republish, and raises a Home
+// Assistant event.
+//
+// The MQTT side of the bridge (topics, discovery payloads, entity ids) is
+// documented in docs/bridge.md, which the manifest also publishes as this
+// interface's documentation.
+syntax = "proto3";
+
+package org.capsulad.homeassistant.v1;
+
+option go_package = "org.capsulad.homeassistant.v1;homeassistantv1";
+
+service HomeAssistantService {
+  // GetStatus reports the current configuration, connection and entity state.
+  rpc GetStatus(GetStatusRequest) returns (Status);
+
+  // PublishDiscovery rewrites every retained discovery payload and the current
+  // state. Use it after changing the broker's retained state or Home
+  // Assistant's MQTT integration.
+  rpc PublishDiscovery(PublishDiscoveryRequest) returns (PublishDiscoveryResponse);
+
+  // PublishEvent raises one event on the bridge's Home Assistant event entity,
+  // so another app can leave a trace in Home Assistant's automation engine.
+  rpc PublishEvent(PublishEventRequest) returns (PublishEventResponse);
+}
+
+message GetStatusRequest {}
+
+message Status {
+  // Configured is true once the app has accepted a settings snapshot that
+  // names a broker (or enables discovery).
+  bool configured = 1;
+  // Connected is true while an MQTT session is live.
+  bool connected = 2;
+  // Broker is "host:port" as configured. An mDNS-discovered endpoint is
+  // reported once it is in use.
+  string broker = 3;
+  // NodeID is the topic level and Home Assistant identifier in use.
+  string node_id = 4;
+  string discovery_prefix = 5;
+  string base_topic = 6;
+  // Entities is the number of published discovery payloads.
+  uint32 entities = 7;
+  bool ring_on = 8;
+  string ring_effect = 9;
+  bool display_on = 10;
+  string display_face = 11;
+  // BridgeStatus is "online", "connecting", "stopped" or "error".
+  string bridge_status = 12;
+  // LastError is the most recent failure, empty when there is none.
+  string last_error = 13;
+  uint64 published = 14;
+  uint64 commands = 15;
+  uint64 failures = 16;
+}
+
+message PublishDiscoveryRequest {}
+
+message PublishDiscoveryResponse {
+  // Published is the number of discovery payloads written.
+  uint32 published = 1;
+}
+
+message PublishEventRequest {
+  // EventType must be one of the event types the published event entity
+  // declares. An unknown type is refused.
+  string event_type = 1;
+  // PayloadJSON is an optional JSON object with extra event fields.
+  string payload_json = 2;
+}
+
+message PublishEventResponse {
+  bool published = 1;
+}

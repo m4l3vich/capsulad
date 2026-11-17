@@ -172,8 +172,8 @@ concurrent playback streams may be open per app; the fifth open fails with
 | Event | Fields | Meaning |
 |---|---|---|
 | `PlaybackStarted` | `stream_id`, `actual_format` | Sent once, before any progress. |
-| `PlaybackProgress` | `frames_played`, `frames_queued` | About every 250 ms. |
-| `AudioNotice` | `code`, `detail` | `STREAM_CLOSED` when the stream finishes; `DAEMON_SHUTDOWN` on shutdown. |
+| `PlaybackProgress` | `frames_played`, `frames_queued` | About every 250 ms. `frames_played` counts **mixed output frames the mixer consumed for this stream**, silence included: it advances on every mixer tick for any open, unpaused playback, so it is not evidence that the producer is still feeding the stream. `frames_queued` is this stream's own backlog in frames. |
+| `AudioNotice` | `code`, `detail` | `STREAM_CLOSED` when the stream finishes; `DAEMON_SHUTDOWN` on shutdown; `APP_EXITED` when the owning run is gone. There is no playback underrun notice: a starved live stream keeps contributing mixed silence instead of ending, so an app that must notice a dead producer has to use its own signal (queue depth plus producer liveness) rather than `frames_played`. |
 
 ### Drain on success, discard on cancel
 

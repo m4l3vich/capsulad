@@ -205,6 +205,21 @@ type Daemon struct {
 	provMu sync.Mutex
 	prov   map[string]provenance.Result
 
+	// pkgMu serialises starting an application against replacing or removing
+	// its package. One lock, not one per app: the registry rescan a package
+	// mutation performs is global, and package operations are rare compared
+	// with the launches they protect.
+	pkgMu sync.Mutex
+
+	// installSlot bounds package staging to one tree at a time (see
+	// admitInstall): the data partition cannot hold two unpacked packages
+	// beside the installed set.
+	installSlot chan struct{}
+	// installIdleBudget is how long an upload may go silent before the daemon
+	// ends the RPC and releases the staging slot. New seeds it; focused tests
+	// may shorten it before Run starts.
+	installIdleBudget time.Duration
+
 	grpcSrv *grpc.Server
 	grpcLis net.Listener
 	web     *webui.Server
@@ -411,6 +426,8 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 		runSubs:     map[int]chan supervisor.Run{},
 		closing:     make(chan struct{}),
 		uiChanges:   uichanges.New(),
+		installSlot:       make(chan struct{}, 1),
+		installIdleBudget: defaultInstallIdleBudget,
 	}
 
 	switch cfg.Platform {

@@ -25,7 +25,14 @@ const (
 // Launch implements the single-instance invocation contract: a ready
 // singleton receives AppLaunchInvocation in place; a starting singleton holds
 // a bounded, expiring invocation; ordinary apps spawn a new supervised run.
+//
+// It holds the package mutex so a process is never started from a package tree
+// that InstallPackageStream or UninstallPackage is replacing or removing: the
+// launch either completes first (and the mutation then refuses because the app
+// is running) or starts from the already-swapped tree.
 func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocationID string, spawned bool, err error) {
+	d.pkgMu.Lock()
+	defer d.pkgMu.Unlock()
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return "", "", false, fmt.Errorf("application %s is not installed", appID)

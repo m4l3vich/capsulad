@@ -114,7 +114,19 @@ Rules and limits:
 - A target disconnect fails in-flight calls with `UNAVAILABLE`; calls are never replayed to a new
   process.
 - The caller's identity is derived from the socket peer and the optional `capsulad-run-id`
-  metadata. A claim that contradicts peer credentials is `PERMISSION_DENIED`.
+  metadata. A claim that contradicts peer credentials is `PERMISSION_DENIED`. The verified
+  result is delivered to the target as `IncomingAppCall.caller_run_id`: a supervised run's id
+  when the claim matched that run's process, `pid:<pid>` for a caller with no supervised run
+  (the CLI, the Web UI), or empty when neither is available.
+- The daemon authorizes which services are reachable, not who may invoke a method: an inbound
+  call is a **local request, not an authenticated one**, and a handler must never treat a field
+  inside the request as the caller's identity. A handler that serves a privileged local
+  interface identifies the caller from `caller_run_id` and must match it against daemon-served
+  data — for example `AppInterfaceService.ListInterfaces`, whose `run_id`/`app_id` rows come
+  from the supervisor — before acting. Refuse with `PERMISSION_DENIED` when the caller is not
+  the app the interface is for; a caller that appears as `pid:<pid>` or empty has no app
+  identity and cannot be authorized this way. See
+  [security.md](security.md#routed-calls-and-trust).
 - Built-in system apps answer in-process through an internal handler. Their wire shape is
   identical: one request frame, optional half-close, then responses and `end`. Bidirectional
   request streaming to a system app is `UNIMPLEMENTED`.

@@ -103,10 +103,11 @@ func (s *Server) watchTopicWith(ctx context.Context, c *wsConn, topic webv1.Topi
 	switch topic {
 	case webv1.Topic_TOPIC_OVERVIEW:
 		// The settings stream blocks for the subscription lifetime; run it
-		// beside the run watcher instead of before it. Bluetooth and settings
-		// invalidations rebuild observed/adapter and audio state.
+		// beside the run watcher instead of before it. Bluetooth, settings and
+		// installed-package invalidations rebuild observed/adapter, audio and
+		// application state.
 		go s.watchOverviewSettings(ctx, c)
-		go s.watchOverviewBluetooth(ctx, c, signals)
+		go s.watchOverviewSignals(ctx, c, signals)
 		s.watchRuns(ctx, c, "", webv1.Topic_TOPIC_OVERVIEW, func() {
 			ctx2, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
@@ -170,10 +171,11 @@ func (s *Server) watchWakeword(ctx context.Context, c *wsConn) {
 	s.watchWakewordSignals(ctx, c, signals)
 }
 
-// watchApplicationSignals republishes the application view when any app's
-// settings change. The hub carries no payload, so the authoritative
-// configuration snapshot is rebuilt here; a short coalescing window keeps a
-// slider drag from flooding every open session with full views.
+// watchApplicationSignals republishes the application view when its settings
+// change or when the installed package it describes was replaced or removed.
+// The hub carries no payload, so the authoritative view is rebuilt here; a
+// short coalescing window keeps a slider drag from flooding every open session
+// with full views.
 func (s *Server) watchApplicationSignals(ctx context.Context, c *wsConn, appID string, signals <-chan uichanges.Topic) {
 	if signals == nil {
 		return
@@ -204,7 +206,7 @@ func (s *Server) watchApplicationSignals(ctx context.Context, c *wsConn, appID s
 			if !ok {
 				return
 			}
-			if signal != uichanges.AppSettings {
+			if signal != uichanges.AppSettings && signal != uichanges.Apps {
 				continue
 			}
 			if timer == nil {
@@ -299,9 +301,11 @@ func (s *Server) publish(topic uichanges.Topic) {
 	}
 }
 
-// watchOverviewBluetooth republishes the overview when observed adapter state
-// changes (a BlueZ-side change, not only a persisted setting).
-func (s *Server) watchOverviewBluetooth(ctx context.Context, c *wsConn, signals <-chan uichanges.Topic) {
+// watchOverviewSignals republishes the overview when an in-process
+// invalidation changes it: observed adapter state (a BlueZ-side change, not
+// only a persisted setting) or the installed-application set after a package
+// was installed, replaced or removed.
+func (s *Server) watchOverviewSignals(ctx context.Context, c *wsConn, signals <-chan uichanges.Topic) {
 	if signals == nil {
 		return
 	}
@@ -313,7 +317,7 @@ func (s *Server) watchOverviewBluetooth(ctx context.Context, c *wsConn, signals 
 			if !ok {
 				return
 			}
-			if signal != uichanges.Bluetooth {
+			if signal != uichanges.Bluetooth && signal != uichanges.Apps {
 				continue
 			}
 			viewCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -328,8 +332,9 @@ func (s *Server) watchOverviewBluetooth(ctx context.Context, c *wsConn, signals 
 	}
 }
 
-// watchSettingsSignals republishes the settings view on Bluetooth status
-// changes that are not persisted-setting updates.
+// watchSettingsSignals republishes the settings view on invalidation that is
+// not a persisted-setting update: observed Bluetooth status, or the
+// installed-application set the default-provider selectors are built from.
 func (s *Server) watchSettingsSignals(ctx context.Context, c *wsConn, signals <-chan uichanges.Topic) {
 	if signals == nil {
 		return
@@ -342,7 +347,7 @@ func (s *Server) watchSettingsSignals(ctx context.Context, c *wsConn, signals <-
 			if !ok {
 				return
 			}
-			if signal != uichanges.Bluetooth {
+			if signal != uichanges.Bluetooth && signal != uichanges.Apps {
 				continue
 			}
 			viewCtx, cancel := context.WithTimeout(ctx, 8*time.Second)

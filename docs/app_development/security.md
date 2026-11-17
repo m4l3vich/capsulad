@@ -139,6 +139,53 @@ it carries no app identity: no `capsulad-run-id` metadata, a UID below the sandb
 that is not supervised. A sandbox UID or a supervised PID is confined even without a run ID. App
 confinement is implemented by identity checks on each method, not by hiding the socket.
 
+## Routed calls and trust
+
+`AppBusService.Call` is a **local request with an identified peer, not an authorization
+decision**. The daemon decides what is reachable: a supervised app may address another app's
+*declared* interfaces (`[[interfaces]]`), and only the daemon's internal token reaches private or
+system targets. That check is per service, not per method: the framework does not decide who may
+invoke a method.
+
+The peer is identified, though. The daemon derives `IncomingAppCall.caller_run_id` from the
+connection's peer credentials and the optional `capsulad-run-id` claim: a supervised run's id
+when the claim resolves to that run and its live process matches the socket peer, `pid:<pid>` for
+a local caller with no supervised run (the CLI, the Web UI), or empty when neither is available.
+A claim that contradicts peer credentials is `PERMISSION_DENIED`. The Go SDK exposes the value as
+`ServerCall.CallerRunID()`; the Rust and C callbacks carry the same field. Because it is derived
+by the daemon and not by the caller, a handler may use it for authorization.
+
+What that identity is not:
+
+- It is not a per-method permission: a declared interface is reachable by every ready local app,
+  and the framework never decides whether a particular app may invoke a particular method.
+- It is not administrator authority or user consent. A CLI or Web UI call arrives as `pid:<pid>`
+  — a local process, not a person, and not an administrator credential. `pid:<pid>` and empty
+  cannot be authorized as an application.
+- A value inside the request payload is never identity.
+
+A handler that serves a privileged local interface should therefore identify its caller and
+refuse: match `CallerRunID()` against daemon-served run data — for example
+`AppInterfaceService.ListInterfaces`, whose `run_id`/`app_id` rows come from the supervisor, not
+from the caller — and end the call with `PERMISSION_DENIED` otherwise.
+
+Two consequences follow. Both are accepted rather than mitigated:
+
+- Without such a check, any **ready** local app can invoke any declared interface of another app
+  with no per-method permission. A handler that acts on the framework's behalf (opening a
+  capture, changing what a provider shows) is then reachable by every other local app.
+- A handler that performs **egress on a caller-supplied destination** without checking the caller
+  is an unauthenticated arbitrary-egress primitive for any ready local app: any app that is ready
+  could make it dial an address of its choosing. Any handler that fetches, connects or forwards
+  to a caller-supplied destination must perform the check above before dialing; an interface that
+  does so is not an egress primitive, and the repository README records which first-party apps
+  are in that state.
+
+The posture remains: **apps are trusted local code, and the app-bus plane is local only** (one
+framework Unix socket, no network listener, no per-app sockets). Keep administrator or per-user
+meaning out of app-bus handlers, authorize with the daemon-derived caller run id where an
+interface is privileged, and constrain egress destinations inside the handler that performs them.
+
 ## What apps must never do
 
 - Open, read or write physical hardware directly: LED controllers, display device nodes,
@@ -181,7 +228,7 @@ in [services.md](services.md).
 | `RoutingService` | `ForceRelease` |
 | `AudioService` | `SetMasterVolume`, `SetMicrophoneMuted` (`GetAudioState` is readable) |
 | `AssistantService` | wakeword sample recording/listing/deleting, classifier training |
-| `ApplicationService` | `Launch`, `Stop` (`ListApplications`, `ListRuntimes`, `GetBinaryProvenance` are readable; run listings are app-scoped) |
+| `ApplicationService` | `Launch`, `Stop`, `InstallApplication`, `UninstallApplication` (`ListApplications`, `ListRuntimes`, `GetBinaryProvenance` are readable; run listings are app-scoped) |
 | `SystemService` | `SetBluetoothDiscoverable`, `SetBluetoothIncomingConnections`, `ListPairedDevices`, `UnpairDevice`, `GetWebUiSecurity` |
 | `DiagnosticsService` | `GetSnapshot`, `WatchLogs` |
 

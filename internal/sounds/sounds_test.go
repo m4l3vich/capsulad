@@ -18,6 +18,7 @@ func TestEmbeddedCuesDecode(t *testing.T) {
 		{"volume", Volume(), 400},
 		{"microphone muted", MicrophoneMuted(), 800},
 		{"microphone live", MicrophoneLive(), 150},
+		{"bluetooth connected", BluetoothConnected(), 600},
 	} {
 		clip := tc.clip
 		if clip.RateHz != 44100 || clip.Channels < 1 || clip.Channels > 2 {

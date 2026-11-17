@@ -453,10 +453,44 @@ client.Handle("org.example.thermostat.v1.ThermostatService", "GetTarget",
     })
 ```
 
-`ServerCall` exposes `ID()`, `Service()`, `Method()`, `Context()`, `Recv()`, `RecvJSON(v)`,
-`Send()`, `SendJSON(v)` and `End(code, detail)`. Returning without `End` makes the caller see
-`INTERNAL`. The inbound budget is 64 live calls with a 32-entry dispatch queue; overflow is
-rejected with `RESOURCE_EXHAUSTED`.
+`ServerCall` exposes `ID()`, `Service()`, `Method()`, `Context()`, `CallerRunID()`, `Recv()`,
+`RecvJSON(v)`, `Send()`, `SendJSON(v)` and `End(code, detail)`. Returning without `End` makes
+the caller see `INTERNAL`. The inbound budget is 64 live calls with a 32-entry dispatch queue;
+overflow is rejected with `RESOURCE_EXHAUSTED`.
+
+`CallerRunID()` is the caller's `capsulad-run-id` claim, which the relay checks against the
+connection's socket peer credentials where the transport provides them (the framework Unix
+socket); a claim that contradicts them is `PERMISSION_DENIED` before the call is relayed. A
+caller with no supervised run — the CLI or the Web UI — appears as `pid:<pid>`, and a caller
+that sent no claim appears as the empty string. The value is never taken from a request field.
+A handler that must act only for a particular app should authorize with this value instead of
+trusting a request field, for example by matching it against the run ids in
+`AppInterfaceService.ListInterfaces` (the run-to-app mapping is served by the daemon):
+
+```go
+// Inside a ServerCall handler.
+var listed struct {
+    Interfaces []struct {
+        AppID string `json:"appId"`
+        RunID string `json:"runId"`
+    } `json:"interfaces"`
+}
+if err := client.CallJSON(ctx, "", "capsulad.framework.v1.AppInterfaceService",
+    "ListInterfaces", map[string]any{"runningOnly": true}, &listed, 5*time.Second); err != nil {
+    _ = call.End(13, err.Error())
+    return
+}
+authorized := false
+for _, iface := range listed.Interfaces {
+    if iface.RunID == call.CallerRunID() && iface.AppID == "org.example.allowed" {
+        authorized = true
+    }
+}
+if !authorized {
+    _ = call.End(7, "permission denied: caller is not org.example.allowed")
+    return
+}
+```
 
 ### Helpers
 
@@ -773,7 +807,6 @@ CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
   go build -trimpath -o bin/thermostat .
 capsulad-cli app package . -out thermostat.tar.gz
 capsulad-cli -data-dir /data/capsdemo app install thermostat.tar.gz
-/etc/init.d/S99btctl.sh restart          # the registry is read at startup
 capsulad-cli -data-dir /data/capsdemo app start org.example.thermostat target=23
 capsulad-cli -data-dir /data/capsdemo app runs org.example.thermostat
 ```
@@ -975,7 +1008,10 @@ Limits and environment:
 
 - 64 MiB JS heap, 1 MiB stack, script file at most 8 MiB.
 - No timers (`setTimeout`/`setInterval`), no threads, no filesystem access, no `require`.
-  `Date.now()` and plain computation work.
+  `Date.now()` and plain computation work. A script that has to animate spins on `Date.now()`
+  and can poll a stream with `Call.tryRecv`, which waits for a bounded slice and reports "no
+  message yet" as `undefined`; that keeps the panel responsive while the animation runs. A
+  blocking `recv` still owns the only thread, so use it only for an idle wait.
 - The process exits when `capsulad.run()` returns (bus ended or `capsulad.stop()`).
 
 Structure of a script:
@@ -999,7 +1035,7 @@ If the script returns without calling `capsulad.start()`, the host exits with an
 | `capsulad.on(kind, fn)` | `"invocation"`, `"settings_changed"`, `"action"`, `"activation"`, `"touch_released"`, `"call"`, `"disconnect"` | One handler per kind; `"call"` and `"disconnect"` are special. |
 | `capsulad.call(service, method, request?, timeoutMs?)` | → decoded JSON | Unary JSON call. Default timeout 30000 ms; throws on error. |
 | `capsulad.callBytes(service, method, bytes, timeoutMs?)` | → `Uint8Array` | Unary raw protobuf. |
-| `capsulad.open(service, method, kind?, timeoutMs?)` | → `Call` | Starts a call; `kind` 0 unary, 1 server-stream (default), 2 client-stream, 3 bidi. |
+| `capsulad.open(service, method, kind?, timeoutMs?)` | → `Call` | Starts a call; `kind` 0 unary, 1 server-stream (default), 2 client-stream, 3 bidi. `timeoutMs` is the whole-RPC deadline; `0` means no deadline. |
 | `capsulad.openRouted(appId, service, method, timeoutMs?)` | → `Call` | Routed call through the app bus. |
 | `capsulad.stream(service, method, request?, timeoutMs?)` | → `Call` | `open` + send + half-close. |
 | `capsulad.routed(appId, service, method, request?, timeoutMs?)` | → decoded JSON | One-shot routed unary. |
@@ -1020,8 +1056,10 @@ If the script returns without calling `capsulad.start()`, the host exits with an
 | `send(value)` | Send one JSON message. |
 | `sendBytes(bytes)` | Send one raw protobuf message. |
 | `halfClose()` | Close the request direction. |
-| `recv(timeoutMs?)` | Next JSON message, or `null` at end of stream. Default 30000 ms. |
-| `recvBytes(timeoutMs?)` | Next protobuf message, or `null` at end of stream. |
+| `recv(timeoutMs?)` | Blocking: next JSON message, or `null` at end of stream. Default 30000 ms. |
+| `recvBytes(timeoutMs?)` | Blocking: next protobuf message, or `null` at end of stream. |
+| `tryRecv(timeoutMs?)` | Bounded: next JSON message, `undefined` when none arrived within `timeoutMs`, or `null` at end of stream. Default 0 polls once. |
+| `tryRecvBytes(timeoutMs?)` | Bounded: next protobuf message, `undefined` when none arrived within `timeoutMs`, or `null` at end of stream. Default 0 polls once. |
 | `end(code?, detail?)` | End a call you serve (default `0`). |
 | `cancel()` | Cancel the call. |
 | `status()` | `{code, detail}` of the terminal gRPC status. |
@@ -1029,6 +1067,21 @@ If the script returns without calling `capsulad.start()`, the host exits with an
 | `callInfo()` | `{kind, direction, service, method, target_app_id, routed, call_id, grpc_code, ended}` describing the call object itself. |
 
 All keys on both objects are snake_case, exactly as the engine emits them.
+
+`timeoutMs` on `call`, `callBytes`, `open`, `openRouted`, `stream`, `routed` and
+`routedStream` is the **whole-RPC deadline**, carried on the request head: when it expires the
+daemon ends that call, including every long-lived stream. Pass `0` (no deadline) for a
+presentation, capture, `WatchInput` or other stream that must live for the app's lifetime, and a
+positive value for a one-shot call. `Call.recv(timeoutMs)` is a separate wait for one message and
+does not extend the RPC deadline.
+
+`tryRecv`/`tryRecvBytes` are the bounded, non-blocking reads: they wait at most `timeoutMs`
+(default `0`, poll once; a non-positive value also polls once, while `WAIT_FOREVER` waits) and
+return `undefined` when no message is ready, `null` only at end of stream, and the message
+otherwise. The SDK's timeout status is a normal poll result here, not an
+error, so an animation can poll input on every slice. `recv`/`recvBytes` remain blocking reads
+whose timeout (or any other failure) terminates a QuickJS app; use `WAIT_FOREVER` for an idle
+wait.
 
 Handlers receive the **inner message** as decoded JSON:
 `{invocationId, arguments:[{name,value}]}`, `{revision, values:[{key,valueJson}]}`,
@@ -1041,8 +1094,11 @@ An activation's `origin` is the only keyword evidence: a manual (touch/key) turn
 hold-to-talk mode, while only `ACTIVATION_WAKEWORD` carries the id of the word that matched. Read
 `origin` rather than treating a non-empty model id as proof a word was heard.
 
-Error handling: `recv` returns `null` only at end of stream. A timeout or transport failure
-throws a JS error carrying `.status`; catch it if you poll with a short timeout.
+Error handling: `recv` returns `null` only at end of stream. The host raises every SDK failure
+with `JS_ThrowInternalError`, and quickjs-ng marks internal errors **uncatchable**: a timeout or
+transport failure terminates the app and `try`/`catch` cannot recover it. Do not poll with short
+timeouts; block with `capsulad.WAIT_FOREVER` or poll with `tryRecv`, and treat `null` as the
+stream ending. (The MicroPython host raises a catchable `OSError` for the same condition.)
 
 ### Complete QuickJS app
 
@@ -1119,16 +1175,15 @@ function pixels(rgb, count) {
 
 function paint() {
   if (call === null) return;
-  try {
-    call.send({ frame: { ring: { pixels: pixels(color, 12) } } });
-  } catch (err) {
-    log("frame failed: " + err.message);
-  }
+  // send() failures are uncatchable in this host; keep the call healthy
+  // instead of wrapping it in try/catch.
+  call.send({ frame: { ring: { pixels: pixels(color, 12) } } });
 }
 
 function open() {
   if (call !== null) return;
-  call = capsulad.open(PRESENTATION, "Open", 3, 10000);
+  // 0 = no RPC deadline: the presentation lives until this app closes it.
+  call = capsulad.open(PRESENTATION, "Open", 3, 0);
   call.send({ open: { resourceId: RING } });
   var event = call.recv(10000);
   if (event && event.ready) {
@@ -1198,13 +1253,9 @@ log("ready app=" + capsulad.env.appId + " run=" + capsulad.env.runId);
 
 open();
 
-try {
-  var snapshot = capsulad.call(CONFIG, "Get", { appId: capsulad.env.appId }, 5000);
-  applySettings({ values: snapshot.values });
-  paint();
-} catch (err) {
-  log("settings read failed: " + err.message);
-}
+var snapshot = capsulad.call(CONFIG, "Get", { appId: capsulad.env.appId }, 5000);
+applySettings({ values: snapshot.values });
+paint();
 
 capsulad.run();
 ```
@@ -1214,7 +1265,6 @@ Package and install:
 ```sh
 capsulad-cli app package . -out ringpaint.tar.gz
 capsulad-cli -data-dir /data/capsdemo app install ringpaint.tar.gz
-/etc/init.d/S99btctl.sh restart          # the registry is read at startup
 capsulad-cli -data-dir /data/capsdemo app start org.example.ringpaint color=#22cc66
 ```
 
@@ -1232,7 +1282,9 @@ Limits and environment:
 - 4 MiB heap, script file at most 8 MiB.
 - No filesystem access: the embed port has no `open`, `json` or `io`. The prelude carries its
   own JSON encoder/decoder and `capsulad.call` uses it.
-- No timers or threads. The process exits when `capsulad.run()` returns.
+- No threads and no `time` module. Repeating work uses the run loop's callbacks:
+  `capsulad.every(interval_ms, fn)` plus `capsulad.monotonic_ms()` (see below). The process
+  exits when `capsulad.run()` returns.
 
 Structure:
 
@@ -1260,7 +1312,43 @@ The surface mirrors the QuickJS host with Python names:
 | `capsulad.notify_action(id, succeeded, detail="")` | acknowledgement |
 | `capsulad.register_descriptors(data)`, `capsulad.info()`, `capsulad.handle_info(h)`, `capsulad.state()`, `capsulad.log(message)` | as in QuickJS |
 | `capsulad.env` | dict with `socket`, `runId`, `appId`, `sdk`, `library`, `appDir` |
+| `capsulad.monotonic_ms()` | Monotonic milliseconds, never going backwards (the only clock in this host) |
+| `capsulad.every(interval_ms, fn)` | Call `fn()` from the run loop at most once per interval; returns a token |
+| `capsulad.cancel_timer(token)` | Stop a callback registered with `every`; returns whether it existed |
 | `capsulad.WAIT_FOREVER` | `0xFFFFFFFF` |
+
+Repeating callbacks are the host's only timer. Lifecycle and limits:
+
+- **Registration.** `every(interval_ms, fn)` may be called before or after `capsulad.start()`,
+  but callbacks only run from `capsulad.run()`'s loop — never from `start()` itself.
+- **Scheduling.** The loop fires a due callback between dispatched events and, when the bus is
+  idle, from its poll timeout, which is bounded by the nearest due timer (so a 500 ms callback
+  keeps firing with no events, calls or framework traffic at all). A callback's next due time is
+  `now + interval_ms` measured after it returns, so a slow callback slips its schedule instead of
+  piling up.
+- **Single thread.** A callback runs on the same thread as event handlers, so it must not block
+  for long; it may issue framework calls and read non-blocking receives (`timeout` `0`).
+- **Errors.** An exception from a callback is logged (`timer handler failed: …`) and the run
+  continues; that timer keeps its schedule.
+- **Cancellation and clock faults.** Cancelling a timer from inside another callback takes effect
+  in the same pass: a timer that was already cancelled does not fire, even when it was due at the
+  start of that pass, and its next due time is only advanced when it actually fires. A broken
+  clock does not end the run either: if `monotonic_ms()` raises, that pass is skipped and the poll
+  falls back to its default bound, leaving the timer due so it fires once the clock works again,
+  while a clock that jumps backwards simply leaves a timer not yet due.
+- **Bounds.** At most **16** repeating callbacks per run; `every` raises `ValueError` beyond
+  that and for an interval below 1 ms. `cancel_timer(token)` removes one and reports whether it
+  existed; the token is per process and never reused.
+- **Termination.** Every callback stops when `capsulad.run()` returns (normal end, `stop()` or a
+  lost bus); the host clears the timer table on the way out, so nothing fires during interpreter
+  teardown. Nothing survives the process.
+- **Clock.** `monotonic_ms()` is the only clock in this host: milliseconds from a monotonic
+  source, never going backwards, unaffected by wall-clock or timezone changes.
+
+The QuickJS host still has no timers; this is a MicroPython-host capability.
+
+`timeout` is the whole-RPC deadline here too: pass `0` for a presentation, capture or input
+stream that must outlive a single request.
 
 `Call` methods use snake_case: `send`, `send_bytes`, `half_close`, `recv`, `recv_bytes`, `end`,
 `cancel`, `status`, `call_info`. The `info` attribute carries the same inbound metadata as

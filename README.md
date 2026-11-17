@@ -175,7 +175,23 @@ version.
   the selected assistant; an API activation of a bound word is delivered to that same app,
   exactly like a detection. The delivery target is always reported in
   `AssistantActivation.app_id`. See [docs/WAKEWORD.md](docs/WAKEWORD.md#multiple-wakewords-and-app-binding).
-- **Web UI:** five destinations — Main, Settings, Assets, Access and Diagnostics. The Assets
+- **Shipped app packages:** optional first-party apps are built and packaged on the build host
+  (`make simon`, `make pa`, `make radio`, `make radio-tuner`, `make homeassistant`) and installed
+  like any other package. `org.capsulad.simon` is a QuickJS memory game that owns the segment
+  display and a full-panel capture while it runs; `org.capsulad.pa` is a background MicroPython
+  service that plays one streamed WAV per routed `Play` call and replies after the queued audio
+  drains; `org.capsulad.radio` is a MicroPython internet-radio front end that keeps the station
+  list, shows the station number and serves the standard media contract;
+  `org.capsulad.radio.tuner` is its native companion, which fetches the station over HTTP(S) and
+  decodes it, because a script host has neither a network binding nor an audio decoder; and
+  `org.capsulad.homeassistant` is a native MQTT bridge that publishes the speaker to Home
+  Assistant through discovery, publishes its state and applies Home Assistant's commands to the
+  ring, the display and the Bluetooth source. None is compiled into the daemon, and none is
+  installed by default.
+- **Web UI:** six destinations — Main, Apps, Settings, Assets, Access and Diagnostics. The Apps
+  page lists installed packages with their running/system state and installs, updates or removes
+  one through the session-authenticated `/api/apps` routes (a raw `.tar.gz` upload, refused while
+  that app is running); a change it makes is live, with no daemon restart. The Assets
   page lists `<data-dir>/assets` with size and SHA-256, uploads a file to a store-relative
   path and deletes one through the session-authenticated `/api/assets` routes; the same
   directory is mounted read-only at `/assets` for apps, and uploads are limited to 32 MiB.
@@ -240,11 +256,12 @@ no host access beyond validated own-setting patches.
 A deployment bundle is a directory or `.tar.gz` with exactly these top-level entries:
 `capsulad`, `capsulad-cli`, `lib/` (native runtime and headers), `apps/*.tar.gz`, and
 `boot/S99btctl.sh`. `make deploy-bundle` assembles that directory from ready-made host-built
-archives — build them first with `make dumbassistant`, `make marusia` or `make devapps` — and
-never packages an app. `capsulad-cli deploy PATH` validates the whole bundle before
-changing installed state, stages it outside the data partition, stops the daemon, installs or
-updates packages and managed runtime files, replaces both binaries, optionally installs the boot
-hook, restarts through the boot service and gates on `capsulad -health`. A replaced binary is kept
+archives — build them first with `make dumbassistant`, `make marusia`, `make product-apps` (the
+five product apps) or `make devapps` — and never packages an app. `capsulad-cli deploy PATH`
+validates the whole bundle before changing installed state, stages it outside the data partition,
+stops the daemon, installs or updates packages and managed runtime files, replaces both binaries,
+optionally installs the boot hook, restarts through the boot service and gates on
+`capsulad -health`. A replaced binary is kept
 recoverable only until the health gate passes — renamed aside when the staged file is on the data
 filesystem, otherwise gzip-compressed in staging after the target was removed, since `/data` cannot
 hold two 40 MiB daemons. A failure after the stop restores what was replaced and restarts the
@@ -312,24 +329,51 @@ before the next turn.
 - **Provenance** is optional per app. A verified Sigstore/GitHub attestation describes the
   binary digest, signature, certificate chain, transparency log and workflow identity; it
   is evidence, not a runtime safety guarantee.
-- **One first-party app talks to the internet.** The optional `apps/marusia` assistant is
-  the only first-party component that opens outbound connections. While it is installed and
-  selected as the assistant, a turn sends microphone PCM and the device identity (serial from
-  the non-empty `serial` setting, otherwise `DeviceService.GetInfo.hardware_serial`, otherwise
-  host-only local `/proc/cpuinfo`, otherwise empty; plus the distinct `device_id` value and the
-  advertised client version) together with the vendor session credential it holds — the
-  masked `session_id` and `session_secret` settings, or the session recovered from the
-  vendor agent's root-only state file — to the configured vendor endpoint over HTTPS, and
-  logs the selected serial source once per process without logging the serial value. The
-  `Invalid 'x-device-sn'` rejection remains legible, directs operators to the `serial` setting
-  and the framework-reported serial, and preserves the original gRPC status; when no source
-  resolves, the warning names that setting. It fetches the HTTPS TTS URL that endpoint returns. The daemon, the framework plane and every
-  other first-party app stay local-only. Nothing is sent when the app is not selected or
-  idle. With a session configured the app validates it without an attach; only a device
-  without a session sends the provisioning attach, which carries the device serial and the
-  configured `xtoken_id` (empty when unset) and whose refusal is logged. A turn with no
-  recognised text and no command is reported as a no-answer with the terminal error
-  indication, never as a completed turn.
+- **Which first-party apps reach the network.** The daemon, the framework plane and every other
+  first-party component stay local-only. Three optional packages open outbound connections, each
+  only after the operator configured it or asked it to play:
+  - `apps/marusia`, the assistant. While it is installed and
+    selected as the assistant, a turn sends microphone PCM and the device identity (serial from
+    the non-empty `serial` setting, otherwise `DeviceService.GetInfo.hardware_serial`, otherwise
+    host-only local `/proc/cpuinfo`, otherwise empty; plus the distinct `device_id` value and the
+    advertised client version) together with the vendor session credential it holds — the
+    masked `session_id` and `session_secret` settings, or the session recovered from the
+    vendor agent's root-only state file — to the configured vendor endpoint over HTTPS, and
+    logs the selected serial source once per process without logging the serial value. The
+    `Invalid 'x-device-sn'` rejection remains legible, directs operators to the `serial` setting
+    and the framework-reported serial, and preserves the original gRPC status; when no source
+    resolves, the warning names that setting. It fetches the HTTPS TTS URL that endpoint returns.
+    Nothing is sent when the app is not selected or
+    idle. With a session configured the app validates it without an attach; only a device
+    without a session sends the provisioning attach, which carries the device serial and the
+    configured `xtoken_id` (empty when unset) and whose refusal is logged. A turn with no
+    recognised text and no command is reported as a no-answer with the terminal error
+    indication, never as a completed turn.
+  - `apps/homeassistant`, the bridge. It is an MQTT client for the broker named in its
+    `broker_host`/`broker_port` settings, or for the broker it finds by browsing `_mqtt._tcp`
+    when `broker_discover` is on. It publishes its discovery payloads, its availability and one state
+    topic per published entity, and applies the commands Home Assistant sends back to the ring,
+    the segment display and the Bluetooth source; `broker_tls` performs a verified TLS 1.2+
+    handshake through the shared transport with no insecure mode (as a plain MQTT session it
+    sends everything in clear on the local network), and the username/password settings are the
+    broker credential. It publishes device state to whatever broker the operator points it at, so
+    the broker is as trusted as the operator makes it; nothing is sent while the app is stopped
+    or unconfigured, and it never opens a listening socket.
+  - `apps/radio/tuner`, the native companion of the internet radio. It opens one outbound
+    HTTP/1.1 connection per `Tune` to the station URL from the operator's station list (verified
+    TLS for `https://`, plain for `http://`), follows redirects and one playlist level, strips
+    ICY metadata and decodes the MP3 locally. It sends the HTTP request and nothing else — no
+    credential, no device identity — and it plays only the station the user selected; the
+    MicroPython front end has no network binding of its own. Nothing is fetched while the radio
+    is stopped or paused. Access to it is authorized: `Tune` and `Stop` accept only the configured
+    player app's currently ready run. The handler compares the daemon-relayed caller run id — the
+    caller's `capsulad-run-id` claim, checked against the socket peer credentials where the
+    transport provides them (the framework Unix socket) and rejected before relay when it does not
+    match, never taken from a request field; `pid:<pid>` for a caller with no supervised run,
+    empty when unknown — against the run the framework reports for that app, and ends every other
+    call with `PERMISSION_DENIED`. The request's own `player_app_id` is validated but is not the
+    authorization; see
+    [routed calls and trust](docs/app_development/security.md#routed-calls-and-trust).
 
 ## Current limits
 
@@ -417,6 +461,50 @@ before the next turn.
   MP3 body is an explicit actionable error and error ring state, not silence. A clean phrase with
   no recognised text and no command is a no-answer: the app says so and shows the terminal error
   indication instead of reporting a completed turn.
+- **The internet radio is two packages and MP3-only.** `org.capsulad.radio` cannot fetch or
+  decode anything itself: without a running `org.capsulad.radio.tuner` it reports the distinct
+  `no tuner provider is running` error instead of pretending to play. The tuner accepts MPEG-1/
+  MPEG-2 Layer III over HTTP/1.1 only — AAC/HE-AAC, Ogg/Opus/Vorbis, FLAC, MP4/M4A, WAV and HLS
+  are refused at `Tune` with `unsupported codec: …`/`HLS playlists are not supported`, no gzip,
+  at most one playlist level (≤64 KiB) — and its reconnect is a new session with a marked
+  discontinuity, not seamless resume. Pause ends the tuner session by design, so resuming
+  re-dials the station. A dead or hung tuner never leaves a stale `PLAYING`: an autonomous watchdog
+  (≈2 s liveness of the tuned tuner's run against the framework's ready-run table, and one 60 s
+  no-audio bound on
+  the speaker stream's queued frames) moves the app to its error state on its own, with no user
+  activity; recovery is only `play`, `stop` or `dismiss`. That bound covers buffering and playback,
+  so a station that never starts, or one that goes silent, ends in that error state
+  instead of waiting forever; the end-of-stream drain keeps the loop responsive and a `pause`
+  during it acts as a stop (the tail is discarded), with a drain unfinished after 30 s aborted. A
+  tuner named only in the
+  `tuner` setting
+  must still declare the tuner interface, because that declaration resolves its run for push
+  authorization and for the watchdog.
+- **The Home Assistant bridge needs a reachable MQTT broker.** A named broker, or an
+  mDNS-discoverable one (`broker_discover` browses `_mqtt._tcp`; on a build whose daemon has no
+  responder — the simulator answered `DiscoveryService/Browse` with `unknown service` — a broker
+  must be named). Without one it publishes nothing and says so in the status sensor. It exports
+  the surfaces the device advertises (ring, segment display, Bluetooth source) plus the sensor,
+  touch and diagnostics entities that are switched on; master volume and microphone mute are
+  administrator-only, so both are read-only entities, and the display is a face selector rather
+  than text because the framework ships no segment font. The Bluetooth source is enumerated
+  (`sensor` with `playing`/`idle`/`off`, a title sensor) with four transport buttons rather than a
+  `media_player`, because Home Assistant's MQTT integration has no media-player platform. Sensor
+  units are published in Home Assistant's vocabulary (`°C`, `lx`) and anything else verbatim
+  without a device class, and entity ids are Home Assistant's own: the bridge publishes
+  `unique_id`, not `object_id`. A broker that is plaintext on the LAN, a wrong credential, an
+  unauthorised topic or an unknown command is reported, never guessed or retried into a state
+  change; a broker that accepts a connection and then stops answering (no CONNACK or SUBACK, or a
+  write that wedges) cannot leave a half-online bridge: both exchanges are bounded at 10 s, writes
+  are bounded and context-aware (2 s for `DISCONNECT`, 5 s for client control writes), so the
+  session fails, publishes `offline` and retries with a paced backoff — 1 s, 2 s, 4 s … capped at
+  1 min, reset only after a session became usable and held for 30 s — so even a healthy session
+  that drops inside that window backs off further, deliberately. A broker it cannot really use
+  therefore retries slowly instead of flapping online/offline about once a second and republishing
+  the whole retained discovery set each time; a deliberate reconnect is still immediate.
+- **Simon Says takes the whole panel while it runs.** Its capture is full-panel, so the
+  framework's volume, mute, media and assistant actions are game input for as long as the game
+  is on the panel; holding the unmarked centre is the only documented way back.
 - **Persistent app storage beyond typed settings is not provided.** Apps own typed
   settings and their read-only package; there is no general per-app writable volume.
 - **The daemon-to-app wire protocol may change with the daemon.** Schema and message
@@ -449,6 +537,7 @@ before the next turn.
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
 | `apps/devtools`, `apps/dumbassistant`, `apps/marusia` | development apps and the two optional assistants |
+| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio plus its native tuner companion, and the Home Assistant bridge |
 | `deploy/rockchip-stock` | the single boot hook and bring-up scripts |
 | `proto` | framework and standard contract schemas (media, clock, ring, web) |
 | `docs` | application manual, development, verification, hardware, behavior, wakeword and glossary |
@@ -467,6 +556,7 @@ before the next turn.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Capsula Mini rev 4 hardware evidence and firmware findings |
 | [docs/WAKEWORD.md](docs/WAKEWORD.md) | detection, enrollment, training and model evidence |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | project terms as this codebase uses them |
+| [apps/radio/README.md](apps/radio/README.md), [apps/radio/tuner/README.md](apps/radio/tuner/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md) | the internet radio's station list, controls, display states and player/tuner wire contract; the tuner's build, codecs and its `Tune` caller authorization; the Home Assistant bridge's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, rejections and limits |
 | [AGENTS.md](AGENTS.md) | repository working rules, lifecycle invariants and verification gates |
 
 ## Quick start

@@ -137,8 +137,11 @@ or equate extra animation with polish.
   a gap occurred. Always resume/clean up a paused test process on failure.
 - Run the narrowest relevant checks after changes; use `-race` for touched shared
   lifecycle/state paths. Root Go tests do not cover nested modules. `make test` runs the root
-  module, `sdk/go`, the Rust binding, the native crate, the C++ example and the optional
-  assistant; `make test-race` adds the race detector to the root module. Focused commands are in
+  module, `sdk/go`, the nested app modules (both assistants, the radio tuner companion and the
+  Home Assistant bridge), the Rust binding, the native crate and the C++ example;
+  `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, Internet Radio)
+  and repeats the two app Go modules; `make test-race` adds the race detector to the root module.
+  Focused commands are in
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests). Standalone Go test commands on macOS need
   `-ldflags '-linkmode=external'`, as the Makefile and app build helpers already handle.
   `internal/daemon` `TestDumbAssistantEndsAfterSpeechOverColoredRoom` fails on this host and
@@ -165,7 +168,10 @@ or equate extra animation with polish.
   and package on the build host — `make dumbassistant` and `make devapps` write
   `<id>-<version>.tar.gz` beside each package directory with `capsulad-cli app package` — and the
   device only ever installs that archive. `capsulad-cli app install|remove` refuses while the app
-  is running; a new or replaced package is visible only after the daemon restarts.
+  is running. While the daemon is reachable the change is applied live: the CLI streams the
+  archive to the daemon, it reloads its application registry, and a new or replaced package is
+  usable with no restart. Only when the daemon is provably absent (or with `deploy -restart
+  never`) does the on-disk path apply, where the package becomes visible at the next start.
 - `make deploy-bundle` assembles a bundle from ready-made artifacts and never packages anything:
   it copies `apps/*.tar.gz` from `build/apps`, adds the `build/devapps` archives when
   `BUNDLE_DEVAPPS=1`, and fails when a staged app directory has no archive. Run

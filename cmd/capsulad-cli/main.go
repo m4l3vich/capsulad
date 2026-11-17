@@ -32,10 +32,8 @@ import (
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/artifact"
 	"capsulad/internal/backend/rockchip/inspect"
-	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 	"capsulad/internal/manifest"
-	"capsulad/internal/registry"
 	"capsulad/internal/sandbox"
 	"capsulad/internal/version"
 	"capsulad/internal/websecurity"
@@ -119,9 +117,10 @@ Commands:
   status                         device, resources and runs
   doctor                         same as status with backend diagnostics
   app list                       installed applications
-  app install PATH               install or atomically replace a package (dir or .tar.gz)
+  app install PATH               install or atomically replace a package (dir or .tar.gz);
+                                 activated immediately when capsulad is running
   app package DIR [-out FILE]    write the canonical .tar.gz artifact
-  app remove ID                  uninstall an application
+  app remove ID                  uninstall an application (refused while it runs)
   app start ID [NAME=VALUE ...]  launch or deliver an invocation
   app stop RUN_ID                request graceful stop
   app runs [ID]                  list supervised runs
@@ -315,74 +314,14 @@ func runApp(args []string, dataDir, socket, nativeLibDir string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("usage: capsulad-cli app install PATH")
 		}
-		// Stage under the apps root (same filesystem as the installation) so
-		// the package is copied once and can be renamed into place.
-		root := filepath.Join(resolveDataDir(dataDir), "apps")
-		if err := os.MkdirAll(root, 0o750); err != nil {
-			return err
-		}
-		staging, err := os.MkdirTemp(root, ".install-")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(staging)
-		pkg, err := artifact.OpenIn(staging, args[0])
-		if err != nil {
-			return err
-		}
-		defer pkg.Close()
-		m := pkg.Manifest
-		if err := checkNativeSDKRequirement(m, dataDir, nativeLibDir); err != nil {
-			return err
-		}
-		installed := false
-		if _, err := os.Stat(filepath.Join(root, m.ID)); err == nil {
-			installed = true
-		}
-		// A running app keeps its binary mapped: replacing the package under a
-		// live run would leave the old process running from a deleted tree and
-		// consume the space a retry needs. Require an explicit stop first.
-		if installed {
-			if run := liveRun(dataDir, socket, m.ID); run != "" {
-				return fmt.Errorf("app %s is running (run %s); stop it before replacing the package", m.ID, run)
-			}
-		}
-		logs, _ := logbus.New(ids.NewClock(), 100, "")
-		reg, err := registry.Open(root, logs)
-		if err != nil {
-			return err
-		}
-		app, err := reg.InstallPackage(pkg)
-		if err != nil {
-			return err
-		}
-		verb := "installed"
-		if installed {
-			verb = "updated"
-		}
-		fmt.Printf("%s %s (%s) into %s\n", verb, app.ID(), app.Manifest.Version, app.Dir)
-		fmt.Println("restart capsulad to activate the installed package")
-		return nil
+		return installAppPackage(args[0], dataDir, socket, nativeLibDir)
 	case "package":
 		return runAppPackage(args)
 	case "remove":
 		if len(args) == 0 {
 			return fmt.Errorf("usage: capsulad-cli app remove ID")
 		}
-		if run := liveRun(dataDir, socket, args[0]); run != "" {
-			return fmt.Errorf("app %s is running (run %s); stop it before removing", args[0], run)
-		}
-		root := filepath.Join(resolveDataDir(dataDir), "apps")
-		logs, _ := logbus.New(ids.NewClock(), 100, "")
-		reg, err := registry.Open(root, logs)
-		if err != nil {
-			return err
-		}
-		if err := reg.Uninstall(args[0]); err != nil {
-			return err
-		}
-		fmt.Printf("removed %s\n", args[0])
-		return nil
+		return removeAppPackage(args[0], dataDir, socket)
 	}
 	// -data-dir is the supported way to locate the socket; only a literal
 	// -socket overrides it.

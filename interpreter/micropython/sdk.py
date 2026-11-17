@@ -222,6 +222,9 @@ _disconnect_handler = None
 _started = False
 _finished = False
 _live = []
+_timers = []
+_timer_seq = 0
+MAX_TIMERS = 16
 
 
 class Call:
@@ -325,6 +328,90 @@ def on(kind, fn):
     _handlers[kind] = fn
 
 
+def monotonic_ms():
+    """Milliseconds from a monotonic clock; never goes backwards."""
+    return _c._monotonic_ms()
+
+
+def every(interval_ms, fn):
+    """Call fn() from the run loop at most once per interval_ms.
+
+    The callback runs between dispatched events (and from the poll timeout when
+    the bus is idle), so it may not block for long. Exceptions are logged and do
+    not end the run. Returns a token for cancel_timer().
+    """
+    global _timer_seq
+    if not callable(fn):
+        raise TypeError("timer handler must be callable")
+    interval = int(interval_ms)
+    if interval < 1:
+        raise ValueError("interval_ms must be at least 1")
+    if len(_timers) >= MAX_TIMERS:
+        raise ValueError("at most %d repeating callbacks" % MAX_TIMERS)
+    _timer_seq += 1
+    token = _timer_seq
+    _timers.append([token, interval, fn, monotonic_ms() + interval])
+    return token
+
+
+def cancel_timer(token):
+    """Stop a callback registered with every(). Returns whether it existed."""
+    for index in range(len(_timers)):
+        if _timers[index][0] == token:
+            del _timers[index]
+            return True
+    return False
+
+
+def _poll_timeout():
+    """Bound the next poll by the nearest due timer, at most one second."""
+    wait = 1000
+    if not _timers:
+        return wait
+    try:
+        now = monotonic_ms()
+    except Exception:
+        # A broken clock must not end the run; poll at the default bound.
+        return wait
+    for timer in _timers:
+        due = timer[3] - now
+        if due < 0:
+            due = 0
+        if due < wait:
+            wait = due
+    return wait
+
+
+def _registered(timer):
+    for current in _timers:
+        if current is timer:
+            return True
+    return False
+
+
+def _run_timers():
+    if not _timers:
+        return
+    try:
+        now = monotonic_ms()
+    except Exception:
+        return
+    for timer in list(_timers):
+        if now < timer[3]:
+            continue
+        # Another callback in this same pass may have cancelled it.
+        if not _registered(timer):
+            continue
+        timer[3] = now + timer[1]
+        try:
+            timer[2]()
+        except Exception as err:
+            try:
+                _c._log("timer handler failed: " + repr(err))
+            except Exception:
+                pass
+
+
 def start(timeout=10000):
     global _started
     if _started:
@@ -341,10 +428,11 @@ def run():
         return {"status": _c._disconnect_status(), "detail": _c._disconnect_detail()}
     try:
         while True:
-            job = _c._poll(1000)
+            job = _c._poll(_poll_timeout())
             if job is None:
                 if _c._stopped() or _c._disconnected():
                     break
+                _run_timers()
                 continue
             kind = job[0]
             if kind == "event":
@@ -368,8 +456,10 @@ def run():
                 if _disconnect_handler is not None:
                     _disconnect_handler({"status": job[1], "detail": job[2]})
                 break
+            _run_timers()
     finally:
         _finished = True
+        _timers[:] = []
         _release_all()
     return {"status": _c._disconnect_status(), "detail": _c._disconnect_detail()}
 
@@ -499,3 +589,6 @@ _c.state = state
 _c.log = log
 _c.env = env
 _c.WAIT_FOREVER = WAIT_FOREVER
+_c.monotonic_ms = monotonic_ms
+_c.every = every
+_c.cancel_timer = cancel_timer

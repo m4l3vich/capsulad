@@ -1,0 +1,95 @@
+id = "org.capsulad.radio"
+name = "Internet Radio"
+version = "0.1.0"
+description = "Internet radio front end: keeps a station list, plays a station through the framework speaker and serves the standard media contract. Station audio is fetched and decoded by a companion tuner app (org.capsulad.radio.v1.RadioTunerService); see README.md."
+# The app must already be running to be discoverable as the device's media
+# provider (circle key, swipes, Web UI "Now playing"), so it starts at boot and
+# stays idle until the user selects a station.
+background = true
+start_on_boot = false
+restart_on_failure = true
+single_instance = true
+provides = ["media_player"]
+
+[entrypoint]
+runtime = "micropython"
+path = "main.py"
+sdk = "0.5"
+
+[[settings]]
+key = "stations"
+label = "Stations"
+description = "One station per line, \"Name | URL\". Blank lines and lines starting with # are ignored. http:// and https:// stream URLs only; at most 99 stations."
+type = "text"
+default = "# One station per line: Name | stream URL\nSomaFM Groove Salad | https://ice1.somafm.com/groovesalad-128-mp3\nRadio Paradise Main Mix | https://stream.radioparadise.com/mp3-192"
+
+[[settings]]
+key = "station"
+label = "Selected station"
+description = "1-based number of the selected station in the list. Changing it switches a playing station; the app also updates it when the station changes from the media contract or the next/previous actions."
+type = "integer"
+default = 1
+min = 1
+max = 99
+
+[[settings]]
+key = "autoplay"
+label = "Play at startup"
+description = "Start the selected station as soon as the app is ready. Off by default: a radio that starts talking on its own after a reboot is a surprise."
+type = "boolean"
+default = false
+
+[[settings]]
+key = "tuner"
+label = "Tuner app id"
+description = "App id of the companion tuner that fetches and decodes station audio. Empty discovers a running tuner through AppInterfaceService instead. A named tuner must still declare org.capsulad.radio.v1.RadioTunerService: that declaration resolves its run for push authorization and the liveness watchdog. Example: org.capsulad.radio.tuner."
+type = "text"
+default = ""
+
+[[actions]]
+id = "play"
+label = "Play"
+description = "Tune and play the selected station."
+
+[[actions]]
+id = "pause"
+label = "Pause"
+description = "Pause playback. The tuner stops fetching while the player is paused."
+
+[[actions]]
+id = "stop"
+label = "Stop"
+description = "Stop playback, tell the tuner to drop the session and release the display."
+
+[[actions]]
+id = "next"
+label = "Next station"
+description = "Select the next station in the list and play it."
+
+[[actions]]
+id = "previous"
+label = "Previous station"
+description = "Select the previous station in the list and play it."
+
+[[actions]]
+id = "dismiss"
+label = "Dismiss"
+description = "Stop playback and return to the idle baseline. This is the action the device's circle key uses to dismiss the radio."
+
+[[arguments]]
+name = "station"
+description = "Station to select and play: the 1-based number, the exact name, or the stream URL."
+type = "text"
+required = false
+
+[[interfaces]]
+service = "capsulad.contracts.media.v1.MediaPlayerService"
+version = "v1"
+descriptor = "proto/media.protoset"
+docs = "proto/media.md"
+
+[[interfaces]]
+service = "org.capsulad.radio.v1.RadioPlayerService"
+version = "v1"
+descriptor = "proto/radio.protoset"
+docs = "proto/radio.md"

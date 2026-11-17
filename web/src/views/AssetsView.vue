@@ -6,12 +6,12 @@ import {
   assetPathError,
   defaultTarget,
   deleteAsset,
-  formatBytes,
   listAssets,
   MAX_ASSET_BYTES,
   shortHash,
   uploadAsset
 } from '../lib/assets.js'
+import { formatBytes } from '../lib/format.js'
 
 // Assets manages the shared read-only store. Every app sandbox mounts the same
 // directory at /assets, so this page is the only writer; uploads reuse the

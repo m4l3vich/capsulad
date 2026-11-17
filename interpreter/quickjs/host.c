@@ -464,6 +464,64 @@ static JSValue js_recv_proto(JSContext *ctx, JSValueConst this_val, int argc,
   return result;
 }
 
+/* try_recv_json/try_recv_proto are the bounded, non-blocking reads. The SDK
+ * returns CAPSULAD_STATUS_TIMEOUT with the call still open when no message
+ * arrived; that is a normal poll result, not a failure, so it maps to
+ * JS_UNDEFINED ("nothing yet") while END_OF_STREAM stays JS_NULL and every
+ * real transport/status error still throws. The ABI is unchanged: the host
+ * passes the caller's timeout through call_recv_json/call_recv_proto, and 0
+ * polls once. */
+static JSValue js_try_recv_json(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+  (void)this_val;
+  capsulad_host *h = ctx_host(ctx);
+  if (argc < 1) {
+    return JS_ThrowTypeError(ctx, "tryRecvJson(call, timeout?)");
+  }
+  capsulad_buf out = {0};
+  int32_t status = h->api->call_recv_json(
+      arg_handle(ctx, argv[0]),
+      arg_timeout(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, 0), &out);
+  if (status == CAPSULAD_STATUS_END_OF_STREAM) {
+    return JS_NULL;
+  }
+  if (status == CAPSULAD_STATUS_TIMEOUT) {
+    return JS_UNDEFINED;
+  }
+  if (status != CAPSULAD_STATUS_OK) {
+    return throw_status(ctx, h, status);
+  }
+  JSValue result = JS_NewStringLen(ctx, (const char *)out.data,
+                                   capsulad_host_text_len(out.data, out.len));
+  h->api->buf_free(out);
+  return result;
+}
+
+static JSValue js_try_recv_proto(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+  (void)this_val;
+  capsulad_host *h = ctx_host(ctx);
+  if (argc < 1) {
+    return JS_ThrowTypeError(ctx, "tryRecvProto(call, timeout?)");
+  }
+  capsulad_buf out = {0};
+  int32_t status = h->api->call_recv_proto(
+      arg_handle(ctx, argv[0]),
+      arg_timeout(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, 0), &out);
+  if (status == CAPSULAD_STATUS_END_OF_STREAM) {
+    return JS_NULL;
+  }
+  if (status == CAPSULAD_STATUS_TIMEOUT) {
+    return JS_UNDEFINED;
+  }
+  if (status != CAPSULAD_STATUS_OK) {
+    return throw_status(ctx, h, status);
+  }
+  JSValue result = JS_NewUint8ArrayCopy(ctx, out.data, out.len);
+  h->api->buf_free(out);
+  return result;
+}
+
 static JSValue js_call_end(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   (void)this_val;
@@ -748,6 +806,8 @@ static int install_native(JSContext *ctx) {
   set_fn(ctx, native, "half_close", js_half_close, 1);
   set_fn(ctx, native, "recv_json", js_recv_json, 2);
   set_fn(ctx, native, "recv_proto", js_recv_proto, 2);
+  set_fn(ctx, native, "try_recv_json", js_try_recv_json, 2);
+  set_fn(ctx, native, "try_recv_proto", js_try_recv_proto, 2);
   set_fn(ctx, native, "end_call", js_call_end, 3);
   set_fn(ctx, native, "cancel", js_cancel, 1);
   set_fn(ctx, native, "release", js_release, 1);
@@ -802,6 +862,18 @@ static const char *prelude =
     "    recvBytes(timeout) {\n"
     "      this._check();\n"
     "      return n.recv_proto(this._handle, timeout === undefined ? 30000 : timeout);\n"
+    "    }\n"
+    "    tryRecv(timeout) {\n"
+    "      this._check();\n"
+    "      const wait = typeof timeout === \"number\" && timeout > 0 ? timeout : 0;\n"
+    "      const text = n.try_recv_json(this._handle, wait);\n"
+    "      if (text === undefined) return undefined;\n"
+    "      return text === null ? null : JSON.parse(text);\n"
+    "    }\n"
+    "    tryRecvBytes(timeout) {\n"
+    "      this._check();\n"
+    "      const wait = typeof timeout === \"number\" && timeout > 0 ? timeout : 0;\n"
+    "      return n.try_recv_proto(this._handle, wait);\n"
     "    }\n"
     "    end(code, detail) { this._finish(n.end_call, [this._handle, code === undefined ? 0 : code, detail === undefined ? \"\" : String(detail)]); return this; }\n"
     "    cancel() { this._finish(n.cancel, [this._handle]); return this; }\n"

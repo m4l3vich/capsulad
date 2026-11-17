@@ -6,9 +6,11 @@
  * (capsulad.Call, stream helpers, event dispatch). Keeping protocol calls in C
  * prevents a second, divergent client implementation in Python.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "py/obj.h"
 #include "py/objexcept.h"
@@ -538,6 +540,21 @@ static void dict_set_str(mp_obj_t dict, const char *key, const char *value) {
                     mp_obj_new_str(value, strlen(value)));
 }
 
+/* Monotonic milliseconds since an unspecified origin. The script hosts have no
+ * time module, so the prelude's repeating callbacks and any app-level timeout
+ * need one monotonic source; it never goes backwards and is unaffected by wall
+ * clock changes. */
+static mp_obj_t mp_capsulad_monotonic_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    mp_raise_OSError(errno);
+  }
+  uint64_t ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+  return mp_obj_new_int_from_uint((mp_uint_t)ms);
+}
+MP_DEFINE_CONST_FUN_OBJ_0(mp_capsulad_monotonic_ms_obj,
+                           mp_capsulad_monotonic_ms);
+
 static mp_obj_t mp_capsulad_env(void) {
   mp_obj_t dict = mp_obj_new_dict(6);
   dict_set_str(dict, "socket", getenv("CAPSULAD_SOCKET"));
@@ -586,6 +603,7 @@ static const struct {
     {"_handle_info", &mp_capsulad_handle_info_obj},
     {"_register_descriptors", &mp_capsulad_register_descriptors_obj},
     {"_env", &mp_capsulad_env_obj},
+    {"_monotonic_ms", &mp_capsulad_monotonic_ms_obj},
 };
 
 void capsulad_module_init(void) {

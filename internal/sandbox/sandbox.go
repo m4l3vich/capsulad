@@ -193,6 +193,11 @@ func (l *Launcher) libraryDir() (string, error) {
 	return l.libDir, l.libErr
 }
 
+// LibraryDir returns the resolved shared native SDK directory. It is the same
+// directory the launch path uses, resolved once, so an install-time [native_sdk]
+// preflight checks the runtime the app will actually load.
+func (l *Launcher) LibraryDir() (string, error) { return l.libraryDir() }
+
 func (l *Launcher) sandboxRoot() string {
 	if l.cfg.SandboxRoot != "" {
 		return l.cfg.SandboxRoot

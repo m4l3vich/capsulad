@@ -1,0 +1,14 @@
+
+¿
+pa.protoorg.capsulad.pa.v1"!
+PlayRequest
+data (Rdata"–
+
+PlayResult
+played (Rplayed
+frames (Rframes$
+sample_rate_hz (RsampleRateHz
+channels (Rchannels
+detail (	Rdetail2[
+SpeakerServiceI
+Play.org.capsulad.pa.v1.PlayRequest.org.capsulad.pa.v1.PlayResult(bproto3

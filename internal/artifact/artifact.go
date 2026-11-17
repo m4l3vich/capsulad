@@ -48,6 +48,14 @@ var DefaultLimits = Limits{
 	MaxEntries:    4096,
 }
 
+// MaxArchiveBytes bounds one .tar.gz archive delivered over a transport. The
+// unpacked budget in DefaultLimits is the real package limit; this bound only
+// stops a client from streaming an arbitrarily large body into a staging tree.
+// Deflate stores incompressible input with a small overhead, so the bound
+// carries a 1 MiB slack over the unpacked budget to keep a maximum-size
+// package acceptable.
+var MaxArchiveBytes = DefaultLimits.MaxTotalBytes + (1 << 20)
+
 // Package is an opened artifact: a staged package directory that follows the
 // pinned mode policy, plus its parsed manifest. The directory can be renamed
 // into an installation root as one unit.
@@ -117,6 +125,39 @@ func stageIn(parent, src string, limits Limits) (*Package, error) {
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("package %s: %w", src, err)
+	}
+	return &Package{Dir: dir, Manifest: m}, nil
+}
+
+// OpenReader stages a gzip-compressed tar received from r inside parent as an
+// application package and loads its manifest. It is OpenIn for a caller that
+// takes the artifact from a transport: the archive is never written to disk,
+// so an upload needs only the unpacked package budget instead of holding the
+// archive and its tree at once. The caller owns parent and should remove it
+// afterwards, exactly as with OpenIn.
+func OpenReader(parent string, r io.Reader, limits Limits) (*Package, error) {
+	dir, err := os.MkdirTemp(parent, "pkg-")
+	if err != nil {
+		return nil, err
+	}
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("artifact stream: expected a gzip-compressed tar (.tar.gz): %w", err)
+	}
+	err = extractTar(tar.NewReader(gz), dir, limits)
+	// Closing the decompressor never validates the stream; a truncated or
+	// corrupt archive surfaces from extractTar's reads, so the close error is
+	// not a second failure to report.
+	_ = gz.Close()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	m, err := manifest.Load(dir, filepath.Join(dir, ManifestFile))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("package stream: %w", err)
 	}
 	return &Package{Dir: dir, Manifest: m}, nil
 }

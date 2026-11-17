@@ -1,0 +1,13 @@
+id = "org.capsulad.simon"
+name = "Simon Says"
+version = "1.0.0"
+description = "Memory game on the Capsula Mini panel: repeat the segment sequence with the four side keys; hold the unmarked centre to exit."
+background = false
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "quickjs"
+path = "main.js"
+sdk = "0.5"

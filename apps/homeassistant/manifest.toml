@@ -1,0 +1,224 @@
+id = "org.capsulad.homeassistant"
+name = "Home Assistant bridge"
+version = "0.1.0"
+description = "Publishes the speaker's hardware and state to Home Assistant through MQTT discovery and applies Home Assistant's commands to the ring, the segment display and the Bluetooth source."
+background = true
+start_on_boot = true
+restart_on_failure = true
+single_instance = true
+
+[entrypoint]
+runtime = "native"
+path = "homeassistant"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app links only the Go SDK, which dlopens the shared Capsulad engine. The
+# engine is injected by the launcher and is never bundled into this package.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[interfaces]]
+service = "org.capsulad.homeassistant.v1.HomeAssistantService"
+version = "v1"
+descriptor = "proto/homeassistant.protoset"
+docs = "docs/bridge.md"
+
+# --- broker -----------------------------------------------------------------
+
+[[settings]]
+key = "broker_host"
+label = "Broker host"
+description = "MQTT broker host name or address. Empty means 'discover one with mDNS' when broker_discover is on; with discovery off the bridge reports that it has no broker and publishes nothing."
+type = "text"
+default = ""
+
+[[settings]]
+key = "broker_port"
+label = "Broker port"
+description = "MQTT broker port. 1883 is plaintext, 8883 is the usual TLS port; set broker_tls to match."
+type = "integer"
+default = 1883
+min = 1
+max = 65535
+
+[[settings]]
+key = "broker_tls"
+label = "Use TLS"
+description = "Perform a verified TLS 1.2+ handshake through the shared native transport. There is no insecure mode and no verification override: a self-signed broker needs broker_ca_pem, and certificate or host name mismatches are refused. Off sends the MQTT session, its credentials and every state in clear on the local network."
+type = "boolean"
+default = false
+
+[[settings]]
+key = "broker_tls_roots"
+label = "TLS trust roots"
+description = "Which roots verify the broker certificate. system = the device's system bundle plus public roots plus broker_ca_pem; webpki = public roots plus broker_ca_pem; pem = only broker_ca_pem (no system bundle, no public roots)."
+type = "select"
+default = "system"
+[[settings.choices]]
+value = "system"
+label = "System roots + configured CA"
+[[settings.choices]]
+value = "webpki"
+label = "Public roots + configured CA"
+[[settings.choices]]
+value = "pem"
+label = "Only the configured CA"
+
+[[settings]]
+key = "broker_ca_pem"
+label = "Extra CA certificates (PEM)"
+description = "PEM certificates appended to the trusted set, for a broker with a private CA. Required by the pem roots mode. A public certificate is not a secret; never paste a private key here."
+type = "text"
+default = ""
+
+[[settings]]
+key = "broker_tls_server_name"
+label = "TLS server name"
+description = "Name used for SNI and for the certificate check. Empty uses the broker host. Set it only when the broker certificate names a different host than the configured address; verification is never skipped."
+type = "text"
+default = ""
+
+[[settings]]
+key = "broker_username"
+label = "Broker user name"
+description = "MQTT user name. Empty connects anonymously. A password requires a user name, per MQTT 3.1.1."
+type = "text"
+default = ""
+
+[[settings]]
+key = "broker_password"
+label = "Broker password"
+description = "MQTT password for broker_username. Masked: it is never logged, never published in a discovery payload and never returned by the Web UI or the settings UI. Clearing it needs an explicit clear in the Web UI."
+type = "text_masked"
+default = ""
+
+[[settings]]
+key = "broker_discover"
+label = "Discover the broker with mDNS"
+description = "When broker_host is empty, browse _mqtt._tcp through the daemon's Avahi responder and use the first advertised broker. The simulator has no responder, so discovery only works on a device with Avahi running."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "keep_alive_seconds"
+label = "MQTT keepalive"
+description = "Keepalive interval. The bridge pings after half of it and treats a broker that stays silent beyond one and a half intervals as gone, then reconnects with backoff (1 s doubling to at most 1 min; reset only after a session has been usable for 30 s, so a broker that cannot be used does not make the device flap). At the 5 s minimum the keepalive can end a session before the 10 s subscribe budget does; both paths reconnect the same way. The broker's last will marks the device offline if the app dies without disconnecting."
+type = "integer"
+default = 30
+min = 5
+max = 600
+
+[[settings]]
+key = "client_id"
+label = "MQTT client id"
+description = "Broker client identifier. Empty derives 'capsulad-ha-<node_id>', which keeps one reserved session per device instead of leaving ghosts behind on every reconnect."
+type = "text"
+default = ""
+
+# --- topics -----------------------------------------------------------------
+
+[[settings]]
+key = "discovery_prefix"
+label = "Discovery prefix"
+description = "Home Assistant MQTT discovery prefix. It must match the broker's discovery prefix (the MQTT integration default is homeassistant). Changed prefixes leave the previous retained discovery payloads behind until they are removed from the broker by hand."
+type = "text"
+default = "homeassistant"
+
+[[settings]]
+key = "base_topic"
+label = "State topic root"
+description = "Root of the state and command topics: <base_topic>/<node_id>/<entity>/{state,set} plus <base_topic>/<node_id>/status for availability."
+type = "text"
+default = "capsulad"
+
+[[settings]]
+key = "node_id"
+label = "Node id"
+description = "Topic level and Home Assistant device identifier. Empty derives a slug from the framework device id, which is stable across restarts. Changing it republishes everything under new entity ids and leaves the old entities to be removed from Home Assistant by hand."
+type = "text"
+default = ""
+
+# --- cadence ----------------------------------------------------------------
+
+[[settings]]
+key = "state_interval_seconds"
+label = "Device state interval"
+description = "How often uptime and mixer state are republished. Sensor and media changes are additionally pushed as they happen."
+type = "integer"
+default = 30
+min = 5
+max = 3600
+
+[[settings]]
+key = "sensor_interval_seconds"
+label = "Sensor sample interval"
+description = "Minimum interval requested from each framework sensor watch stream."
+type = "integer"
+default = 60
+min = 5
+max = 3600
+
+# --- exposure ---------------------------------------------------------------
+
+[[settings]]
+key = "expose_ring"
+label = "Expose the LED ring"
+description = "Publish a light entity for the ring: colour, brightness and the built-in effects. Turning it off releases the capture, so the device's configured default ring app resumes."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "expose_display"
+label = "Expose the segment display"
+description = "Publish a switch and a select for the segment display: show one of the framework's built-in faces, or release the display back to the device's configured default app. There is no text entity because the framework exposes no text or font rendering for the segment display."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "expose_sensors"
+label = "Expose sensors"
+description = "Publish one sensor entity for each sensor the device advertises through SensorService, with its unit and, when the unit maps unambiguously, a Home Assistant device class."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "expose_bluetooth"
+label = "Expose the Bluetooth source"
+description = "Publish the connected Bluetooth source as Home Assistant entities: a state sensor (playing/idle/off with title, artist, album and position as attributes), a title sensor, and one button each for play, pause, next and previous through BluetoothMediaService. Home Assistant has no MQTT media player, so no media_player entity is created. The device address and name are redacted by the framework and are never published."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "expose_touch"
+label = "Expose the panel buttons (opt-in)"
+description = "Publish an event entity for the panel's play_pause and centre keys and completed swipes, using a partial touch capture. While that capture is held, Home Assistant owns those two controls, so a sounding framework alert or an assistant turn can no longer be dismissed with them; the volume and microphone gestures stay with the device. Leave it off unless you want the panel as a Home Assistant input."
+type = "boolean"
+default = false
+
+[[settings]]
+key = "expose_diagnostics"
+label = "Expose diagnostic entities"
+description = "Publish read-only uptime, master volume and microphone-mute entities, the bridge status sensor and the three bridge buttons. Master volume and microphone mute are read-only because the framework reserves both writes for a local administrator."
+type = "boolean"
+default = true
+
+# --- actions ----------------------------------------------------------------
+
+[[actions]]
+id = "republish"
+label = "Republish discovery and state"
+description = "Rewrite every retained discovery payload and the current state. Use it after clearing retained messages on the broker or re-adding the MQTT integration."
+
+[[actions]]
+id = "reconnect"
+label = "Reconnect the broker"
+description = "Drop the current MQTT session (publishing offline first) and dial again immediately."
+
+[[actions]]
+id = "release_hardware"
+label = "Release hardware"
+description = "Hand the ring and the segment display back to the device's configured default apps without stopping the bridge. Confirm before running: Home Assistant loses control of those two surfaces until the next command."
+confirm_before_run = true

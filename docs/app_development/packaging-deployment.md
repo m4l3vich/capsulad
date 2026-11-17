@@ -107,22 +107,59 @@ capsulad-cli -data-dir /data/capsdemo app install PATH
 capsulad-cli -data-dir /data/capsdemo app remove ID
 ```
 
-`PATH` is a `.tar.gz` or, for development convenience, an unpacked package directory.
+`PATH` is a `.tar.gz` or, for development convenience, an unpacked package directory. The same
+two operations are available from the authenticated Web UI **Apps** page, which uploads the
+archive to `POST /api/apps` and removes a package with `DELETE /api/apps/<app-id>`.
 
+There are two paths, chosen by whether capsulad is reachable — never by a retry:
+
+| State | What happens |
+|---|---|
+| capsulad is listening on its socket | The CLI streams the package to the daemon's `ApplicationService.InstallApplication` (a directory is packaged first); the daemon validates it, refuses a running app, swaps the package atomically and reloads its registry, so the package is **active immediately**. `app remove` uses `ApplicationService.UninstallApplication` the same way. |
+| capsulad is not running (socket absent or actively refusing) | The CLI installs or removes in `<data-dir>/apps` itself and prints `restart capsulad to activate the installed package`. This is the deployment and recovery path. |
+
+If the socket answers nothing but accepts no connection proof — a timeout, a permission error or
+any other transport failure — the CLI refuses rather than guessing:
+`cannot tell whether capsulad is running …`. Writing the package tree of a daemon that may be
+live is never attempted.
+
+- Only one package is unpacked at a time (the data partition cannot hold two staging trees), and
+  an upload that stops making progress is bounded: 60 s without progress (no message received and
+  no buffered bytes consumed), or 30 minutes in total, ends the call with nothing installed. The
+  bound applies while the package is still being received, unpacked or verified — before the
+  commit point; once the validated package starts its atomic swap the call waits for and reports
+  the real result, so a completed install is never reported as a timeout. A second upload waits
+  up to 30 s for the slot.
+- The browser upload is additionally bounded by the Web UI's own HTTP read deadline of 10
+  minutes per request, which is shorter than the daemon's 30-minute total budget: a browser
+  upload slower than that is cut by the HTTPS server, while `capsulad-cli` (which streams over
+  the local socket) is bounded only by the daemon's idle and total budgets.
 - Installation stages the package on the same filesystem, validates the manifest, preflights a
   declared `[native_sdk]` requirement against the installed runtime, sets the previous
   installation aside, renames the staged tree into `<data-dir>/apps/<app-id>`, and only then
-  removes the old tree. A failed install leaves the previous installation intact.
-- Replacing, removing or installing over a **running** app is refused:
-  `app <id> is running (run <run-id>); stop it before replacing the package`. Stop the run first
-  with `app stop <run-id>`.
-- A newly installed package becomes visible after `capsulad` restarts. The registry is read at
-  startup, and `app install` prints a reminder. `capsulad-cli deploy` performs that restart when
+  removes the old tree. A failed install leaves the previous installation intact and never
+  exposes a partial package. The upload is streamed straight into the staging tree, so a package
+  is never written twice on the 78.5 MiB data partition.
+- A running app is never touched: replacing, removing or installing over it is refused with
+  `app <id> is running (run <run-id>); stop it before replacing the package` (or
+  `… before removing`). Stop the run first with `app stop <run-id>`. The daemon serialises
+  install/remove against launch, so a process is never started from a tree that is being
+  swapped.
+- With the daemon reachable, an accepted install or removal is visible to `app list`, the Web UI
+  and every other reader at once; there is no restart step. A package installed while capsulad
+  is stopped becomes visible at the next start. `capsulad-cli deploy` restarts the daemon when
   it is allowed to.
-- The install prints `installed <id> (<version>) into <dir>` or `updated …`.
+- The install prints `installed <id> (<version>) into <dir>`, `updated <id> (<old> -> <new>)` or
+  `reinstalled <id> (<version>)`; the live path adds `active now: the daemon reloaded its
+  application registry`.
+- A newly installed or replaced app is never started implicitly: `start_on_boot` and
+  `background` describe what the daemon does at start, and an update must not resurrect an app
+  that had to be stopped for the replacement. Launch it from the Web UI or with
+  `app start <id>`.
 - Removing an app deletes its package directory. App settings live in
-  `<data-dir>/app-settings/<app-id>/settings.json` and are not removed by uninstall; reinstalling
-  the same ID finds its stored settings again.
+  `<data-dir>/app-settings/<app-id>/settings.json` and are not removed by uninstall, and a stored
+  default-provider selection is left as the administrator set it; reinstalling the same ID finds
+  its stored settings again.
 - Built-in system apps have no package directory and cannot be installed, replaced or removed.
 
 ## Deployment bundle

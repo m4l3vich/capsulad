@@ -9,11 +9,11 @@ const {
   assetPathError,
   defaultTarget,
   deleteAsset,
-  formatBytes,
   listAssets,
   MAX_ASSET_BYTES,
   shortHash
 } = await import('../src/lib/assets.js')
+const { formatBytes } = await import('../src/lib/format.js')
 const { session } = await import('../src/lib/session.js')
 
 test('assetPathError accepts nested relative paths', () => {

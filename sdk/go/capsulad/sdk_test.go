@@ -280,6 +280,24 @@ func TestIncomingCallInfoSnakeCase(t *testing.T) {
 	}
 }
 
+func TestServerCallExposesCallerRunID(t *testing.T) {
+	call := newServerCall(0, incomingCallInfo{
+		CallID:      "call_1",
+		CallerRunID: "run_2",
+		GRPCService: "org.example.ring.v1.RingControllerService",
+		RPCName:     "SetMode",
+	})
+	defer call.cancel()
+	if call.CallerRunID() != "run_2" {
+		t.Fatalf("CallerRunID() = %q", call.CallerRunID())
+	}
+	empty := newServerCall(0, incomingCallInfo{CallID: "call_2"})
+	defer empty.cancel()
+	if empty.CallerRunID() != "" {
+		t.Fatalf("CallerRunID() = %q, want empty", empty.CallerRunID())
+	}
+}
+
 func TestLoadRealNativeLibrary(t *testing.T) {
 	path := os.Getenv("CAPSULAD_TEST_LIBRARY")
 	if path == "" {

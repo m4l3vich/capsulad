@@ -35,7 +35,7 @@ only the daemon itself holds; a peer that merely shares the daemon PID (the Web 
 | `AudioService` | full for streams and state reads; `SetMasterVolume`/`SetMicrophoneMuted` administrator only |
 | `InputService` | own selected touch capture only |
 | `AssistantService` | `ListWakewordModels`, `BeginConversation`; wakeword sample/training RPCs administrator only |
-| `ApplicationService` | `ListApplications`, `ListRuntimes`, `GetBinaryProvenance`, own runs; `Launch`/`Stop` administrator only |
+| `ApplicationService` | `ListApplications`, `ListRuntimes`, `GetBinaryProvenance`, own runs; `Launch`/`Stop`/`InstallApplication`/`UninstallApplication` administrator only |
 | `ApplicationConfigurationService` | `Describe` public; `Get`/`Update`/`TriggerAction` own app |
 | `AppInterfaceService` | full |
 | `AppBusService` | `Connect` (app identity), `Call` (any local caller) |
@@ -329,6 +329,8 @@ the app bus; see [lifecycle.md](lifecycle.md#assistant-activations).
 | `Stop` | unary | administrator | Graceful stop of one run. |
 | `ListRuns` | unary | app scope (own app) or administrator | Runs. |
 | `WatchRuns` | server stream | app scope (own app) or administrator | Run state changes. |
+| `InstallApplication` | client stream `InstallApplicationRequest` → `InstallApplicationResult` | administrator | Install or atomically replace one `.tar.gz` package. |
+| `UninstallApplication` | unary `UninstallApplicationRequest` → `UninstallApplicationResult` | administrator | Remove one installed package. |
 
 `InstalledApplication`:
 
@@ -341,9 +343,59 @@ the app bus; see [lifecycle.md](lifecycle.md#assistant-activations).
 | `interfaces` | `DeclaredAppInterface[]` = `{grpc_service, interface_version, summary}` |
 | `entrypoint` | `{runtime, relative_path, cpu_architecture, binary_abi, framework_sdk_version}` |
 | `github_attestation` | `{bundle_path, subject_path, expected_repository, expected_workflow}` |
-| `system_app`, `can_stop`, `can_uninstall` | bool — server-owned, never inferred from the ID |
+| `system_app`, `can_stop`, `can_uninstall` | bool — server-owned, never inferred from the ID. `can_uninstall` is true for a supervised package and false for a compiled-in system app; a running app still refuses removal at the call. |
 
 `RuntimeAvailability` = `{runtime, available, implementation_version, detail}`.
+
+Package administration is part of this service because the browser backend and `capsulad-cli`
+use the same local control plane as every other client; there is no second administration
+channel. A supervised app calling either RPC is `PERMISSION_DENIED` before a byte is read or a
+path is touched.
+
+`InstallApplicationRequest` is a client stream whose **first** message is
+`InstallApplicationOpen{file_name}` (diagnostics only — the daemon never installs from a
+client-named location) and whose remaining messages carry `content` bytes of one gzip-compressed
+tar. Chunk boundaries carry no meaning; the concatenation is the artifact described in
+[packaging-deployment.md](packaging-deployment.md#artifact-format). The compressed stream is
+bounded at 65 MiB and the unpacked tree at the pinned package budget, so a client cannot make the
+device buffer an unbounded upload.
+
+The daemon ends an upload with no progress for 60 s (no message received and no buffered bytes
+consumed), or one that exceeds 30 minutes in total, with `DEADLINE_EXCEEDED`. A timeout is
+reported only before the install reaches its commit point, so nothing has been swapped,
+"nothing was installed" is true and the staging slot is released; the package may already be
+unpacked and verified at that point. Once the commit begins (the validated package is being
+swapped in), the call no longer times out: it waits for and returns the real result, because a
+committed install cannot be reported as abandoned. Only one upload is unpacked at a time (the
+78.5 MiB data partition cannot hold two packages beside the installed set), so a second upload
+waits up to 30 s and is then refused with `RESOURCE_EXHAUSTED`.
+
+`InstallApplicationResult` = `{application, replaced, previous_version}`; `previous_version` is
+empty for a fresh install and otherwise the version that installation carried before the call, so
+a caller can distinguish an update from a reinstall of the same version.
+
+Semantics an app author can rely on:
+
+- The artifact is validated (root `manifest.toml`, relative regular files and directories only,
+  no links, per-file/total/entry limits) before anything installed is touched.
+- A declared `[native_sdk]` requirement is checked against the installed runtime; a mismatch is
+  `FAILED_PRECONDITION`.
+- Replacing or removing a package whose app is **running** is `FAILED_PRECONDITION`
+  (`app <id> is running (run <run-id>); stop it before …`). Stop the run first.
+- A compiled-in system app ID cannot be installed over, replaced or removed
+  (`FAILED_PRECONDITION`); `can_uninstall` is false for those entries.
+- The swap is atomic: a failed install leaves the previous installation intact and never exposes
+  a partial package. An accepted install or removal is visible to `ListApplications` immediately
+  — the daemon reloads its registry in place — and a newly installed or replaced app is never
+  started implicitly.
+- Removal keeps the app's stored settings (`<data-dir>/app-settings/<app-id>/settings.json`) and
+  never rewrites a stored default-provider selection; reinstalling the same app ID finds them
+  again.
+- The daemon serialises install/remove against `Launch`, so a process is never started from a
+  package tree that is being replaced or removed.
+
+`UninstallApplicationRequest` = `{app_id}`; `UninstallApplicationResult` = `{app_id}`. An unknown
+app is `NOT_FOUND`.
 
 `LaunchRequest` = `{app_id, arguments[]}` with `LaunchArgument{name, value}`. `LaunchResult` =
 `{run_id, spawned_new_process, invocation_id}`; `invocation_id` is also set when a singleton app
@@ -419,6 +471,13 @@ response_example_json}`.
 |---|---|---|---|
 | `Connect` | bidi `AppOutbound` → `AppInbound` | app identity | The app's single long-lived channel. |
 | `Call` | bidi `RoutedCallRequest` → `RoutedCallResponse` | any local caller | Relay one call to a target app. |
+
+A routed `Call` is a local request with a daemon-derived caller identity, but no per-method
+authorization: the daemon decides which declared interfaces are reachable, and the target's
+handler receives `IncomingAppCall.caller_run_id` (Go: `ServerCall.CallerRunID()`) — a supervised
+run id, `pid:<pid>` for a non-app local caller, or empty. A handler that serves a privileged
+interface must authorize that identity against framework run data and refuse otherwise. See
+[security.md](security.md#routed-calls-and-trust).
 
 See [app-bus.md](app-bus.md) for the message tables, identity rules, deadlines and limits.
 

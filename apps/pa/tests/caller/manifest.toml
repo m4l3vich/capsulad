@@ -1,0 +1,19 @@
+id = "org.capsulad.pa.test-caller"
+name = "PA speaker test caller"
+version = "0.1.0"
+description = "Test-only MicroPython caller for the PA speaker end-to-end check. Exercises accepted files, every rejection class, and cancellation. Never install it on a device."
+background = false
+start_on_boot = false
+restart_on_failure = false
+single_instance = true
+
+[entrypoint]
+runtime = "micropython"
+path = "main.py"
+sdk = "0.5"
+
+[[arguments]]
+name = "phase"
+description = "Which case group to run: main (default) or settings."
+type = "text"
+required = false

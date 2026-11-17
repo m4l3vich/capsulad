@@ -1,0 +1,41 @@
+
+Ø	
+homeassistant.protoorg.capsulad.homeassistant.v1"
+GetStatusRequest"ó
+Status
+
+configured (R
+configured
+	connected (R	connected
+broker (	Rbroker
+node_id (	RnodeId)
+discovery_prefix (	RdiscoveryPrefix
+
+base_topic (	R	baseTopic
+entities (Rentities
+ring_on (RringOn
+ring_effect	 (	R
+ringEffect
+
+display_on
+ (R	displayOn!
+display_face (	RdisplayFace#
+bridge_status (	RbridgeStatus
+
+last_error (	R	lastError
+	published (R	published
+commands (Rcommands
+failures (Rfailures"
+PublishDiscoveryRequest"8
+PublishDiscoveryResponse
+	published (R	published"W
+PublishEventRequest
+
+event_type (	R	eventType!
+payload_json (	RpayloadJson"4
+PublishEventResponse
+	published (R	published2ú
+HomeAssistantServicec
+	GetStatus/.org.capsulad.homeassistant.v1.GetStatusRequest%.org.capsulad.homeassistant.v1.Statusƒ
+PublishDiscovery6.org.capsulad.homeassistant.v1.PublishDiscoveryRequest7.org.capsulad.homeassistant.v1.PublishDiscoveryResponsew
+PublishEvent2.org.capsulad.homeassistant.v1.PublishEventRequest3.org.capsulad.homeassistant.v1.PublishEventResponseB/Z-org.capsulad.homeassistant.v1;homeassistantv1bproto3
