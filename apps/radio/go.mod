@@ -1,4 +1,4 @@
-module capsulad/apps/radio/tuner
+module capsulad/apps/radio
 
 go 1.22.5
 
@@ -7,4 +7,4 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4
 )
 
-replace capsulad/sdk => ../../../sdk/go
+replace capsulad/sdk => ../../sdk/go

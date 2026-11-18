@@ -266,8 +266,9 @@ CapsuladUI.appId
 CapsuladUI.schema       // { settings: [...] } from the manifest
 CapsuladUI.revision     // current app-settings revision
 CapsuladUI.onState(fn)  // snapshot/state events
-CapsuladUI.onResult(fn) // patch results
-CapsuladUI.patch(changes) // [{key, valueJson}] or [{key, clear:true}]
+CapsuladUI.onResult(fn) // patch results, each carrying requestId
+CapsuladUI.patch(changes) // [{key, valueJson}] or [{key, clear:true}];
+                          // returns a 1-based request id (0 when ignored)
 CapsuladUI.resize()
 ```
 
@@ -282,6 +283,24 @@ token.
 | frame → parent | `resize` | `{height}` (20–4000 px). |
 | parent → frame | `state` | `{revision, schema, values}` after an update. |
 | parent → frame | `result` | `{requestId, ok, revision, message?, error?}`. |
+
+`patch` returns a per-frame, monotonically increasing request ID, starting at 1. It returns 0
+when the call is ignored locally (empty or non-array `changes`). The matching `result` echoes
+that ID as `requestId`; ids are never reused for the document's lifetime. Patches are serialized
+by the host (one in flight, queue of 16), but a frame may have several submitted patches
+outstanding, so **correlate each result with the patch that produced it**. A `result` is not a
+generic acknowledgement of "the latest edit": a predecessor's late result must not clear a newer
+draft or claim the newest save.
+
+After a patch reaches the daemon, the host sends that patch's `result` and then the `state`
+snapshot for the resulting revision, in that order on the frame's channel. `state` carries the
+authoritative persisted values but is not tied to one request; use `result.requestId` for the
+acknowledgement and treat snapshots as convergence data.
+
+A form that submits text should keep `{id, text}` for the newest submission and clear its dirty
+flag only when `result.ok` arrives for exactly that id **and** the control still holds the
+submitted text. A failed result, a result for an older id, a newer edit, or an unrelated
+snapshot must leave the draft untouched.
 
 Host rules:
 

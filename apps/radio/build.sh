@@ -1,27 +1,33 @@
 #!/bin/sh
-# Build and package the Internet Radio tuner companion.
+# Build and package the Internet Radio app (single native package).
 #
-#   sh apps/radio/tuner/build.sh
-#   OUT=/tmp/radio-tuner sh apps/radio/tuner/build.sh
-#   PACKAGE=0 sh apps/radio/tuner/build.sh          # stage only
-#   GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/radio/tuner/build.sh
+#   sh apps/radio/build.sh
+#   OUT=/tmp/radio sh apps/radio/build.sh
+#   PACKAGE=0 sh apps/radio/build.sh          # stage only
+#   GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/radio/build.sh
 #
-# Packaging happens on the build host. The device receives
-# org.capsulad.radio.tuner-<version>.tar.gz.
+# The binary is compiled and packaged on the build host. The device receives
+# org.capsulad.radio-<version>.tar.gz; it needs the shared native runtime that
+# the launcher injects (make native).
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
+ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)
 OUT=${OUT:-"$ROOT/build/apps"}
-APP_ID=org.capsulad.radio.tuner
+APP_ID=org.capsulad.radio
+PKG="$OUT/$APP_ID"
 GO=${GO:-go}
 PACKAGE=${PACKAGE:-1}
 CLI=${CAPSULAD_CLI:-}
 
 say() { printf '%s\n' "$*" >&2; }
-die() { say "radio-tuner: $*"; exit 1; }
+die() { say "radio: $*"; exit 1; }
 
 [ -f "$ROOT/sdk/go/go.mod" ] || die "Go SDK not found at $ROOT/sdk/go"
+[ -f "$HERE/manifest.toml" ] || die "missing $HERE/manifest.toml"
+[ -f "$HERE/ui/settings.html" ] || die "missing $HERE/ui/settings.html"
+[ -f "$HERE/README.md" ] || die "missing $HERE/README.md (the packaged app guide)"
+
 LIB_DIR=${CAPSULAD_NATIVE_LIB_DIR:-"$ROOT/build/lib"}
 [ -f "$LIB_DIR/capsulad-native.json" ] ||
   die "native runtime metadata missing at $LIB_DIR/capsulad-native.json; run 'make native'"
@@ -60,43 +66,42 @@ resolve_cli() {
   if [ -x "$CLI" ]; then
     return 0
   fi
-  say "radio-tuner: building the host packager $CLI"
+  say "radio: building the host packager $CLI"
   ( cd "$ROOT" && GOOS="$HOST_GOOS" GOARCH="$HOST_GOARCH" CGO_ENABLED=1 \
       $GO build -trimpath -ldflags "-s -w $HOST_LDFLAGS" -o "$CLI" ./cmd/capsulad-cli ) ||
     die "failed to build the host capsulad-cli packager"
 }
 
-stage() {
-  rm -rf "$OUT/$APP_ID"
-  rm -f "$OUT/$APP_ID"-*.tar.gz
-  mkdir -p "$OUT/$APP_ID/bin"
-}
-
 resolve_cli
-stage
-say "radio-tuner: building $APP_ID for $GOOS/$GOARCH (cgo=$CGO_ENABLED cc=$CC)"
+rm -rf "$PKG"
+rm -f "$OUT/$APP_ID"-*.tar.gz
+mkdir -p "$PKG/bin" "$PKG/ui" "$PKG/proto"
+
+say "radio: building $APP_ID for $GOOS/$GOARCH (cgo=$CGO_ENABLED cc=$CC)"
 ( cd "$HERE" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED="$CGO_ENABLED" CC="$CC" \
-    $GO build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$APP_ID/bin/tuner" ./cmd/tuner ) ||
+    $GO build -trimpath -ldflags "$LDFLAGS" -o "$PKG/bin/radio" ./cmd/radio ) ||
   die "build failed; a device build needs a matching C compiler (CC=aarch64-linux-gnu-gcc)"
-cp "$HERE/manifest.toml" "$OUT/$APP_ID/manifest.toml"
-# Stamp the package ABI for the target libc (source manifest stays the default).
+
+cp "$HERE/manifest.toml" "$PKG/manifest.toml"
+cp "$HERE/README.md" "$PKG/README.md"
+cp "$HERE/ui/settings.html" "$PKG/ui/settings.html"
+cp "$HERE/proto/media.protoset" "$PKG/proto/media.protoset"
+cp "$HERE/proto/media.md" "$PKG/proto/media.md"
 if [ "${GOOS:-}" = linux ]; then
-    sh "$HERE/../../../tools/stage-manifest-abi.sh" "$OUT/$APP_ID/manifest.toml" "${TARGET_ABI:-linux-gnu}"
+  sh "$ROOT/tools/stage-manifest-abi.sh" "$PKG/manifest.toml" "${TARGET_ABI:-linux-gnu}"
 fi
-say "radio-tuner: staged $OUT/$APP_ID"
+say "radio: staged $PKG"
 
 if [ "$PACKAGE" = "1" ]; then
-if [ "${GOOS:-}" = linux ]; then
-    staged_bin=$(find "$OUT/$APP_ID" -maxdepth 1 -type f -perm -u+x | head -1)
-    [ -n "$staged_bin" ] || { echo "error: no staged executable to ABI-check" >&2; exit 1; }
-    sh "$HERE/../../../tools/check-elf-interp.sh" "$staged_bin" "${TARGET_ABI:-linux-gnu}"
-fi
   if [ "${GOOS:-}" = linux ]; then
-    ( cd "$OUT" && "$CLI" app package "$APP_ID" -target-abi "${TARGET_ABI:-linux-gnu}" -max-glibc "${CAPSULAD_MAX_GLIBC:-}" -target-arch "${CAPSULAD_TARGET_ARCH:-}" )
+    [ -x "$PKG/bin/radio" ] || { echo "error: no staged executable at $PKG/bin/radio to ABI-check" >&2; exit 1; }
+    sh "$ROOT/tools/check-elf-interp.sh" "$PKG/bin/radio" "${TARGET_ABI:-linux-gnu}"
+    ( cd "$OUT" && "$CLI" app package "$APP_ID" -target-abi "${TARGET_ABI:-linux-gnu}" \
+        -max-glibc "${CAPSULAD_MAX_GLIBC:-}" -target-arch "${CAPSULAD_TARGET_ARCH:-}" )
   else
     ( cd "$OUT" && "$CLI" app package "$APP_ID" )
   fi || die "packaging failed with $CLI"
-  say "radio-tuner: install with: capsulad-cli app install $OUT/$APP_ID-<version>.tar.gz"
+  say "radio: install with: capsulad-cli app install $OUT/$APP_ID-<version>.tar.gz"
 else
-  say "radio-tuner: PACKAGE=0, no archive written"
+  say "radio: PACKAGE=0, no archive written"
 fi

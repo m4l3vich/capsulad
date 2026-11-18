@@ -1,51 +1,0 @@
-
-ó	
-radio.protoorg.capsulad.radio.v1"©
-PushRequest
-sequence (Rsequence
-
-session_id (	R	sessionId
-pcm (Rpcm$
-sample_rate_hz (RsampleRateHz
-channels (Rchannels#
-sample_format (RsampleFormat
-first_frame (R
-firstFrame$
-discontinuity (Rdiscontinuity%
-dropped_frames	 (RdroppedFrames
-title
- (	Rtitle
-artist (	Rartist
-finished (Rfinished
-failed (Rfailed
-detail (	Rdetail"@
-
-PushResult
-accepted (Raccepted
-detail (	Rdetail"…
-TuneRequest
-
-session_id (	R	sessionId
-url (	Rurl!
-station_name (	RstationName"
-player_app_id (	RplayerAppId"‚
-
-TuneResult
-accepted (Raccepted
-detail (	Rdetail
-
-session_id (	R	sessionId!
-content_type (	RcontentType"D
-StopRequest
-
-session_id (	R	sessionId
-detail (	Rdetail"@
-
-StopResult
-accepted (Raccepted
-detail (	Rdetail2c
-RadioPlayerServiceM
-Push".org.capsulad.radio.v1.PushRequest!.org.capsulad.radio.v1.PushResult2±
-RadioTunerServiceM
-Tune".org.capsulad.radio.v1.TuneRequest!.org.capsulad.radio.v1.TuneResultM
-Stop".org.capsulad.radio.v1.StopRequest!.org.capsulad.radio.v1.StopResultB)Z'capsulad/apps/radio/gen/radiov1;radiov1bproto3

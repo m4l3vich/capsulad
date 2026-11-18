@@ -28,7 +28,7 @@ import (
 )
 
 // Codec is the container/codec a stream advertises or that the first bytes
-// identify. The tuner decodes only CodecMP3.
+// identify. The radio app decodes only CodecMP3.
 type Codec int
 
 const (
@@ -98,7 +98,7 @@ type Config struct {
 
 func (c Config) normalize() Config {
 	if c.UserAgent == "" {
-		c.UserAgent = "capsulad-radio-tuner/1.0"
+		c.UserAgent = "capsulad-radio/1.0"
 	}
 	if c.MaxRedirects <= 0 {
 		c.MaxRedirects = 5

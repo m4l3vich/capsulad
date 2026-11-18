@@ -199,7 +199,7 @@ func TestBuildRequestHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	request := string(buildRequest(Config{UserAgent: "capsulad-radio-tuner/1.0"}, u))
+	request := string(buildRequest(Config{UserAgent: "capsulad-radio/1.0"}, u))
 	for _, want := range []string{
 		"GET /live.mp3?token=abc HTTP/1.1\r\n",
 		"Host: example.test\r\n",

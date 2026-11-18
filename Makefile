@@ -46,6 +46,13 @@ GO_ENV := GOOS=$(GOOS) GOARCH=$(GOARCH)
 CGO_GO_ENV := CGO_ENABLED=1 $(GO_ENV)
 GOBUILD := $(GO_ENV) $(GO) build $(GO_BUILD_FLAGS) -ldflags '$(GO_LDFLAGS)'
 
+# Build tags for capsulad-cli only. grpcnotrace drops gRPC's optional
+# golang.org/x/net/trace hooks (and the text/template stack only they reach);
+# the CLI never registers those handlers and gRPC tracing is off by default, so
+# the wire behavior is unchanged. The daemon and app builds keep the default
+# tag set. This is the CLI's measured release saving, not a semantics change.
+CLI_TAGS ?= grpcnotrace
+
 BINDIR ?= build/bin
 HOST_CLI ?= $(BINDIR)/capsulad-cli-host
 LIBDIR ?= build/lib
@@ -54,6 +61,21 @@ APPDIR ?= build/apps
 DEVAPPSDIR ?= build/devapps
 DEPLOYDIR ?= build/deploy-bundle
 DEPLOY_TARBALL ?= $(DEPLOYDIR).tar.gz
+# Include the CLI in the deployment bundle. The default keeps the documented
+# adb flow, which runs `capsulad-cli` from the pushed bundle. BUNDLE_CLI=0
+# assembles a CLI-free device bundle: the CLI is not a prerequisite and is not
+# copied, while a separately installed <data-dir>/capsulad-cli is left as it is.
+BUNDLE_CLI ?= 1
+# One predicate decides both the prerequisite and the copy. Reject anything
+# else instead of building a CLI the bundle then omits.
+ifneq ($(words $(BUNDLE_CLI)),1)
+$(error BUNDLE_CLI must be 0 or 1, got '$(BUNDLE_CLI)')
+endif
+ifneq ($(filter 0 1,$(BUNDLE_CLI)),$(BUNDLE_CLI))
+$(error BUNDLE_CLI must be 0 or 1, got '$(BUNDLE_CLI)')
+endif
+CLI_ENABLED := $(if $(filter 1,$(BUNDLE_CLI)),1,0)
+CLI_PREREQ := $(if $(filter 1,$(CLI_ENABLED)),capsulad-cli,)
 # Include the development apps staged in $(DEVAPPSDIR) in the bundle. They are
 # never built here: `make devapps` produces their artifacts first.
 BUNDLE_DEVAPPS ?= 0
@@ -173,7 +195,7 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence simon pa radio radio-tuner homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-apps test-simon test-pa test-radio test-radio-tuner test-homeassistant test-airplay test-interpreter clean
+.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence simon pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-apps test-simon test-pa test-radio test-homeassistant test-airplay test-interpreter clean
 
 all: release
 
@@ -205,29 +227,42 @@ capsulad:
 capsulad-cli:
 	mkdir -p $(BINDIR)
 	rm -f $(BINDIR)/capsulad-cli
-	$(GOBUILD) -o $(BINDIR)/capsulad-cli ./cmd/capsulad-cli
+	$(GOBUILD) -tags=$(CLI_TAGS) -o $(BINDIR)/capsulad-cli ./cmd/capsulad-cli
 
 # Host-executable CLI used to package app artifacts when GOOS/GOARCH is not the
 # build host. It is a build-time tool only: it never enters a deployment bundle.
 capsulad-cli-host:
 	mkdir -p $(BINDIR)
 	rm -f $(HOST_CLI)
-	GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build $(GO_BUILD_FLAGS) -ldflags '$(HOST_GO_LINKMODE)' -o $(HOST_CLI) ./cmd/capsulad-cli
+	GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build $(GO_BUILD_FLAGS) -tags=$(CLI_TAGS) -ldflags '$(HOST_GO_LINKMODE)' -o $(HOST_CLI) ./cmd/capsulad-cli
 
 # One directory that `capsulad-cli deploy` accepts as-is. Layout:
-# capsulad, capsulad-cli, lib/ (native runtime incl. headers), apps/*.tar.gz,
-# boot/<hook>. App artifacts are produced and packaged by the app build targets
-# (`make dumbassistant`, `make devapps`); assembly only copies the ready-made
-# .tar.gz files, so nothing is ever packaged for or on the device.
+# capsulad, capsulad-cli (unless BUNDLE_CLI=0), lib/ (native runtime incl.
+# headers), apps/*.tar.gz, boot/<hook>. App artifacts are produced and packaged
+# by the app build targets (`make dumbassistant`, `make devapps`); assembly only
+# copies the ready-made .tar.gz files, so nothing is ever packaged for or on the
+# device.
 # DEPLOY_PLATFORM selects the boot hook (rockchip-stock, amlogic-stock or
 # amlogic-alpine); pass the same value to `capsulad-cli deploy -platform`.
 # Native runtime symlinks are rebuilt from capsulad-native.json during deploy;
 # the bundle carries only the regular runtime files so its tarball is extractable.
-deploy-bundle: capsulad capsulad-cli $(NATIVE_PREREQ)
+deploy-bundle: capsulad $(CLI_PREREQ) $(NATIVE_PREREQ)
 	rm -rf $(DEPLOYDIR) $(DEPLOY_TARBALL)
 	mkdir -p $(DEPLOYDIR)/lib/include $(DEPLOYDIR)/apps $(DEPLOYDIR)/boot
+	@if [ -e "$(APPDIR)/org.capsulad.radio.tuner" ] || \
+	    ls "$(APPDIR)"/org.capsulad.radio.tuner-*.tar.gz >/dev/null 2>&1; then \
+		echo "error: $(APPDIR) still holds the retired org.capsulad.radio.tuner companion." >&2; \
+		echo "       The single org.capsulad.radio app now fetches and decodes in-process." >&2; \
+		echo "       Remove the stale stage and archive explicitly, then rerun:" >&2; \
+		echo "         rm -rf $(APPDIR)/org.capsulad.radio.tuner $(APPDIR)/org.capsulad.radio.tuner-*.tar.gz" >&2; \
+		exit 1; \
+	fi
 	cp $(BINDIR)/capsulad $(DEPLOYDIR)/capsulad
+ifeq ($(CLI_ENABLED),1)
 	cp $(BINDIR)/capsulad-cli $(DEPLOYDIR)/capsulad-cli
+else
+	@echo "bundle: no CLI (BUNDLE_CLI=0); deploy and recovery need a separately pushed device CLI"
+endif
 	@for f in $(LIBDIR)/*; do \
 		if [ -f "$$f" ] && [ ! -L "$$f" ]; then cp "$$f" $(DEPLOYDIR)/lib/; fi; \
 	done
@@ -255,10 +290,17 @@ deploy-bundle: capsulad capsulad-cli $(NATIVE_PREREQ)
 			[ -f "$$f" ] || continue; \
 			cp "$$f" $(DEPLOYDIR)/apps/; \
 			if [ -n "$(NATIVE_LIBC)" ]; then \
-				abi=$$(tar -xzOf "$$f" manifest.toml 2>/dev/null | sed -n 's/^[[:space:]]*abi[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' | head -1); \
-				case "$$abi" in \
-				*"$(NATIVE_LIBC)"*) ;; \
-				*) echo "error: $$f declares abi \"$$abi\", but $(DEPLOY_PLATFORM) needs $(NATIVE_LIBC); rebuild it with TARGET_ABI=$(TARGET_ABI)." >&2; exit 1 ;; \
+				runtime=$$(tar -xzOf "$$f" manifest.toml 2>/dev/null | sed -n 's/^[[:space:]]*runtime[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' | head -1); \
+				case "$$runtime" in \
+				native) \
+					abi=$$(tar -xzOf "$$f" manifest.toml 2>/dev/null | sed -n 's/^[[:space:]]*abi[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' | head -1); \
+					case "$$abi" in \
+					*"$(NATIVE_LIBC)"*) ;; \
+					*) echo "error: $$f declares abi \"$$abi\", but $(DEPLOY_PLATFORM) needs $(NATIVE_LIBC); rebuild it with TARGET_ABI=$(TARGET_ABI)." >&2; exit 1 ;; \
+					esac ;; \
+				quickjs | micropython) \
+					: ;; \
+				*) echo "error: $$f declares runtime \"$$runtime\"; the $(DEPLOY_PLATFORM) ABI gate needs native, quickjs or micropython." >&2; exit 1 ;; \
 				esac; \
 			fi; \
 			echo "bundled $$f"; \
@@ -274,7 +316,6 @@ deploy-bundle: capsulad capsulad-cli $(NATIVE_PREREQ)
 		[ -f "$$d/manifest.toml" ] || continue; \
 		id=$$(basename "$$d"); \
 		target=$${id#org.capsulad.}; \
-		if [ "$$id" = "org.capsulad.radio.tuner" ]; then target=radio-tuner; fi; \
 		bundle_app "$$id" "$(APPDIR)" "$$target"; \
 	done; \
 	if [ "$(BUNDLE_DEVAPPS)" = "1" ]; then \
@@ -371,6 +412,7 @@ dumbassistant: $(PACKAGER_TARGET)
 	mkdir -p $(APPDIR)/org.capsulad.dumbassistant/assets
 	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.dumbassistant/dumbassistant ./cmd/dumbassistant
 	cp apps/dumbassistant/manifest.toml $(APPDIR)/org.capsulad.dumbassistant/manifest.toml
+	cp apps/dumbassistant/README.md $(APPDIR)/org.capsulad.dumbassistant/README.md
 	@$(MAKE) check-target-toolchain
 	@if [ "$(GOOS)" = linux ]; then sh tools/stage-manifest-abi.sh $(APPDIR)/org.capsulad.dumbassistant/manifest.toml "$(TARGET_ABI)"; fi
 	cp -R apps/dumbassistant/assets/. $(APPDIR)/org.capsulad.dumbassistant/assets/
@@ -379,14 +421,16 @@ dumbassistant: $(PACKAGER_TARGET)
 	@rm -f $(APPDIR)/org.capsulad.dumbassistant-*.tar.gz
 	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.dumbassistant
 
-# Marusia is the second optional first-party app. It has no packaged assets:
-# the reply is a TTS URL fetched at turn time. The staged package directory and
-# its <id>-<version>.tar.gz land side by side in $(APPDIR).
+# Marusia is the second optional first-party app. It has no runtime assets: the
+# reply is a TTS URL fetched at turn time. The package carries the binary, the
+# manifest and the operator-facing README.md guide. The staged package directory
+# and its <id>-<version>.tar.gz land side by side in $(APPDIR).
 marusia: $(PACKAGER_TARGET)
 	rm -rf $(APPDIR)/org.capsulad.marusia
 	mkdir -p $(APPDIR)/org.capsulad.marusia
 	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.marusia/marusia ./cmd/marusia
 	cp apps/marusia/manifest.toml $(APPDIR)/org.capsulad.marusia/manifest.toml
+	cp apps/marusia/README.md $(APPDIR)/org.capsulad.marusia/README.md
 	@$(MAKE) check-target-toolchain
 	@if [ "$(GOOS)" = linux ]; then sh tools/stage-manifest-abi.sh $(APPDIR)/org.capsulad.marusia/manifest.toml "$(TARGET_ABI)"; fi
 	@$(MAKE) check-target-toolchain
@@ -396,8 +440,8 @@ marusia: $(PACKAGER_TARGET)
 
 # Cadence is the third optional first-party assistant: a client for a
 # self-hosted Cadence server. Its own Makefile owns the package contents (the
-# binary and manifest; no assets), and the repository target supplies the output
-# directory and the build-host packager.
+# binary, manifest and README.md guide; no runtime assets), and the repository
+# target supplies the output directory and the build-host packager.
 cadence: $(PACKAGER_TARGET)
 	$(MAKE) -C apps/cadence package OUT=$(abspath $(APPDIR)) CLI=$(abspath $(PACKAGER))
 
@@ -414,19 +458,12 @@ simon: $(PACKAGER_TARGET)
 pa: $(PACKAGER_TARGET)
 	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/pa/build.sh
 
-# The Internet Radio front end. The native tuner companion is its own package
-# (`make radio-tuner`), because a script host cannot fetch or decode a stream.
-# The app's own Makefile owns its package contents, including the raw-protobuf
-# contract; the repository target only supplies the output directory and the
-# build-host packager.
+# The Internet Radio app is one native package: it fetches and decodes station
+# audio in-process and serves the standard media contract. The app's build
+# script owns its package contents (binary, manifest, settings UI, descriptor,
+# README) and needs the host native runtime to link the shared SDK.
 radio: $(PACKAGER_TARGET)
-	$(MAKE) -C apps/radio package OUT=$(abspath $(APPDIR))/org.capsulad.radio CLI=$(abspath $(PACKAGER))
-
-# The native tuner compiles and packages itself, and needs the host native
-# runtime (`make native`) to link the shared SDK. A device package is the same
-# script with GOOS/GOARCH/CC set for aarch64.
-radio-tuner:
-	OUT=$(abspath $(APPDIR)) sh apps/radio/tuner/build.sh
+	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/radio/build.sh
 
 # The Home Assistant bridge is a native app: the build script compiles the Go
 # binary and packages it with the manifest, its descriptor and its bridge
@@ -455,18 +492,18 @@ AIRPLAY_TARGET_ABI ?= all
 airplay-target:
 	OUT=$(AIRPLAY_TARGET_OUT) TARGET_ABI=$(AIRPLAY_TARGET_ABI) sh apps/airplay/target/build-target.sh
 
-# All six product app packages in one step. `make native` first for the three
+# All five product app packages in one step. `make native` first for the three
 # native ones; each target is also usable on its own.
-product-apps: simon pa radio radio-tuner homeassistant airplay
+product-apps: simon pa radio homeassistant airplay
 
 # `make test` runs every Go module that ships in this repository: the root Go
-# module, the nested app modules (both assistants, the radio tuner companion and
-# the Home Assistant bridge), the Rust binding and the native crate (the frozen
-# C ABI), plus a compile of the public C++ example. `make test-race` adds the
-# race detector to the root module. The script-app suites need Node or CPython,
-# so they stay out of it: run them with `make test-apps` (`test-simon`,
-# `test-pa`, `test-radio`).
-test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-radio-tuner test-homeassistant test-airplay
+# module, the nested app modules (both assistants, Internet Radio and the Home
+# Assistant bridge), the Rust binding and the native crate (the frozen C ABI),
+# plus a compile of the public C++ example. `make test-race` adds the race
+# detector to the root module. The script-app suites need Node or CPython, so
+# they stay out of it: run them with `make test-apps` (`test-simon`, `test-pa`,
+# `test-interpreter`).
+test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-radio test-homeassistant test-airplay
 
 test-go:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...
@@ -508,11 +545,10 @@ test-interpreter:
 	python3 interpreter/micropython/sdk_test.py
 
 # Host-side suites. Simon's contract tests load the shipped main.js into a fake
-# QuickJS host under Node; the Internet Radio unit tests import the shipped
-# main.py with a scripted `capsulad` module under CPython; the tuner and bridge
-# companions are nested Go modules; and the MicroPython host's pure-Python
-# prelude has its own self-test (timers included).
-test-apps: test-simon test-radio test-radio-tuner test-homeassistant test-pa test-interpreter
+# QuickJS host under Node; Internet Radio's unit tests are a nested Go module;
+# the Home Assistant bridge is another nested Go module; and the MicroPython
+# host's pure-Python prelude has its own self-test (timers included).
+test-apps: test-simon test-radio test-homeassistant test-pa test-interpreter
 
 test-simon:
 	node --test apps/simon/test/*.test.mjs
@@ -522,10 +558,7 @@ test-pa:
 	python3 apps/pa/tests/test_app.py
 
 test-radio:
-	$(MAKE) -C apps/radio test
-
-test-radio-tuner:
-	cd apps/radio/tuner && $(CGO_GO_ENV) $(GO) test ./...
+	cd apps/radio && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 test-homeassistant:
 	cd apps/homeassistant && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
