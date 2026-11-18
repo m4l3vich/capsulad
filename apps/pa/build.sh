@@ -49,6 +49,7 @@ resolve_cli
 rm -rf "$PKG"
 mkdir -p "$PKG/proto" "$PKG/docs"
 cp "$HERE/manifest.toml" "$HERE/main.py" "$PKG/"
+cp "$HERE/README.md" "$PKG/README.md"
 cp "$HERE/proto/pa.proto" "$PKG/proto/pa.proto"
 cp "$HERE/docs/speaker.md" "$PKG/docs/speaker.md"
 

@@ -1,0 +1,95 @@
+{
+  "ascii_unicodes": "U+0020-007E",
+  "axes": {
+    "FILL": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "GRAD": [
+      -50.0,
+      0.0,
+      200.0
+    ],
+    "opsz": [
+      20.0,
+      24.0,
+      48.0
+    ],
+    "wght": [
+      100.0,
+      400.0,
+      700.0
+    ]
+  },
+  "brotli": "1.2.1",
+  "family": "Material Symbols Rounded",
+  "fill_glyphs": [
+    "check_circle.fill",
+    "display_settings.fill",
+    "edit.fill",
+    "error.fill",
+    "info.fill",
+    "light_mode.fill",
+    "mic.fill",
+    "pause.fill",
+    "play_arrow.fill",
+    "record_voice_over.fill",
+    "robot_2.fill",
+    "schedule.fill",
+    "settings.fill",
+    "skip_next.fill",
+    "skip_previous.fill",
+    "video_library.fill",
+    "visibility_off.fill",
+    "volume_up.fill",
+    "warning.fill",
+    "widgets.fill"
+  ],
+  "font": "material-symbols-rounded-subset.woff2",
+  "font_bytes": 40336,
+  "font_sha256": "934d0bc540967efd8b4b272c8fab64d0af2f76600c5ac566876e92a889c7ec48",
+  "fonttools": "4.68.0",
+  "glyph_count": 90,
+  "glyphs": [
+    "bluetooth",
+    "check_circle",
+    "display_settings",
+    "edit",
+    "error",
+    "info",
+    "light_mode",
+    "mic",
+    "more_vert",
+    "network_wifi_1_bar",
+    "network_wifi_2_bar",
+    "network_wifi_3_bar",
+    "pause",
+    "play_arrow",
+    "record_voice_over",
+    "robot_2",
+    "schedule",
+    "search",
+    "settings",
+    "signal_wifi_0_bar",
+    "signal_wifi_4_bar",
+    "skip_next",
+    "skip_previous",
+    "video_library",
+    "visibility_off",
+    "volume_up",
+    "warning",
+    "widgets",
+    "wifi",
+    "wifi_off"
+  ],
+  "harfbuzz": "11.3.3",
+  "license": "Apache-2.0",
+  "source": {
+    "file": "material-symbols-rounded.woff2",
+    "package": "material-symbols",
+    "sha256": "5913b06d8c3ce0c9575a1884a420283d1532f1ccb1c3cdb5326c683c57cbaad8",
+    "version": "0.48.3"
+  },
+  "uharfbuzz": "0.51.1"
+}

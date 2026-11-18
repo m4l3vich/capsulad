@@ -1,0 +1,5 @@
+# Pinned tooling for web/scripts/build-icon-font.py. These packages are needed
+# only to regenerate the checked-in subset, not to build the SPA.
+fonttools==4.68.0
+brotli==1.2.1
+uharfbuzz==0.51.1

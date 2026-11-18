@@ -1,5 +1,41 @@
 # Marusia
 
+## Using this app
+
+Marusia is an optional voice assistant for the recovered VK Marusia service. It
+sends microphone audio to the configured vendor endpoint and plays the returned
+TTS reply. The rest of this page documents the implementation, wire protocol and
+recovered evidence for maintainers.
+
+- **Before selecting it:** provision a valid vendor session or `xtoken_id`, and
+  check the *Service endpoint*. **Test 2** and a custom `http://` base send the
+  session and microphone audio without TLS; use them only on a trusted LAN.
+- **Select it:** open **Settings → Voice assistant** and choose Marusia.
+  Selection starts the app. Choosing another assistant, or **none**, leaves it
+  stopped.
+- **Controls:** a wake word or talk-key press starts a turn. The ring shows the
+  capture indication and returns to the baseline when the turn ends. Press the
+  circle/play-pause key to dismiss the current turn; the process stays ready.
+- **Launch and stop:** open **Apps → Marusia → Details**. *Launch* starts a run
+  without speaking. When it is not the selected assistant, *Stop* is durable;
+  when it is selected, the control is shown as *Restart* and deselecting is the
+  off switch.
+- **Teardown:** dismiss the turn, then stop or deselect. Uninstalling keeps its
+  settings for a reinstall.
+- **Troubleshooting:**
+  - **401, expired session or attach failure:** set a current session or
+    `xtoken_id`, or point *Vendor session file* at the provisioned
+    `session.json` (its `device_settings.json` is read beside it).
+  - **"keyword not confirmed":** keep *Keyword policy* at `no_kw`. `kw_params`
+    is only valid when the captured phrase really begins with the wake word.
+  - **A turn produces no audio:** check the logs for the returned TTS URL,
+    HTTP status and decode. Ogg Opus, MP3, AAC, FLAC, 24/32-bit and float WAV
+    replies are refused with one actionable line.
+  - **A plaintext endpoint warning appears:** that is deliberate; the service
+    and credentials are not protected on `http://`.
+  - **It never starts:** installing and launching need a compatible native
+    runtime; the package declares `[native_sdk]`.
+
 A first-party optional voice assistant for Capsula. It implements the VK/Marusia
 voice-agent turn recovered from the vendor binary shipped on this hardware:
 

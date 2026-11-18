@@ -3,7 +3,9 @@
 Every package contains exactly one root `manifest.toml`. It declares the app's identity, its
 single entrypoint, its lifecycle flags, its provider hints, its typed settings and actions, its
 launch arguments, the interfaces it publishes, an optional custom settings document and
-optional provenance evidence.
+optional provenance evidence. A package may also contain one optional root `README.md` user
+guide; it is a package file, not a manifest field, and is described under
+[User guide](#user-guide-readmemd).
 
 The manifest is **declarative metadata for the supervisor, the UI and discovery**. It is not a
 permission or security policy: it cannot declare an output port, a service endpoint, a listening
@@ -197,6 +199,33 @@ The app must declare at least one `[[settings]]` entry. The document is untruste
 an opaque-origin sandboxed iframe with `sandbox="allow-scripts"` and a restrictive CSP, and can
 only submit validated patches for its own app's declared settings. The protocol is in
 [settings-actions.md](settings-actions.md).
+
+## User guide (`README.md`)
+
+A package may include one operator-facing user guide at its root, named exactly `README.md`.
+It is not a manifest field: the name is fixed, and an existing package without it remains valid.
+
+| Property | Value |
+|---|---|
+| Name | `README.md` at the package root (nested README files are not the guide) |
+| Required | No |
+| Format | Markdown, UTF-8, non-empty |
+| Size limit | 64 KiB |
+| File type | Regular file; symlinks, directories, devices and FIFOs are refused |
+| Rendering | Inert text in the authenticated Web UI application detail |
+| Availability | Any installed app, running or stopped; built-in system apps use embedded guides |
+
+- The guide is **not** interface documentation. `[[interfaces]].docs` describes one gRPC service
+  for callers; `README.md` explains the app to the person using the speaker.
+- The daemon serves it only through the session-authenticated Web UI. It is never executed,
+  framed, granted a script context, or used as a navigation target, and the response contains no
+  package path.
+- A guide should cover the app's controls, how to launch and stop it, teardown or hand-over
+  steps, and the failures a user can act on. Repository-only links are not a substitute for
+  those instructions.
+- A missing guide is a normal state and is reported as "no user guide". An unreadable file
+  (wrong type, oversized, invalid UTF-8 or empty) is reported separately in the app detail; it
+  does not block packaging, installation or launch.
 
 ## `[github_attestation]`
 

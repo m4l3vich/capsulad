@@ -1,5 +1,37 @@
 # Dumb Assistant
 
+## Using this app
+
+Dumb Assistant is an optional voice assistant that does not recognize words: it
+waits for microphone speech to end, then plays a WAV reply after the configured
+delay. The rest of this page documents the implementation for maintainers.
+
+- **Select it:** open **Settings → Voice assistant** and choose Dumb Assistant.
+  Selection starts the app through the normal selected-provider rule. Choosing
+  another assistant, or **none**, leaves it stopped.
+- **Controls:** start a turn with the configured wake word or the talk key. The
+  ring shows teal while listening and a blue chase during the delay and reply.
+  Press the circle/play-pause key during a turn to dismiss it.
+- **Launch and stop:** open **Apps → Dumb Assistant → Details**. *Launch* is a
+  useful connectivity check. When it is not the selected assistant, *Stop* is a
+  durable off switch. When it is selected, the same control is shown as
+  *Restart*; choose another assistant or **none** to turn it off for good.
+- **Teardown:** dismiss the current turn, then stop or deselect the app. The
+  turn releases the microphone, the ring capture and playback on every terminal
+  path. Uninstalling the package keeps its settings for a later reinstall.
+- **Troubleshooting:**
+  - **No reply:** a turn needs real speech; silence or a muted microphone ends
+    without one. The app also refuses to listen without a visible ring
+    indication, so check that a ring provider is selected.
+  - **The reply is the wrong file:** *Reply WAV asset* is relative to the shared
+    `/assets` store. An absolute path, `..`, a symlink or a non-WAV file is
+    rejected and the previous value is kept.
+  - **The delay is ignored:** use an empty value, one millisecond value, or an
+    ascending range such as `200-1500`. Malformed or out-of-range values are
+    rejected in the settings form.
+  - **Launch fails:** install and launch require a compatible native runtime
+    (`[native_sdk]`); the message names the mismatch.
+
 An optional first-party assistant package for capsulad. It claims the
 `voice_assistant` role but performs no speech recognition: it listens to real
 microphone PCM, decides when the user has stopped speaking, then plays a WAV

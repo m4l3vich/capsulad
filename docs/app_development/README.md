@@ -235,7 +235,7 @@ The full walkthrough, including manifest fields, deployment bundles and rollback
 
 | Document | Contents |
 |---|---|
-| [manifest.md](manifest.md) | Every manifest field, type, default, constraint and validation rule; runtimes; settings, actions, arguments, interfaces; complete examples. |
+| [manifest.md](manifest.md) | Every manifest field, type, default, constraint and validation rule; runtimes; settings, actions, arguments, interfaces; the optional root `README.md` user guide; complete examples. |
 | [lifecycle.md](lifecycle.md) | Launch, identity, environment variables, run states, restart and backoff, settings and action callbacks, shutdown, failures versus stops. |
 | [sdk.md](sdk.md) | The native SDK model, Go/Rust/C usage, handles and threading, status model, JSON versus protobuf, deadlines, outbound HTTP(S)/TLS, remote gRPC (TLS/h2c), encoding/hash/random/URL primitives, script hosts. |
 | [network.md](network.md) | Outbound TCP streams with verified TLS, UDP datagrams, daemon-mediated listeners (`CAPSULAD_CONTROL_FD`), and mDNS publish/browse through the daemon's Avahi responder: options, limits, errors, cleanup and examples. |
@@ -246,7 +246,7 @@ The full walkthrough, including manifest fields, deployment bundles and rollback
 | [settings-actions.md](settings-actions.md) | Typed settings, compare-and-swap, validation, redaction, actions, custom settings UI protocol. |
 | [assets.md](assets.md) | The shared read-only asset store and how apps consume it. |
 | [standard-contracts.md](standard-contracts.md) | `capsulad.contracts.clock.v1.ClockService`, `capsulad.contracts.ring.v1.RingService`, `capsulad.contracts.media.v1.MediaPlayerService`. |
-| [packaging-deployment.md](packaging-deployment.md) | Artifact format, packaging, install/update/remove, deployment bundles, simulator, versioning, rollback. |
+| [packaging-deployment.md](packaging-deployment.md) | Artifact format, the optional root `README.md` guide, packaging, install/update/remove, deployment bundles, simulator, versioning, rollback. |
 | [security.md](security.md) | Sandbox modes, filesystem view, sockets, what an app must never attempt, provenance, trust boundaries. |
 | [troubleshooting.md](troubleshooting.md) | Symptom, cause and fix for the failures an app author actually hits. |
 

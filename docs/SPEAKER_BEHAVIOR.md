@@ -151,7 +151,16 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   no app id is reserved for one: when no media app is playing or paused — the normal case for a
   connected phone — the circle key and swipes drive the source through that public service, and the
   Web UI "Now playing" panel lists the same source from the same service as a framework-owned
-  provider with its PLAY/PAUSE/SKIP buttons mapped onto the same commands. Bluetooth uses
+  provider with its PLAY/PAUSE/SKIP buttons mapped onto the same commands. That panel is a strict
+  now-playing projection rather than provider discovery: it lists only players that report
+  `PLAYBACK_PLAYING`, and for the framework source only while playback is *observed* — the peer's
+  own status, transport packet receipts or transport state, never this daemon's command memory, so
+  an acknowledged Play the peer did not act on cannot create a row. A connected but idle, paused or
+  stopped source therefore adds no row and no error card, while the physical key and the swipes
+  still drive it, and so does `BluetoothMediaService.GetState`/`Command` directly — from a
+  framework client on the socket or from the MCP `media_command` tool, neither of which needs a
+  panel row. Its transport buttons return to the panel as soon as playback is observed again.
+  Bluetooth uses
   only public BlueZ interfaces and the advertised device; a source without `MediaPlayer1` is driven
   through its public `MediaControl1`. A toggle's direction comes from the strongest available
   evidence, in this order: a direction this daemon commanded in the last two seconds (the next
@@ -185,6 +194,27 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   plays distinct mute and unmute cues; a Bluetooth source that connects while the speaker accepts
   inbound links (speaker mode) plays the embedded connection cue (`question.wav`) once. The startup
   jingle plays once on installation, then only when `startup_sound_enabled` is on (off by default).
+  The same installation/`startup_sound_enabled` decision shows the **startup ring introduction**: a
+  short blue-teal (the aurora palette midpoint) run on the top of the ring that fades in from dark,
+  holds, fades back down in steps and releases. It is a temporary framework capture on the ring,
+  like the muted-microphone indication: the run length derives from the advertised pixel count
+  (pixel 0 is the top, indices advance clockwise; the run is clamped to the preset's 12-pixel
+  maximum on a larger ring), a newer system indication or app capture takes selection priority,
+  and the selected ring baseline — including an explicit blank for a closed active window — is
+  selected again on release instead of a forced black frame. An explicit no-ring-provider choice
+  still permits this transient framework indication on the ring (as volume, mute and alert
+  indications already do); its release returns the explicit blank frame, so the durable choice is
+  a dark baseline, not a ban on framework feedback.
+  The timeline is a 0.6 s fade-in inside a 1.5 s hold, then six 70 ms taper steps: about 1.9 s
+  total, deliberately not the ten-second jingle. The physical writer starts before that lifetime
+  begins, so a cold boot with slow boot-app spawning cannot consume the fade-in. The
+  introduction mirrors the cue's own decision rather than a second rule: the installation marker is
+  written only after the cue reaches the mixer, so a boot whose audio path cannot open does not
+  consume the one-shot cue and retries both the jingle and the introduction on the next boot; once
+  the marker exists, a boot with the startup sound off shows neither. Shutdown, cancellation and a
+  superseded introduction invalidate the fade generation, so a late fade step cannot blank or
+  release a newer owner (a newer indication merely wins selection while the introduction remains
+  privately owned and is destroyed by its own release).
   Cues are framework playback streams under the master gain: they never block boot or input
   handling, and each toggle or step produces exactly one cue. The master volume is a ceiling on
   every app's contribution, the mixer holds its output below full scale with a soft limiter, and
@@ -218,6 +248,33 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   leaves the socket, its live subscriptions and its epoch intact; only a real transport failure
   closes the socket and starts the reconnect. The wakeword area shows guided training and the real
   last 20 engine detections only.
+- **Web UI app guide.** An app detail page offers its user guide — the package root `README.md`, or
+  an embedded document for a compiled-in app — over the session-authenticated
+  `GET /api/apps/{appID}/guide`, independent of the app's run state, so a stopped app can still
+  explain its controls, launch and recovery. The response is JSON with the Markdown as text: the
+  SPA renders it with interpolated text and no markup, link target, script context or network
+  primitive, and no package path is exposed. Reading it changes no setting, launches nothing and
+  has no app-visible side effect. A package without a guide is reported as having no guide, and an
+  unreadable one (wrong file type, over 64 KiB, invalid UTF-8, empty) is reported separately
+  without blocking install, launch or the rest of the page.
+- **Web UI now playing.** The Overview media card is a strict projection: only players reporting
+  `PLAYBACK_PLAYING` are listed, and a provider with none is omitted entirely, so an idle, paused
+  or unreadable provider never renders a row the user cannot act on and never an error card. It is
+  a display policy, not a change to discovery or control: the Overview app list still shows a
+  stopped or paused app with its launch control and its declared actions (a radio's `play`, for
+  one); a READY but idle or paused provider is still reported and addressable through
+  `capsulad-cli media list`, `AppInterfaceService` and `ListPlayers`/`WatchPlayers`; and the
+  Bluetooth source stays readable and commandable through
+  `BluetoothMediaService.GetState`/`Command`, which need no panel row. A provider with no ready
+  run is not routable at all, which is a discovery fact, not this filtering. With nothing
+  playing the card says so. The card converges without
+  polling or reload: the daemon follows each READY media provider's `WatchPlayers` stream and
+  `BluetoothMediaService.WatchState`, renewing a feed below the app bus's own call bound and
+  rebuilding the whole authoritative overview on an observed change, so a provider that starts
+  from stopped appears in an already-open page and the row disappears when playback stops. Feeds
+  exist only for READY providers, and a failed listing keeps the existing feeds rather than
+  tearing down a working projection; position ticks and a hidden player's metadata change are not
+  overview changes, so no timer polls a stopped app.
 - **Brightness.** Global brightness affects static frames too. Automatic mode retains the visible 5 %
   floor and discards stale cache entries when its mode changes; manual zero is explicit off. Ring
   frame deduplication keys on pixels **and** brightness, so a brightness-only change is still written.
@@ -269,25 +326,40 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   Selecting a built-in starts it immediately, while the explicit none choice leaves its output blank
   and survives restart. `Launch` on a stopped built-in starts exactly one run under its stable
   `builtin:<app_id>` ID, and stopping an unselected built-in leaves it stopped.
-- **Panel game (`org.capsulad.simon`).** A launch opens a captured `display.segment.front`
-  presentation and acquires a full-panel capture on `touch.panel.main`, shows `0000` with the
-  colon on and starts round 1. While the game runs *every* panel action belongs to it: the four
-  side keys are the four symbols (north `mic_toggle`=1, east `volume_up`=2, south `play_pause`=3,
-  west `volume_down`=4) and the framework's volume, mute, media and assistant handling is
-  suppressed. A round replays the whole growing sequence in the left cell at 320 ms on / 140 ms
-  off; while the game waits for input the four cells show the zero-padded score with the colon on;
-  a completed round shows the score with all decimal points for 250 ms; a wrong symbol shows four
-  dashes (mask `0x40`) for 900 ms and then the final score with the colon off, and any side key
-  starts a new game. Holding the unmarked centre for at least 800 ms is the documented exit, and
-  the host's `Call.tryRecv` surfaces that press within about 20 ms even mid-replay: the press
-  freezes the replay and shows the dashes, and the release exits immediately (simulator: press
-  18 ms into round 2, exit 0.5 ms after a 1018 ms release). A short tap resumes the frozen replay,
-  and side keys during a replay are ignored rather than queued. On exit the app cancels its input
-  subscription and both capture streams, sends `ClosePresentation`, awaits the stream end and
-  stops, so the configured baseline returns (verified by `capsulad.clock` regaining
-  `display.segment.front`). The game needs a `display.segment.front` with at least four digits and
-  refuses one with fewer; it omits the colon and the decimal points when the display does not
-  advertise them, so a reduced panel degrades instead of showing a wrong frame. A timed read is a
+- **Panel game (`org.capsulad.simon`).** A launch reads the device's advertised capabilities
+  (`DeviceService.ListResources`, `AudioService.ListEndpoints`) and then owns exactly four things
+  for the life of the run: an LED ring presentation on `light.ring.main`, an *optional* score
+  presentation on `display.segment.front`, a full-panel capture on `touch.panel.main` and one
+  speaker playback stream. The game is a colour-and-tone memory game, not a segment-display game:
+  the ring is read as a clock face (pixel 0 at the top, indices advancing clockwise) and each side
+  of the panel owns the 90° arc centred on its own direction, so the four colours are stable
+  cardinals — north `mic_toggle` red, east `volume_up` yellow, south `play_pause` green, west
+  `volume_down` blue — with one distinct tone per colour (392/523/659/784 Hz, a rising pentatonic
+  figure) and a deliberately lower falling buzz (220→130 Hz) reserved for a wrong answer. The arc
+  geometry derives from the advertised pixel count and needs at least four pixels and RGB support;
+  nothing is keyed to a board name or a hard-coded ring size. A round replays the whole growing
+  sequence in colour and tone at 320 ms on / 140 ms off; a correct press re-lights that arc, plays
+  a short version of the same tone and raises the score; a completed round lights every arc for
+  260 ms while side input is ignored; a wrong side key flashes the whole ring white, plays the
+  error buzz and shows four dashes, then the final score with the colon off, and any side key
+  starts a retry from zero. While the game runs *every* panel action belongs to it: side keys are
+  game input and the framework's volume, mute, media and assistant handling is suppressed, and side
+  input during a replay, a round break or the error display is ignored rather than queued.
+  The score display is optional and never gates the game: with no `display.segment.front`, one with
+  fewer than four digits, or one whose capture is refused, the ring, the tones and one log line per
+  accepted press are the progress indicator, and the colon/decimal points are used only when the
+  display advertises them. Holding the unmarked centre for at least 800 ms, measured from the input
+  event's monotonic timestamp so the exit never waits for an animation, is the documented exit; the
+  press immediately shows the hold hint (four dashes, colon on) and dims the ring to white, and a
+  release before the threshold restores the current phase — including resuming a paused replay —
+  while a release at or past it exits. A routing preemption of the ring or the panel, an ended
+  capture stream or a speaker notice is a terminal interruption, not a degraded game: the run ends
+  through the same release path instead of continuing with invisible output or a dead panel.
+  On every terminal path the app cancels the speaker stream (discarding a queued tone), cancels its
+  input subscription, releases the panel, display and ring captures through
+  `RoutingService.ReleaseCapture`, closes both presentations and awaits the stream ends, so the
+  configured clock/ring baseline returns for *both* resources and the framework's panel semantics
+  come back. A timed read is a
   fatal error in that host, so the game needs one with
   `Call.tryRecv`/`tryRecvBytes`: ship the matching `lib/capsulad-quickjs` from
   `make interpreter-quickjs`, otherwise the app logs `unavailable: this QuickJS host has no
@@ -297,7 +369,11 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   which wins, the run is recorded as 143 "stopped" (signal landed) or 0 "stopped" (process exited
   first). Cleanup has already completed either way; the crashed path sets `restartAfterStop`, but
   Simon declares `restart_on_failure=false` and is not a selected provider, so nothing relaunches
-  it.
+  it. Recorded timings for the centre-hold exit (a press surfacing within about 20 ms mid-replay,
+  exit 0.5 ms after a 1018 ms release) and for `capsulad.clock` regaining `display.segment.front`
+  are simulator evidence from the previous segment-first build; the ring/tone build's own device
+  run — including the ring's emitted colours and the tones' acoustic output — is still a gate,
+  since frame and PCM submission is not physical output.
 - **PA announcement (`org.capsulad.pa`).** A background service that is already running; the
   trigger is a routed `Play` call carrying one streamed RIFF/WAVE file. Feedback is one
   `PlayResult` per accepted clip — its `detail` names the WAV's own format (`played 3200 frames at
@@ -321,89 +397,81 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   waits, and only the caller that owns the call can end it, by cancelling. At most 1 MiB of RIFF
   chunks may precede the `data` chunk; beyond that the call ends `INVALID_ARGUMENT` with a detail
   naming the limit.
-- **Internet radio (`org.capsulad.radio` + `org.capsulad.radio.tuner`).** The front end owns the
-  station list, the display and the standard media contract; the native companion owns the
-  socket and the decoder. Play/tune shows the station number with a dark colon while the tuner
-  dials, a lit colon while playing, the last decimal point while paused, four dashes on error
-  until `stop`/`dismiss` or a new `play`, and no presentation at all when stopped, which restores
-  the selected baseline. While it is active the app holds a routing capture on
-  `display.segment.front`, so the station display wins over the configured default app, and it
-  releases that capture before the presentation closes. A bare launch — including the invocation
-  a boot start delivers — only makes sure the app is running and never starts audio; play needs
-  the `play` action, a `station` launch argument, the `station` setting or a media command. A
-  short circle tap follows the normal media contract (the app is a standard provider, so the Web
-  UI "Now playing" panel and the swipes drive it), and the circle key's dismissal runs the app's
-  `dismiss` action. Pause is not a parked buffer: the player answers `PLAYBACK_PAUSE` and refuses
-  further tuner pushes (`paused`), so the tuner drops its session and resuming is a fresh `Tune`
-  with a new session id. Next/previous wrap the list and persist the new `station` number with a
-  compare-and-swap update; `autoplay` plays once, at the first settings snapshot after startup,
-  and never restarts a radio the user stopped. The two halves authorize each other with the
-  daemon-verified caller run id: the tuner accepts `Tune`/`Stop` only from its configured player's
-  ready run, and the player accepts a push only from the run of the tuner app it tuned (resolved
-  through `AppInterfaceService.ListInterfaces`), refusing a foreign or unnamed caller as
-  `unauthorized caller` before anything is written. When the push-authorization lookup itself
-  fails, only the run that is *serving* this session can end it — the session fails at once with
-  `push authorization unavailable` (error state, four dashes, `PLAYBACK_STOPPED`) — while an
-  unknown or foreign caller is merely refused `unauthorized caller` and can never end playback
-  through a lookup failure. `session_id` must be an exact, non-empty echo:
-  a missing or different id is refused as `stale session` and changes no state, so a superseded or
-  foreign session's terminal message cannot end the current one. Resuming after a pause discards
-  the paused tail — the player aborts the old queue and opens a fresh session, so nothing is
-  replayed and the previous station's tail can never surface. One no-audio bound covers both
-  phases: while buffering, a session that accepts no audio within **60 s** of `Tune` returning
-  ends with `tuner did not start (no audio for 60000 ms)`; while playing, no queued audio for 60 s
-  ends it with `tuner stalled (no queued audio for 60000 ms)`. The bound follows the tuner's retry
-  budget — `(1+12)+(2+12)+(4+12) = 43 s` worst case plus a 10 s first-chunk idle — so a legitimate
-  retry window is never pre-empted while a dead or hung tuner is still bounded. A natural end
-  (`finished=1`) half-closes and drains without blocking the loop: the phase stays `playing` while
-  the queued tail plays and the session becomes `stopped` when the daemon ends the event stream,
-  but a terminal `finished` that carries no audio at all returns straight to `stopped`
-  (`station stream ended`). `Pause` during that drain is a stop — the speaker stream is already
-  half-closed, so it replies `accepted=true, detail="stream ended"`, discards the tail and reports
-  `PLAYBACK_STOPPED` instead of stranding the player in `PLAYBACK_PAUSED` with no stream;
-  `Stop`/`dismiss`/a station change abort a drain the same way, and a drain unfinished after 30 s
-  is aborted. The media contract requires a
-  non-empty `playerId` on `GetStatus`/`Play`/`Pause`/`SkipNext`/`SkipPrevious`
-  (`INVALID_ARGUMENT` when it is missing, `NOT_FOUND` for an unknown player, `UNIMPLEMENTED` for an
-  unknown method), and the script host's single-threaded loop bounds a blocking `Tune` at 25 s and
-  a best-effort `Stop` at 2 s, so a stop, dismiss or next that arrives during a dial applies when
-  the dial returns. A station switch, a player refusal, an app stop or three failed reconnects in
-  30 s ends the session and releases the socket, decoder, stream and display. A dead or stalled
-  tuner cannot leave a silent "playing" state, even with no user activity: the app registers an
-  autonomous watchdog at startup on the MicroPython host's repeating callback
-  (`capsulad.every(500, …)` with `capsulad.monotonic_ms()`, which runs between dispatched events
-  and from the idle poll timeout) and uses two independent signals. *Liveness:* every four ticks
-  (≈2 s) the run that last pushed for this session must still be the ready **run** of the tuned
-  tuner app in `ListInterfaces` — a supervisor-restarted tuner has a new run id and counts as gone
-  — checked with an 800 ms budget, and a lookup error is never treated as death; that path ends
-  with `tuner stopped (run is no longer ready)`.
-  *Dry queue:* the speaker
-  stream's own `frames_queued` — not `frames_played`, which counts mixed output frames including
-  silence — must show queued audio at least once every 60 s, which bounds a live-but-hung tuner;
-  the bound is derived from the tuner's three-reconnect budget
-  (`(1+12)+(2+12)+(4+12) = 43 s`), every successful chunk write resets that clock, and the path
-  ends with `tuner stalled (no queued audio for 60000 ms)`. Both paths end in the error state
-  (four dashes, `PLAYBACK_STOPPED` in the contract) and log
-  `radio: playback failed: <detail>` then `radio: state error <detail>`; an unexpected end of
-  stream or a `STREAM_CLOSED`/`DAEMON_SHUTDOWN` notice ends the session immediately, and a
-  framework lookup failure is never treated as tuner death. Recovery is only `play`/`stop`/
-  `dismiss`. The timer API is bounded and documented in the application manual: callbacks run on
-  the event thread between dispatched events and from the idle poll timeout, a slow callback slips
-  to `now + interval` (no catch-up storm), exceptions are logged as `timer handler failed: …`
-  without ending the run and the schedule is kept, a timer cancelled by another callback in the
-  same pass no longer fires even if it was due, a clock fault never ends the run (a raising clock
-  skips the pass and leaves the poll at its 1 s default; a backwards jump just leaves a timer not
-  yet due), at most 16
-  repeating callbacks exist per run (`ValueError` past that and below 1 ms), tokens are never
-  reused, and all of them stop when `run()` returns — QuickJS still
-  has no timers, so that host's model is unchanged. A tuner named only by the `tuner`
-  setting must still declare `RadioTunerService`, because that declaration is what resolves its
-  run for push authorization and for the watchdog (fail-closed otherwise). A failed frame closes
-  the presentation and the next state change reopens it, and a failed open is transient and
-  retried rather than becoming a permanent "no display".
-  A `SIGTERM` stop kills the
-  MicroPython host, which installs no signal handler; the framework then releases the run's
-  presentation, capture and audio stream.
+- **Internet radio (`org.capsulad.radio`).** One native app owns the station list, the display,
+  the network stream, the decoder and the standard media contract: it fetches one HTTP(S) MP3
+  stream through the shared `libcapsulad` transport, strips ICY metadata, decodes it and writes
+  paced PCM to the framework speaker in its own process. There is no companion app, no app-to-app
+  audio hop and therefore no cross-app push authorization; the retired MicroPython front end and
+  `org.capsulad.radio.tuner` are replaced under the same app id, and the stored `stations`,
+  `station` and `autoplay` settings survive the package replacement. The app is `background`,
+  `start_on_boot` and `single_instance`: it is already running to answer actions and the media
+  contract and stays idle until a station is played. Play shows the station number with a dark
+  colon while the stream dials (buffering), a lit colon while playing, the last decimal point
+  while paused, four dashes on error until `stop`/`dismiss` or a new `play`, and no presentation at
+  all when stopped, which restores the selected baseline. While it is active the app holds a
+  routing capture on `display.segment.front`, so the station display wins over the configured
+  default app, and it releases that capture before the presentation closes; a device that
+  advertises no segment display plays without one and retries the presentation on the next state
+  change. A bare launch — including the invocation a boot start or a second `app start` delivers —
+  only makes sure the app is running and never starts audio; `autoplay` is off by default and
+  plays the selected station once, at the first settings snapshot after startup, never restarting
+  a radio the user stopped and never starting playback when the setting is changed later. A short
+  circle tap follows the normal media contract (the app is a standard provider, so the Web UI
+  "Now playing" panel and the swipes drive it), and the circle key's dismissal runs the app's
+  `dismiss` action. Pause is not a parked buffer: the station stream is closed and the queued tail
+  discarded, `PLAYBACK_PAUSED` is reported until play, and resuming re-dials the station.
+  Next/previous wrap the list and persist the new `station` number with a compare-and-swap update;
+  a live, paused or errored radio switches station immediately, while an idle radio only selects —
+  changing the stored `station` never implicitly starts audio. The packaged settings document
+  renders the parsed station list as a named picker and writes `station` through the sandboxed
+  `capsulad.settings-ui/1` bridge; an out-of-range stored selection is reported and does not start
+  audio, and the app never silently rewrites a deliberate selection. A station switch while active
+  replaces the owned playback: the previous session is cancelled and its late open, read or
+  failure cannot clear the newer stream or selection, and a stale own-write echo cannot revert it.
+  Streaming is bounded on every path: a read that goes idle for 10 s fails the stream, up to three
+  reconnects with 1/2/4 s backoff run inside the same session, and a terminal failure ends in the
+  error state (four dashes, `PLAYBACK_STOPPED` in the contract) with the reason logged. A stream
+  that never starts or goes silent cannot leave a stale `PLAYING` even with no user activity: an
+  autonomous watchdog (500 ms ticks) bounds "no audio reached the speaker" at **60 s** while
+  buffering or playing — ending as `radio did not start (no audio for 1m0s)` or `radio stalled (no
+  queued audio for 1m0s)` — which covers the three-reconnect budget plus the first-chunk idle, so a
+  legitimate retry window is never pre-empted. A finite file that ends is not a live station: its
+  tail chunk is written, EOF triggers the same bounded reconnects and the app then ends in the
+  error state, while a live stream stays playing. The media contract keeps exactly one player, id
+  `radio`: `ListPlayers`/`GetStatus` still expose the stopped entry, so the selected station stays
+  discoverable and `Play` can start it (the strict Web UI Now Playing projection hides it — a
+  consumer policy, not a different contract), `GetStatus`/command calls require a non-empty
+  `playerId` (`INVALID_ARGUMENT` when it is missing, `NOT_FOUND` for an unknown player), and
+  `WatchPlayers` sends a full snapshot first and then converges on each change without a slow
+  watcher blocking playback. `Close`/`SIGTERM` cancels the stream, aborts playback, closes the
+  presentation and waits for its loops; a killed process is covered by the framework, which
+  releases the run's presentation, capture and audio stream.
+- **AirPlay receiver (`org.capsulad.airplay`).** The trigger is a sender on the local link: it
+  finds the receiver through the two mDNS records the daemon publishes and connects to the
+  daemon-allocated control port. Advertisement is what makes the speaker appear in a sender's
+  output list, so it follows the DNS-SD limits the responder enforces rather than the saved
+  setting verbatim: both `_airplay._tcp` and `_raop._tcp` carry the same 32-byte ed25519 HomeKit
+  long-term public key as `pk` (64 lowercase hex characters), and the instance labels are a
+  rune-safe projection of the saved receiver name into the 63-byte DNS-SD limit — the `_raop`
+  instance keeps its `<DEVICEID>@` prefix and shortens only the display part. The saved name and
+  `/info` keep the full value; the legacy 2048-bit RSA key is never advertised (its base64 form is
+  about 360 bytes and a single TXT item over 255 bytes is refused by the responder) and is used
+  only to decrypt an `ANNOUNCE` that carries `rsaaeskey`, so a sender that takes its key from the
+  TXT record uses the unencrypted path. Republishing is serialized: one publish withdraws and
+  replaces both records atomically, and a close waits for an in-flight publish, so a session
+  start/end, a group-id change, a settings change or a replaced sender cannot make two callers
+  register the same instance and be told the name collides. Feedback is the standard media
+  contract (buffering, then playing, with the sender's metadata) plus the ring: the cover-art
+  palette with the audio envelope, or a dim neutral breath with no cover art, never an invented
+  image. A pause (`rate 0`) flushes queued audio and reports `PLAYBACK_PAUSED`; the ring
+  presentation and the playback stream are owned by the session and released on teardown,
+  connection loss, takeover, idle timeout, app stop or a settings change, and the playback stream
+  is aborted rather than drained so a stopped session makes no late sound. Panel gestures and the
+  Web UI reach the sender through its event channel — the same standard media contract — and never
+  through a private daemon→sender path. Volume is applied app-side to this app's PCM, so the
+  mixer's master and limiter stay the ceiling. The wire behaviour is host-verified; no stream from
+  a live Apple sender and no acoustic output is claimed. See
+  [apps/airplay/README.md](../apps/airplay/README.md).
 - **Home Assistant bridge (`org.capsulad.homeassistant`).** The app is installed, started and
   configured with an MQTT broker (named, or discovered with mDNS when `broker_discover` is on);
   a launch while it runs is an invocation that forces a discovery/state republish. Feedback is a
@@ -630,13 +698,17 @@ for all words, retraining keeps that word's enabled state and binding, and a can
 atomic commit may still install that word's new model.
 
 The shipped app packages have their own host suites, run with `make test-apps`: the Simon
-contract suite drives the real `main.js` inside a fake QuickJS host (22 pass, 0 fail, plus a
-simulator run of the packaged app), the PA suite exercises the real `main.py`'s WAV parser and
-protobuf helpers under CPython, the Internet Radio suite imports the real `main.py` with a
-scripted `capsulad` module and an independent protobuf codec (plus its simulator `e2e` and the
-live `e2e-tuner` against a real MP3 station), and the tuner and bridge modules
-are nested Go suites. None of it is a device measurement: the tuner's fetch/decode evidence is a
-host network run, and no app package has been installed or run on the unit.
+contract suite drives the real `main.js` inside a fake QuickJS host (ring geometry at several
+advertised pixel counts, the colour/tone pair per side, input ordering, retry and centre
+hold/tap, no-display degradation, preemption and the release order), the PA suite exercises the
+real `main.py`'s WAV parser and protobuf helpers under CPython, and the Internet Radio and Home
+Assistant bridge suites are nested Go modules. [VERIFICATION.md](VERIFICATION.md) still carries
+the recorded runs of the earlier segment-first Simon build and of the retired two-package radio
+(its CPython suite, simulator `e2e` with a fixture tuner, and live `e2e-tuner` against a real MP3
+station); those entries are evidence about those builds, and the suites that produced them no
+longer exist. None of it is a device measurement: a radio fetch/decode run is
+host evidence, and app-package installation and runs on the unit are recorded separately with
+their own proof levels.
 
 ## Rockchip speaker verification
 

@@ -121,6 +121,7 @@ if want dev.hardware; then
       $GO build -trimpath -ldflags "$LDFLAGS" -o "$dir/devtools" ./cmd/devtools ) ||
     die "native build failed; a cross build needs a matching C compiler/sysroot (CC=...)"
   cp "$src/manifest.toml" "$dir/manifest.toml"
+  cp "$src/README.md" "$dir/README.md"
   mkdir -p "$dir/proto"
   if command -v protoc >/dev/null 2>&1; then
     protoc -I "$src/proto" --descriptor_set_out="$dir/proto/devtools.protoset" "$src/proto/devtools.proto" ||
@@ -140,6 +141,7 @@ if want dev.quickjs; then
   stage dev.quickjs
   cp "$HERE/quickjs/manifest.toml" "$OUT/dev.quickjs/manifest.toml"
   cp "$HERE/quickjs/main.js" "$OUT/dev.quickjs/main.js"
+  cp "$HERE/quickjs/README.md" "$OUT/dev.quickjs/README.md"
   say "devapps: staged $OUT/dev.quickjs"
   pack dev.quickjs
 fi
@@ -148,6 +150,7 @@ if want dev.micropython; then
   stage dev.micropython
   cp "$HERE/micropython/manifest.toml" "$OUT/dev.micropython/manifest.toml"
   cp "$HERE/micropython/main.py" "$OUT/dev.micropython/main.py"
+  cp "$HERE/micropython/README.md" "$OUT/dev.micropython/README.md"
   say "devapps: staged $OUT/dev.micropython"
   pack dev.micropython
 fi

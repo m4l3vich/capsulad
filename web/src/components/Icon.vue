@@ -1,5 +1,5 @@
 <script setup>
-import 'material-symbols'
+import '../assets/material-symbols-rounded.css'
 defineProps({ size: Number })
 </script>
 

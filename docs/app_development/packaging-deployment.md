@@ -47,6 +47,13 @@ including dotfiles: keep `.git`, editor state and scratch build trees out of the
 directory. The executable bit is the only mode bit the launcher reads; the package tree is
 immutable once installed.
 
+A package may include one optional root `README.md`. That file is the operator-facing user
+guide shown in the authenticated Web UI application detail; it is not the per-interface `docs`
+Markdown declared in the manifest. Keep it a regular, bounded (64 KiB) UTF-8 Markdown file and
+include it in the staged package directory. It may be absent: archives without a guide remain
+installable and are shown as having no guide. See
+[manifest.md](manifest.md#user-guide-readmemd) for the rendering and safety rules.
+
 Packaging validates the manifest before writing. A manifest error therefore fails the package
 step with the same message an install would produce; see [manifest.md](manifest.md).
 
@@ -72,13 +79,15 @@ capsulad-cli app package ./my-app -out build/apps/my-app.tar.gz
 | `APP=dev.hardware make devapps` | Builds one development app. |
 | `OUT=/tmp/devapps make devapps` | Changes the output directory. |
 | `PACKAGE=0 make devapps` | Stages package directories only, with no `.tar.gz`. Development convenience; the device path installs archives. |
-| `make deploy-bundle` | Assembles `build/deploy-bundle/` and `build/deploy-bundle.tar.gz` from already-built artifacts. It builds or reuses the daemon, CLI and native runtime, but never packages an app. |
+| `make deploy-bundle` | Assembles `build/deploy-bundle/` and `build/deploy-bundle.tar.gz` from already-built artifacts. It builds or reuses the daemon, the CLI and the native runtime, but never packages an app. |
+| `BUNDLE_CLI=0 make deploy-bundle` | Writes the same bundle without `capsulad-cli`: the CLI is not built and not copied. A separately installed `<data-dir>/capsulad-cli` is left untouched. |
 | `BUNDLE_DEVAPPS=1 make deploy-bundle` | Also copies staged development-app archives from `build/devapps/`. |
 
+`BUNDLE_CLI` accepts only `0` and `1`; the default is `1` and any other value is rejected.
 `make deploy-bundle` requires every app directory under `build/apps/` to have a matching
-`<id>-*.tar.gz`; otherwise it fails and tells you which build target to run. The bundle contains
-`capsulad`, `capsulad-cli`, `lib/` (the native runtime plus headers), `apps/*.tar.gz` and
-`boot/S99btctl.sh`.
+`<id>-*.tar.gz`; otherwise it fails and tells you which build target to run. The default bundle
+contains `capsulad`, `capsulad-cli`, `lib/` (the native runtime plus headers), `apps/*.tar.gz`
+and `boot/S99btctl.sh`; `BUNDLE_CLI=0` writes the same layout without `capsulad-cli`.
 
 ### Cross builds
 
@@ -100,8 +109,10 @@ GOOS=linux GOARCH=arm64 DEPLOY_PLATFORM=amlogic-alpine make deploy-bundle
 ```
 
 `make deploy-bundle` derives `TARGET_ABI` from `DEPLOY_PLATFORM` (`linux-musl` for
-`amlogic-alpine`, `linux-gnu` otherwise) and refuses an app archive whose manifest `abi`
-does not name the bundle's libc, so a glibc package cannot ride an Alpine bundle.
+`amlogic-alpine`, `linux-gnu` otherwise) and refuses a native app archive whose manifest `abi`
+does not name the bundle's libc, so a glibc package cannot ride an Alpine bundle. The refusal
+applies to `entrypoint.runtime = "native"` archives: QuickJS and MicroPython packages are
+libc-independent and carry no `abi`, and an archive declaring an unknown runtime is refused.
 
 The device rejects a native entrypoint whose `architecture` is not `aarch64`/`arm64` or whose
 `abi` does not contain the profile's requirement (`linux` on the stock images, `musl` on
@@ -179,7 +190,7 @@ A deployment bundle moves a whole stack onto an existing device. It is a directo
 | Entry | Meaning |
 |---|---|
 | `capsulad` | Daemon binary; installed as `<data-dir>/capsulad`, mode `0755`. |
-| `capsulad-cli` | CLI binary; installed as `<data-dir>/capsulad-cli`, mode `0755`. |
+| `capsulad-cli` | Optional CLI binary; the default bundle carries it and `BUNDLE_CLI=0` omits it. Installed as `<data-dir>/capsulad-cli`, mode `0755`, when present. |
 | `lib/` | Shared native runtime and headers. Replaces managed runtime files in `<data-dir>/lib`. |
 | `apps/*.tar.gz` | Application packages. Installed or atomically updated. Other names are reported and ignored. |
 | `boot/S99btctl.sh` | Boot hook. Installed only when bundled, and only when the daemon is restarted. |
@@ -189,6 +200,24 @@ Symlinks anywhere in the bundle are rejected. The bundle itself is capped at 64 
 128 MiB unpacked and 8192 entries. The bundle is staged outside the data directory (the
 temporary directory unless `-staging` says otherwise), so unpacking an archive never needs free
 space on the 78.5 MiB partition that already holds the daemon.
+
+### CLI-free bundles
+
+`make deploy-bundle BUNDLE_CLI=0` writes the same layout without `capsulad-cli`. `BUNDLE_CLI`
+accepts only `0` and `1` (default `1`); any other value is rejected. Deploy only replaces the
+files the bundle carries, so a separately installed `<data-dir>/capsulad-cli` is neither removed
+nor updated by a CLI-free bundle, and a board without one keeps no on-device CLI.
+
+Deploy and recovery then need a CLI pushed separately, for example
+`adb push build/bin/capsulad-cli /tmp/capsulad-cli` and running it from `/tmp`. The tmpfs copy
+disappears on reboot, so it must be pushed again before the next deploy or recovery. Do not run
+the CLI from `/data` while the same deployment replaces that file; run the pushed copy instead.
+An interrupted deployment is recovered as for any other deployment (restart the stack through
+the boot service and check the installed binary before retrying).
+
+A CLI-free bundle removes the CLI's bytes from the tarball and from the deployment write path,
+including its pre-deploy free-space requirement. `<data-dir>` reclaims that space only when no
+separately installed CLI remains.
 
 ```sh
 capsulad-cli -data-dir /data/capsdemo deploy build/deploy-bundle.tar.gz
@@ -215,7 +244,8 @@ Deployment order: every bundle entry is validated first; the data filesystem is 
 space the binary writes cannot free themselves; when a restart is scheduled the daemon is stopped
 through the boot service and its pid is verified gone (`-restart never` instead stops live runs of
 the apps the bundle replaces, if the daemon is reachable); packages are installed or updated and
-`lib/` is synced with nothing running; the boot hook and the CLI are installed; the daemon is
+`lib/` is synced with nothing running; the boot hook is installed and a bundled CLI is installed
+or replaced (a CLI-free bundle leaves an installed CLI untouched); the daemon is
 replaced last; the daemon is restarted through the boot service; and `capsulad -health` must
 succeed within the timeout. A replaced binary is kept recoverable only until the health gate
 passes: as a sibling `<file>.prev` when the staged file is on the data filesystem, otherwise

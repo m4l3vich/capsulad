@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import ModalDialog from '../components/ModalDialog.vue'
+import ApplicationView from './ApplicationView.vue'
 import { link } from '../router.js'
 import { useTopic } from '../lib/live.js'
 import { notify } from '../lib/toast.js'
@@ -55,6 +56,13 @@ function removalBlockedReason(app) {
   if (isRunning(app)) return 'Stop the app on Overview before removing its package'
   return ''
 }
+
+// --- detail -----------------------------------------------------------------
+
+// App detail is the same live surface as Overview, so the user guide,
+// settings and run status stay in one place. The page only opens it; the
+// detail view owns fetching and dismissing the guide.
+const selectedApp = ref('')
 
 // --- install ----------------------------------------------------------------
 
@@ -302,16 +310,24 @@ async function confirmRemove() {
                   <span v-else class="badge badge-ghost badge-sm">Stopped</span>
                 </td>
                 <td class="text-right">
-                  <button
-                    v-if="!app.systemApp"
-                    type="button"
-                    class="btn btn-error btn-xs btn-outline"
-                    :disabled="Boolean(removalBlockedReason(app))"
-                    :title="removalBlockedReason(app) || `Remove ${app.displayName || app.appId}`"
-                    :aria-label="`Remove ${app.displayName || app.appId}`"
-                    @click="askRemove(app)"
-                  >Remove</button>
-                  <span v-else class="text-xs text-base-content/50">Built in</span>
+                  <div class="flex flex-wrap justify-end gap-1">
+                    <button
+                      type="button"
+                      class="btn btn-xs btn-outline"
+                      :aria-label="`Open details for ${app.displayName || app.appId}`"
+                      @click="selectedApp = app.appId"
+                    >Details</button>
+                    <button
+                      v-if="!app.systemApp"
+                      type="button"
+                      class="btn btn-error btn-xs btn-outline"
+                      :disabled="Boolean(removalBlockedReason(app))"
+                      :title="removalBlockedReason(app) || `Remove ${app.displayName || app.appId}`"
+                      :aria-label="`Remove ${app.displayName || app.appId}`"
+                      @click="askRemove(app)"
+                    >Remove</button>
+                    <span v-else class="text-xs text-base-content/50">Built in</span>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -349,5 +365,12 @@ async function confirmRemove() {
         </button>
       </template>
     </ModalDialog>
+
+    <ApplicationView
+      v-if="selectedApp"
+      :key="selectedApp"
+      :app-id="selectedApp"
+      @close="selectedApp = ''"
+    />
   </div>
 </template>

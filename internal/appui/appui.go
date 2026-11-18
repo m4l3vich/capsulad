@@ -1,10 +1,12 @@
-// Package appui serves application-provided settings documents.
+// Package appui serves application-provided UI documents and built-in help.
 //
-// A manifest may declare one self-contained HTML document. The document is
-// untrusted: it is framed by the Web UI as an opaque-origin document with
-// a restrictive CSP, no network access, no forms, no frames, and no host
-// session. The only accepted output is a bounded settings-value patch sent
-// through the authenticated bridge in the Web UI parent.
+// A manifest may declare one self-contained HTML settings document. The
+// document is untrusted: it is framed by the Web UI as an opaque-origin
+// document with a restrictive CSP, no network access, no forms, no frames,
+// and no host session. The only accepted output is a bounded settings-value
+// patch sent through the authenticated bridge in the Web UI parent. The
+// package also owns the embedded user guides for compiled-in applications,
+// which have no package root to carry a README.md.
 package appui
 
 import (
@@ -44,12 +46,23 @@ var clockHTML []byte
 //go:embed assets/ring.html
 var ringHTML []byte
 
+//go:embed assets/clock-guide.md
+var clockGuide []byte
+
+//go:embed assets/ring-guide.md
+var ringGuide []byte
+
 var builtinDocuments = map[string]struct {
 	file string
 	doc  []byte
 }{
 	"capsulad.clock": {"clock.html", clockHTML},
 	"capsulad.ring":  {"ring.html", ringHTML},
+}
+
+var builtinGuides = map[string][]byte{
+	"capsulad.clock": clockGuide,
+	"capsulad.ring":  ringGuide,
 }
 
 // BuiltinHTML returns the embedded document for a compiled-in application.
@@ -67,6 +80,17 @@ func BuiltinHTML(appID, declaredPath string) ([]byte, error) {
 		return nil, fmt.Errorf("built-in settings UI declaration %q does not match %s", declaredPath, entry.file)
 	}
 	return append([]byte(nil), entry.doc...), nil
+}
+
+// BuiltinGuide returns the embedded user guide for a compiled-in application.
+// The second result is false for an app that has no guide; the embedded
+// documents are trusted package content and are served as inert Markdown.
+func BuiltinGuide(appID string) ([]byte, bool) {
+	doc, ok := builtinGuides[appID]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), doc...), true
 }
 
 // ContentSecurityPolicy is applied both to the served document and inside the

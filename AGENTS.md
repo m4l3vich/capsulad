@@ -140,10 +140,12 @@ or equate extra animation with polish.
   a gap occurred. Always resume/clean up a paused test process on failure.
 - Run the narrowest relevant checks after changes; use `-race` for touched shared
   lifecycle/state paths. Root Go tests do not cover nested modules. `make test` runs the root
-  module, `sdk/go`, the nested app modules (both assistants, the radio tuner companion and the
-  Home Assistant bridge), the Rust binding, the native crate and the C++ example;
-  `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, Internet Radio)
-  and repeats the two app Go modules; `make test-race` adds the race detector to the root module.
+  module, `sdk/go`, the nested app Go modules (the three assistants, the native Internet Radio,
+  the Home Assistant bridge and the AirPlay receiver), the Rust binding, the native crate and the
+  C++ example;
+  `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, the MicroPython
+  host prelude) and repeats the radio and bridge Go modules; `make test-race` adds the race
+  detector to the root module.
   Focused commands are in
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests). Standalone Go test commands on macOS need
   `-ldflags '-linkmode=external'`, as the Makefile and app build helpers already handle.

@@ -526,8 +526,8 @@ Exposes the connected A2DP source's AVRCP state to apps.
 | `Command` | unary `BluetoothMediaState` | any local caller | `PLAY`, `PAUSE`, `TOGGLE`, `NEXT`, `PREVIOUS`. |
 
 `BluetoothMediaState` = `{present, playing, device_address, device_name, title, artist, album,
-duration_ms, position_ms, revision, detail, direction_known, direction_playing}`. For a supervised
-app caller `device_address` and `device_name` are empty; metadata fields remain.
+duration_ms, position_ms, revision, detail, direction_known, direction_playing, observed_playing}`.
+For a supervised app caller `device_address` and `device_name` are empty; metadata fields remain.
 
 `playing` is the source-published AVRCP status. A source that exposes only `MediaControl1`, or
 whose player does not publish `Status`, reports `playing=false` even while audio is flowing, so it
@@ -537,9 +537,20 @@ owned A2DP transport's packet receipts, `MediaPlayer1.Status`, then the transpor
 publishes the result as `direction_playing`, with `direction_known` reporting whether a direction
 could be resolved at all (`false` when no source is connected, or for a backend that exposes only
 its exact state). A consumer that shows a Play/Pause choice should use `direction_playing` when
-`direction_known` is true and fall back to `playing` otherwise; that is what the daemon's Web UI
-does. Neither field changes the meaning of `Command`: explicit `PLAY`, `PAUSE`, `NEXT` and
-`PREVIOUS` are applied as sent, and only `TOGGLE` consults the resolved direction.
+`direction_known` is true and fall back to `playing` otherwise. Neither field changes the meaning
+of `Command`: explicit `PLAY`, `PAUSE`, `NEXT` and `PREVIOUS` are applied as sent, and only
+`TOGGLE` consults the resolved direction.
+
+`observed_playing` answers the different question "is audio actually playing". It follows the
+resolved direction only when that direction is backed by this sink's packet receipts, the observed
+transport state, or `MediaPlayer1.Status`; for a backend that publishes only its exact state it
+follows `playing`. It is false when the only evidence is command memory (the daemon sent a command
+the source has not acted on) and whenever `present` is false. In particular, a stale cached
+`playing=true` after this daemon paused the source is not observed playback.
+A Now Playing surface uses this field: the Web UI overview and the MCP overview snapshot list the
+source only while `observed_playing` is true, so an acknowledged but unobserved Play does not
+create a row, while a `MediaControl1`-only source stays visible from receipt/transport evidence.
+Discovery and the physical key keep using the unfiltered source and `direction_playing`.
 
 
 `detail` is bounded display text, not playback state and not an error: it explains why a field is
@@ -627,13 +638,14 @@ shape are in [network.md](network.md#mdns-publication-and-browsing).
 | `service_type` | string | `_name._tcp` or `_name._udp`, optionally with a domain suffix; the name starts with `_` and uses only letters, digits and hyphens. |
 | `instance_name` | string | Display instance, ≤63 UTF-8 bytes, no NUL. |
 | `port` | uint32 | `1..65535`. |
-| `txt` | map<string,string> | ≤16 records, ≤1024 bytes total; keys non-empty. |
+| `txt` | map<string,string> | ≤16 records, ≤1024 bytes total, and ≤255 bytes per `key=value` record; keys non-empty. The 255-byte limit is one DNS TXT character-string: DNS-SD can split a longer value across strings, but the daemon's Avahi responder cannot express that split, so an oversized item is rejected instead of truncated. |
 | `domain` | string | Empty means `local`; labels are lowercased. |
 
 `PublishServiceResponse` = `{publication_id, service_type, instance_name, domain, host, port}`.
-`host` is the responder's fully-qualified name; an app cannot choose it. Avahi may rename a
-colliding instance on the link, so the effective advertised name can differ from the requested
-one; the response reports the values you requested.
+`host` is the responder's fully-qualified name; an app cannot choose it. The daemon publishes
+with Avahi's no-rename policy: an instance name may be at most 63 UTF-8 bytes, and when another
+registration on the link already owns it the call fails with `ALREADY_EXISTS` rather than being
+silently renamed. The response reports the values you requested.
 
 `UnpublishServiceRequest` = `{publication_id}`; the response is `{removed}`. An unknown id, or
 one owned by another run, is `NOT_FOUND` — the daemon never reveals or removes another app's
@@ -651,10 +663,11 @@ build or platform without a responder returns `FAILED_PRECONDITION` with the rea
 false success. The simulator has no Avahi responder, so publish and browse are unsupported
 there.
 
-Errors: an invalid service type, instance, port or TXT set is `INVALID_ARGUMENT`; an unknown
-publication is `NOT_FOUND`; a missing responder or a responder that is not yet answering is
-`FAILED_PRECONDITION`; a responder lost during a browse stream is `UNAVAILABLE`; cancellation
-and deadline expiry are `CANCELED` and `DEADLINE_EXCEEDED`.
+Errors: an invalid service type, instance, port or TXT set (including a `key=value` record over
+255 bytes) is `INVALID_ARGUMENT`; an instance name already registered on the link is
+`ALREADY_EXISTS`; an unknown publication is `NOT_FOUND`; a missing responder or a responder that
+is not yet answering is `FAILED_PRECONDITION`; a responder lost during a browse stream is
+`UNAVAILABLE`; cancellation and deadline expiry are `CANCELED` and `DEADLINE_EXCEEDED`.
 
 ### Daemon-mediated listeners are not a service
 

@@ -89,6 +89,9 @@ say "homeassistant: building for $GOOS/$GOARCH (cgo=$CGO_ENABLED cc=$CC)"
   die "native build failed; a cross build needs a matching C compiler/sysroot (CC=...)"
 
 cp "$HERE/manifest.toml" "$dir/manifest.toml"
+# The package root README.md is the operator-facing user guide shown in the
+# Web UI; it is not the interface documentation beside the descriptor.
+cp "$HERE/README.md" "$dir/README.md"
 # Stamp the package ABI for the target libc (source manifest stays the default).
 if [ "${GOOS:-}" = linux ]; then
     sh "$HERE/../../tools/stage-manifest-abi.sh" "$dir/manifest.toml" "${TARGET_ABI:-linux-gnu}"

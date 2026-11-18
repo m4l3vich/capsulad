@@ -5,6 +5,7 @@ import Icon from './Icon.vue'
 import { socket } from '../lib/ws.js'
 import { connectWifi, fetchWifi, forgetWifi, scanWifi, subscribeWifi } from '../lib/wifi.js'
 import { notify } from '../lib/toast.js'
+import { WIFI_SIGNAL_ICONS } from '../lib/iconNames.js'
 
 // Wi-Fi is an explicit surface: the snapshot never scans, joining is a user
 // action, and the network that is carrying this session cannot be forgotten
@@ -50,11 +51,11 @@ function stateLabel(state) {
 
 function signalLevel(dbm) {
   const value = Number(dbm)
-  if (!Number.isFinite(value) || value === 0) return { icon: 'signal_wifi_0_bar', label: 'Signal strength unknown' }
-  if (value >= -55) return { icon: 'signal_wifi_4_bar', label: 'Strong signal' }
-  if (value >= -70) return { icon: 'network_wifi_3_bar', label: 'Fair signal' }
-  if (value >= -80) return { icon: 'network_wifi_2_bar', label: 'Weak signal' }
-  return { icon: 'network_wifi_1_bar', label: 'Very weak signal' }
+  if (!Number.isFinite(value) || value === 0) return { icon: WIFI_SIGNAL_ICONS.unknown, label: 'Signal strength unknown' }
+  if (value >= -55) return { icon: WIFI_SIGNAL_ICONS.strong, label: 'Strong signal' }
+  if (value >= -70) return { icon: WIFI_SIGNAL_ICONS.fair, label: 'Fair signal' }
+  if (value >= -80) return { icon: WIFI_SIGNAL_ICONS.weak, label: 'Weak signal' }
+  return { icon: WIFI_SIGNAL_ICONS.veryWeak, label: 'Very weak signal' }
 }
 
 function securityLabel(security) {

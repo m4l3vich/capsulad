@@ -1,5 +1,43 @@
 # Home Assistant bridge (`org.capsulad.homeassistant`)
 
+## Using this app
+
+The bridge is a background service that publishes the speaker to Home Assistant
+over MQTT and applies Home Assistant's commands through framework services. The
+rest of this page documents the entity set and implementation for maintainers.
+
+- **Before selecting it:** configure *Broker host* and credentials, or leave the
+  host empty with *Discover the broker with mDNS* enabled on a device that has
+  Avahi. Keep the discovery prefix aligned with Home Assistant's MQTT
+  integration (usually `homeassistant`).
+- **Launch:** the package starts at boot and stays ready. Open
+  **Apps → Home Assistant bridge → Details** to launch it manually after a stop;
+  it declares no launch arguments.
+- **Controls:** use the entities Home Assistant discovers. The detail page also
+  offers *Republish discovery and state*, *Reconnect the broker* and *Release
+  hardware*. *Release hardware* hands the ring and segment display back to the
+  device's configured defaults and asks for confirmation.
+- **Teardown:** *Stop* on the detail page ends the bridge until the next boot or
+  manual launch. It is a background app, not a selected provider, so a stop does
+  not restart it. Uninstalling keeps its settings; retained discovery messages
+  may remain on the broker.
+- **Troubleshooting:**
+  - **No entities appear:** check the broker, user name/password, discovery
+    prefix and retained messages. Use *Republish discovery and state* after
+    clearing retained state or re-adding the MQTT integration.
+  - **TLS fails:** there is no insecure mode. Add the broker's private CA to
+    *Extra CA certificates*, and set *TLS server name* when the certificate
+    names a different host.
+  - **The ring or display stopped responding:** Home Assistant owns those
+    surfaces while the bridge drives them. Use *Release hardware*; the
+    device's configured defaults resume.
+  - **Panel buttons no longer dismiss alerts:** *Expose the panel buttons* uses
+    a partial touch capture. Leave it off unless Home Assistant should own those
+    controls; volume and microphone gestures stay with the device.
+  - **The broker reports the device offline after a crash:** the last will is
+    retained. Reconnect or let the bridge reconnect; *Republish* refreshes the
+    retained state.
+
 Publishes a Capsula Mini to Home Assistant with MQTT discovery, and applies Home
 Assistant's commands back to the device through the framework's normal services.
 

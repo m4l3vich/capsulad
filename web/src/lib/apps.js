@@ -97,3 +97,31 @@ export async function removePackage(appId) {
   })
   if (!resp.ok) throw new Error(await readError(resp))
 }
+
+/**
+ * Read one application's optional user guide. The package root README.md is
+ * injected as inert Markdown; built-in apps use their embedded guide. A 404
+ * means the app has no guide and is shown as such, not as a broken page.
+ */
+export async function readGuide(appId, { signal } = {}) {
+  const resp = await fetch(`/api/apps/${encodeURIComponent(appId)}/guide`, {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+    signal
+  })
+  let body = {}
+  try {
+    body = await resp.json()
+  } catch (_) {
+    body = {}
+  }
+  if (!resp.ok) throw new Error(body.error || `guide unavailable (${resp.status})`)
+  const markdown = typeof body.markdown === 'string' ? body.markdown : ''
+  if (!markdown.trim()) throw new Error('The application user guide is empty.')
+  return {
+    appId: String(body.app_id || appId),
+    title: String(body.title || ''),
+    source: String(body.source || ''),
+    markdown
+  }
+}

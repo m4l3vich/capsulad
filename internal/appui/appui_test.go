@@ -40,6 +40,27 @@ func TestWrapDocumentWithoutHead(t *testing.T) {
 	}
 }
 
+func TestBuiltinGuidesExistAndExplainRecovery(t *testing.T) {
+	for _, id := range []string{"capsulad.clock", "capsulad.ring"} {
+		doc, ok := BuiltinGuide(id)
+		if !ok {
+			t.Fatalf("%s has no built-in guide", id)
+		}
+		text := string(doc)
+		for _, want := range []string{"## Controls", "## Troubleshooting"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s guide missing %q", id, want)
+			}
+		}
+		if strings.Contains(text, "http://") || strings.Contains(text, "https://") {
+			t.Fatalf("%s guide contains an external URL", id)
+		}
+	}
+	if _, ok := BuiltinGuide("org.example.missing"); ok {
+		t.Fatal("unknown built-in guide accepted")
+	}
+}
+
 func TestBuiltinDocumentsExistAndAreSelfContained(t *testing.T) {
 	for _, id := range []string{"capsulad.clock", "capsulad.ring"} {
 		doc, err := BuiltinHTML(id, id[len("capsulad."):]+".html")

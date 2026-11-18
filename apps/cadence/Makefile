@@ -75,13 +75,15 @@ all: package
 
 # build is deliberately phony: the Go command owns incremental rebuilds and
 # correctly tracks replace-module SDK sources, compiler flags, cgo headers and
-# generated files. The package has no assets: the binary and manifest are all.
+# generated files. The package carries the binary, the manifest and the
+# operator-facing README.md user guide; there are no runtime assets.
 # build may run on the host for inspection; only package insists on Linux.
 build:
 	rm -rf $(OUT)/$(APP_ID)
 	mkdir -p $(OUT)/$(APP_ID)
 	$(GOBUILD) -o $(OUT)/$(APP_ID)/cadence ./cmd/cadence
 	@sed -E 's/^abi = "[^"]*"$$/abi = "$(TARGET_ABI)"/' manifest.toml > $(OUT)/$(APP_ID)/manifest.toml
+	cp README.md $(OUT)/$(APP_ID)/README.md
 	@grep -q '^abi = "$(TARGET_ABI)"$$' $(OUT)/$(APP_ID)/manifest.toml || { \
 		echo "error: manifest.toml has no single entrypoint abi line to set to $(TARGET_ABI)" >&2; \
 		exit 1; \

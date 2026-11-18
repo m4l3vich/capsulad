@@ -10,6 +10,7 @@ import { socket } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
 import { pct } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
+import { SETTINGS_SECTION_ICONS } from '../lib/iconNames.js'
 
 // The timezone map carries its own large module; keep it out of the initial
 // bundle and load it the first time this view renders the picker.
@@ -508,43 +509,43 @@ onUnmounted(() => {
 const sections = [
   {
     id: 'voice-assistant',
-    icon: 'robot_2',
+    icon: SETTINGS_SECTION_ICONS.voiceAssistant,
     title: 'Voice assistant',
     keywords: ['voice', 'assistant', 'summon', 'talk', 'touch']
   },
   {
     id: 'wakeword',
-    icon: 'record_voice_over',
+    icon: SETTINGS_SECTION_ICONS.wakeword,
     title: 'Wakeword',
     keywords: ['wakeword', 'wake word', 'detection', 'training', 'recordings', 'model']
   },
   {
     id: 'display-ring',
-    icon: 'fluorescent',
+    icon: SETTINGS_SECTION_ICONS.displayRing,
     title: 'Display & ring',
     keywords: ['display', 'ring', 'led', 'segment', 'brightness', 'ambient', 'auto', 'default app']
   },
   {
     id: 'microphone',
-    icon: 'mic',
+    icon: SETTINGS_SECTION_ICONS.microphone,
     title: 'Microphone',
     keywords: ['microphone', 'mic', 'mute', 'hide', 'delay', 'indicator', 'privacy']
   },
   {
     id: 'bluetooth',
-    icon: 'bluetooth',
+    icon: SETTINGS_SECTION_ICONS.bluetooth,
     title: 'Bluetooth',
     keywords: ['bluetooth', 'pair', 'unpair', 'discoverable', 'incoming', 'speaker', 'name', 'rename']
   },
   {
     id: 'wifi',
-    icon: 'wifi',
+    icon: SETTINGS_SECTION_ICONS.wifi,
     title: 'Wi-Fi',
     keywords: ['wifi', 'wi-fi', 'network', 'ssid', 'password', 'scan', 'portal', 'wireless']
   },
   {
     id: 'device',
-    icon: 'schedule',
+    icon: SETTINGS_SECTION_ICONS.device,
     title: 'Time & device',
     keywords: ['device', 'timezone', 'time', 'zone', 'clock', 'hostname', 'name', 'volume', 'sound', 'startup']
   }

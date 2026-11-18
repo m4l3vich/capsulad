@@ -1,5 +1,37 @@
 # PA Speaker (`org.capsulad.pa`)
 
+## Using this app
+
+PA Speaker is a background service, not an interactive app: it exposes
+`org.capsulad.pa.v1.SpeakerService` and plays one WAV streamed by another local
+app. It has no panel controls and no settings form beyond *Maximum clip length*.
+The rest of this page documents the interface and build for maintainers.
+
+- **Launch:** the package starts at boot and stays ready. Open
+  **Apps → PA Speaker → Details** if you need to launch it manually after a stop;
+  the launch form declares no arguments.
+- **Controls:** use the `Play` RPC from another app (see *Calling it* below).
+  The app has no physical buttons; volume and microphone keys remain framework
+  controls.
+- **Teardown:** a caller ends the stream by half-closing and waits for
+  `PlayResult`, or cancels to discard queued audio. *Stop* on the detail page
+  stops the service until the next boot or manual launch. It is a background
+  app, not a selected provider, so a stop does not restart it.
+- **Troubleshooting:**
+  - **Launch fails:** the device needs the MicroPython host
+    (`lib/capsulad-micropython`, built by `make interpreter-micropython`) and
+    the shared runtime.
+  - **`RESOURCE_EXHAUSTED`:** the clip is longer than *Maximum clip length*
+    (1–60 s) or its declared length is unknown and it ran past the bound. Raise
+    the setting only for a clip that needs it.
+  - **`INVALID_ARGUMENT`:** the stream is not a supported WAV; the RPC detail
+    names the rejected field.
+  - **A second call waits or fails:** one playback stream is held at a time.
+    Wait for the first `PlayResult` or cancel it.
+  - **Nothing is heard:** the framework must have a speaker endpoint and the
+    device must not be muted; this app submits PCM, it does not change master
+    volume.
+
 A background MicroPython app that turns the Capsula Mini into an addressable
 speaker: another app streams one WAV file to it over the app bus and it plays
 the file on the framework speaker. It holds no microphone, ring or touch

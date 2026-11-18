@@ -12,7 +12,7 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Rust 1.85 or newer with Cargo | `libcapsulad`, Rust binding |
 | C compiler | Go SDK cgo shim, C/C++ example, script hosts |
 | Node.js + npm | rebuilding the Web UI (`web/`) and the Simon contract tests (`node --test`); the built SPA is checked in |
-| Python 3 | the PA and Internet Radio unit tests (`make test-pa`, `make test-radio`) |
+| Python 3 | the PA unit tests (`make test-pa`), the MicroPython host prelude self-test (`make test-interpreter`), and regenerating the Web UI icon subset (a venv, see [Web UI](#web-ui)) |
 | `protoc` | regenerating Go bindings and the embedded descriptor after schema changes |
 
 ## Build profiles and targets
@@ -31,12 +31,19 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make web` | `npm ci && npm run build` into `internal/webui/dist` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
 | `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (the Cadence client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
-| `make simon` / `make pa` / `make radio` / `make radio-tuner` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio front end with its native tuner companion, the Home Assistant bridge and the AirPlay 2 receiver (`product-apps` is the six together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
-| `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps` |
+| `make simon` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio (one native package), the Home Assistant bridge and the AirPlay 2 receiver (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
+| `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps`, `BUNDLE_CLI=0` omits the CLI |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
 internal linker emits Mach-O binaries that current dyld rejects (missing `LC_UUID`). The
 Makefile keys this off the target `GOOS`, not the build host.
+
+`capsulad-cli` and `capsulad-cli-host` add `-tags=grpcnotrace`, which drops gRPC's optional
+`x/net/trace` integration and the template stack only it reaches; the CLI never registers
+those handlers and gRPC tracing is off by default, so the wire behavior is unchanged. Set
+`CLI_TAGS=` to build the untagged client. The daemon and app targets keep the default tag
+set. The measured effect is recorded in
+[VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).
 
 ## Cross build for the device
 
@@ -83,6 +90,45 @@ cache. With `web/node_modules` already present, `cd web && npm run build` works 
 The checked-in `internal/webui/dist` is embedded with `go:embed`, so an ordinary Go build
 needs no Node toolchain. For frontend work, run Vite against a live simulator daemon; Vite
 serves sources and proxies `/api`, `/healthz` and `/ws` to the daemon's real HTTPS surface.
+The served tree also carries `LICENSE-material-symbols.txt` and `THIRD-PARTY.md`, copied
+verbatim from `web/public` by the Vite build and reachable at `/LICENSE-material-symbols.txt`
+and `/THIRD-PARTY.md`, so a released binary ships the Apache-2.0 notice for the font it
+serves. `web/src/assets/LICENSE-material-symbols.txt` stays the source-tree copy next to the
+font; the web tests keep the two licence copies byte-identical.
+
+The icon font is a checked-in derived asset, not a post-build edit. `web/src/assets` holds a
+40,336-byte subset of Material Symbols Rounded (90 glyphs: 30 icon ligatures, their 20
+`.fill` alternates, `.notdef`, and 39 ASCII components — space, period, underscore,
+`digit_zero`–`digit_nine` and lowercase `a`–`z`, with uppercase mapped to the same glyphs;
+FILL/GRAD/opsz/wght axes intact) and
+`icon-font.json` with its glyph/fill lists, source hash and output hash. `npm run build` runs
+`npm run check:icons` first: it verifies the hash, size limit and declared glyphs, extracts
+every static `<Icon>` body plus the toast, Wi-Fi signal and settings-section lists in
+`src/lib/iconNames.js`, and fails when an icon has no glyph, a `.fill` alternate is missing,
+the subset is stale, or a source references the full `material-symbols` package — the bare
+specifier, any `material-symbols/...` subpath (a stylesheet, the `.woff2` files, the scss
+entry points) or a `url()` to its font. A `<Icon>` that cannot contribute a name also fails
+with its source line: a self-closing `<Icon ... />` or a tag without `</Icon>` has no slot
+text, so it would otherwise ship a missing glyph. After adding or
+changing an icon name, regenerate the subset (a Python venv, not the SPA build):
+
+```sh
+cd web
+python3 -m venv ../build/font-venv
+../build/font-venv/bin/pip install -r scripts/requirements-fonts.txt
+../build/font-venv/bin/python scripts/build-icon-font.py
+```
+
+`npm run fonts` runs the same script with the `python3` on `PATH`; use it only from an
+environment that already has the pinned packages.
+
+The generator pins `material-symbols` 0.48.3 and fontTools 4.68.0, rejects a name the font
+does not provide, keeps every existing `<icon>.fill` alternate, shapes each icon at FILL 0 and
+FILL 1 against the full font, rejects changed variable axes, and produces the same bytes on
+two runs before writing. The `.fill` glyphs are not optional trimming: Material Symbols uses
+GSUB FeatureVariations to swap the base ligature for its filled alternate when FILL ≥ 0.99,
+so dropping them changes the rendered icon. The subset filename and `icon-font.json` must
+change together.
 
 ```sh
 mkdir -p build/dev-web
@@ -99,8 +145,13 @@ dev server reuses the daemon certificate (`build/dev-web/security`, or
 `Secure; SameSite=Strict`; set `CAPSULAD_DEV_HTTPS=0` only for browsers that accept Secure
 cookies from `localhost`.
 
-`sh tools/dev-media.sh build/dev-web` installs the stopped `dev.media` fixture, which the
-Overview media bar can start through the normal routed contract.
+`sh tools/dev-media.sh build/dev-web` installs the stopped `dev.media` fixture for exercising the
+Overview "Now playing" card: it starts READY and stopped, so the card reads "Nothing is playing"
+until playback actually starts (a simulator tap, the app's `Play` action or an operator media
+command), and the row appears and disappears live without a reload. The card is a strict
+projection — only `PLAYBACK_PLAYING` players, and a provider with none is omitted — so an idle or
+paused provider is deliberately absent there while `capsulad-cli media list`, `ListPlayers` and
+the explicit transport controls still report and reach it.
 
 The same listener also serves the daemon's MCP frontend at `https://HOST:8443/mcp`: an
 API-key surface exposing the same operations as the browser, with no separate port, flag
@@ -121,7 +172,15 @@ rejected. Pinned limits: 48 MiB per file, 64 MiB unpacked, 4096 entries. The app
 contract for the artifact, manifest and install flow is
 [app_development/packaging-deployment.md](app_development/packaging-deployment.md).
 
-Packaging runs on the build host, never on the device. Each app build target compiles its tree
+Packaging runs on the build host, never on the device. A package may carry one optional root
+`README.md` user guide — inert Markdown the Web UI serves from
+`GET /api/apps/{appID}/guide` and renders as text in the app detail, for a running or a stopped
+app alike (built-in apps use embedded guides; a package without one is reported as having no
+guide). Every first-party build script stages its own, and the guide is capped at 64 KiB, must
+be a regular file and must be valid UTF-8. See
+[app_development/manifest.md](app_development/manifest.md#user-guide-readmemd).
+
+Each app build target compiles its tree
 and then packages it with `capsulad-cli app package DIR`, which writes `<id>-<version>.tar.gz`
 beside the package directory: `make dumbassistant` leaves
 `build/apps/org.capsulad.dumbassistant-<version>.tar.gz`, `make marusia` leaves
@@ -130,13 +189,14 @@ beside the package directory: `make dumbassistant` leaves
 Alpine board, which also rewrites the staged manifest and checks the binary's loader), and
 `make devapps` leaves one archive per development app under `build/devapps`. The product apps follow the same layout:
 `make simon` leaves `build/apps/org.capsulad.simon-<version>.tar.gz`, `make pa`
-`org.capsulad.pa-<version>.tar.gz`, `make radio` `org.capsulad.radio-<version>.tar.gz` and
-`make radio-tuner` `org.capsulad.radio.tuner-<version>.tar.gz`. `apps/devtools/build.sh` takes
+`org.capsulad.pa-<version>.tar.gz` and `make radio` `org.capsulad.radio-<version>.tar.gz`.
+`apps/devtools/build.sh` takes
 `PACKAGE=0` to stage the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli`
-to choose the packager; `apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/tuner/build.sh`
-and `apps/homeassistant/build.sh` take the same two variables plus `OUT=`; `apps/radio/Makefile`
-owns the front end's package contents and the repository target only calls
-`make -C apps/radio package` with an output directory and a build-host packager.
+to choose the packager; `apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/build.sh`
+and `apps/homeassistant/build.sh` take the same two variables plus `OUT=`
+(`apps/radio/Makefile` wraps that script for local use). Every first-party package stages its
+own root `README.md` next to `manifest.toml`, because that file is the app's user guide in the
+Web UI; a build script that cannot find it fails rather than packaging a guide-less app.
 A cross build packages with the host-executable `build/bin/capsulad-cli-host`
 (`make capsulad-cli-host`), because the cross-target CLI cannot run on the build host.
 
@@ -202,11 +262,16 @@ staged package directory has no archive. `BUNDLE_DEVAPPS=1` also copies the arch
 they belong in the bundle. The bundle contains host-targeted binaries unless you built with
 `GOOS`/`GOARCH` and `NATIVE_TARGET` for the device: a host bundle is for simulator work, and
 installing it on the Capsula Mini fails the daemon's self-check (`-version` cannot execute
-there).
+there). `BUNDLE_CLI=0` opts into a CLI-free device bundle; the default (`BUNDLE_CLI=1`) keeps
+the documented adb flow. The target is rebuilt from an empty directory, so changing the mode
+cannot leave a CLI from a previous bundle in the output. A stale `build/apps/org.capsulad.radio.tuner`
+directory or archive — from a build of the retired radio companion — fails the assembly with the
+exact `rm -rf` cleanup to run; no target deletes build artifacts implicitly, so the guard exists
+to keep a fresh bundle from staging that package.
 
 ```text
 capsulad                    daemon binary
-capsulad-cli                CLI binary
+capsulad-cli                CLI binary (omitted with BUNDLE_CLI=0)
 lib/                        native runtime, metadata and headers
 apps/*.tar.gz               application packages
 boot/S99btctl.sh            boot hook
@@ -228,7 +293,9 @@ free space on the data partition and cannot fail there.
 `capsulad-cli deploy PATH [-init-script PATH] [-restart auto|always|never] [-dry-run]
 [-staging DIR] [-timeout DURATION]` accepts that directory or the tarball. `capsulad-cli`
 itself is optional in a device bundle: the running CLI installs a daemon without
-installing a copy of itself. Flags:
+installing a copy of itself, and `BUNDLE_CLI=0` assembles such a bundle. Because the CLI is
+then not a build prerequisite either, a CLI-free bundle can be assembled from the daemon and
+app outputs alone. Flags:
 
 - `-dry-run` stages and validates the bundle and prints the plan; nothing durable changes.
 - `-init-script` selects the boot service (default `/etc/init.d/S99btctl.sh`).
@@ -281,15 +348,15 @@ The steps, in order:
    place. Both steps copy instead of renaming because the hook lives on the overlayfs root,
    where renaming a lower-layer file fails with `EINVAL`. Doing this before the binaries keeps
    the post-handback window free of everything but the daemon.
-7. Replace `capsulad-cli`, then `capsulad`. A staged file on the target filesystem is renamed
-   into place, and the replaced binary is kept as `<name>.prev`. A staged file elsewhere (the
-   normal case, since staging is on the temporary filesystem) cannot be renamed: the replaced
-   binary is compressed into staging (~25 MiB for the 40 MiB daemon), the target is
-   removed to release its space, the staged bytes are written directly to the target path and
-   chmodded 0755. No sibling copy of the new binary is ever created on `/data`. A staged file
-   inside the staging tree is deleted once it is written; a directory bundle is left alone
-   unless it shares the target filesystem, where the rename consumes its entry — rebuild the
-   bundle before repeating that path.
+7. Replace `capsulad-cli` when the bundle carries it, then `capsulad`. A staged file on the
+   target filesystem is renamed into place, and the replaced binary is kept as `<name>.prev`.
+   A staged file elsewhere (the normal case, since staging is on the temporary filesystem)
+   cannot be renamed: the replaced binary is compressed into staging (~25 MiB for the 40 MiB
+   daemon), the target is removed to release its space, the staged bytes are written directly
+   to the target path and chmodded 0755. No sibling copy of the new binary is ever created on
+   `/data`. A staged file inside the staging tree is deleted once it is written; a directory
+   bundle is left alone unless it shares the target filesystem, where the rename consumes its
+   entry — rebuild the bundle before repeating that path.
 8. Run `<init-script> restart` with `CAPSULAD_DATA_DIR` exported, then poll
    `capsulad -health -socket <socket>` until it exits 0 (exit 2 falls back to a framework
    API probe).
@@ -302,6 +369,43 @@ The steps, in order:
 A bundle without `capsulad`, `capsulad-cli`, `lib/`, `apps/` or `boot/S99btctl.sh` is
 rejected as having no actionable payload. Nothing is written outside `<data-dir>` except
 the boot hook.
+
+### CLI-free bundles
+
+`make deploy-bundle BUNDLE_CLI=0` writes the same layout without `capsulad-cli`. Build the
+daemon and the device CLI (`make daemon GOOS=linux GOARCH=arm64`, or the full cross recipe
+above for the native runtime), assemble, then push the CLI to `/tmp`:
+
+```sh
+make daemon GOOS=linux GOARCH=arm64
+make deploy-bundle BUNDLE_CLI=0 GOOS=linux GOARCH=arm64 \
+  NATIVE_TARGET=aarch64-unknown-linux-gnu
+adb -s <device> push build/bin/capsulad-cli /tmp/capsulad-cli
+adb -s <device> push build/deploy-bundle /tmp/capsulad-bundle
+adb -s <device> shell chmod 0755 /tmp/capsulad-cli
+adb -s <device> shell /tmp/capsulad-cli -data-dir /data/capsdemo \
+  deploy /tmp/capsulad-bundle -timeout 60s
+```
+
+The example assumes `build/lib` came from the cross recipe above; pass `BUNDLE_NATIVE=0` only
+for a deliberately static/script-only bundle.
+
+The pushed CLI is not installed: it lives on the tmpfs, consumes no `/data` blocks, and
+disappears on reboot. The deployer only replaces files the bundle carries, so an already
+installed `<data-dir>/capsulad-cli` is neither removed nor updated by a CLI-free bundle; it
+remains the device's recovery copy but must be refreshed deliberately when the CLI changes.
+A board without an installed CLI needs the `/tmp` push again after every reboot before the
+next deploy or recovery. Do not run the CLI from `/data` while the same deployment replaces
+it; run the pushed `/tmp` copy as above. An interrupted deployment is recovered exactly as
+under [Over adb](#over-adb) (`S99btctl.sh start` and the installed-binary check); a CLI-free
+bundle changes where the operator runs the CLI, not the rollback path.
+
+Storage tradeoff: a CLI-free bundle removes the CLI's bytes from the tarball and from the
+deployment write path, and removes the CLI-sized pre-deploy free-space requirement. It
+reclaims `/data` only when no CLI is installed there (the pushed `/tmp` flow above); a
+separately installed recovery CLI keeps consuming its own space and is not deleted. The
+measured bytes for the current build are in
+[VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).
 
 ### Over adb
 
@@ -489,13 +593,14 @@ selection case and no backend for them, so any other `-platform` value fails wit
 ## Tests
 
 ```sh
-make test              # every Go module: root, sdk/go, the three assistants, the tuner, the bridge and
-                       # the AirPlay receiver, the Rust binding, the native crate and the C++ header compile
+make test              # every Go module: root, sdk/go, the three assistants, the native Internet
+                       # Radio, the bridge and the AirPlay receiver, the Rust binding, the native
+                       # crate and the C++ header compile
 make test-race         # root Go module with -race
 make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia      # the apps/marusia module's tests from the repository root
 make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine
-make test-radio-tuner  # the nested apps/radio/tuner Go module
+make test-radio        # the nested apps/radio Go module (stations, media, streaming)
 make test-homeassistant # the nested apps/homeassistant Go module
 make test-airplay      # the nested apps/airplay Go module (protocol, codecs, session)
 ```
@@ -512,14 +617,14 @@ produced by ffmpeg and are checked in with their reference PCM, so the decoder i
 a real encoder rather than against itself.
 
 The script-app suites need Node or CPython, so they are not part of `make test`;
-`make test-apps` runs them together with the two Go modules above:
+`make test-apps` runs them together with the radio and bridge Go modules:
 
 ```sh
-make test-apps         # test-simon, test-pa, test-radio, test-radio-tuner, test-homeassistant and test-interpreter
+make test-apps         # test-simon, test-radio, test-homeassistant, test-pa and test-interpreter
 make test-interpreter  # python3 interpreter/micropython/sdk_test.py (host prelude + timers)
 make test-simon        # node --test apps/simon/test/*.test.mjs
 make test-pa           # python3 apps/pa/tests/test_wav.py and test_app.py
-make test-radio        # the app's own target: python3 -m unittest discover in apps/radio/tests
+make test-radio        # the nested apps/radio Go module from the repository root
 ```
 
 `test-interpreter` needs no built host: the MicroPython prelude is pure Python, and its self-test
@@ -527,22 +632,21 @@ covers timer registration, the 16-callback cap, cancellation during a pass, cloc
 exception isolation, the poll bound and stop-on-return.
 
 `test-simon` loads the shipped `main.js` into a fake QuickJS host and asserts the app's
-observable requests, frames and terminal cleanup. `test-pa` exercises the shipped script's WAV
-parser and protobuf helpers under CPython. `test-radio` imports the shipped `main.py`
-with a scripted `capsulad` module and an independent protobuf codec, and drives settings
-snapshots, actions, launch invocations, media-contract calls and tuner pushes.
+observable requests, ring/segment frames, per-colour tone PCM, input ordering and terminal
+cleanup. `test-pa` exercises the shipped script's WAV
+parser and protobuf helpers under CPython. `test-radio` is the app's own Go suite: station
+grammar and selection, settings application, media snapshots, chunk sizing, idle accounting,
+session ownership and the stream package's framing, ICY stripping, redirects, playlists and
+codec detection. It contacts no network and needs no daemon.
 
-The simulator end-to-end runs live with their apps and need `make capsulad capsulad-cli`,
+The simulator end-to-end run lives with its app and needs `make capsulad capsulad-cli`,
 `make native` and `make interpreter-micropython` first:
 
 ```sh
-make -C apps/radio e2e         # the radio + its test tuner fixture against a simulator daemon
-make -C apps/radio e2e-tuner   # live: the native tuner + a real MP3 station (needs network + the tuner)
 sh apps/pa/tests/e2e.sh        # install, boot, play, rejections and cancellation for the PA service
 ```
 
-Each uses a test-only companion that is never installed on a device: the radio's
-`tests/fixture-tuner` and PA's `tests/caller`.
+It uses a test-only caller (`apps/pa/tests/caller`) that is never installed on a device.
 
 `make test` does not run the interpreters or device backends. Focused commands:
 
@@ -557,6 +661,13 @@ go test -run 'TestDumbAssistant|TestSupervisor' ./internal/daemon
 cargo test --manifest-path sdk/native/Cargo.toml
 sdk/go/regenerate-abi.sh --check
 ```
+
+`sh tools/check-deploy-bundle.sh` needs no Go build: it assembles the default and
+`BUNDLE_CLI=0` bundles from stub build outputs with the real recipe, and checks the tarball
+contents, the reused-directory behaviour, the absence of the CLI build/copy in the
+omitted mode and the up-front rejection of an ambiguous `BUNDLE_CLI` value. The deploy-side
+acceptance of a CLI-free bundle is covered by
+`go test ./cmd/capsulad-cli -run TestDeployWithoutCLILeavesInstalledCLI`.
 
 The networking surface has its own suites; every listener and peer is loopback and the mDNS
 responder is a fake, so none of them needs a device or a network:
@@ -612,19 +723,18 @@ staged directory under `build/apps`. None of them is part of `all`, `release` or
 
 | Target | Package | What it is |
 |---|---|---|
-| `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS memory game: the four side keys are the symbols, the segment display shows the sequence and the score, and holding the unmarked centre leaves the game. The package is `manifest.toml` plus `main.js`; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
+| `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS colour-and-tone memory game: the LED ring replays a growing four-colour sequence (north red, east yellow, south green, west blue) with one distinct tone per colour, the four side keys repeat it, an optional four-digit segment display keeps the score, and holding the unmarked centre leaves the game. The package is `manifest.toml`, `main.js` and the app guide `README.md`; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
 | `make pa` | `org.capsulad.pa` | PA Speaker, a background MicroPython service: another app routes one `SpeakerService/Play` (a streamed WAV) and the app plays it through the framework speaker, replying after the queued audio drains. |
-| `make radio` | `org.capsulad.radio` | Internet Radio, a MicroPython front end: station list, segment display, the standard media contract, and no network or decoder of its own. |
-| `make radio-tuner` | `org.capsulad.radio.tuner` | The native companion that fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and pushes 200 ms PCM chunks to the radio app over the app bus. |
+| `make radio` | `org.capsulad.radio` | Internet Radio, a single native app: it keeps the station list, fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and writes paced PCM to the framework speaker in the same process, and serves the standard media contract. Its package carries the binary, the manifest, the `ui/settings.html` station picker, the media descriptor and the app guide. There is no companion package. |
 | `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant bridge, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
-| `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the legacy RAOP setup, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor and `docs/media.md`. |
+| `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the legacy RAOP setup, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`, whose records carry the 32-byte ed25519 HomeKit key as `pk` inside a 63-byte instance label. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor, `docs/media.md`, the app guide `README.md` and `NOTICE`. |
 
 ```sh
 make native                                            # the native apps link the shared SDK
 # make airplay additionally needs FFmpeg's libavcodec/libavutil development files
-make product-apps                                      # all six: simon, pa, radio, radio-tuner, homeassistant, airplay
-sh apps/radio/tuner/build.sh                           # tuner alone; OUT=/PACKAGE=/CAPSULAD_CLI= honored
-capsulad-cli app install build/apps/org.capsulad.radio.tuner-<version>.tar.gz
+make product-apps                                      # all five: simon, pa, radio, homeassistant, airplay
+sh apps/radio/build.sh                                 # radio alone; OUT=/PACKAGE=/CAPSULAD_CLI= honored
+capsulad-cli app install build/apps/org.capsulad.radio-<version>.tar.gz
 ```
 
 The Simon package needs a QuickJS host with `Call.tryRecv`, so run `make interpreter-quickjs`
@@ -644,30 +754,56 @@ into the staged manifest through `tools/stage-manifest-abi.sh`, runs
 prefix or a matching cross compiler.
 
 Each app's own entrypoint is authoritative for its package contents:
-`apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/Makefile` (`make -C apps/radio package`),
-`apps/radio/tuner/build.sh`, `apps/homeassistant/build.sh` and `apps/airplay/build.sh` — all of them honor `OUT=`,
-`PACKAGE=0` and `CAPSULAD_CLI=` where they package. The three script apps compile nothing; the
-tuner and the bridge are native and need the host native runtime (`make native`) because their
+`apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/build.sh`, `apps/homeassistant/build.sh`
+and `apps/airplay/build.sh` — all of them honor `OUT=`,
+`PACKAGE=0` and `CAPSULAD_CLI=` where they package. Simon and PA compile nothing; the radio, the
+bridge and the receiver are native and need the host native runtime (`make native`) because their
 binaries link the shared SDK.
 
-The tuner's and the bridge's build host artifacts are **simulator** binaries; a device package is
+A native app's build host artifacts are **simulator** binaries; a device package is
 the same script with the target toolchain, exactly like the other native apps:
 
 ```sh
-GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/radio/tuner/build.sh
+GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/radio/build.sh
 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc sh apps/homeassistant/build.sh
 ```
 
-Install both radio halves: the front end alone reports the `no tuner provider is running` state
-instead of pretending to play, and the tuner discovers its player from its `player_app` setting
-or the player finds it through `AppInterfaceService.ListInterfaces`. The tuner accepts `Tune` and
-`Stop` only from that player app's currently ready run — it checks the daemon-relayed caller run
-id against the run the framework reports for the app and answers `PERMISSION_DENIED` otherwise,
-so a CLI, Web UI or third-party app call is refused. The tuner refuses
-AAC/HE-AAC, Ogg/Opus/Vorbis, FLAC, MP4/M4A, WAV and HLS at `Tune` with `unsupported codec: …`, so
-the station list must be MP3 (MPEG-1/MPEG-2 Layer III). See
-[`apps/radio/README.md`](../apps/radio/README.md) for the station-list format, the actions and the
-player/tuner wire contract.
+The internet radio is one package: it fetches, decodes and plays in its own supervised run, so
+there is no second half to install, no app-to-app audio hop and no cross-app `Tune`
+authorization. It refuses AAC/HE-AAC, Ogg/Opus/Vorbis, FLAC, MP4/M4A, WAV and HLS with an
+explicit error, so the station list must be MP3 (MPEG-1/MPEG-2 Layer III). Its
+`ui/settings.html` is packaged with it and renders the named station picker in the Web UI's app
+detail; a selection writes the `station` setting through the sandboxed settings bridge. See
+[`apps/radio/README.md`](../apps/radio/README.md) for the station-list format, the controls, the
+display states and the streaming limits.
+
+### Upgrading from the retired radio companion
+
+The previous release was two packages: the MicroPython front end plus the native
+`org.capsulad.radio.tuner`. The single native app replaces both under the **unchanged** app id
+`org.capsulad.radio`, so its stored `stations`, `station` and `autoplay` settings survive the
+package replacement. Nothing is migrated or uninstalled implicitly; the upgrade is an ordinary
+app install after stopping the live runs.
+
+`app stop` takes a **run id**, not an app id, so resolve the runs first:
+
+```sh
+capsulad-cli app runs org.capsulad.radio.tuner   # note the run_… id, if the companion is installed
+capsulad-cli app stop <companion-run-id>
+capsulad-cli app remove org.capsulad.radio.tuner # only when it is installed
+capsulad-cli app runs org.capsulad.radio         # note the radio's run_… id
+capsulad-cli app stop <radio-run-id>
+capsulad-cli app install build/apps/org.capsulad.radio-<version>.tar.gz
+capsulad-cli app start org.capsulad.radio
+```
+
+`app install` refuses while a run is live, and `app runs` prints nothing for an app that is not
+installed, so the companion steps simply do not apply on a device that never had it. Removing the
+companion does not erase its persisted settings: `player_app` stays under
+`<data-dir>/app-settings/org.capsulad.radio.tuner/` as ordinary framework form state and is used
+by nothing. On the build host, remove the stale staging directory and archive explicitly before
+assembling a bundle (`rm -rf build/apps/org.capsulad.radio.tuner build/apps/org.capsulad.radio.tuner-*.tar.gz`);
+`make deploy-bundle` fails with that instruction if either is still present.
 
 ## Administration commands
 
@@ -775,8 +911,10 @@ docker run --rm --platform linux/arm64 -v "$PWD":/src -w /src/sdk/native rust:al
 ```
 
 App packages are built per target: `make deploy-bundle DEPLOY_PLATFORM=amlogic-alpine` exports
-`TARGET_ABI=linux-musl` (and `linux-gnu` otherwise), each app build stages that value in its
-manifest `abi`, and the bundle refuses an archive whose `abi` does not name the target libc. The
+`TARGET_ABI=linux-musl` (and `linux-gnu` otherwise), each native app build stages that value in its
+manifest `abi`, and the bundle refuses an archive with `entrypoint.runtime = "native"` whose `abi`
+does not name the target libc. QuickJS and MicroPython archives are libc-independent, so they pass
+without an `abi`; an archive declaring an unknown runtime is refused rather than guessed at. The
 packager never rewrites the field. `BUNDLE_NATIVE=0` remains available for a deliberately
 runtime-free bundle (static Go/script apps), but it is not the Alpine default. The ABI is
 unchanged (`1.0`).

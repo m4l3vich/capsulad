@@ -1,5 +1,44 @@
 # Cadence
 
+## Using this app
+
+Cadence is an optional voice assistant for a **self-hosted Cadence server**. It
+streams microphone audio as Opus and plays the server's streamed reply. The rest
+of this page documents the protocol and implementation for maintainers.
+
+- **Before selecting it:** set *Cadence server URL* and a *Device token* (or a
+  token file), and add a CA certificate if the server uses a private one. The
+  app has no insecure TLS mode.
+- **Select it:** open **Settings → Voice assistant** and choose Cadence.
+  Selection starts the app. Choosing another assistant, or **none**, leaves it
+  stopped.
+- **Controls:** a wake word or talk-key press starts a turn. The ring shows teal
+  while listening, a blue chase while thinking and a green chase while speaking.
+  Press the circle/play-pause key to dismiss the turn; the process stays ready.
+- **Follow-up:** with *Follow-up windows* enabled, the microphone and indication
+  stay open after a complete reply until the server's window closes.
+- **Launch and stop:** open **Apps → Cadence → Details**. *Launch* starts a run
+  without speaking. When it is not the selected assistant, *Stop* is durable;
+  when it is selected, the control is shown as *Restart* and deselecting is the
+  off switch.
+- **Teardown:** dismiss the turn, then stop or deselect. Dismissal cancels the
+  session, aborts reply playback and releases the microphone and ring.
+- **Troubleshooting:**
+  - **Connection or 401 errors:** check the server URL, device token and trust
+    roots. `http://` is allowed for a LAN server but logs a warning and sends
+    the token and audio unencrypted.
+  - **The app will not launch:** it needs `libopus.so.0` from the image and a
+    compatible native runtime; nothing is bundled. An Alpine image must keep
+    the `opus` package.
+  - **A wake-word or button turn works but an automation activation does not:**
+    this client deliberately refuses API activations because they are not
+    evidence that the room's owner spoke.
+  - **No reply:** check the server's close code and the app logs; a failed
+    codec, uplink or playback path holds a red ring briefly and releases the
+    capture.
+  - **Follow-up starts unexpectedly:** turn off *Follow-up windows*; it is
+    enabled by default.
+
 An optional first-party assistant for capsulad that is a **client of a
 self-hosted [Cadence](https://git.shino.boo/devilreef/cadence/) server**. It
 claims the `voice_assistant` role and drives the normal assistant turn: the

@@ -1,15 +1,16 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { toasts, dismissToast } from '../lib/toast.js'
+import { TOAST_ICONS } from '../lib/iconNames.js'
 import Icon from './Icon.vue'
 
 // Kind drives the daisyUI alert tone, the announced politeness and the glyph.
 // Errors and warnings interrupt; successes and plain info wait their turn.
 const presentation = {
-  success: { alert: 'alert-success', role: 'status', icon: 'check_circle' },
-  info: { alert: 'alert-info', role: 'status', icon: 'info' },
-  warning: { alert: 'alert-warning', role: 'alert', icon: 'warning' },
-  error: { alert: 'alert-error', role: 'alert', icon: 'error' }
+  success: { alert: 'alert-success', role: 'status', icon: TOAST_ICONS.success },
+  info: { alert: 'alert-info', role: 'status', icon: TOAST_ICONS.info },
+  warning: { alert: 'alert-warning', role: 'alert', icon: TOAST_ICONS.warning },
+  error: { alert: 'alert-error', role: 'alert', icon: TOAST_ICONS.error }
 }
 
 function look(toast) {

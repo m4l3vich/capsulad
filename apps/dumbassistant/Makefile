@@ -46,6 +46,7 @@ build:
 	mkdir -p $(OUT)/assets
 	$(GOBUILD) -o $(OUT)/dumbassistant ./cmd/dumbassistant
 	cp manifest.toml $(OUT)/manifest.toml
+	cp README.md $(OUT)/README.md
 	cp assets/reply.wav $(OUT)/assets/reply.wav
 
 # package writes the installable artifact beside the package directory:

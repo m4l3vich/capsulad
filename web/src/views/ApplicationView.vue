@@ -3,6 +3,8 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
+import { readGuide } from '../lib/apps.js'
+import { guideBlocks } from '../lib/guide.js'
 import { logLine, safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
@@ -28,6 +30,64 @@ let configRevision = 0
 
 const launchArgs = reactive({})
 let launchInitialized = ''
+
+// The user guide is inert text fetched over the authenticated same-origin API.
+// It is deliberately independent of the run state: a stopped app can still
+// explain its controls, launch and recovery before anyone starts it.
+const guideOpen = ref(false)
+const guide = ref(null)
+const guideError = ref('')
+const guideLoading = ref(false)
+let guideController = null
+
+const guideDocumentBlocks = computed(() => (guide.value ? guideBlocks(guide.value.markdown) : []))
+const guideSourceLabel = computed(() => {
+  if (!guide.value) return ''
+  if (guide.value.source === 'builtin') return 'built-in guide'
+  if (guide.value.source === 'package') return 'from the application package'
+  return ''
+})
+
+function abortGuideLoad() {
+  if (!guideController) return
+  guideController.abort()
+  guideController = null
+  guideLoading.value = false
+}
+
+async function loadGuide() {
+  const app = props.appId
+  if (!app) return
+  abortGuideLoad()
+  const controller = new AbortController()
+  guideController = controller
+  guideLoading.value = true
+  guideError.value = ''
+  try {
+    const doc = await readGuide(app, { signal: controller.signal })
+    if (controller.signal.aborted || props.appId !== app) return
+    guide.value = doc
+  } catch (err) {
+    if (controller.signal.aborted || props.appId !== app) return
+    guideError.value = err?.message || 'The user guide could not be loaded.'
+  } finally {
+    if (guideController === controller) {
+      guideController = null
+      guideLoading.value = false
+    }
+  }
+}
+
+function openGuide() {
+  guideOpen.value = true
+  if (!guide.value || guide.value.appId !== props.appId) loadGuide()
+}
+
+function closeGuide() {
+  abortGuideLoad()
+  guideOpen.value = false
+  guideError.value = ''
+}
 
 const settingsFrame = ref(null)
 const settingsUI = ref(null)
@@ -90,7 +150,16 @@ watch(loadError, (value) => {
 })
 
 onUnmounted(() => {
+  abortGuideLoad()
   teardownFrame()
+})
+
+// A reopened detail for another app starts with no guide from the previous
+// package; the fetched document belongs to exactly one application ID.
+watch(() => props.appId, (next, previous) => {
+  if (!previous || next === previous) return
+  guide.value = null
+  closeGuide()
 })
 
 // --- generic application settings -----------------------------------------
@@ -447,6 +516,69 @@ function uptime(ns) {
     </div>
 
     <div v-else-if="data" class="flex flex-col gap-4">
+      <div v-if="guideOpen" class="flex flex-col gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <button type="button" class="btn btn-sm btn-ghost" @click="closeGuide">
+            <span aria-hidden="true">←</span> Back to application
+          </button>
+          <span v-if="guideSourceLabel" class="badge badge-ghost badge-sm">{{ guideSourceLabel }}</span>
+        </div>
+
+        <div v-if="guideLoading" class="flex items-center gap-2 py-4 text-sm" role="status" aria-live="polite">
+          <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
+          Loading the user guide…
+        </div>
+
+        <div v-else-if="guideError" class="alert alert-warning py-2" role="alert">
+          <span class="text-sm">{{ guideError }}</span>
+          <button type="button" class="btn btn-sm btn-outline" @click="loadGuide">Try again</button>
+        </div>
+
+        <article v-else-if="guide" class="flex flex-col gap-3 break-words text-sm leading-relaxed">
+          <template v-for="(block, index) in guideDocumentBlocks" :key="index">
+            <component
+              :is="`h${Math.min(block.level + 2, 6)}`"
+              v-if="block.type === 'heading'"
+              class="mt-2 font-semibold tracking-tight"
+              :class="block.level <= 2 ? 'text-base' : 'text-sm'"
+            >{{ block.text }}</component>
+
+            <p v-else-if="block.type === 'paragraph'" class="text-base-content/80">{{ block.text }}</p>
+
+            <ul v-else-if="block.type === 'list' && block.kind === 'ul'" class="list-disc space-y-1 pl-5 text-base-content/80">
+              <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+            </ul>
+
+            <ol v-else-if="block.type === 'list'" class="list-decimal space-y-1 pl-5 text-base-content/80">
+              <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+            </ol>
+
+            <pre
+              v-else-if="block.type === 'code'"
+              class="overflow-x-auto rounded bg-base-200 p-3 font-mono text-xs leading-relaxed"
+            >{{ block.text }}</pre>
+
+            <div v-else-if="block.type === 'table'" class="overflow-x-auto rounded border border-base-300">
+              <table class="table table-xs">
+                <thead>
+                  <tr>
+                    <th v-for="(header, headerIndex) in block.headers" :key="headerIndex" scope="col">{{ header }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+                    <td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </article>
+
+        <p v-else class="text-sm text-base-content/60">No guide content is available.</p>
+      </div>
+
+      <template v-else>
       <div v-if="!connected" class="alert alert-warning py-2" role="status">
         <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
       </div>
@@ -464,6 +596,20 @@ function uptime(ns) {
           <button type="button" class="btn btn-sm btn-warning" @click="discardAndClose">Discard changes</button>
         </div>
       </div>
+
+      <!-- Help is available before (and without) launching the app. -->
+      <section class="rounded-lg border border-base-300 p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="min-w-0">
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">User guide</h3>
+            <p class="mt-1 text-xs text-base-content/60">
+              Controls, launch and teardown steps and troubleshooting from this application's
+              package. Available whether or not it is running.
+            </p>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline" @click="openGuide">Read user guide</button>
+        </div>
+      </section>
 
       <!-- Launch: required arguments are explicit, not guessed. -->
       <section class="rounded-lg border border-base-300 p-3">
@@ -795,6 +941,7 @@ function uptime(ns) {
           <p v-else class="text-sm text-base-content/60">No log records yet.</p>
         </div>
       </details>
+      </template>
     </div>
   </ModalDialog>
 </template>
