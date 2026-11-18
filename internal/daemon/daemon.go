@@ -264,12 +264,19 @@ type Daemon struct {
 	osdCapture   string
 	osdTimer     *time.Timer
 	osdGen       uint64
-	cueMu        sync.Mutex
-	lastCue      time.Time
-	micGen       uint64
-	micTimer     *time.Timer
-	lastMuted    bool
-	lastApplied  *settings.UserSettings
+	// startupMu guards the boot introduction's presentation, capture and
+	// generation. Its fade callback must never outlive or overwrite a newer
+	// ring owner.
+	startupMu      sync.Mutex
+	startupPres    *presentations.Presentation
+	startupCapture string
+	startupGen     uint64
+	cueMu          sync.Mutex
+	lastCue        time.Time
+	micGen         uint64
+	micTimer       *time.Timer
+	lastMuted      bool
+	lastApplied    *settings.UserSettings
 
 	btMu           sync.Mutex
 	btInit         bool
@@ -824,6 +831,13 @@ func (d *Daemon) Run() error {
 
 	d.seedDefaults()
 	d.applySettings(d.user.Get())
+	// The output loop is the only physical writer. Start it before the startup
+	// introduction so its bounded lifetime is never spent before the first
+	// tick: on a cold device, spawning the boot apps below can take long enough
+	// to clip the fade-in or the whole introduction while the jingle still
+	// plays. Every state the loop reads (resources, presentations, routing,
+	// brightness) is already initialized here.
+	go d.outputLoop()
 	d.maybePlayStartupCue()
 	d.startSystemApps()
 	d.startBootApps()
@@ -831,7 +845,6 @@ func (d *Daemon) Run() error {
 	go d.watchBluetooth()
 	go d.watchSettings()
 	go d.autoBrightnessLoop()
-	go d.outputLoop()
 	// Arm the hardware timer only after the daemon is serving: on a nowayout
 	// driver an armed timer cannot be disarmed, so a startup failure must not
 	// leave the board in a reset loop.
@@ -1002,6 +1015,9 @@ func (d *Daemon) shutdown() {
 			}
 		}
 		d.sup.Shutdown(5 * time.Second)
+		// The boot introduction owns a system capture; release it through the
+		// router before the presentation manager tears every stream down.
+		d.stopStartupRing("shutdown")
 		d.pres.CloseAll()
 		d.audio.Close()
 		d.wake.Close()

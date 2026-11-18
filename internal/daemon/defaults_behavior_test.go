@@ -67,6 +67,12 @@ func TestExplicitNoRingProviderSurvivesRestart(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(base, "settings.json"), data, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			// Record the installation startup cue so this fixture is a later
+			// boot: the transient startup ring introduction is a framework
+			// indication, and this test asserts the persisted baseline choice.
+			if err := os.WriteFile(filepath.Join(base, startupSoundMarker), []byte("played\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			for _, boot := range []string{"first-boot", "restart", "selection"} {
 				t.Run(boot, func(t *testing.T) {
 					d := startEmptyDaemon(t, base)
