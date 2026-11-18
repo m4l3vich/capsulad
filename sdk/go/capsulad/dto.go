@@ -253,4 +253,10 @@ type BluetoothMediaState struct {
 	// AVRCP status, which a MediaControl1-only source never publishes; prefer
 	// this field when DirectionKnown is true.
 	DirectionPlaying bool `json:"directionPlaying,omitempty"`
+	// ObservedPlaying is true only when playback is actually observed (the
+	// source's status, the transport state, or the sink's packet receipts),
+	// not merely inferred from a command this daemon sent. A Now Playing
+	// surface should use this field; DirectionPlaying stays the Play/Pause
+	// choice so a toggle cannot invert relative to the last command.
+	ObservedPlaying bool `json:"observedPlaying,omitempty"`
 }

@@ -78,6 +78,21 @@ func (s *bluetoothMediaService) stateProto(ctx context.Context, state bluetooth.
 	out := bluetoothMediaProto(state)
 	if direction := s.d.bluetoothPlaybackDirection(ctx, state); direction.Present {
 		out.DirectionKnown, out.DirectionPlaying = true, direction.Playing
+		// A now-playing surface must not treat a command this daemon just sent
+		// as observed playback. Direction memory exists to make the next
+		// toggle invert; the source-published status, transport state and sink
+		// receipts are the evidence that playback is actually happening. A
+		// MediaControl1-only source has no status, so receipt/transport
+		// evidence is what keeps it visible while it is genuinely playing.
+		// When a direction is resolvable, its evidence wins even over a cached
+		// `playing`: a stale peer status that still says playing after this
+		// daemon paused the source is not observed playback.
+		observed := direction.Playing && direction.Evidence != bluetooth.EvidenceMemory
+		out.ObservedPlaying = state.Present && observed
+	} else {
+		// A backend that publishes only its exact state has no richer evidence;
+		// its `playing` is the observation.
+		out.ObservedPlaying = state.Present && state.Playing
 	}
 	return out
 }

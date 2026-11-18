@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -102,21 +103,18 @@ func (s *Server) watchTopic(ctx context.Context, c *wsConn, topic webv1.Topic, a
 func (s *Server) watchTopicWith(ctx context.Context, c *wsConn, topic webv1.Topic, appID string, signals <-chan uichanges.Topic, logBoundary logSnapshotBoundary) {
 	switch topic {
 	case webv1.Topic_TOPIC_OVERVIEW:
-		// The settings stream blocks for the subscription lifetime; run it
-		// beside the run watcher instead of before it. Bluetooth, settings and
-		// installed-package invalidations rebuild observed/adapter, audio and
-		// application state.
-		go s.watchOverviewSettings(ctx, c)
-		go s.watchOverviewSignals(ctx, c, signals)
+		// Every upstream funnels into one serialized rebuild. Without a single
+		// owner, an older read that finishes later could overwrite a newer
+		// state in the browser; the pusher coalesces a burst into one trailing
+		// rebuild instead.
+		push := &overviewPusher{s: s, c: c, ctx: ctx}
+		go s.watchOverviewSettings(ctx, c, push.trigger)
+		go s.watchOverviewSignals(ctx, signals, push.trigger)
+		media := newOverviewMediaWatch(s, ctx, push.trigger)
+		go media.run()
 		s.watchRuns(ctx, c, "", webv1.Topic_TOPIC_OVERVIEW, func() {
-			ctx2, cancel := context.WithTimeout(ctx, 8*time.Second)
-			defer cancel()
-			view, err := s.overviewView(ctx2)
-			if err != nil {
-				c.sendResync(topic, appID)
-				return
-			}
-			c.sendEvent(&webv1.Event{Topic: topic, Body: &webv1.Event_Overview{Overview: view}})
+			push.trigger()
+			media.kick()
 		})
 	case webv1.Topic_TOPIC_SETTINGS:
 		go s.watchSettingsSignals(ctx, c, signals)
@@ -157,6 +155,60 @@ func (s *Server) watchTopicWith(ctx context.Context, c *wsConn, topic webv1.Topi
 		s.watchAccessSignals(ctx, c, signals)
 	case webv1.Topic_TOPIC_WIFI:
 		s.watchWifiSignals(ctx, c, signals)
+	}
+}
+
+// overviewPusher serializes rebuilds of one overview subscription. A request
+// that arrives while a build is in flight marks a trailing rebuild, so the last
+// event the browser sees is built from the newest request rather than from a
+// read that merely finished last.
+type overviewPusher struct {
+	s   *Server
+	c   *wsConn
+	ctx context.Context
+
+	mu      sync.Mutex
+	pending bool
+	running bool
+}
+
+func (p *overviewPusher) trigger() {
+	p.mu.Lock()
+	p.pending = true
+	if p.running {
+		p.mu.Unlock()
+		return
+	}
+	p.running = true
+	p.mu.Unlock()
+	go p.run()
+}
+
+func (p *overviewPusher) run() {
+	for {
+		p.mu.Lock()
+		if !p.pending {
+			p.running = false
+			p.mu.Unlock()
+			return
+		}
+		p.pending = false
+		p.mu.Unlock()
+		if p.ctx.Err() != nil {
+			return
+		}
+		viewCtx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+		view, err := p.s.overviewView(viewCtx)
+		cancel()
+		if p.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			p.c.sendResync(webv1.Topic_TOPIC_OVERVIEW, "")
+			continue
+		}
+		p.c.sendEvent(&webv1.Event{Topic: webv1.Topic_TOPIC_OVERVIEW,
+			Body: &webv1.Event_Overview{Overview: view}})
 	}
 }
 
@@ -305,7 +357,7 @@ func (s *Server) publish(topic uichanges.Topic) {
 // invalidation changes it: observed adapter state (a BlueZ-side change, not
 // only a persisted setting) or the installed-application set after a package
 // was installed, replaced or removed.
-func (s *Server) watchOverviewSignals(ctx context.Context, c *wsConn, signals <-chan uichanges.Topic) {
+func (s *Server) watchOverviewSignals(ctx context.Context, signals <-chan uichanges.Topic, trigger func()) {
 	if signals == nil {
 		return
 	}
@@ -320,14 +372,7 @@ func (s *Server) watchOverviewSignals(ctx context.Context, c *wsConn, signals <-
 			if signal != uichanges.Bluetooth && signal != uichanges.Apps {
 				continue
 			}
-			viewCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			view, err := s.overviewView(viewCtx)
-			cancel()
-			if err != nil {
-				c.sendResync(webv1.Topic_TOPIC_OVERVIEW, "")
-				continue
-			}
-			c.sendEvent(&webv1.Event{Topic: webv1.Topic_TOPIC_OVERVIEW, Body: &webv1.Event_Overview{Overview: view}})
+			trigger()
 		}
 	}
 }
@@ -366,7 +411,7 @@ func (s *Server) watchSettingsSignals(ctx context.Context, c *wsConn, signals <-
 // so volume, mute and Bluetooth toggles changed by hardware or another session
 // appear without a refresh. It is separate from TOPIC_SETTINGS because the
 // overview also carries audio and Bluetooth state.
-func (s *Server) watchOverviewSettings(ctx context.Context, c *wsConn) {
+func (s *Server) watchOverviewSettings(ctx context.Context, c *wsConn, trigger func()) {
 	stream, err := frameworkv1.NewSettingsServiceClient(s.Conn).WatchSettings(ctx, &frameworkv1.WatchSettingsRequest{})
 	if err != nil {
 		if ctx.Err() == nil {
@@ -420,14 +465,7 @@ func (s *Server) watchOverviewSettings(ctx context.Context, c *wsConn) {
 		case <-timerC:
 			timer = nil
 			timerC = nil
-			viewCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			view, err := s.overviewView(viewCtx)
-			cancel()
-			if err != nil {
-				c.sendResync(webv1.Topic_TOPIC_OVERVIEW, "")
-				continue
-			}
-			c.sendEvent(&webv1.Event{Topic: webv1.Topic_TOPIC_OVERVIEW, Body: &webv1.Event_Overview{Overview: view}})
+			trigger()
 		}
 	}
 }

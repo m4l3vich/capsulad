@@ -1341,6 +1341,13 @@ message BluetoothMediaState {
   // publishes only its exact state).
   bool direction_known = 12;
   bool direction_playing = 13;
+  // True when playback is observed rather than inferred from a command this
+  // daemon sent: the source's AVRCP status, the observed transport state, or
+  // this sink's own packet receipts. `direction_playing` stays the Play/Pause
+  // choice (it may come from command memory so a toggle inverts correctly); a
+  // now-playing surface uses this field so an acknowledged-but-unobserved Play
+  // cannot create a row.
+  bool observed_playing = 14;
 }
 message GetWebUiSecurityRequest {}
 message WebUiSecurityStatus {

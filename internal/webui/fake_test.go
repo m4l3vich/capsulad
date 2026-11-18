@@ -67,6 +67,20 @@ type fakeBackend struct {
 	btStatus *frameworkv1.BluetoothStatus
 	// btStatusErr fails GetBluetoothStatus so the error path is observable.
 	btStatusErr error
+	// btWake broadcasts a Bluetooth media state change to every WatchState
+	// subscriber. It is closed and replaced on change, so a subscriber that
+	// captured the old channel wakes immediately.
+	btWake chan struct{}
+
+	// mediaPlayers overrides the players a media provider reports. A missing
+	// entry uses the default one-playing-player fixture. mediaErr makes
+	// ListPlayers fail so the now-playing projection's error omission is
+	// observable.
+	mediaPlayers map[string][]*mediav1.PlayerStatus
+	mediaErr     map[string]error
+	// mediaWake broadcasts a provider player-set change to every WatchPlayers
+	// subscriber, with the same close-and-replace rule as btWake.
+	mediaWake chan struct{}
 
 	// installedArchive is the byte stream the fake daemon received through
 	// InstallApplication, so a route test can prove the browser's body reached
@@ -117,7 +131,31 @@ func newFakeBackend() *fakeBackend {
 		trainingCancel:  make(chan struct{}, 1),
 		recordingStart:  make(chan struct{}, 1),
 		recordingCancel: make(chan struct{}, 1),
+		btWake:          make(chan struct{}),
+		mediaWake:       make(chan struct{}),
 	}
+}
+
+// setBluetoothMedia publishes one source state to every framework watch and
+// the next GetState read, so a live overview test observes a real transition.
+func (b *fakeBackend) setBluetoothMedia(state *frameworkv1.BluetoothMediaState) {
+	b.mu.Lock()
+	b.btMedia = state
+	close(b.btWake)
+	b.btWake = make(chan struct{})
+	b.mu.Unlock()
+}
+
+// setMediaPlayers installs one provider's player set and wakes its watchers.
+func (b *fakeBackend) setMediaPlayers(appID string, players ...*mediav1.PlayerStatus) {
+	b.mu.Lock()
+	if b.mediaPlayers == nil {
+		b.mediaPlayers = map[string][]*mediav1.PlayerStatus{}
+	}
+	b.mediaPlayers[appID] = players
+	close(b.mediaWake)
+	b.mediaWake = make(chan struct{})
+	b.mu.Unlock()
 }
 
 func startFakeGRPC(t *testing.T, b *fakeBackend) *grpc.ClientConn {
@@ -515,6 +553,10 @@ func (f *fakeBus) Call(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallReq
 	if start == nil {
 		return status.Error(codes.InvalidArgument, "no start")
 	}
+	if start.GetGrpcService() == "capsulad.contracts.media.v1.MediaPlayerService" &&
+		start.GetRpcName() == "WatchPlayers" {
+		return f.watchPlayers(stream, start.GetTargetAppId())
+	}
 	body, err := f.response(start, request)
 	if err != nil {
 		return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
@@ -579,17 +621,104 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 		})
 	case "capsulad.contracts.media.v1.MediaPlayerService":
 		if start.GetRpcName() == "ListPlayers" {
-			resp, _ := proto.Marshal(&mediav1.ListPlayersResponse{Players: []*mediav1.PlayerStatus{{
-				PlayerId: "p1", PlaybackState: mediav1.PlaybackState_PLAYBACK_PLAYING, Title: protoString("Scarlet Fire"),
-				SupportedActions: []mediav1.MediaAction{
-					mediav1.MediaAction_MEDIA_PAUSE, mediav1.MediaAction_MEDIA_SKIP_NEXT,
-				},
-			}}})
-			return resp, nil
+			players, err := f.playersFor(start.GetTargetAppId())
+			if err != nil {
+				return nil, err
+			}
+			return proto.Marshal(&mediav1.ListPlayersResponse{Players: players})
 		}
 		return proto.Marshal(&mediav1.PlayerCommandResult{Accepted: true})
 	}
 	return nil, status.Errorf(codes.Unimplemented, "unexpected service %s", start.GetGrpcService())
+}
+
+// playersFor returns a provider's current player set. Tests override it by app
+// id; the default is the fixture the overview tests were written against.
+func (f *fakeBus) playersFor(appID string) ([]*mediav1.PlayerStatus, error) {
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	if err := f.b.mediaErr[appID]; err != nil {
+		return nil, err
+	}
+	players, overridden := f.b.mediaPlayers[appID]
+	if !overridden {
+		players = []*mediav1.PlayerStatus{{
+			PlayerId: "p1", PlaybackState: mediav1.PlaybackState_PLAYBACK_PLAYING, Title: protoString("Scarlet Fire"),
+			SupportedActions: []mediav1.MediaAction{
+				mediav1.MediaAction_MEDIA_PAUSE, mediav1.MediaAction_MEDIA_SKIP_NEXT,
+			},
+		}}
+	}
+	out := make([]*mediav1.PlayerStatus, 0, len(players))
+	for _, player := range players {
+		out = append(out, proto.Clone(player).(*mediav1.PlayerStatus))
+	}
+	return out, nil
+}
+
+// watchPlayers is the fake provider's WatchPlayers stream: one snapshot, then
+// updates and removals after each setMediaPlayers call. It follows the public
+// contract the real providers implement, so the overview's live path is
+// exercised over the real app-bus transport.
+func (f *fakeBus) watchPlayers(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallRequest, frameworkv1.RoutedCallResponse], appID string) error {
+	players, err := f.playersFor(appID)
+	if err != nil {
+		return err
+	}
+	previous := map[string]*mediav1.PlayerStatus{}
+	for _, player := range players {
+		previous[player.GetPlayerId()] = player
+	}
+	snapshot, _ := proto.Marshal(&mediav1.PlayerEvent{
+		Event: &mediav1.PlayerEvent_Snapshot{Snapshot: &mediav1.ListPlayersResponse{Players: players}},
+	})
+	if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+		ResponseMessage: snapshot,
+	}}); err != nil {
+		return err
+	}
+	for {
+		f.b.mu.Lock()
+		wake := f.b.mediaWake
+		f.b.mu.Unlock()
+		select {
+		case <-stream.Context().Done():
+			return nil
+		case <-wake:
+		}
+		players, err := f.playersFor(appID)
+		if err != nil {
+			return err
+		}
+		current := map[string]*mediav1.PlayerStatus{}
+		for _, player := range players {
+			current[player.GetPlayerId()] = player
+			if old := previous[player.GetPlayerId()]; old == nil || !proto.Equal(old, player) {
+				updated, _ := proto.Marshal(&mediav1.PlayerEvent{
+					Event: &mediav1.PlayerEvent_Updated{Updated: player},
+				})
+				if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+					ResponseMessage: updated,
+				}}); err != nil {
+					return err
+				}
+			}
+		}
+		for id := range previous {
+			if current[id] != nil {
+				continue
+			}
+			removed, _ := proto.Marshal(&mediav1.PlayerEvent{
+				Event: &mediav1.PlayerEvent_Removed{Removed: &mediav1.PlayerRemoved{PlayerId: id}},
+			})
+			if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+				ResponseMessage: removed,
+			}}); err != nil {
+				return err
+			}
+		}
+		previous = current
+	}
 }
 
 func protoString(v string) *string { return &v }
@@ -641,15 +770,26 @@ func (f *fakeBluetoothMedia) GetState(context.Context, *frameworkv1.GetBluetooth
 }
 
 func (f *fakeBluetoothMedia) WatchState(_ *frameworkv1.WatchBluetoothMediaStateRequest, stream grpc.ServerStreamingServer[frameworkv1.BluetoothMediaState]) error {
-	state, err := f.GetState(stream.Context(), &frameworkv1.GetBluetoothMediaStateRequest{})
-	if err != nil {
-		return err
+	for {
+		// Capture the wake channel before reading the state: a change between
+		// the read and the wait closes the captured channel and wakes this
+		// loop instead of being lost.
+		f.b.mu.Lock()
+		wake := f.b.btWake
+		f.b.mu.Unlock()
+		state, err := f.GetState(stream.Context(), &frameworkv1.GetBluetoothMediaStateRequest{})
+		if err != nil {
+			return err
+		}
+		if err := stream.Send(state); err != nil {
+			return err
+		}
+		select {
+		case <-stream.Context().Done():
+			return nil
+		case <-wake:
+		}
 	}
-	if err := stream.Send(state); err != nil {
-		return err
-	}
-	<-stream.Context().Done()
-	return nil
 }
 
 func (f *fakeBluetoothMedia) Command(_ context.Context, req *frameworkv1.BluetoothMediaCommandRequest) (*frameworkv1.BluetoothMediaState, error) {

@@ -303,8 +303,10 @@ var mcpToolCatalogue = []mcpTool{
 		objectSchema(map[string]any{}), mcpGetCertificate),
 	readTool("get_state", websecurity.ScopeOperator,
 		"Read one live snapshot the Web UI subscribes to. Topics: overview (device, audio, apps, runs, "+
-			"media), settings, application (needs app_id), diagnostics (logs and metrics), wakeword, "+
-			"access (the listener/credential status and the API-key list with its scopes) and wifi. Use "+
+			"and the Now Playing media projection: only players that report PLAYBACK_PLAYING, with "+
+			"idle/paused/stopped providers omitted), settings, application (needs app_id), diagnostics "+
+			"(logs and metrics), wakeword, access (the listener/credential status and the API-key list "+
+			"with its scopes) and wifi. Use "+
 			"this to observe state that a mutation "+
 			"streams to the Web UI, for example wakeword training progress.",
 		objectSchema(map[string]any{

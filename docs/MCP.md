@@ -152,7 +152,7 @@ uploads) are just as strict and also set `additionalProperties: false`.
 |---|---|---|
 | `get_status` | status | `DeviceService.GetInfo`/`ListResources`, `ApplicationService.ListRuns`, `SystemService.GetStatus` (the `/api/status` read). |
 | `get_certificate` | status | `/api/cert.pem`. |
-| `get_state` | operator | one Web UI snapshot: `overview`, `settings`, `application` (+ `app_id`), `diagnostics`, `wakeword`, `access`, `wifi`. |
+| `get_state` | operator | one Web UI snapshot: `overview`, `settings`, `application` (+ `app_id`), `diagnostics`, `wakeword`, `access`, `wifi`. The `overview` topic is the Now Playing projection: only `PLAYBACK_PLAYING` players, with providers that have none omitted. |
 | `list_assets` | operator | the shared asset catalog, optionally filtered by `prefix`. |
 | `list_api_keys` | operator | key names, prefixes, creation times, revocation state and scopes. |
 | `update_settings` | operator | `Command.settings`; requires `expected_revision`. |
@@ -160,7 +160,7 @@ uploads) are just as strict and also set `additionalProperties: false`.
 | `stop_run` | operator | `Command.stop` (the run must belong to that app). |
 | `trigger_action` | operator | `Command.action`. |
 | `update_app_settings` | operator | `Command.app_settings`; requires `expected_revision` and declared keys. |
-| `media_command` | operator | `Command.media`; app providers and the framework Bluetooth provider. |
+| `media_command` | operator | `Command.media`; the explicit control surface for app providers and the framework Bluetooth provider, including paused or idle ones. |
 | `bluetooth_command` | operator | `Command.bluetooth`; discoverable, incoming connections, unpair, adapter name. |
 | `wifi_command` | operator | `Command.wifi`; scan, connect, forget. |
 | `record_sample` | operator | `Command.record_sample`; microphone indication gate applies. |

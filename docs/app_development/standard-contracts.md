@@ -261,11 +261,20 @@ connected phone has no media app at all.
 The connected Bluetooth source is still visible and controllable without one. The framework's
 own `BluetoothMediaService` (see [services.md](services.md#bluetoothmediaservice)) is the data
 and command path: the Web UI "Now playing" panel lists the source as a framework-owned provider
-(one player `bluetooth` while a source is connected, none otherwise) and its
+only while playback is observed (one player `bluetooth`), and its
 PLAY/PAUSE/SKIP_NEXT/SKIP_PREVIOUS buttons call that service, while the physical circle key and
 swipes use it directly whenever no standard player is playing or paused. Framework and
 application providers coexist; consumers discover every running application provider through
 `AppInterfaceService` and choose among the players they expose.
+
+"Now playing" is a projection, not provider discovery. The Web UI overview and the MCP
+`get_state` overview snapshot include only players that report `PLAYBACK_PLAYING`, and omit a
+provider that has none; a connected but idle, paused or stopped Bluetooth source, an installed
+media app with no ready run, and a provider whose players cannot be read add no row and no error
+card. This filtering does not change discovery or control: `ListPlayers`, `WatchPlayers`,
+`AppInterfaceService.ListInterfaces`, `capsulad-cli media list` and the MCP `media_command` tool
+still report and address idle or paused providers, and the physical circle key falls back to
+`BluetoothMediaService` exactly as before.
 
 | RPC | Request | Response | Behaviour |
 |---|---|---|---|

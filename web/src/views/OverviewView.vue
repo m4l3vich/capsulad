@@ -29,6 +29,11 @@ const bluetoothReady = computed(() =>
 const bluetoothConnected = computed(() => connectedBadge(data.value?.pairedDevices))
 const apps = computed(() => data.value?.apps || [])
 const runs = computed(() => data.value?.runs || [])
+// The overview snapshot is the Now Playing projection: only players that
+// report PLAYBACK_PLAYING, and only providers that still have one. A connected
+// but paused source, an idle app and a provider whose players cannot be read
+// are absent, so the provider tabs and player list never offer a row the user
+// cannot act on. With none left the card falls back to "Nothing is playing."
 const providers = computed(() => data.value?.providers || [])
 const selected = computed(() => data.value?.selectedProviders || {})
 
@@ -367,7 +372,7 @@ function trackTime(ms) {
                   >
                     <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId || 'Media' }}</span>
                     <span class="text-[11px] text-base-content/60">
-                      {{ provider.error || playerCount(provider) }}
+                      {{ playerCount(provider) }}
                     </span>
                   </button>
                 </li>
@@ -379,11 +384,7 @@ function trackTime(ms) {
             <p v-if="providers.length > 1" class="truncate text-[11px] text-base-content/60">
               {{ activeProvider.name || 'Media app' }}
             </p>
-            <p v-if="activeProvider.error" class="text-xs text-error">{{ activeProvider.error }}</p>
-            <p v-else-if="!(activeProvider.players || []).length" class="text-xs text-base-content/60">
-              No active player.
-            </p>
-            <ul v-else class="flex flex-col gap-2">
+            <ul class="flex flex-col gap-2">
               <li v-for="player in activeProvider.players" :key="player.playerId" class="flex min-w-0 flex-col gap-1.5">
                 <div class="flex min-w-0 items-start justify-between items-center gap-2">
                   <div class="min-w-0">

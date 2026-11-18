@@ -707,12 +707,19 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 		if !providesMedia(a) || !running[a.GetAppId()] {
 			continue
 		}
-		provider := &webv1.MediaProviderView{AppId: a.GetAppId(), Name: a.GetDisplayName()}
 		players, err := s.listPlayers(ctx, a.GetAppId())
 		if err != nil {
-			provider.Error = rpcMessage(err)
+			// The overview is Now Playing, not provider discovery: a provider
+			// whose players cannot be read has no observed playing player to
+			// show, and an error row would be a card for a state the user
+			// cannot act on. Discovery keeps reporting the provider.
+			continue
 		}
+		provider := &webv1.MediaProviderView{AppId: a.GetAppId(), Name: a.GetDisplayName()}
 		for _, p := range players {
+			if p.GetPlaybackState() != mediav1.PlaybackState_PLAYBACK_PLAYING {
+				continue
+			}
 			provider.Players = append(provider.Players, &webv1.MediaPlayerView{
 				PlayerId: p.GetPlayerId(), PlaybackState: p.GetPlaybackState().String(),
 				SupportedActions: mediaActions(p.GetSupportedActions()),
@@ -721,14 +728,20 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 				DurationMs: p.GetDurationMs(), PositionMs: p.GetPositionMs(), Revision: p.GetRevision(),
 			})
 		}
+		// A playing sibling keeps the provider in the projection; an idle,
+		// paused or stopped-only provider is omitted rather than shown empty.
+		if len(provider.Players) == 0 {
+			continue
+		}
 		out = append(out, provider)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].GetAppId() < out[j].GetAppId() })
 	// The connected Bluetooth source is a framework-owned provider, not an app:
 	// no manifest, no run, no app id. It comes from the public
 	// BluetoothMediaService on this socket and is appended after the application
-	// providers, so a running player stays the default view. With no connected
-	// source it is absent, and the browser shows no empty provider row.
+	// providers, so a running player stays the default view. It appears only
+	// while playback is actually observed; a connected but idle, paused or
+	// stopped source is provider discovery, not Now Playing, and adds no row.
 	if provider := s.frameworkMediaProvider(ctx); provider != nil {
 		out = append(out, provider)
 	}

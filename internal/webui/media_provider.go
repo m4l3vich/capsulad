@@ -6,9 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	mediav1 "capsulad/gen/go/capsulad/contracts/media/v1"
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	webv1 "capsulad/gen/go/capsulad/web/v1"
@@ -20,7 +17,8 @@ import (
 // BluetoothMediaService on this same socket, and its commands are that service's
 // Commands — exactly the path the physical circle key uses when no provider is
 // playing or paused. An installed media provider keeps its app identity and is
-// listed and commanded exactly as before.
+// commanded exactly as before; the overview lists it only for its playing
+// players.
 const (
 	// frameworkBluetoothPlayerID is the single player a connected source
 	// exposes. It is stable for the life of the source session.
@@ -29,26 +27,17 @@ const (
 )
 
 // frameworkMediaProvider returns the connected Bluetooth source as a media
-// provider, or nil when no source is connected. Every failure that means "this
-// platform has no Bluetooth source" yields nil: an absent manager, a stopped
-// radio or a source that disconnected between the overview reads. A genuine
-// failure is reported on the provider view instead of hiding the row, because
-// the alternative is the defect this provider exists to remove — a speaker with
-// a phone playing that shows no media at all.
+// provider only while playback is observed, and nil otherwise. A source that
+// is connected but idle, paused or stopped is provider discovery, not Now
+// Playing, so it adds no row; an unreadable state has no observed playback to
+// claim either. Both are omitted instead of rendering an error or an empty
+// card. `observed_playing` excludes the framework's command-memory direction,
+// so an acknowledged Play that the peer did not act on cannot create a row;
+// receipt and transport evidence keep a MediaControl1-only source visible
+// while it is genuinely playing.
 func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProviderView {
 	state, err := frameworkv1.NewBluetoothMediaServiceClient(s.Conn).GetState(ctx, &frameworkv1.GetBluetoothMediaStateRequest{})
-	if err != nil {
-		if unavailableMediaError(err) {
-			return nil
-		}
-		return &webv1.MediaProviderView{
-			Name:  frameworkBluetoothName,
-			Kind:  webv1.MediaProviderKind_MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA,
-			Error: rpcMessage(err),
-		}
-	}
-	if !state.GetPresent() {
-		// Nothing is connected: no provider, no empty row.
+	if err != nil || !state.GetPresent() || !state.GetObservedPlaying() {
 		return nil
 	}
 	return &webv1.MediaProviderView{
@@ -56,7 +45,7 @@ func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProvide
 		Kind: webv1.MediaProviderKind_MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA,
 		Players: []*webv1.MediaPlayerView{{
 			PlayerId:      frameworkBluetoothPlayerID,
-			PlaybackState: frameworkPlaybackState(state).String(),
+			PlaybackState: mediav1.PlaybackState_PLAYBACK_PLAYING.String(),
 			SupportedActions: mediaActions([]mediav1.MediaAction{
 				mediav1.MediaAction_MEDIA_PLAY,
 				mediav1.MediaAction_MEDIA_PAUSE,
@@ -72,33 +61,6 @@ func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProvide
 			PositionMs: state.GetPositionMs(),
 			Revision:   state.GetRevision(),
 		}},
-	}
-}
-
-// frameworkPlaybackState maps the framework's resolved direction onto the
-// standard media contract's playback states. `playing` is the source-published
-// AVRCP status, which a source exposing only MediaControl1 never publishes; the
-// resolved direction is what the manager's own toggle uses, so showing it keeps
-// the browser's Play/Pause choice consistent with the physical key.
-func frameworkPlaybackState(state *frameworkv1.BluetoothMediaState) mediav1.PlaybackState {
-	playing := state.GetPlaying()
-	if state.GetDirectionKnown() {
-		playing = state.GetDirectionPlaying()
-	}
-	if playing {
-		return mediav1.PlaybackState_PLAYBACK_PLAYING
-	}
-	return mediav1.PlaybackState_PLAYBACK_PAUSED
-}
-
-// unavailableMediaError reports whether an error means "no Bluetooth media
-// source on this platform" rather than a failure of the framework surface.
-func unavailableMediaError(err error) bool {
-	switch status.Code(err) {
-	case codes.Unavailable, codes.Unimplemented, codes.FailedPrecondition, codes.NotFound:
-		return true
-	default:
-		return false
 	}
 }
 
