@@ -249,6 +249,273 @@ staged.
   `build/linux-arm64/release-20261117b/verify-after-recovery.sh` re-runs the whole verification
   once the speaker is reachable. This is gate 31.
 
+### 2026-11-18 full-stack deployment (all 12 apps, startup ring)
+
+A coordinated `capsulad-cli deploy` of the 2026-11-18 working tree (HEAD `1c6bb20` plus the
+startup-ring work and the size-optimised CLI/Web UI) was applied over ADB to the Capsula Mini
+rev 4. Artifacts were cross-built for aarch64 / glibc ≤ 2.33 with the repo-local bullseye
+sysroot toolchain; every ELF passed the version/SONAME/`DT_NEEDED` gates. No device reboot was
+performed.
+
+- **Deployed stack.** `capsulad` 28,639,384 B `4ddb9111…`, `capsulad-cli` 8,781,976 B
+  `90420043…`, `lib/libcapsulad.so.1.0.0` 6,500,208 B `fa742e8f…` (SONAME `libcapsulad.so.1`,
+  max GLIBC 2.30), `capsulad-native.json` `f4491337…` (ABI 1.0), `capsulad-quickjs`
+  `f80ae271…`, `capsulad-micropython` `dfe2fbb0…`, `/etc/init.d/S99btctl.sh` `91440905…`.
+  The installed files matched `SHA256SUMS.final` (`evidence/check-installed-hashes.sh`).
+- **Packages.** All twelve installed and listed with the expected versions/runtimes:
+  `simon 1.0.0` (quickjs), `pa 0.1.0`/`radio 0.1.0` (micropython), `radio.tuner 0.1.0`,
+  `homeassistant 0.1.0`, `dumbassistant 0.2.0`, `marusia 0.1.0`, `cadence 0.1.0`,
+  `airplay 0.1.0`, `dev.hardware 0.1.0` (native), `dev.quickjs 0.1.0` (quickjs),
+  `dev.micropython 0.1.0` (micropython).
+- **Runs and runtime.** `capsulad -health` exit 0; `S99btctl.sh status` 0. Runs: clock,
+  marusia, airplay, homeassistant, pa, radio, radio.tuner all `APP_READY`, single runs. The
+  four native runs' `/proc/<pid>/maps` resolve
+  `/capsulad/lib/libcapsulad.so.1.0.0` with no `(deleted)` entry, so the restarted native apps
+  load the updated runtime. A safe smoke started `dev.quickjs` and `dev.micropython` to
+  `APP_READY` and stopped both; the non-dev run set was unchanged.
+- **Service restarts and recovery.** Three canonical service restarts were required by the
+  observed failures, not by a reboot: (1) the daemon/boot deploy's `-restart auto`; (2) a
+  recovery `S99btctl.sh restart` after the live apps attempt refused; (3) the final
+  apps + `-restart auto` that installed all twelve packages and started the full stack. The
+  first attempted live app install (`-restart never`) refused because the daemon restarts the
+  selected default assistant after a stop request (`org.capsulad.marusia … still running after
+  a stop request`); the deploy restored the previous app tree (`restore_rc=0`) and the
+  recovery restart returned health 0. The first apps space gate then refused because the old
+  `libcapsulad` inode was still mapped by the five running apps/hosts (`(deleted)` maps), leaving
+  12,849 KiB free and a 2,405 KiB projected final; stopping those replaced runs through the
+  documented app lifecycle freed the inode and raised free to 19,218 KiB. The standard
+  `-restart auto` apps deploy then installed all twelve packages with the daemon stopped and
+  performed the final restart; this is the deployment finding recorded below. The automation
+  now stages that stopped-daemon apps+restart path and stops the pinned replaced runs first, so
+  a re-run does not repeat the live `-restart never` attempt. It performs a read-only projected
+  free-space preflight before stopping any run (counting the pinned library and interpreter-host
+  files), verifies the stopped-daemon stage script is fully staged and started, polls the actual
+  free space after the stops (the selected assistant may restart on the new lib), and restores
+  the baseline through the service and missing app starts on a start, gate or timeout failure.
+  Stage logs are cleared with a verified size check before each start, the timeout branch always
+  restarts the service, post-stage verification failures run the same baseline recovery, and a
+  baseline-restore failure is a hard error rather than a warning. A deleted native-lib map or a
+  non-ready airplay run forces the restart even when the five baseline apps are ready (airplay
+  is start_on_boot but not part of `baseline_ready`); ring/marker/settings failures with a ready
+  baseline do not restart.
+- **Startup ring.** The final boot's per-boot context (`/run/startup-context.txt`, 144 lines)
+  contains exactly one `startup ring introduction on light.ring.main (capture=…)` at
+  `2026-11-17T22:38:11.747788107Z` and one
+  `startup ring complete; selected ring baseline restored` at
+  `22:38:14.314677206Z` (2.567 s log interval; the source/simulator measured 1.924 s — the
+  device interval includes setup, acquisition and release scheduling). The whole-log trace
+  retains the earlier boots' ring lines (22:32, 22:35, 22:38) while the per-boot context has
+  only the final one. The physical fade-in/out is **not** optically measured; the evidence is
+  the daemon's presentation lifecycle and the reviewed backend/simulator proof.
+- **Startup audio (digital monitor only).** The final restart was captured on
+  `alsa_playback.monitor` and `master.monitor` (16 kHz mono, gzip) with no microphone
+  recording. The master monitor has a **10.800 s** non-silent span (peak 890) and the ALSA
+  monitor a 4.500 s maximum span (peak 914) for the authored 11.413 s jingle. The captures were
+  stopped by terminating `parec` so gzip wrote a valid trailer; the remaining file is 314 s of
+  silence after the jingle. This is digital output evidence, not an acoustic or optical
+  measurement.
+- **Settings/user state.** The four pre-existing app-settings files are byte-identical
+  (`capsulad.clock 66d8345f…`, `capsulad.ring f9c799ae…`, `org.capsulad.dumbassistant
+  c3726d99…`, `org.capsulad.marusia f4190f1b…`); installing the new apps seeded
+  new app-settings for `org.capsulad.airplay`, `dev.quickjs`, `dev.micropython` and
+  `org.capsulad.radio`, and advanced the global settings revision 3800 -> 3808.
+  The selected default assistant, display provider, startup-sound switch and
+  `startup-sound.played` marker are unchanged. The master volume was moved 19.7 % -> 10 % by
+  logged **physical panel volume key presses** (`key volume_down/up` at 22:36:07–22:36:14 UTC),
+  not by the deployment; it was then restored to the pre-deployment value through the public
+  `AudioService.SetMasterVolume` (`0.1968503892` float32, CLI reports 19 %), advancing the
+  revision to 3809. The four pre-existing app-settings and all provider/boot choices are
+  unchanged. The host driver therefore checks the pre-existing app-settings hashes and the
+  user-visible settings other than volume/revision; the whole `settings.json` hash is not
+  expected to match (app registration advances the revision, and new app-settings are seeded).
+- **Storage.** `/data` free after the deployment was 8,649 KiB, `/run` was returned to 44 KiB
+  (task staging/backups removed after evidence capture), `/tmp` returned to its pre-deployment
+  baseline, and `MemAvailable` was 89,940 kB. The task-created `/tmp` shards, `/run` logs,
+  captures, settings snapshots, backups and helpers were removed after evidence capture (the
+  observed 44 KiB `/run` result followed the manual cleanup of this run; the driver now removes
+  those `/run` probes automatically); no user file or log under `/data` was deleted or truncated.
+- **Remaining gates.** The visible ring fade/gamma and the actual acoustic output are not
+  measured on this unit; the double-rotation per-boot-boot trace edge remains theoretically
+  possible (the whole-log lifecycle section still retains the lines); and the master-volume
+  restoration used the public float32 API, so the stored value is the float32 rounding of the
+  pre-deployment 19.685 % (the CLI and effective level are 19 %). Deployment finding for future
+  changes: replacing a package set that includes the selected assistant requires the daemon to
+  be stopped (use `-restart auto` or a service stop); a live `-restart never` replacement can
+  race the assistant's automatic restart. A live `lib/` replacement also leaves the previous
+  library inode mapped by running apps until the next restart, so app-space accounting must
+  account for that pinned inode.
+
+### 2026-11-18 deployment: Now Playing, AirPlay discovery, native Radio, Simon and app guides
+
+The updated ARM64 stack was staged over ADB and installed through `capsulad-cli deploy` and
+`S99btctl.sh`. The installed daemon (`0e8f808f…`), CLI (`61bef405…`), native runtime
+(`401d35e5…`), runtime metadata, script hosts and boot hook matched the build. All 48 files
+from the 11 app packages matched their archives. The app update exited 0 and its canonical
+restart passed `capsulad -health` and the boot-service status check.
+
+- Native Internet Radio 0.2.0 reached `APP_READY` at startup with autoplay still off. The
+  retired tuner was stopped and uninstalled; no package or run remains. Simon 1.1.0 passed a
+  launch/stop smoke and left the existing run set unchanged. The bundled guides were installed;
+  the browser guide route and Now Playing interaction were not exercised on the device.
+- Avahi resolved both `_airplay._tcp` and `_raop._tcp` to `capsula.local:7000`, repairing
+  the previously missing RAOP record. AirPlay advertised a different device ID after deployment
+  despite unchanged saved values. Pairing impact and a real sender session remain unverified.
+- Global settings, Radio preferences, assets and wakeword data matched the pre-deployment
+  snapshot. Only AirPlay's settings revision advanced; every saved value matched.
+- A large temporary backup caused transient allocation failures before any install. Removing
+  that staging restored the original service without a restart. The unit later rebooted
+  unexpectedly during the core update; the stage log was lost and the cause is unconfirmed.
+  Post-reboot hashes and health verified the complete core installation, not a clean core
+  deploy exit. The subsequent app update did not reboot the unit. Temporary staging was
+  removed; `/data` had 8,653 KiB free at the end.
+
+Detailed checked hashes are in `build/candidate-20261118T112139Z/DEPLOY-EVIDENCE-20261118.md`;
+local rollback artifacts are in `build/deploy-20261118T1925Z/`. No media was sent to the
+speaker, and no acoustic or optical evidence was collected.
+
+## 2026-11-18 current-change evidence: AirPlay advertisement, Simon 1.1.0, radio and app guides
+
+This section records evidence for the current working tree only. It is not a deployment record,
+and its parts sit at different proof levels. A container or a simulator is host infrastructure,
+not the speaker; read the level stated in each part.
+
+### AirPlay: field diagnosis and independent responder
+
+- **Field evidence (read-only device logs).** On the Capsula Mini rev 4 the old production stack
+  published `_airplay._tcp` and it resolved to `capsula.local` / `192.168.1.50` (and the unit's
+  IPv6 address); `OPTIONS * RTSP/1.0` on TCP 7000 answered `200 OK` with
+  `Server: AirTunes/366.0`. `_raop._tcp` was never advertised: `avahi-browse -rt _raop._tcp` on
+  the unit and `dns-sd -B _raop._tcp` on the Mac both omitted the speaker, while the daemon log
+  recorded `publish _raop._tcp: … add service: Invalid record` wrapped as "mDNS responder is not
+  running". The app's `pk` TXT item was the base64 PKCS#1 RSA public key (about 364 bytes, item
+  about 367), and Avahi rejects a TXT character-string over 255 bytes with
+  `org.freedesktop.Avahi.InvalidRecordError`; this was an Avahi rejection, not daemon
+  pre-validation. A later post-session `_airplay` `Local name collision` was diagnosed as an
+  application-side concurrent-publish race: one successful `Unpublish` was followed ~30 ms later
+  by an `AddService` collision, and a different publish call succeeded about 1 s later (the app
+  has no retry). The fix uses the 32-byte ed25519 `pk` as 64 lowercase hex on `_raop` (with
+  `am`, `ft`, `sf`), caps the `_airplay` instance at 63 UTF-8 bytes, projects the RAOP instance
+  rune-safely after its 12-hex `@` prefix, pre-validates each TXT item at 255 bytes, maps invalid
+  records to `INVALID_ARGUMENT` and collisions to `ALREADY_EXISTS`, serialises publish/close, and
+  packages the app root `README.md`. `apps/airplay/README.md` documents the resulting wire
+  contract; this page records only what was observed.
+
+- **Independent responder (real Avahi in a container).** A cross-compiled `linux/arm64` test
+  binary ran in `debian:bullseye` against a real `avahi-daemon` 0.8 and system D-Bus.
+  `avahi-browse -rt _raop._tcp` then listed and resolved the new record set: instance
+  `AABBCCDDEEFF@Scratch Speaker`, port 7001, TXT `am=… pk=<64 hex> ft=… sf=… cn=0,1,2 et=0,1
+  md=0,1,2 tp=UDP,TCP vn=65537 vs=366.0 da=true`. Sending a 364-byte `pk` directly to Avahi still
+  produced `add service: Invalid record`, mapped to `ErrInvalidRequest`; a duplicate instance
+  produced a real collision, mapped to `ErrNameInUse`. So the old production build did not
+  announce `_raop`, while the new container build publishes and resolves it. This is a genuine
+  Avahi D-Bus responder, not a fake or a host loopback; it is still not the speaker.
+
+- **Independent sender (loopback).** `TestPyatvFullFlowStreamsPCM` with pyatv 0.18.0 passed again
+  on the current tree: the receiver delivered **611,072 bytes of PCM** to the framework sink.
+  This is the legacy RAOP path over loopback. It is neither an Apple sender on the user's LAN nor
+  proof that the fixed advertisement is accepted by one.
+
+- **Final host checks.** The final `-race` run of the advertisement ownership, session-state and
+  RAOP-label tests passed on the real files. A final real-tree Docker run,
+  `go test ./internal/discovery -run 'TestAvahi|TestNormalizeServiceTXTItemLimit'`, also passed;
+  that removes the earlier overlay caveat for the discovery package (the container proof above
+  used overlays for a missing `strings` import and for an unrelated `media_watch.go` compile
+  error, and remains an independent result).
+- **Open and not claimed.** No rebuilt AirPlay package has been deployed to the speaker, and no
+  Apple sender, acoustic output or post-fix device advertisement is verified. The 611,072-byte
+  pyatv loopback is a sender-library proof only.
+
+### Simon Says 1.1.0 (isolated simulator)
+
+- `node --test apps/simon/test/*.test.mjs` reported **31/31 passing** (`tests 31`, `pass 31`,
+  `fail 0`). This supersedes the earlier 22/22 contract count recorded for `simon 1.0.0`; that
+  older result stays as history for that package, not for 1.1.0.
+- `sh apps/simon/build.sh` built `org.capsulad.simon-1.1.0.tar.gz` with the root `README.md`,
+  which was installed in an isolated simulator (fresh data directory, simulator platform) and
+  started to `APP_READY`.
+- On that random run the simulator backend received north-side red frames on ring pixels **0, 1
+  and 11**; injecting the corresponding north panel key through the simulator admin advanced the
+  score display to `0001`. Holding the centre for **900 ms** and releasing restored the
+  configured Clock and Ring baselines, released the panel capture and left no Simon run. The app
+  log confirmed the playback stream closed.
+- Limits: the ring/segment frames are backend submission, not emitted light; the PCM tone shape
+  asserted by the host suite is host fixture evidence only, not an acoustic measurement. No
+  device, optical or listening check is recorded here.
+
+### Internet Radio (simulator browser and nested suite)
+
+- **Build/install and guard.** `org.capsulad.radio-0.2.0.tar.gz` (sha256
+  `ca4334b319032fe8bdd29e398448d1ee02186302d8e9894ff1faec67fad7cf4c`) was built from
+  `apps/radio`, installed live after stopping the old run (`reinstalled org.capsulad.radio
+  (0.2.0) … the daemon reloaded its application registry`), and started once to `APP_READY`;
+  logs showed `radio ready` and
+  `settings ready revision=6 stations=2 station=2 autoplay=false`. The scoped scratch bundle
+  gate refused the old tuner directory/archive as intended.
+- **Nested suite and dependency boundary.** `CGO_ENABLED=1 go test -race -count=1 -ldflags
+  '-linkmode=external' ./...` passed from `apps/radio`. For both `darwin/arm64` and
+  `linux/arm64`, `go list -deps ./cmd/radio` excluded `net/http`, `crypto/tls` and gRPC.
+- **Browser acceptance (PASS).** In one Chrome document against the authenticated simulator,
+  idle Internet Radio was `Running` with Now Playing `Nothing is playing.` An external
+  `capsulad-cli app start … station=1` made `North tone` appear without a reload
+  (`performance.timeOrigin` unchanged); the named picker then selected `East tone`, switching
+  Now Playing live on the same document (`revision 9 station=2`); Pause changed it to
+  `Nothing is playing.` with the pause control removed and the log `state paused …/east.mp3`.
+  Closing and reopening the detail kept `Selected: 2 — East tone` with option 2
+  `aria-selected="true"`, so the station choice survived the reopen.
+- **Fast local origin / prior queue-full.** The final origin sustained playback for about
+  **29.6 s** (`17:48:48.337` → `17:49:17.904`) to a finite EOF, reconnected (`reconnect 1/3`),
+  and a second EOF/reconnect cycle also succeeded while the UI stayed on the station.
+  Queue-full occurrences in the final run were **0**; the earlier
+  `playback write failed (13): outbound call queue is full` is superseded by this fix, not an
+  open gate.
+- **Settings follow-up (PASS, rebuilt 0.2.0).** The follow-up used a rebuilt
+  `org.capsulad.radio-0.2.0.tar.gz` with sha256
+  `3955d538552d50c23edeb340528ffa0ba4d24ad84c56e0565c993cbc7db21cce`; the earlier acceptance
+  above used `ca4334b3…`, so both artifacts are recorded. It was installed live after stopping
+  the previous run and started once to `APP_READY` (`revision=11 stations=2 station=1`), then
+  `app start … station=2` made `East fast` active. In the real settings iframe, shortening the
+  textarea from the two-station list to the one-station `North fast` and clicking Save reported
+  `Saved.` while the app setting **stayed `station 2`** (`revision 13`: `stations=1`,
+  `station=2`); the picker showed `Selected station 2 is not in the list. Pick one above.` with
+  class `notice err`, Now Playing removed the playing row live on the same document
+  (`Nothing is playing.`, no reload), and the app log recorded
+  `error: station 2 is not in the 1 configured stations`. An unsaved
+  `Draft | http://127.0.0.1:18766/east.mp3` textarea survived autoplay toggled
+  `false → true → false` exactly as typed (each update `Saved.`), while the daemon stayed
+  `revision 15` with the one-station list, `station=2`, `autoplay=false`: the draft was never
+  persisted. Clicking picker `North fast` selected `1 — North fast`; closing the detail and
+  using Actions → Play logged `session 2 playing station="North fast"` and made Now Playing
+  appear live on the same document (`revision 16 station=1`), then cleanup paused it.
+- **Scope of that follow-up.** It was a settings-document-only change, so the pacing proof was
+  not rerun and no active switch/Pause retest beyond the shrink-stop and recovery-Play paths was
+  performed. That pacing result remains evidence for the same radio logic, not a separate
+  rerun. The durable UI test `cd web && node --test test/radio-settings.test.mjs` passed **2/2**:
+  it runs the packaged script with the actual injected bridge, covers an accepted older save
+  plus a newer rejected save and a persisted value repeated before the older commit, and
+  confirms only the matching `requestId` can acknowledge a draft — artificial-ordering test
+  evidence, not a browser or physical result.
+- **Limits.** These are backend and browser evidence on the simulator; no sound was measured
+  and no device or real station was used.
+
+### App guide
+
+- The Web UI guide-render suite (`web/test/guide-render.test.mjs`) passed **4/4** node tests, and
+  the Go race run over `internal/manifest` and `internal/appui` passed its guide read and
+  built-in-guide tests.
+- A subsequent coordinated race run over `./internal/webui` and `./internal/daemon` with
+  `-run 'TestGuide|TestOverview|TestFrameworkMediaCommand|TestDiscovery(Publish|Auth|Browse)|TestBluetoothMedia'`
+  passed in both packages, covering the guide access/usability handlers plus the Now Playing and
+  Bluetooth snapshot/stream checks; `npm run build` passed and rebuilt the embedded Web UI.
+- In Chrome against the rebuilt authenticated simulator, Apps → stopped Simon → **User guide**
+  displayed "How to play" and "392 Hz", and **Back** returned to the application; the built-in
+  Clock guide displayed "Stopwatch".
+- Archive checks found a root `README.md` in each package built here: Simon, Radio, PA, Home
+  Assistant, AirPlay (its host-only package override), DumbAssistant, Marusia, `dev.hardware`,
+  `dev.quickjs` and `dev.micropython`. Cadence was packaged in the cached arm64 Bullseye
+  container with the glibc loader and also contained `README.md`. Built-in guide embedding was
+  covered independently, and authentication plus rendering were verified in real Chrome.
+- These remain simulator/host/browser results; no device run of the guide path is recorded here.
+
 ## Verified only on the simulator or host
 
 - Complete virtual backend (segment display, RGB ring, contacts, keys and audio). The Go
@@ -258,6 +525,92 @@ staged.
   [Known pre-existing failures](#known-pre-existing-failures)); the clean race run reported
   **0 data races**. `make test-sdk` exited 0; its per-suite counts and the gated Go SDK result
   (37 pass, 0 fail, 1 skip) are recorded in the networking bullet below.
+- **Startup ring introduction (simulator backend, 2026-11-18).** Proof level: backend
+  submission — frames the output loop wrote into the simulator's ring, not emitted light.
+  `go test -race -ldflags '-linkmode=external' -run 'TestStartup' -v ./internal/daemon`
+  passed (`ok`, 18.466 s) with
+  `TestStartupRingGeometryFollowsRingCapabilities`,
+  `TestStartupRingFadesAndRestoresBaseline`,
+  `TestStartupRingFollowsStartupCueDecision` (installation-boot, explicit-no-provider and
+  `startup_sound_enabled` sub-cases), `TestStartupRingStaleFadeCannotTouchNewerOwner`,
+  `TestStartupRingRendersBeforeSlowBootApps`, `TestStartupCueMarkerConsumesTheIntroduction` and
+  `TestStartupRingReleasedOnShutdown`.
+  The ordering regression blocks the only boot app's `Launch` on `pkgMu` (explicit no-provider
+  settings keep `applySettings` from launching anything earlier): the introduction's frames still
+  reached the backend while the boot was blocked, with a near-dark minimum blue level and the full
+  217 peak. Reverting to the old order (`go d.outputLoop()` after `startBootApps`) made that test
+  fail with `the introduction produced no physical frame while boot app startup was blocked`; the
+  writer now starts before `maybePlayStartupCue`. The marker test waits for
+  `startup-sound.played` to appear only after the cue reached the simulator mixer, then confirms a
+  second decision with the off-by-default setting starts no introduction; the retry side is the
+  documented marker intent (a failed audio open does not consume the one-shot cue) and remains
+  pinned by `TestStartupCueFollowsMarkerAndSetting`. The shutdown test cancels the daemon with an
+  active introduction and asserts the capture/presentation are released and the capture is no
+  longer selected. The geometry test covers 39- and 48-pixel rings, which now keep the preset's
+  12-pixel top arc instead of silently dropping the introduction.
+  The explicit-no-provider sub-case forces the installation cue decision while
+  `light.ring.main` is an explicit none: the transient introduction still took the ring (as the
+  muted-microphone indication does), released at its bounded lifetime, and left
+  `selected_presentation`/`selected_capture_id` empty with an all-zero backend frame — the durable
+  blank baseline survived. `TestExplicitNoRingProviderSurvivesRestart` and
+  `TestFrameworkOwnedClockStartsWithNoProviderSelections` still pass; the restart fixture now
+  records the startup marker so it asserts the persisted baseline after a later boot rather than
+  the one-time installation indication, and `TestOutputClearsUnownedDisplayAndRing` passes.
+  The live simulator daemon (`-platform simulator`, fresh data directory, `-output-trace`,
+  `-dev-admin`, `/state` polled about every 60 ms) wrote the derived four-pixel top run
+  (pixel count 12 → count 4, pixel 0 = top): the first submitted frame was
+  `{2,10,12}`-per-pixel (near dark), the fade-in sampled 119 → 155 → 180 → 216 → 217 on the
+  authored blue channel (`#28AFD9`), the full run held under `brightness=0.8`, and the
+  fade-out steps measured 181 → 145 → 109 → 72 → 36, each one sixth of the peak. The
+  introduction logged at `21:05:56.132` and `startup ring complete; selected ring baseline
+  restored` at `21:05:58.056` (1.924 s), after which `light.ring.main` selected
+  `capsulad.ring` with no capture and the breathe baseline was lit again on all 12 pixels —
+  no forced black frame. A post-ordering-fix run of the final code reproduced it: first submitted
+  frame `{2,10,13}`-per-pixel, sampled blue 143 → 179 → 216 → 217, tail 181 → 145 → 72 → 36 → 0,
+  introduction `22:07:16.697` → `startup ring complete; selected ring baseline restored`
+  `22:07:18.623` (1.926 s), then the breathe baseline lit all 12 pixels again. A second start on
+  the same data directory (marker present,
+  `startup_sound_enabled` false) logged no `startup ring` line and left the ring on
+  `capsulad.ring`/`default_baseline` with no capture. A third run reproduced the deployed unit's
+  persisted shape — marker present, `startup_sound_enabled` true, `default_app_by_resource`
+  holding only `display.segment.front` and no ring key, so `capsulad.ring` is not a run — and the
+  introduction still appeared over the unowned ring: 4/12 pixels lit, sampled blue levels
+  144 → 179 → 203 → 217, then 145 → 109 → 72 → 0; log
+  `21:14:26.899` → `startup ring complete; selected ring baseline restored` at `21:14:28.824`
+  (1.925 s), after which `light.ring.main` had empty `selected_app_id`/`selected_capture_id` and an
+  all-zero frame. The transient indication therefore reaches a unit that never selected a ring
+  provider while the durable blank baseline survives. The full
+  `go test -ldflags '-linkmode=external' ./internal/daemon` package run completed with only the
+  documented environmental `TestDumbAssistantEndsAfterSpeechOverColoredRoom` failure (the same
+  failure the behavior document records for this host), so the boot-time capture added no other
+  package regression. Not observed here: emitted light,
+  gamma/brightness as seen, real 12-LED timing, and the device's post-deployment boot order;
+  those remain gates of the deployment task.
+- **App and bundle ABI gates (host, 2026-11-18).** Two release-pipeline blockers found while
+  preparing the device bundle were fixed and narrowly proved without compiling the daemon.
+  (1) `make radio-tuner` failed after compiling because `apps/radio/tuner/build.sh` searched
+  `$OUT/$APP_ID` with `find -maxdepth 1 -perm -u+x`, which never sees the manifest's
+  `bin/tuner`; the command exited 2 with `error: no staged executable to ABI-check`. The script
+  now ABI-checks that explicit path. With `GOOS=linux GOARCH=arm64
+  DEPLOY_PLATFORM=rockchip-stock TARGET_ABI=linux-gnu CC=<aarch64 wrapper>
+  CAPSULAD_NATIVE_LIB_DIR=build/artifacts-20261118/lib
+  CAPSULAD_CLI=build/artifacts-20261118/bin/capsulad-cli-host make radio-tuner`, the same
+  command exited 0, printed `interpreter=/lib/ld-linux-aarch64.so.1`, and wrote
+  `org.capsulad.radio.tuner-0.1.0.tar.gz` (993,875 B) whose manifest declares
+  `runtime = "native"`, `path = "bin/tuner"`, `architecture = "aarch64"`, `abi = "linux-gnu"`.
+  (2) `make deploy-bundle` with `NATIVE_TARGET=aarch64-unknown-linux-gnu` rejected the three
+  script apps because the libc gate demanded an `abi` from every archive, while the QuickJS and
+  MicroPython manifests carry none. The bundle now applies the libc/ABI check only to
+  `runtime = "native"` archives, accepts QuickJS/MicroPython runtimes, and still refuses an
+  unknown runtime. Narrow proof (stub daemon and CLI, no Go compile):
+  `make -o capsulad -o capsulad-cli deploy-bundle BUNDLE_NATIVE=0 BUNDLE_DEVAPPS=1
+  GOOS=linux GOARCH=arm64 DEPLOY_PLATFORM=rockchip-stock
+  NATIVE_TARGET=aarch64-unknown-linux-gnu …` bundled all 12 archives (9 apps + 3 devapps);
+  a fabricated `org.capsulad.fakenative` archive (`runtime = "native"`, no `abi`) still failed
+  with `declares abi "", but rockchip-stock needs gnu`, and a `runtime = "wasm"` archive failed
+  with `declares runtime "wasm"; the rockchip-stock ABI gate needs native, quickjs or
+  micropython`. `sh tools/check-deploy-bundle.sh` still passes. Host proof only: the stub
+  daemon/CLI were shell scripts and no device executed these artifacts.
 - **Host builds and target compile (this macOS host, 2026-11-17).** `make daemon` produced
   `capsulad` 41,095,522 bytes and `capsulad-cli` 11,792,818 bytes (0.1.0-dev, SDK 0.5);
   `make native` produced `libcapsulad.1.dylib` 5,270,288 bytes with metadata ABI 1.0, which the
@@ -272,6 +625,86 @@ staged.
   is skipped on this host because the Rust target/core and the cross linker are not installed.
   `go mod tidy`, `gofmt` and `cargo fmt` reported no diff; two web builds were byte-identical
   and `npm test` passed 39/39.
+- **Deployment bundle CLI omission (host, 2026-11-18).** `sh tools/check-deploy-bundle.sh`
+  assembled both bundle modes from stub build outputs with the real `deploy-bundle` recipe
+  (no Go compile): the default output and tarball contained `capsulad`, `capsulad-cli` and
+  `boot/S99btctl.sh`; `BUNDLE_CLI=0` contained no `capsulad-cli`, a stale `capsulad-cli`
+  placed in the reused bundle directory was removed, and switching back to the default on the
+  same directory restored it. `make -n deploy-bundle` listed the
+  `./cmd/capsulad-cli` build and copy for the default, and neither for `BUNDLE_CLI=0`;
+  `BUNDLE_CLI=yes` failed before any recipe line with `BUNDLE_CLI must be 0 or 1, got 'yes'`.
+  `go test -ldflags '-linkmode=external' ./cmd/capsulad-cli -run
+  'TestDeployWithoutCLILeavesInstalledCLI' -count=1` passed (`ok`, 0.058 s): a daemon-only
+  bundle deployed over a data directory holding a sentinel `<data-dir>/capsulad-cli` left
+  that file byte-identical and printed no `cli:` plan line. These are host assembly and
+  deploy-logic proofs only; no adb push, tmpfs recovery, device deployment or on-device
+  `/data` measurement was performed. With the current CLI measured below, a CLI-free bundle
+  omits 8,781,976 B from the directory and about 3,233,000 B from the gzip tarball; `/data`
+  reclaims that only when no separately installed copy remains.
+- **CLI size build (host cross-compile, 2026-11-18).** The current `linux/arm64` release
+  artifact is 8,781,976 bytes (8.38 MiB) against the 11,993,240-byte (11.44 MiB) baseline:
+  −3,211,264 B (−3.06 MiB, 26.8%). `go version -m` records `-tags=grpcnotrace`,
+  `-trimpath=true`, `CGO_ENABLED=0`, `GOOS=linux`, `GOARCH=arm64`; `CGO_ENABLED=0` is the
+  Linux cross default, not a Makefile pin (ambient cgo is used otherwise). Its gzip sizes
+  (host GNU gzip `-n`, no stored name/time; these are implementation-dependent and vary by a
+  few bytes) are about 3,233,000 B at level 6 (`tar -czf`'s default compressor) versus about
+  4,348,500 B for the baseline, and about 3,219,000 B at `gzip -9` versus about 4,327,900 B.
+  The tag removes 7 dependencies for the documented
+  `GOOS=linux GOARCH=arm64 CGO_ENABLED=0` target (273 → 266; host `darwin` counts 275 → 268),
+  including
+  `golang.org/x/net/trace` and the template stack. The development admin path now uses
+  `http.NewRequest`/`http.ReadResponse` over `net.Dial` instead of `http.Client`;
+  `go test -ldflags '-linkmode=external' ./cmd/capsulad-cli -run 'TestDev|TestRunDev'` passed
+  10/10 (`ok`, 0.124 s) for chunked bodies, error statuses, request semantics, dial failure,
+  deadline, `/state` output and the key command, and the whole `cmd/capsulad-cli` package
+  passed. Against a real simulator daemon, `capsulad-cli dev state` was byte-identical to
+  `curl --unix-socket … /state` (2,660 B, chunked, no framing in the output) and key/wakeword
+  worked; a fake-UDS gRPC smoke returned correct `status`, `app list`, `app runs` and three
+  streamed `logs` records. This is the host cross-build; no device executed the artifact.
+- **Icon font subset and embedded dist (host, 2026-11-18).** `web/src/assets` now carries a
+  40,336-byte Material Symbols Rounded subset: 90 glyphs made of 30 icon ligatures, their 20
+  `.fill` alternates, `.notdef` and 39 ASCII components (space, period, underscore,
+  `digit_zero`–`digit_nine`, lowercase `a`–`z`; uppercase maps to the lowercase glyphs), with
+  FILL/GRAD/opsz/wght intact.
+  `icon-font.json` pins source package 0.48.3 and its SHA-256, the output SHA-256/size, the
+  glyph and fill lists, and the tool versions. `cd web && npm run check:icons` printed
+  `icon font ok: 30 icons (20 filled alternates), 90 glyphs, 40336 bytes (sha256 934d0bc5…)`;
+  `npm test` passed 56/56 with 0 skipped, run with `CAPSULAD_FONT_PYTHON` pointing at a venv
+  built from `scripts/requirements-fonts.txt` (fontTools 4.68.0); without that toolchain the
+  generator test skips with an explicit reason instead of passing silently. The suite covers
+  fontkit one-glyph shaping, the fill-alternate source-set helper, a test invoking the real
+  `checkIconFont()` gate, axes, the `fluorescent`-missing rejection, the full-family guard
+  (bare specifier, every `material-symbols/…` subpath, `require()`/dynamic `import()` and
+  `@font-face url()` forms, with the local subset still allowed), the self-closing `<Icon />`
+  and unclosed-tag rejections, commented-out template markup being ignored, the byte-identical
+  licence copies, and `build-icon-font.py --check --require no_such_material_symbol_glyph`
+  exiting 1 with the name in the error while the font and manifest stay byte-identical
+  (the icon-font file alone: 13 tests; 1 more in `icon-font-generator.test.mjs`).
+  `npm run check:icons` also enforces the pinned package version and source/output hashes,
+  every declared glyph, and missing/stale `.fill` alternates against the source font.
+  `npm ci && npm run build` emitted one WOFF2 and reproduced the previous hashed filenames
+  (`index-80ec97ca.css`, `index-e83816c1.js`, `TimezonePicker-ba7a5968.js`). The checked-in
+  `internal/webui/dist` dropped from 13,907,163 to 985,202 bytes
+  (12,921,961 B = 12.32 MiB, 92.9%): the 972,557-byte asset tree plus
+  `LICENSE-material-symbols.txt` (11,358 B, Apache-2.0, sha256 cfc7749b…) and
+  `THIRD-PARTY.md` (1,287 B), copied from `web/public`, so the embedded tree a release ships
+  carries the font notice and serves it at `/LICENSE-material-symbols.txt` and
+  `/THIRD-PARTY.md`. `index-80ec97ca.css` references
+  `material-symbols-rounded-subset-934d0bc5.woff2`, the outlined/sharp families are gone, and
+  `TestEmbeddedDistServesFontLicense` fetches the licence through the SPA handler and
+  byte-compares it with the embedded copy.
+  A static `linux/arm64` daemon built with `CGO_ENABLED=0 -trimpath -ldflags '-s -w'` is
+  still 28,639,384 bytes — the same size as before the notice was embedded. Measured by
+  building with and without the two new dist files: the 12,645 B of notice text is absorbed by
+  existing section padding, so only the SHA-256 changes (`c6524993…` with the notice, against
+  the 41,549,976-byte baseline, −12,910,592 B = 12.31 MiB). Headless WebKit compared
+  all 30 names at FILL 0 and FILL 1 against the full 0.48.3 rounded font with ImageMagick
+  AE = 0 and RMSE = 0; a harness loading the real built CSS and subset rendered 30/30 spans,
+  byte-identical to the subset reference, and its server log requested only the subset CSS and
+  WOFF2. Retaining the `.fill` glyphs is required: GSUB FeatureVariations swaps in the filled
+  alternate at FILL ≥ 0.99, and a base-only subset renders differently. Not verified:
+  Chromium/Android WebView (the managed Chromium screenshot path hung), an on-device browser,
+  daemon boot/runtime, gzip/transfer size and a native glibc build.
 - **Simulator smoke (fresh data directory).** `auth init` completed, `capsulad -health`
   reported healthy, and `capsulad-cli status` named Capsula Mini with 6 backends and 7
   resources. The Web UI served `/` with 200 and `<title>capsulad</title>`, `/healthz` returned
