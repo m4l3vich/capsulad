@@ -200,7 +200,8 @@ func runDeploy(args []string, dataDir, socket string) error {
 
 PATH is a bundle directory or a .tar.gz containing:
   capsulad              daemon binary (installed as <data-dir>/capsulad, 0755)
-  capsulad-cli          CLI binary (installed as <data-dir>/capsulad-cli, 0755)
+  capsulad-cli          optional CLI binary (present in the default bundle, omitted
+                        by BUNDLE_CLI=0; installed as <data-dir>/capsulad-cli, 0755)
   lib/                  shared native runtime and headers (replaces managed files)
   apps/*.tar.gz         application packages (installed or atomically updated)
   boot/%s       boot hook (installed as -init-script when present)

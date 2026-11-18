@@ -16,9 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -152,12 +150,15 @@ The bundle is staged under the temporary directory (or -staging), never inside
 the data directory and on the data filesystem only with room for the largest staged tree;
 the data partition is checked for the space the binary writes cannot free themselves
 before the daemon is stopped.
-A deployment bundle contains capsulad, capsulad-cli, lib/, apps/ and boot/%s;
-unknown top-level entries are reported and ignored. A restarting deployment stops the
-daemon first, installs with nothing running, then restarts it. Binaries are installed as
-<data-dir>/capsulad and <data-dir>/capsulad-cli (0755), lib/ as <data-dir>/lib and
-apps/ under <data-dir>/apps; the boot hook is installed only when the bundle
-carries it and the daemon is restarted.
+A deployment bundle contains capsulad, lib/, apps/ and boot/%s, and may also
+carry capsulad-cli: the default "make deploy-bundle" includes it, while
+BUNDLE_CLI=0 omits it. Unknown top-level entries are reported and ignored. A
+restarting deployment stops the daemon first, installs with nothing running,
+then restarts it. capsulad is installed as <data-dir>/capsulad (0755) and a
+bundled CLI as <data-dir>/capsulad-cli (0755); a CLI-free bundle leaves a
+separately installed CLI untouched, neither removed nor updated. lib/ is
+installed as <data-dir>/lib and apps/ under <data-dir>/apps; the boot hook is
+installed only when the bundle carries it and the daemon is restarted.
 Certificate flags: -hostname H, -ip IP (repeatable), -days N. Security store default: <data-dir>/security.
 The Web UI uses self-signed TLS; browsers will warn until the fingerprint is trusted.
 `, bootHookName)
@@ -946,12 +947,6 @@ func runDev(args []string, dataDir string) error {
 		return fmt.Errorf("usage: capsulad-cli dev <wakeword|gesture|key|raw|state>")
 	}
 	sock := filepath.Join(resolveDataDir(dataDir), "run", "dev.sock")
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock)
-		},
-	}, Timeout: 3 * time.Second}
 	sub := args[0]
 	var method, path string
 	var body any
@@ -989,21 +984,14 @@ func runDev(args []string, dataDir string) error {
 	default:
 		return fmt.Errorf("unknown dev command %q", sub)
 	}
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		raw, _ := json.Marshal(body)
-		reader = strings.NewReader(string(raw))
+		payload, _ = json.Marshal(body)
 	}
-	req, err := http.NewRequest(method, "http://capsulad"+path, reader)
+	out, err := devExchange(context.Background(), sock, method, path, payload)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("dev admin socket %s: %w", sock, err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	fmt.Println(strings.TrimSpace(string(raw)))
+	fmt.Println(out)
 	return nil
 }

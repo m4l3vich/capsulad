@@ -1223,6 +1223,40 @@ func TestDeployStopsInstallsAndRestarts(t *testing.T) {
 	}
 }
 
+// A bundle may omit capsulad-cli. The deployer then installs the daemon and
+// leaves any separately installed recovery CLI exactly as it was; it never
+// removes a file the bundle did not carry.
+func TestDeployWithoutCLILeavesInstalledCLI(t *testing.T) {
+	sameFilesystemHook(t, false)
+	dataDir := t.TempDir()
+	writeTestFile(t, dataDir, daemonBinaryName, "#!/bin/sh\n# old daemon\n", 0o755)
+	const installedCLI = "#!/bin/sh\n# separately installed recovery CLI\n"
+	writeTestFile(t, dataDir, cliBinaryName, installedCLI, 0o755)
+
+	initScript := filepath.Join(t.TempDir(), bootHookName)
+	writeTestFile(t, filepath.Dir(initScript), bootHookName, "#!/bin/sh\nexit 0\n", 0o755)
+
+	bundle := t.TempDir()
+	writeTestFile(t, bundle, daemonBinaryName, deployFakeScript, 0o755)
+
+	out, err := captureStdout(t, func() error {
+		return runDeploy([]string{bundle, "-init-script", initScript}, dataDir, "")
+	})
+	if err != nil {
+		t.Fatalf("deploy: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "cli:") {
+		t.Fatalf("CLI-free deployment planned a CLI install:\n%s", out)
+	}
+	if want := "installed " + filepath.Join(dataDir, cliBinaryName); strings.Contains(out, want) {
+		t.Fatalf("CLI-free deployment reported %q:\n%s", want, out)
+	}
+	body, err := os.ReadFile(filepath.Join(dataDir, cliBinaryName))
+	if err != nil || string(body) != installedCLI {
+		t.Fatalf("installed CLI = %q, %v; want it untouched", body, err)
+	}
+}
+
 // Staging lives under the temporary directory and honors -staging; the plan
 // reports it so an operator can see where the space is needed.
 func TestDeployStagesOutsideTheDataDirectory(t *testing.T) {
