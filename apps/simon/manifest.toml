@@ -1,7 +1,7 @@
 id = "org.capsulad.simon"
 name = "Simon Says"
-version = "1.0.0"
-description = "Memory game on the Capsula Mini panel: repeat the segment sequence with the four side keys; hold the unmarked centre to exit."
+version = "1.1.0"
+description = "Colour-and-tone memory game on the Capsula Mini: repeat the growing LED-ring sequence with the four side keys; hold the unmarked centre to exit."
 background = false
 start_on_boot = false
 restart_on_failure = false

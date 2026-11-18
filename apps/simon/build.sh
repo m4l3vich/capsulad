@@ -6,9 +6,9 @@
 #   PACKAGE=0 sh apps/simon/build.sh          # stage the directory, write no archive
 #   CAPSULAD_CLI=build/bin/capsulad-cli sh apps/simon/build.sh
 #
-# The package directory contains only manifest.toml and main.js: the test suite
-# stays out of the installed artifact. Packaging runs the repository CLI, which
-# validates the manifest and the artifact limits.
+# The package directory contains manifest.toml, main.js and the app's root
+# README.md; the test suite stays out of the installed artifact. Packaging runs
+# the repository CLI, which validates the manifest and the artifact limits.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -29,6 +29,7 @@ esac
 
 [ -f "$HERE/manifest.toml" ] || die "missing $HERE/manifest.toml"
 [ -f "$HERE/main.js" ] || die "missing $HERE/main.js"
+[ -f "$HERE/README.md" ] || die "missing $HERE/README.md"
 
 if [ "$PACKAGE" = "1" ]; then
   [ -x "$CLI" ] ||
@@ -38,7 +39,7 @@ fi
 rm -rf "$STAGE"
 rm -f "$OUT/$APP_ID"-*.tar.gz
 mkdir -p "$STAGE"
-cp "$HERE/manifest.toml" "$HERE/main.js" "$STAGE/"
+cp "$HERE/manifest.toml" "$HERE/main.js" "$HERE/README.md" "$STAGE/"
 say "simon: staged $STAGE"
 
 if [ "$PACKAGE" = "1" ]; then
