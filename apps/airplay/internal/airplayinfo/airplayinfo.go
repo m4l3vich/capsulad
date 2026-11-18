@@ -170,11 +170,11 @@ type Config struct {
 	OutputLatencyMicros uint64
 	// PairingLTPK is the accessory's ed25519 long-term public key, the
 	// document's `pk` data (32 bytes; rtsp.c:1202-1203). /info and the event
-	// channel carry the key as data; the TXT records carry the same key as text,
-	// which this application base64-encodes (advertise.go advertiseTXT) where
-	// the reference writes lowercase hex (shairport.c:1984-1991) — the caller
-	// supplies the `pk` record, this package only frames it. The RAOP RSA key is
-	// a different key and does not belong here.
+	// channel carry the key as data; the TXT records carry the same key as
+	// lowercase hex (advertise.go advertiseTXT and advertiseRAOPTXT), matching
+	// the reference (shairport.c:1984-1991) — the caller supplies the `pk`
+	// record, this package only frames it. The RAOP RSA key is a different key
+	// and does not belong here.
 	PairingLTPK []byte
 	// SenderAddress is the sender's "ip:port" for this connection. The document
 	// carries `senderAddress` only when it is non-empty: the reference formats

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -588,6 +589,36 @@ func newTestManager(t *testing.T) (*Manager, *fakeTransport, *fakeAdvertiser, *f
 	return mgr, transport, advertiser, ring, sink, private, pairingID
 }
 
+// TestRAOPInstanceNameFitsLabel pins the DNS-SD single-label projection: a
+// name that is valid for _airplay (63 bytes) leaves only 50 bytes after the
+// 12-hex device id and "@" in the _raop instance. The projection must stay a
+// valid UTF-8 prefix of the saved name rather than fail the advertisement.
+func TestRAOPInstanceNameFitsLabel(t *testing.T) {
+	names := []string{
+		"short",
+		strings.Repeat("a", 63),
+		strings.Repeat("ж", 31) + "a",  // 63 bytes, two-byte runes
+		strings.Repeat("🎛", 15) + "abc", // 63 bytes, four-byte runes
+	}
+	for _, name := range names {
+		got := raopInstanceName("aabbccddeeff", name)
+		if len(got) > maxServiceInstanceBytes {
+			t.Fatalf("instance %q is %d bytes, limit %d", got, len(got), maxServiceInstanceBytes)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("instance %q is not valid UTF-8", got)
+		}
+		const prefix = "AABBCCDDEEFF@"
+		if !strings.HasPrefix(got, prefix) {
+			t.Fatalf("instance %q lost the device-id prefix", got)
+		}
+		display := strings.TrimPrefix(got, prefix)
+		if !strings.HasPrefix(name, display) {
+			t.Fatalf("projected display %q is not a prefix of %q", display, name)
+		}
+	}
+}
+
 func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	mgr, transport, advertiser, ring, sink, clientKey, pairingID := newTestManager(t)
 	if err := mgr.Start(); err != nil {
@@ -605,8 +636,28 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	if advert.TXT["deviceid"] != "aabbccddeeff" || advert.TXT["features"] == "" {
 		t.Fatalf("advertisement TXT = %v", advert.TXT)
 	}
-	if _, ok := advertiser.find("_raop._tcp"); !ok {
+	raop, ok := advertiser.find("_raop._tcp")
+	if !ok {
 		t.Fatal("no _raop._tcp advertisement")
+	}
+	// The field failure: _raop carried the ~360-byte base64 RSA key, which is
+	// larger than one DNS TXT string, so Avahi rejected the whole record. It
+	// now carries the same 32-byte ed25519 key as _airplay, like the reference.
+	if raop.TXT["pk"] != advert.TXT["pk"] || len(raop.TXT["pk"]) != 64 {
+		t.Fatalf("_raop pk = %q, want the 64-hex _airplay key %q", raop.TXT["pk"], advert.TXT["pk"])
+	}
+	if raop.TXT["am"] != DefaultModel || raop.TXT["ft"] == "" || raop.TXT["sf"] == "" {
+		t.Fatalf("_raop TXT = %v", raop.TXT)
+	}
+	for _, record := range []Advert{advert, raop} {
+		if len(record.Instance) > maxServiceInstanceBytes {
+			t.Fatalf("%s instance is %d bytes, limit %d", record.Type, len(record.Instance), maxServiceInstanceBytes)
+		}
+		for key, value := range record.TXT {
+			if item := len(key) + 1 + len(value); item > 255 {
+				t.Fatalf("%s TXT %q is %d bytes, limit 255", record.Type, key, item)
+			}
+		}
 	}
 
 	conn, err := transport.dial(7000)

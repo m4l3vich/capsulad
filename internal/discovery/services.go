@@ -24,11 +24,22 @@ var ErrResponderNotReady = errors.New("mDNS responder is not running")
 // active; the registration or browser no longer exists.
 var ErrResponderLost = errors.New("mDNS responder stopped")
 
+// ErrNameInUse means the responder refused the instance name because it is
+// already registered on the link. The caller may retry with another instance
+// name; the daemon never renames a publication behind the app's back.
+var ErrNameInUse = errors.New("mDNS instance name is already in use")
+
 const (
 	maxInstanceBytes = 63
 	maxTXTRecords    = 16
 	maxTXTBytes      = 1024
-	defaultDomain    = "local"
+	// maxTXTItemBytes is one DNS TXT character-string. Avahi rejects a single
+	// "key=value" item longer than this with InvalidRecordError; DNS-SD allows
+	// splitting a long value across several strings, but Avahi's public
+	// service API cannot express that split, so the daemon must reject the
+	// request instead of letting the responder fail it.
+	maxTXTItemBytes = 255
+	defaultDomain   = "local"
 )
 
 // Service describes one service instance to advertise.
@@ -331,6 +342,11 @@ func normalizeTXT(txt map[string]string) (map[string]string, error) {
 		}
 		if !utf8.ValidString(key) || !utf8.ValidString(value) {
 			return nil, fmt.Errorf("%w: TXT record %q is not valid UTF-8", ErrInvalidRequest, key)
+		}
+		item := len(key) + 1 + len(value) // "key=value" is one DNS TXT string
+		if item > maxTXTItemBytes {
+			return nil, fmt.Errorf("%w: TXT record %q is %d bytes, limit %d per record",
+				ErrInvalidRequest, key, item, maxTXTItemBytes)
 		}
 		total += len(key) + len(value)
 		out[key] = value

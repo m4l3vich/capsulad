@@ -245,7 +245,7 @@ Request (`PublishServiceRequest`):
 | `serviceType` | string | Required. `_name._tcp` or `_name._udp`; the name starts with `_` and contains only letters, digits and hyphens (at most 63 bytes with the underscore). A trailing domain suffix (`_name._tcp.local.`) is accepted and must agree with `domain`. |
 | `instanceName` | string | Required display instance, at most **63** UTF-8 bytes, no NUL. |
 | `port` | uint32 | Required, `1..65535`. |
-| `txt` | map<string,string> | At most **16** records and **1024** bytes in total; keys are non-empty and values may be empty; no NUL in either. |
+| `txt` | map<string,string> | At most **16** records and **1024** bytes in total, and at most **255** bytes per `key=value` record; keys are non-empty and values may be empty; no NUL in either. The daemon rejects, rather than splits, an oversized item. |
 | `domain` | string | Empty means `local`. Labels are lowercased; letters, digits and hyphens only. |
 
 Response (`PublishServiceResponse`) carries `publicationId`, `serviceType`, `instanceName`,
@@ -259,10 +259,10 @@ choose it.
 - **`mdns_unpublish`** takes the publication id and removes that registration. Unpublishing an
   unknown id, or one owned by another run, returns `NOT_FOUND` — the daemon never reveals or
   removes another app's registration.
-- **Collisions.** Avahi may rename a colliding instance (for example by appending a suffix) to
-  keep one instance per name on the link. The response reports the values you requested; the
-  name actually on the wire can differ. Do not treat the returned instance name as proof of what
-  a browser will see.
+- **Collisions.** The daemon publishes with Avahi's no-rename policy. An instance name already
+  registered on the link fails the call with `ALREADY_EXISTS`; the daemon never renames it
+  behind the app's back, so choose another instance name, or withdraw the old publication and
+  retry after it clears.
 - **Exposure.** A publication is visible to the whole local link: service type, instance name,
   port, TXT records and the device's mDNS host name. Never put a credential, token or private
   identifier in a TXT record.
@@ -312,7 +312,7 @@ as `GRPC` (8) with the daemon's reason in the message (see [sdk.md](sdk.md#statu
 | `CAPSULAD_STATUS_NOT_CONNECTED` | 3 | `udp_send` without a peer on an unconnected socket. |
 | `CAPSULAD_STATUS_CLOSED` | 4 | The handle was released, or the write side was shut down. |
 | `CAPSULAD_STATUS_TRANSPORT` | 7 | DNS, TCP, TLS, socket or protocol failure; a listener bind failure such as a port already in use. |
-| `CAPSULAD_STATUS_GRPC` | 8 | An mDNS call ended with a non-OK gRPC status other than `INVALID_ARGUMENT`/`NOT_FOUND` — `FAILED_PRECONDITION` when there is no responder, `UNAVAILABLE` when it was lost. The message carries the reason. |
+| `CAPSULAD_STATUS_GRPC` | 8 | An mDNS call ended with a non-OK gRPC status other than `INVALID_ARGUMENT`/`NOT_FOUND` — `FAILED_PRECONDITION` when there is no responder, `ALREADY_EXISTS` when the instance name is taken, `UNAVAILABLE` when the responder was lost. The message carries the reason. |
 | `CAPSULAD_STATUS_END_OF_STREAM` | 9 | Clean stream end or the read side was shut down. |
 | `CAPSULAD_STATUS_TIMEOUT` | 10 | The bound elapsed; the handle is still usable. |
 | `CAPSULAD_STATUS_CANCELLED` | 11 | A close unblocked the operation, or the call was cancelled. |
@@ -346,7 +346,7 @@ use, permission) is `TRANSPORT`. Neither is ever downgraded to a best-effort bin
 | Multicast group receiver | UDP only, PTP ports 319/320, IPv4 multicast group, wildcard bind, receive-only |
 | Listeners per run | 16 |
 | mDNS instance | ≤63 UTF-8 bytes |
-| mDNS TXT | ≤16 records, ≤1024 bytes total |
+| mDNS TXT | ≤16 records, ≤1024 bytes total, ≤255 bytes per `key=value` record |
 | mDNS browse queue | 64 events per stream; overflow drops the oldest and logs it |
 | Control channel | one per run when the supervisor could create it; number in `CAPSULAD_CONTROL_FD` |
 

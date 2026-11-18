@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // DefaultSourceVersion is the AirPlay srcvers this receiver advertises.
@@ -93,7 +94,9 @@ func hexStatus(v uint64) string { return fmt.Sprintf("0x%x", v) }
 
 // advertiseTXT builds the `_airplay._tcp` record set. Only facts this receiver
 // can honour are published; the device key is the ed25519 long-term public key
-// from the HomeKit pairing identity, `pi` the pairing identifier.
+// from the HomeKit pairing identity, `pi` the pairing identifier. The `name`
+// value is the DNS-SD-projected instance label, so the TXT record and the
+// instance agree even when a long saved name was shortened for the label.
 func (m *Manager) advertiseTXT(active bool) map[string]string {
 	// One feature source for mDNS and /info: the PTP bits appear only when a
 	// clock exists, because the playout path consumes it.
@@ -120,7 +123,7 @@ func (m *Manager) advertiseTXT(active bool) map[string]string {
 		"acl":          "0",
 		"serialNumber": strings.ToUpper(m.cfg.DeviceID),
 		"gcgl":         "0",
-		"name":         m.cfg.Name,
+		"name":         m.instanceLabel(),
 		"manufacturer": "capsulad",
 		"sf":           hexStatus(status),
 	}
@@ -130,36 +133,68 @@ func (m *Manager) advertiseTXT(active bool) map[string]string {
 	return txt
 }
 
-// advertiseRAOPTXT builds the legacy `_raop._tcp` record set. The `pk` here is
-// the RSA public key the legacy key exchange uses, which is a different key and
-// format from the HomeKit `pk` above.
-func (m *Manager) advertiseRAOPTXT() map[string]string {
-	txt := map[string]string{
-		"ch": "2",       // 2 channels
-		"cn": cnList(),  // PCM, ALAC, and AAC-LC when a decoder is compiled in
-		"da": "true",    // digest authentication supported for the RTSP session
-		"et": "0,1",     // no encryption, RSA
-		"md": "0,1,2",   // text, artwork, progress metadata
-		"pw": "false",   // no password
-		"sv": "false",   // software volume is not used
-		"sr": "44100",   // default sample rate
-		"ss": "16",      // default sample size
+// advertiseRAOPTXT builds the `_raop._tcp` record set. AirPlay 2 receivers
+// publish the same 32-byte ed25519 long-term public key here as in
+// `_airplay._tcp` (64 hex characters), which is what the reference receiver
+// and every AirPlay 2 device on the link advertise. The legacy 2048-bit RSA
+// public key is not used: its base64 form is roughly 360 bytes, Avahi rejects
+// any single TXT item over 255 bytes with InvalidRecordError, and splitting a
+// key across TXT strings is not interoperable. A legacy sender therefore uses
+// the unencrypted (`et=0`) path; the RSA decryption code remains for an
+// ANNOUNCE that carries rsaaeskey.
+func (m *Manager) advertiseRAOPTXT(active bool) map[string]string {
+	status := uint64(0)
+	if active {
+		status |= StatusReceiverSessionIsOn
+	}
+	return map[string]string{
+		"am": m.cfg.Model,
+		"cn": cnList(), // PCM, ALAC, and AAC-LC when a decoder is compiled in
+		"da": "true",   // digest authentication supported for the RTSP session
+		"et": "0,1",    // no encryption, RSA
+		"ft": hexFeatures(m.advertisedFeatures()),
+		"md": "0,1,2", // text, artwork, progress metadata
+		"pk": hex.EncodeToString(m.store.Device.LTPK[:]),
+		"sf": hexStatus(status),
 		"tp": "UDP,TCP", // transports offered
 		"vn": "65537",   // protocol version 1.1
 		"vs": m.cfg.SourceVersion,
-		"pk": m.raop.PublicTXT,
 	}
-	return txt
 }
 
 // publish (re)publishes both advertisements. The AirPlay record is republished
 // whenever the session-active status flag changes, because senders read `sf`
 // from the advertisement rather than polling /info.
-func (m *Manager) publish(port int, active bool) error {
+//
+// Session lifecycle, the group-id update and the Re-advertise action can call
+// this concurrently. advMu makes one publish withdraw and replace both records
+// atomically, so two callers cannot both see the previous ids as empty and
+// race AddService for the same instance (which Avahi reports as a collision).
+//
+// The session-active flag is read from the lifecycle state here, under the
+// same m.mu critical section that takes the previous ids, rather than passed
+// in by an asynchronous caller. Lock acquisition order therefore decides only
+// which caller publishes next; it cannot make a delayed session-end caller
+// publish an inactive record after a newer session has already started.
+func (m *Manager) publish(port int) error {
+	m.advMu.Lock()
+	defer m.advMu.Unlock()
+	return m.publishLocked(port)
+}
+
+// publishLocked is publish while the caller holds advMu.
+func (m *Manager) publishLocked(port int) error {
 	if m.advertiser == nil {
 		return nil
 	}
 	m.mu.Lock()
+	if m.closed {
+		// Close owns the final state; a publish that queued behind it must not
+		// resurrect a record after the withdrawal.
+		m.mu.Unlock()
+		return nil
+	}
+	active := m.sessionActive
 	previousAirplay, previousRAOP := m.airplay, m.raopID
 	m.airplay, m.raopID = "", ""
 	m.mu.Unlock()
@@ -173,13 +208,14 @@ func (m *Manager) publish(port int, active bool) error {
 			m.logf("withdrawing the previous _raop._tcp record: %v", err)
 		}
 	}
-	name := m.cfg.Name
-	if name == "" {
-		name = "AirPlay Receiver"
-	}
+	// DNS-SD instances are one label, at most 63 bytes. The saved name is
+	// unchanged and /info still reports it in full; only the mDNS labels are
+	// projected, because Avahi refuses a longer instance instead of advertising
+	// it. The RAOP instance adds "<DEVICEID>@" in front, so its display part
+	// gets the smaller budget.
 	airplayID, err := m.advertiser.Publish(Advert{
 		Type:     "_airplay._tcp",
-		Instance: name,
+		Instance: m.instanceLabel(),
 		Port:     port,
 		TXT:      m.advertiseTXT(active),
 	})
@@ -188,9 +224,9 @@ func (m *Manager) publish(port int, active bool) error {
 	}
 	raopID, err := m.advertiser.Publish(Advert{
 		Type:     "_raop._tcp",
-		Instance: strings.ToUpper(m.cfg.DeviceID) + "@" + name,
+		Instance: raopInstanceName(m.cfg.DeviceID, m.displayName()),
 		Port:     port,
-		TXT:      m.advertiseRAOPTXT(),
+		TXT:      m.advertiseRAOPTXT(active),
 	})
 	m.mu.Lock()
 	m.airplay = airplayID
@@ -204,7 +240,11 @@ func (m *Manager) publish(port int, active bool) error {
 	return nil
 }
 
-func (m *Manager) republishStatus(active bool) {
+// republishStatus refreshes both records after a lifecycle or group-id change.
+// The active flag is not captured here: publish reads the current session state
+// under the lifecycle lock, so an older asynchronous caller cannot publish a
+// stale inactive record after a newer session started.
+func (m *Manager) republishStatus() {
 	m.mu.Lock()
 	listener := m.listener
 	closed := m.closed
@@ -213,7 +253,7 @@ func (m *Manager) republishStatus(active bool) {
 		return
 	}
 	_, port := listener.Addr()
-	if err := m.publish(port, active); err != nil {
+	if err := m.publish(port); err != nil {
 		m.logf("republishing mDNS: %v", err)
 	}
 }
@@ -229,6 +269,53 @@ func (m *Manager) advertisedPort() int {
 	}
 	_, port := listener.Addr()
 	return port
+}
+
+// maxServiceInstanceBytes is the DNS-SD instance label limit. Avahi rejects a
+// longer name with InvalidServiceNameError, so an advertisement cannot carry
+// an arbitrary saved display name.
+const maxServiceInstanceBytes = 63
+
+// displayName is the configured name with the published default applied.
+func (m *Manager) displayName() string {
+	if m.cfg.Name != "" {
+		return m.cfg.Name
+	}
+	return "AirPlay Receiver"
+}
+
+// instanceLabel is the display label the AirPlay record uses. It is a rune-safe
+// projection of the saved name; the setting and /info keep the full value.
+func (m *Manager) instanceLabel() string {
+	return truncateUTF8(m.displayName(), maxServiceInstanceBytes)
+}
+
+// truncateUTF8 returns the longest prefix of s that is at most max bytes and
+// ends on a rune boundary. It never splits a multi-byte character.
+func truncateUTF8(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
+
+// raopInstanceName builds the legacy RAOP "<DEVICEID>@<name>" instance within
+// the DNS-SD label limit. The device-id prefix is preserved so a RAOP sender
+// still sees the same identity; only the display part is shortened, on a rune
+// boundary.
+func raopInstanceName(deviceID, name string) string {
+	prefix := strings.ToUpper(deviceID) + "@"
+	budget := maxServiceInstanceBytes - len(prefix)
+	if budget < 0 {
+		return truncateUTF8(prefix, maxServiceInstanceBytes)
+	}
+	return prefix + truncateUTF8(name, budget)
 }
 
 func formatUint64(v uint64) string { return strconv.FormatUint(v, 10) }

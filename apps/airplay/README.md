@@ -31,7 +31,7 @@ standard library and `golang.org/x/crypto`.
 | AAC-ELD decoding | Decoder available, not advertised | FFmpeg's AAC decoder handles ELD, so the eight ELD format masks are accepted if a sender sends one. Upstream does **not** advertise any ELD format (its RTSP format list is AAC-LC only), and neither does this receiver, so no parity claim is made beyond the decoder. |
 | FairPlay handshake | Implemented, no DRM | `POST /fp-setup` serves the same fixed protocol replies as upstream (Shairport Sync `handle_fp_setup`), so a sender's handshake completes. Those constants decrypt nothing: FairPlay-encrypted content is not playable by either implementation. |
 | AirPlay 2 buffered stream (type 103) | Accepted for ALAC/PCM | TCP data channel with the 2-byte big-endian length prefix that includes its own two bytes. The advertised feature set does not claim buffered audio, so a sender only chooses it when its own policy does. |
-| Legacy RAOP (ANNOUNCE + SETUP + RTP) | Implemented, without the timing exchange | SDP parsing, `a=rsaaeskey` decrypted with the advertised RSA key (RSA-OAEP/SHA-1, the reference's mode), AES-128-CBC audio, UDP transport with receiver-chosen data **and control** ports (the control socket is drained; retransmission recovery is not implemented because no packet cache is kept), or interleaved TCP RTP (`$` frames on the control connection). The RAOP NTP-style timing exchange is not implemented and the SETUP reply advertises `timing_port=0`, so a legacy sender gets no receiver clock service. |
+| Legacy RAOP (ANNOUNCE + SETUP + RTP) | Implemented, without the timing exchange | SDP parsing, `a=rsaaeskey` decrypted with the receiver's RSA key (RSA-OAEP/SHA-1, the reference's mode), AES-128-CBC audio, UDP transport with receiver-chosen data **and control** ports (the control socket is drained; retransmission recovery is not implemented because no packet cache is kept), or interleaved TCP RTP (`$` frames on the control connection). The RAOP NTP-style timing exchange is not implemented and the SETUP reply advertises `timing_port=0`, so a legacy sender gets no receiver clock service. The RSA key is not published in `_raop._tcp` (see [advertisement records](#transport-and-lifecycle-details)), so a sender that takes the key from the TXT record cannot use the encrypted RSA path; the legacy SETUP response body still carries the RSA public key. |
 | Metadata | Implemented | DMAP text (title/artist/album/composer/genre), `progress:` position, cover art (JPEG/PNG) as a ring palette. |
 | Remote control | Implemented | The sender's event channel is bidirectional: the receiver posts `sendMediaRemoteCommand` (play 0, pause 1, next 4, previous 5) with the standard `params` dictionary. |
 | Group membership advertisement | Implemented to upstream's level | A `gid` sent with `SETUP` is recorded and republished as the mDNS `gid` with `gcgl=0`, which is what upstream does. Neither implementation synchronises playback across a group, so multi-room audio is *not* claimed. |
@@ -113,12 +113,27 @@ NQPTP 1.2.9.
   vanish and a bad setting cannot leave the receiver dead.
 - **Listener bookkeeping** drops each closed listener from the runtime's registry, so repeated
   settings restarts do not accumulate descriptors.
+- **Advertisement ordering.** Session start/end, a group-id update and the *Re-advertise*
+  action all publish through one serialized path. A second request waits, then withdraws and
+  replaces the first record instead of racing the same instance, and shutdown waits for an
+  in-flight publish before withdrawing, so a late publish cannot leave a live record after stop.
+  The session-active flag is read from the current lifecycle state when the record is built, not
+  captured by the asynchronous caller, so a delayed session-end request cannot replace a newer
+  active record with `sf=inactive`.
+- **Advertisement records.** `_airplay._tcp` and `_raop._tcp` both carry the 32-byte ed25519
+  HomeKit public key as `pk` (64 hex characters), which is what the reference receiver and every
+  AirPlay 2 device on the link publish. The legacy 2048-bit RSA key is not advertised: its base64
+  encoding is about 360 bytes, and Avahi rejects a DNS TXT item over 255 bytes with
+  `InvalidRecordError`, so that record could never be registered. The daemon validates the
+  255-byte per-item limit before calling Avahi. A saved name longer than the 63-byte DNS-SD
+  instance label is projected on a UTF-8 boundary for the label — and, after the 12-hex device id
+  and `@`, for the `_raop` instance — while the setting and `/info` keep the full value.
 
 ## Configuration
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | text | `AirPlay Receiver` | Advertised receiver name (≤63 UTF-8 bytes). Changing it re-advertises and ends a live session. |
+| `name` | text | `AirPlay Receiver` | Advertised receiver name (≤63 UTF-8 bytes). A longer saved value is projected on a UTF-8 boundary for the mDNS label and for the `_raop` display part; the setting and `/info` keep it in full. Changing it re-advertises and ends a live session. |
 | `receiver_model` | text | `AudioAccessory5,1` | AirPlay model string. `AudioAccessory5,1` is what the upstream receiver patches in so senders draw the compact speaker icon; it is a compatibility string, not a hardware claim. |
 | `rtsp_port` | integer | `7000` | Requested control port; the daemon allocates it and a refusal falls back to an ephemeral port that is then advertised. |
 | `buffer_ms` | integer | `1500` | Playout cushion in milliseconds. |
@@ -128,7 +143,7 @@ NQPTP 1.2.9.
 | `features` | text | empty | Decimal override of the advertised feature mask. |
 | `ptp` | boolean | `true` | Use the sender's PTP clock when the runtime grants a multicast listener. |
 | `pairing_pin` | text | `3939` | HomeKit setup code answered for transient and normal pair-setup. Changing it makes every sender pair again; empty restores `3939`. |
-| `device_identity`, `pairings`, `raop_key` | masked | empty | App-managed generated state: the HomeKit identity (`device_identity`), each paired sender's public key **and admin permission** (`pairings`, compare-and-swap), and the legacy RSA key. Clearing `pairings` revokes every paired sender. |
+| `device_identity`, `pairings`, `raop_key` | masked | empty | App-managed generated state: the HomeKit identity (`device_identity`), each paired sender's public key **and admin permission** (`pairings`, compare-and-swap), and the legacy RSA key used for an ANNOUNCE `rsaaeskey` (not advertised in mDNS). Clearing `pairings` revokes every paired sender. |
 
 ## Lifecycle and feedback
 
@@ -156,7 +171,9 @@ NQPTP 1.2.9.
 This app provides `capsulad.contracts.media.v1.MediaPlayerService` (descriptor
 `proto/media.protoset`, documentation `docs/media.md`). It consumes
 `light.ring.main` (presentation) and `audio.output.speaker` (playback), and it
-publishes `_airplay._tcp` and `_raop._tcp` through the daemon's responder.
+publishes `_airplay._tcp` and `_raop._tcp` through the daemon's responder. Both records carry the
+same ed25519 HomeKit `pk`; the daemon rejects a TXT item over 255 bytes, which is why the legacy
+RSA key is not in either record.
 
 ## Build, test, package
 
@@ -167,6 +184,9 @@ sh apps/airplay/build.sh    # GOOS=linux: builds + packages <id>-<version>.tar.g
 make airplay                # same, through the repository target
 cd apps/airplay && CGO_ENABLED=1 go test -tags ffmpeg ./...
 ```
+
+Every package carries this guide as `README.md` at its root, next to `manifest.toml`, along with
+`NOTICE` and the media contract's `docs/media.md`.
 
 ### Target ABI and the decoder
 
@@ -287,11 +307,14 @@ channel → `SETUP` → encrypted RTP audio → ring frames → media state →
 
 ## Interoperability gate
 
-No iPhone, iPad or Mac was available to this change, and no device access was
-authorized. The wire behaviour above is implemented from the protocol facts and
-checked against fixtures and against the reference receiver's packet layouts —
-not against a live sender. What remains unproven, and must be confirmed on a
-device:
+No live sender stream has been captured. A field check on the RK3308 unit
+observed the receiver in a Mac's mDNS browser (`_airplay._tcp` with a 64-hex
+`pk`), confirmed that `_raop._tcp` was missing because Avahi rejected the
+oversized RSA TXT item, and received `RTSP/1.0 200 OK` for `OPTIONS` on the
+advertised port. The wire behaviour above is otherwise implemented from the
+protocol facts and checked against fixtures and the reference receiver's packet
+layouts — not against a live sender stream. What remains unproven, and must be
+confirmed on a device:
 
 1. that a current iOS release accepts this advertisement set and chooses a
    stream this build decodes (the `srcvers`/`features` settings exist to settle

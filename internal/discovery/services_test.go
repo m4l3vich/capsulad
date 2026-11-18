@@ -65,6 +65,30 @@ func TestNormalizeService(t *testing.T) {
 	}
 }
 
+// TestNormalizeServiceTXTItemLimit pins the per-string DNS TXT limit Avahi
+// enforces. A 2048-bit RSA public key in "pk" is ~360 bytes; letting it through
+// made Avahi reject the whole publication with InvalidRecordError, which the
+// daemon then misreported as a responder that was not running.
+func TestNormalizeServiceTXTItemLimit(t *testing.T) {
+	service := func(valueLen int) Service {
+		return Service{
+			Type: "_raop._tcp", Instance: "speaker", Port: 7000,
+			TXT: map[string]string{"pk": strings.Repeat("A", valueLen)},
+		}
+	}
+	// "pk=" is three bytes, so 252 value bytes make the 255-byte boundary.
+	if _, err := NormalizeService(service(maxTXTItemBytes - 3)); err != nil {
+		t.Fatalf("255-byte TXT item rejected: %v", err)
+	}
+	_, err := NormalizeService(service(maxTXTItemBytes - 2))
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("256-byte TXT item = %v, want ErrInvalidRequest", err)
+	}
+	if !strings.Contains(err.Error(), "limit 255") {
+		t.Fatalf("error %q names no per-record limit", err)
+	}
+}
+
 func TestNormalizeQuery(t *testing.T) {
 	got, err := NormalizeQuery(Query{Type: "_snapcast._tcp"})
 	if err != nil || got.Domain != "local" || got.Type != "_snapcast._tcp" {

@@ -131,13 +131,13 @@ func (b *avahiServiceBackend) publish(ctx context.Context, svc Service) (Publica
 		svc.Instance, svc.Type, svc.Domain, "", uint16(svc.Port), txt)
 	if add.Err != nil {
 		b.freeGroup(groupPath)
-		return Publication{}, fmt.Errorf("%w: add service: %v", ErrResponderNotReady, add.Err)
+		return Publication{}, avahiServiceError("add service", add.Err)
 	}
 	if err := group.CallWithContext(ctx, avahiEntryGroupIface+".Commit", 0).Err; err != nil {
 		b.freeGroup(groupPath)
-		return Publication{}, fmt.Errorf("%w: commit service: %v", ErrResponderNotReady, err)
+		return Publication{}, avahiServiceError("commit service", err)
 	}
-	if err := b.awaitEstablished(ctx, group); err != nil {
+	if err := b.awaitEstablished(ctx, group, svc.Instance); err != nil {
 		// A group that never reached ESTABLISHED is not published, so the
 		// caller must not receive a publication ID.
 		b.freeGroup(groupPath)
@@ -165,7 +165,7 @@ func (b *avahiServiceBackend) publish(ctx context.Context, svc Service) (Publica
 // awaitEstablished waits for Avahi's probing to finish. Commit success alone
 // does not prove the registration is live: a colliding instance ends in
 // COLLISION and a failed registration in FAILURE.
-func (b *avahiServiceBackend) awaitEstablished(ctx context.Context, group dbus.BusObject) error {
+func (b *avahiServiceBackend) awaitEstablished(ctx context.Context, group dbus.BusObject, instance string) error {
 	deadline := time.Now().Add(avahiEntryGroupWait)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -184,7 +184,7 @@ func (b *avahiServiceBackend) awaitEstablished(ctx context.Context, group dbus.B
 		case avahiEntryGroupEstablished:
 			return nil
 		case avahiEntryGroupCollision:
-			return fmt.Errorf("%w: Avahi rejected the instance name as a collision", ErrResponderNotReady)
+			return fmt.Errorf("%w: instance %q collides with another registration", ErrNameInUse, instance)
 		case avahiEntryGroupFailure:
 			return fmt.Errorf("%w: Avahi failed to register the service", ErrResponderNotReady)
 		}
@@ -632,6 +632,29 @@ func decodeAvahiTXT(records [][]byte) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// avahiServiceError classifies a D-Bus error from a publish call. A rejected
+// record or instance is the request's fault and will fail again; saying the
+// responder is "not running" for it hid a TXT-size defect in the field. A name
+// collision is its own condition so the caller can choose a new instance.
+// Other failures stay retryable as an unready responder.
+func avahiServiceError(op string, err error) error {
+	// AddService/Commit return the raw D-Bus error, not the avahiDMSError the
+	// host-name setter wraps, so read the name from the D-Bus type directly.
+	switch dbusErrorName(err) {
+	case "org.freedesktop.Avahi.InvalidRecordError",
+		"org.freedesktop.Avahi.InvalidServiceNameError",
+		"org.freedesktop.Avahi.InvalidServiceTypeError",
+		"org.freedesktop.Avahi.InvalidPortError",
+		"org.freedesktop.Avahi.InvalidKeyError",
+		"org.freedesktop.Avahi.InvalidRDataError",
+		"org.freedesktop.Avahi.InvalidArgumentError":
+		return fmt.Errorf("%w: %s: %v", ErrInvalidRequest, op, err)
+	case "org.freedesktop.Avahi.CollisionError":
+		return fmt.Errorf("%w: %s: the instance name is already registered on the link", ErrNameInUse, op)
+	}
+	return fmt.Errorf("%w: %s: %v", ErrResponderNotReady, op, err)
 }
 
 func avahiObjectGone(err error) bool {

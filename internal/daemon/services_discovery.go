@@ -139,12 +139,15 @@ func discoveredServiceProto(event discovery.Event) *frameworkv1.DiscoveredServic
 	}
 }
 
-// mdnsRPCError maps responder failures to explicit gRPC codes. A missing
-// responder is never reported as a successful publication.
+// mdnsRPCError maps responder failures to explicit gRPC codes. A rejected
+// request, a taken instance name, a missing responder and a lost responder are
+// distinct failures, and none of them is reported as a successful publication.
 func mdnsRPCError(op string, err error) error {
 	switch {
 	case errors.Is(err, discovery.ErrInvalidRequest):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, discovery.ErrNameInUse):
+		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
 	case errors.Is(err, discovery.ErrUnsupported):
 		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
 	case errors.Is(err, discovery.ErrResponderNotReady):

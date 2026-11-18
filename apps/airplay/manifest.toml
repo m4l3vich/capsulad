@@ -1,7 +1,7 @@
 id = "org.capsulad.airplay"
 name = "AirPlay"
 version = "0.1.0"
-description = "AirPlay 2 audio receiver: iPhones, iPads and Macs see the speaker in their AirPlay output list, and the daemon's mixer, ring and media contract carry the session. Decodes ALAC, AAC-LC and PCM; AAC uses FFmpeg's libavcodec, linked at build time."
+description = "AirPlay 2 audio receiver: iPhones, iPads and Macs see the speaker in their AirPlay output list, and the daemon's mixer, ring and media contract carry the session. Decodes ALAC, AAC-LC and PCM; AAC uses FFmpeg's libavcodec, linked at build time. See README.md."
 background = true
 start_on_boot = true
 restart_on_failure = true
@@ -32,7 +32,7 @@ docs = "docs/media.md"
 [[settings]]
 key = "name"
 label = "Receiver name"
-description = "The name iPhones, iPads and Macs show in their AirPlay output list, limited to 63 UTF-8 bytes. Changing it re-advertises immediately and ends a live session, because the advertisement is part of the session identity."
+description = "The name iPhones, iPads and Macs show in their AirPlay output list, limited to 63 UTF-8 bytes. A longer saved value is projected on a UTF-8 boundary for the mDNS label (and, after the device-id prefix, for the legacy RAOP instance); the saved value and /info keep it in full. Changing it re-advertises immediately and ends a live session, because the advertisement is part of the session identity."
 type = "text"
 default = "AirPlay Receiver"
 
@@ -124,7 +124,7 @@ default = ""
 [[settings]]
 key = "raop_key"
 label = "Legacy RAOP key (managed)"
-description = "Generated on first run: the RSA key the legacy RAOP path publishes as 'pk' and uses to decrypt the sender's AES key during ANNOUNCE. Stored masked; replacing it makes a sender repeat the legacy setup. Managed by the app; do not edit."
+description = "Generated on first run: the RSA key the legacy RAOP path uses to decrypt a sender's rsaaeskey during ANNOUNCE. It is not published in mDNS: the _raop record carries the same 32-byte HomeKit public key as _airplay, because Avahi rejects a TXT item over 255 bytes and the 2048-bit RSA key is roughly 360 bytes. A sender that takes the key from the TXT record therefore cannot use the encrypted RSA path; the legacy SETUP response body still returns the RSA public key. Stored masked; replacing it changes the ANNOUNCE key. Managed by the app; do not edit."
 type = "text_masked"
 default = ""
 

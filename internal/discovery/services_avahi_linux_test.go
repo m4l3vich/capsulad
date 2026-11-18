@@ -5,6 +5,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,30 @@ func TestAvahiUnpublishWithoutResponder(t *testing.T) {
 	}
 	if _, tracked := b.pubs["pub_x"]; !tracked {
 		t.Fatal("tracker dropped the publication without a responder")
+	}
+}
+
+// TestAvahiServiceErrorClassification keeps a rejected record from being
+// reported as an absent responder and gives a name collision its own status.
+func TestAvahiServiceErrorClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"invalid record", dbus.Error{Name: "org.freedesktop.Avahi.InvalidRecordError", Body: []any{"Invalid record"}}, ErrInvalidRequest},
+		{"invalid service name", dbus.Error{Name: "org.freedesktop.Avahi.InvalidServiceNameError", Body: []any{"Invalid service name"}}, ErrInvalidRequest},
+		{"collision", dbus.Error{Name: "org.freedesktop.Avahi.CollisionError", Body: []any{"Local name collision"}}, ErrNameInUse},
+		{"not running", dbus.Error{Name: "org.freedesktop.Avahi.NotRunningError", Body: []any{"Daemon not running"}}, ErrResponderNotReady},
+	}
+	for _, tc := range cases {
+		got := avahiServiceError("add service", tc.err)
+		if !errors.Is(got, tc.want) {
+			t.Errorf("%s: avahiServiceError = %v, want %v", tc.name, got, tc.want)
+		}
+		if !strings.Contains(got.Error(), "add service") {
+			t.Errorf("%s: error %q does not name the operation", tc.name, got)
+		}
 	}
 }
 

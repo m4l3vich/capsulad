@@ -113,6 +113,13 @@ type Manager struct {
 	store *pair.Store
 	raop  *raop.KeyPair
 
+	// advMu serializes advertisement mutations. Session start/end, a group-id
+	// update and the Re-advertise action can all request a republish
+	// concurrently; without this lock two calls can withdraw each other's
+	// records and then both AddService the same instance, which Avahi reports
+	// as a collision. It also makes Close wait for an in-flight publish before
+	// it withdraws, so a late publish cannot leave a live record after stop.
+	advMu         sync.Mutex
 	mu            sync.Mutex
 	listener      Listener
 	active        *Session
@@ -237,7 +244,7 @@ func (m *Manager) Start() error {
 	m.listener = listener
 	m.mu.Unlock()
 	if m.advertiser != nil {
-		if err := m.publish(port, false); err != nil {
+		if err := m.publish(port); err != nil {
 			m.logf("mDNS: %v", err)
 		}
 	}
@@ -307,7 +314,7 @@ func (m *Manager) startSession(stream Stream) {
 	m.active = s
 	if !m.sessionActive {
 		m.sessionActive = true
-		go m.republishStatus(true)
+		go m.republishStatus()
 	}
 	m.mu.Unlock()
 	if previous != nil {
@@ -336,7 +343,7 @@ func (m *Manager) SessionEnded(s *Session, reason string) {
 	m.groupID = ""
 	m.mu.Unlock()
 	if wasActive {
-		go m.republishStatus(false)
+		go m.republishStatus()
 	}
 	m.board.SessionEnded(s.boardGen)
 	m.logf("AirPlay session ended: %s", reason)
@@ -353,8 +360,6 @@ func (m *Manager) Close() error {
 	m.closed = true
 	listener := m.listener
 	active := m.active
-	airplayAdv, raopAdv := m.airplay, m.raopID
-	m.airplay, m.raopID = "", ""
 	m.mu.Unlock()
 
 	if active != nil {
@@ -366,6 +371,14 @@ func (m *Manager) Close() error {
 		}
 	}
 	if m.advertiser != nil {
+		// Wait for a publish that started before closed was set, then remove
+		// the ids it installed. A publish that starts after closed is set
+		// observes it under advMu and makes no responder call.
+		m.advMu.Lock()
+		m.mu.Lock()
+		airplayAdv, raopAdv := m.airplay, m.raopID
+		m.airplay, m.raopID = "", ""
+		m.mu.Unlock()
 		if airplayAdv != "" {
 			if err := m.advertiser.Unpublish(airplayAdv); err != nil {
 				m.logf("withdrawing _airplay._tcp: %v", err)
@@ -376,6 +389,7 @@ func (m *Manager) Close() error {
 				m.logf("withdrawing _raop._tcp: %v", err)
 			}
 		}
+		m.advMu.Unlock()
 	}
 	m.acceptWG.Wait()
 	m.sessionWG.Wait()
@@ -434,7 +448,7 @@ func (m *Manager) setGroupID(gid string) {
 	m.groupID = gid
 	m.mu.Unlock()
 	if changed {
-		go m.republishStatus(true)
+		go m.republishStatus()
 	}
 }
 
@@ -462,14 +476,13 @@ func (m *Manager) EndSession(reason string) bool {
 func (m *Manager) Republish() bool {
 	m.mu.Lock()
 	listener := m.listener
-	active := m.sessionActive
 	closed := m.closed
 	m.mu.Unlock()
 	if closed || listener == nil || m.advertiser == nil {
 		return false
 	}
 	_, port := listener.Addr()
-	if err := m.publish(port, active); err != nil {
+	if err := m.publish(port); err != nil {
 		m.logf("re-advertising: %v", err)
 		return false
 	}

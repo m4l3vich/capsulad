@@ -241,8 +241,9 @@ datagrams. There is no gRPC method that opens one, and a run without the control
 
 **Publication** — one live mDNS service instance registered through `DiscoveryService.Publish`
 (`mdns_publish`). It has an opaque publication id, is scoped to the calling run and is removed
-on unpublish, run exit and daemon shutdown. The responder may rename a colliding instance, and
-the advertisement is visible to the whole link, so a TXT record is never a secret.
+on unpublish, run exit and daemon shutdown. The daemon does not rename a colliding instance: a
+name already registered on the link is `ALREADY_EXISTS`, and the advertisement is visible to the
+whole link, so a TXT record is never a secret.
 
 **Browse** — the server-streaming `DiscoveryService.Browse` call (or `mdns_browse_open`) that
 reports resolved services as `DiscoveredService` events: one `EVENT_KIND_ADDED` per resolved

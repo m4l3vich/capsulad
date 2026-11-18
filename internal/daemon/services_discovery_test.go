@@ -188,6 +188,11 @@ func TestDiscoveryAuthAndFailureMapping(t *testing.T) {
 	if _, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", Port: 1}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid publish = %v, want InvalidArgument", err)
 	}
+
+	fake.err = fmt.Errorf("%w: speaker", discovery.ErrNameInUse)
+	if _, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", InstanceName: "x", Port: 1}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("colliding publish = %v, want AlreadyExists", err)
+	}
 }
 
 func TestDiscoveryBrowseStreamsEvents(t *testing.T) {

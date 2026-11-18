@@ -34,6 +34,9 @@ LIB_DIR=${CAPSULAD_NATIVE_LIB_DIR:-"$ROOT/build/lib"}
   die "native runtime metadata missing at $LIB_DIR/capsulad-native.json; build it with 'make native' (or set CAPSULAD_NATIVE_LIB_DIR)"
 ls "$LIB_DIR"/libcapsulad* >/dev/null 2>&1 ||
   die "no libcapsulad shared library in $LIB_DIR; build it with 'make native' (or set CAPSULAD_NATIVE_LIB_DIR)"
+# The support guide travels with the installed app, like the radio and Simon
+# packages. It is a regular Markdown file at the package root.
+[ -f "$HERE/README.md" ] || die "missing $HERE/README.md (the packaged app guide)"
 
 # AAC decoding links libavcodec/libavutil, the same decoder the upstream
 # receiver links for AAC-LC buffered streams. It is a build dependency, not a
@@ -139,6 +142,7 @@ say "airplay: building for $GOOS/$GOARCH ($TARGET_ABI) with the FFmpeg AAC decod
   die "native build failed; a cross build needs a matching C compiler/sysroot (CC=...) and a target libavcodec (CGO_CFLAGS/CGO_LDFLAGS or PKG_CONFIG_PATH)"
 
 cp "$HERE/manifest.toml" "$dir/manifest.toml"
+cp "$HERE/README.md" "$dir/README.md"
 if [ "$GOOS" = linux ]; then
   # Only the copy that becomes a package is stamped, through the shared helper
   # every app uses; the source manifest keeps the glibc default.
@@ -152,7 +156,7 @@ cp "$HERE/docs/media.md" "$dir/docs/media.md"
 # Attribution and licence notices (Shairport Sync MIT constants, the FFmpeg
 # LGPL link and the repository's licence status) ship with the package.
 cp "$HERE/NOTICE" "$dir/NOTICE"
-say "airplay: staged $dir (with NOTICE)"
+say "airplay: staged $dir (with README.md and NOTICE)"
 
 if [ "$PACKAGE" = "auto" ]; then
   if [ "$GOOS" = linux ]; then PACKAGE=1; else PACKAGE=0; fi

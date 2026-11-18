@@ -15,9 +15,12 @@ import (
 type KeyPair struct {
 	// PrivateKey is the PKCS#1 DER encoding of the private key.
 	PrivateKey []byte
-	// PublicTXT is the base64 of the PKCS#1 DER public key. It is exactly the
-	// value a legacy receiver publishes in the mDNS TXT record "pk"; the
-	// sender base64-decodes it and RSA-encrypts the AES key with it.
+	// PublicTXT is the base64 of the PKCS#1 DER public key: the value an
+	// AirPlay 1 receiver publishes in the `_raop._tcp` "pk" TXT record. This
+	// receiver cannot advertise it there: the value is roughly 360 bytes and
+	// Avahi rejects a single TXT item over 255 bytes, so `_raop._tcp` carries
+	// the HomeKit ed25519 key instead (session/advertise.go). The RSA key
+	// remains for an ANNOUNCE that carries rsaaeskey.
 	PublicTXT string
 
 	// priv caches the parsed key. It is always nil for a KeyPair loaded from
@@ -94,7 +97,7 @@ func (k *KeyPair) privateKey() (*rsa.PrivateKey, error) {
 // EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING). OpenSSL's
 // RSA_PKCS1_OAEP_PADDING defaults to SHA-1 for both the OAEP digest and MGF1,
 // so crypto/rsa's DecryptOAEP(sha1.New(), ...) is the matching primitive. The
-// sender encrypts with the same mode using the key from the "pk" TXT record.
+// sender encrypts with the same mode using the receiver's RSA public key.
 func (k *KeyPair) DecryptAESKey(blob []byte) ([]byte, error) {
 	priv, err := k.privateKey()
 	if err != nil {

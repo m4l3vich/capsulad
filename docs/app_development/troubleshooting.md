@@ -252,10 +252,10 @@ stay stopped. Uninstalling a looping app requires stopping its run first.
 | `FAILED_PRECONDITION` naming the responder | Simulator or a build without Avahi, or Avahi is not running/registering after a restart | mDNS is device-only; retry on the unit after `avahi-daemon` is up. Never treat this as a successful publication. |
 | `PERMISSION_DENIED` | The call was made without a supervised app identity | Connect with `CAPSULAD_RUN_ID` from inside the run; an administrator connection cannot publish. |
 | `INVALID_ARGUMENT` about the service type | `example._tcp`, `_example.tcp`, or a name with an underscore inside | Use `_example._tcp` or `_example._udp`; a domain suffix may follow. |
-| `INVALID_ARGUMENT` about instance or TXT | Instance over 63 UTF-8 bytes, more than 16 TXT records, or over 1024 bytes total | Shorten the instance and TXT set. |
+| `INVALID_ARGUMENT` about instance or TXT | Instance over 63 UTF-8 bytes, more than 16 TXT records, over 1024 bytes total, or a `key=value` record over 255 bytes | Shorten the instance and TXT set. The daemon rejects an oversized record instead of splitting it across TXT strings. |
+| `ALREADY_EXISTS` | Another registration on the link already owns the instance name; the daemon does not auto-rename | Withdraw the old publication and retry after it clears, or choose a distinct instance name. |
 | `NOT_FOUND` on unpublish | Wrong id, or a publication owned by another run | Keep the `publicationId` returned by `Publish` and unpublish from the same run. |
 | `Browse` emits nothing | The service type is wrong, the peer is on another link, or the browser is not resolved yet | Verify the type on the publisher, and allow for resolve latency. One `ADDED` event arrives per resolved address. |
-| Browse shows a different instance name | Avahi renamed a collision | Expected; the advertised name can differ from the requested one. |
 | `UNAVAILABLE` on an open browse stream | The responder stopped or the daemon restarted | Resubscribe. |
 
 Publications disappear on their own when the run exits; that is cleanup, not a bug.
