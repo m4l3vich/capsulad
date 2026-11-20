@@ -1886,6 +1886,63 @@ host native SDK against `https://vc.go.mail.ru`; there is no device acoustic mea
 claim that the app is fixed. The safe next action is to re-link/provision the unit under the
 accepted session's account, then re-run the probe.
 
+The 2026-11-20 entry below supersedes this limitation for the current app build: recognition,
+TTS fetch and playback were observed on the device, at digital-output proof level.
+
+### 2026-11-20 app-only deployment and recorded-prompt turn
+
+- **Built artifact.** The reviewed Marusia app tree was built for aarch64 / glibc 2.33 in an arm64
+  Debian Bullseye container (`make marusia`). The package `org.capsulad.marusia-0.1.0.tar.gz`
+  hashes `c37e8fad…`; its binary `marusia` hashes `a88e0ac7…`, names
+  `/lib/ld-linux-aarch64.so.1`, and imports no GLIBC symbol above 2.17. The staged manifest
+  hashes `bc6e7bf2…`.
+- **App-only replacement.** On the Capsula Mini rev 4 (`/data/capsdemo`, ADB) the daemon was
+  stopped through `/etc/init.d/S99btctl.sh`, the package was installed offline with
+  `capsulad-cli -native-lib-dir /data/capsdemo/lib app install`, and the same boot service
+  restarted the daemon. No daemon, native runtime, CLI, boot hook or other app package was
+  replaced. The health gate returned 0, `app runs` reported one `APP_READY` Marusia run, and the
+  installed binary hash matched the built artifact. A first install attempt was refused before
+  writing because the offline CLI was not given the native metadata directory; it changed
+  nothing. The live run's `/app/marusia` (a read-only bind of the installed package) hashed
+  `a88e0ac7…` while it served the turn. The installed daemon (`c924d85e…`), CLI (`56a4c99e…`),
+  native runtime (`8a1cf639…`) and boot hook (`752f1649…`) still match the previously deployed
+  artifacts, so only the app package changed.
+- **Rollback.** The previously installed app directory was copied to the host and packaged with
+  the canonical `app package` path (`17ec16a2…`) before the replacement. It was not needed. The
+  data partition had 8.4 MiB free; the rollback copy lived on the host, and the install staged
+  one tree on the same filesystem (peak free space about 4.2 MiB during the swap), so the
+  restored package was never stored twice on `/data`.
+- **State preserved.** App settings `f4190f1b…`, vendor session `5bb0bf94…` and
+  `device_settings.json` `4ec8ecc6…` were unchanged. The master volume is 30%, the assistant and
+  wakeword choices are unchanged, the daemon owns `/dev/watchdog`, and the other supervised apps
+  are `APP_READY`.
+- **Recorded-prompt turn.** The framework's development admin socket was enabled only for this
+  test (`-dev-admin`), and `capsulad-cli dev wakeword` produced activation
+  `act_25b469c8717f96e5a7fc1a`; the app logged `keyword_mode=no_kw`. The prerecorded
+  `/tmp/marusia-prompts/Маруся, как дела?.wav` (16 kHz mono, 3.24 s) was played into a temporary
+  `stock_inject` null sink while the daemon's `parec` source-output was moved to its monitor, so
+  the app's real microphone capture consumed the recording. The app attached 50 pre-roll chunks,
+  opened the phrase, ended speech after 2.74 s, and uploaded 35 chunks / 2800 ms with
+  `rms_dbfs=-28.5`. The service replied: «Пребываю в поэтичном настроение. Наверное, потому что
+  слушала аудиокнигу про Евгения Онегина. А вы чем были заняты?»; the app fetched and played the
+  reply URL, and the turn completed with `played="https://vc.go.mail.ru/stream"`.
+- **Digital output.** A `parec` capture of `master.monitor` (16 kHz mono s16le, 17.884 s) holds
+  the reply: about 6.2 s of non-silent speech, peak 5462, and an offline transcription that
+  reproduces its first two sentences («Прибываю в поэтичном настроении… слушала аудиокнигу про
+  Евгения Анегена»). This is sink-monitor evidence, not acoustic measurement. The activation was
+  API-injected rather than detected from a spoken wake word; the capture, vendor recognition,
+  reply fetch and playback were the production app path.
+- **Restored.** The null sink was unloaded, the `parec` source-output returned to `speex`, the
+  development socket removed, and the daemon restarted on the canonical boot-service command
+  line. No temporary harness, package, prompt or capture remains on the device. The temporary
+  manual start raised the master volume through phantom input events; the value was restored to
+  30%, but the settings revision advanced from 4142 to 4162. Every user value is the pre-test
+  value.
+- **Observed edge.** The app keeps its microphone capture open until playback ends, so the mic
+  pump logged `microphone queue full; dropped … chunk(s)` (650 in this turn) after the upload
+  stopped. The reply played and the turn completed; the capture is nevertheless open longer than
+  the upload needs.
+
 ## Explicitly unavailable on this hardware
 
 - **User, PID, network and IPC namespaces and seccomp filters.** The stock kernel offers mount
