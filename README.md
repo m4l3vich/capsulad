@@ -78,11 +78,13 @@ version.
 - **Presentations and captures.** Apps open output presentations and acquire routing
   captures. First valid frame makes a presentation eligible; the latest eligible capture
   wins; release, crash and app stop fall back to the selected default baseline.
-- **Audio.** A software mixer makes master volume a ceiling on each app's contribution: hot
-  float input is clamped, one app may hold four concurrent streams, and a soft limiter holds
-  the bus below full scale. It fans out playback, ducks during a conversation, bounds capture
-  queues and gates microphone capture on a visible, audible indication. The PulseAudio sink is
-  pinned at unity so the mixer's master is the only gain stage.
+- **Audio.** A software mixer makes master volume a ceiling on each app's contribution: the
+  persisted 0–1 volume is a control position mapped once to an exponential 60 dB taper (linear
+  in dB, so 5% is about -57 dBFS) rather than used as a linear amplitude; hot float input is
+  clamped, one app may hold four concurrent streams, and a soft limiter holds the bus below full
+  scale. It fans out playback, ducks during a conversation, bounds capture queues and gates
+  microphone capture on a visible, audible indication. The PulseAudio sink is pinned at unity so
+  the mixer's tapered master is the only gain stage.
 - **Input.** Five discrete panel keys with partial/full capture modes, centre-gated swipe
   gestures and a step-then-cancel full-panel crossing of two opposite volume edges (a bare
   single volume edge is a volume step) plus full-capture
@@ -124,8 +126,9 @@ version.
 
 ## What is implemented
 
-- **Supervision:** manifest validation, unique run IDs, singleton invocations (queued,
-  bounded, expiring), graceful stop, stdout/stderr capture, immediate first restart then
+- **Supervision:** manifest validation, unique run IDs, one live run per app (a launch of a
+  running app is delivered as a queued, bounded, expiring invocation), graceful stop,
+  stdout/stderr capture, immediate first restart then
   1/2/4/8 s backoff. A lost framework connection is a failure, not a deliberate stop.
   Selected display/ring/assistant providers are recovery-managed regardless of
   `restart_on_failure`; the backoff resets only after 30 s of continuous READY, and every
@@ -203,7 +206,8 @@ version.
   service that plays one streamed WAV per routed `Play` call and replies after the queued audio
   drains; `org.capsulad.radio` is a single native internet-radio app that keeps the station
   list, fetches and decodes the selected HTTP(S) MP3 stream in-process through the shared
-  `libcapsulad` transport, shows the station number and serves the standard media contract —
+  `libcapsulad` transport, runs only while it has audio or a live indication, shows the station
+  number (or the pause sign) and serves the standard media contract —
   there is no companion package and no app-to-app audio hop; and
   `org.capsulad.homeassistant` is a native MQTT bridge that publishes the speaker to Home
   Assistant through discovery, publishes its state and applies Home Assistant's commands to the
@@ -290,13 +294,14 @@ version = "v1"
 descriptor = "proto/weather.protoset"
 ```
 
-At launch the supervisor allocates a run ID, starts the entrypoint in the probed sandbox
-with the framework environment, and waits for the app to connect, send `AppHello{run_id}`
-and then `AppReady`. Identity comes from the connection plus Linux `SO_PEERCRED`, never
-from a claim. Declared interfaces become available only while the run is ready. A selected
-default provider (display, ring or assistant) is restarted on failure; ordinary apps follow
-`restart_on_failure`. Every output, capture, audio stream and conversation must be released
-on completion, dismissal, cancellation, failure or process exit.
+A launch of an app that already has a live run is delivered to that run as an invocation
+instead of starting a second process. Otherwise the supervisor allocates a run ID, starts the
+entrypoint in the probed sandbox with the framework environment, and waits for the app to
+connect, send `AppHello{run_id}` and then `AppReady`. Identity comes from the connection plus
+Linux `SO_PEERCRED`, never from a claim. Declared interfaces become available only while the
+run is ready. A selected default provider (display, ring or assistant) is restarted on failure;
+ordinary apps follow `restart_on_failure`. Every output, capture, audio stream and conversation
+must be released on completion, dismissal, cancellation, failure or process exit.
 
 Settings are declared in the manifest and stored per app with compare-and-swap revisions;
 actions are transient declarations, not persisted state. An app may also ship one
@@ -562,11 +567,16 @@ before the next turn.
   fake fallback or a second decoder — accepts no gzip, follows at most five redirects with an
   HTTPS→HTTP downgrade refused, and resolves at most one `.pls`/`.m3u` playlist level (≤64 KiB).
   Pause ends the network stream by design, so resuming re-dials the station, and a reconnect is a
-  new session with a marked discontinuity, not a seamless resume. A stream that never starts or
+  new session with a marked discontinuity, not a seamless resume. A pause is a bounded state: the
+  segment display holds a pause sign for one minute, and the run exits if it is not resumed. The
+  app is not a resident service — a bare launch waits one idle minute and a terminal error holds
+  its dashes for the tuning window (or up to one idle minute with **Always display**), then each
+  releases the display to the selected baseline and exits cleanly; a new launch is the recovery.
+  A stream that never starts or
   goes silent never leaves a stale `PLAYING`: a 10 s read-idle bound fails the stream, up to
   three reconnects with 1/2/4 s backoff are attempted inside the same session, and an autonomous
   watchdog bounds "no audio reached the speaker" at 60 s while buffering or playing, moving the
-  app to its error state with no user activity. Recovery is only `play`, `stop` or `dismiss`.
+  app to its error state with no user activity.
   A station switch while active replaces the owned playback, so a superseded session's late
   open, read or failure cannot clear the newer stream or selection.
 - **The Home Assistant bridge needs a reachable MQTT broker.** A named broker, or an

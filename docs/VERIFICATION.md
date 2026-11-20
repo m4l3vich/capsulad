@@ -109,20 +109,31 @@ stock Rockchip image.
 
 ### Audio mixer
 
-- A 1 kHz tone from an app measured on `master.monitor`: source RMS **6364**; **4454 at 70 %**
-  master volume and **1908 at 30 %**, exactly 0.7 and 0.3 of the source, so software master
-  gain is linear and exact.
+- **Pre-taper contract (historical).** A 1 kHz tone from an app measured on `master.monitor`:
+  source RMS **6364**; **4454 at 70 %** master volume and **1908 at 30 %**, exactly 0.7 and 0.3
+  of the source, so that build's software master gain was linear and exact. The master-volume
+  curve measured on the same path was 0 % silence, 1 % peak 58, 5 % peak 294, 10 % peak 589 and
+  20 % peak 1179. Those numbers describe the superseded linear master; the current taper is
+  covered by the host tests below and awaits acoustic measurement on the unit.
 - A conversation ducked that tone to 0.25× (measured **1113 → 477**) with about a 150 ms fade.
-- Master-volume curve measured on the same path: 0 % silence, 1 % peak 58, 5 % peak 294,
-  10 % peak 589, 20 % peak 1179.
+- **Current taper, host digital evidence.** `TestMasterVolumeGainIsLogarithmic` pins exact 0 and
+  unity, 5 % → -57 dB, 50 % → -30 dB and equal dB steps per position step.
+  `TestMixerAppliesMasterTaper` measures full-scale S16 through the real mix loop at 50 %, 25 %
+  and 10 % and compares it with the canonical gain; `TestDaemonMasterVolumeEndToEnd` repeats the
+  check through gRPC and the simulator sink; `TestDaemonF32HotChunkIsClamped` proves the taper is
+  still a ceiling for hot F32 input. The end-to-end run measured full-scale S16 peaks of **1036**
+  at master 0.5 (gain 0.031623), **130** at 0.2 (0.003981) and **65** at 0.1 (0.001995); at
+  unity the limiter held 31128 (**0.950 FS**). `TestBluetoothFallbackUsesCanonicalTaper` pins the
+  PulseAudio fallback's cube-root compensation to the same gains. These are digital-output
+  measurements, not acoustic ones.
 - Application microphone audio arrives over the bus and stops on the indication watchdog.
 - **Low-volume investigation (read-only ADB and source history).** The native Internet Radio
   run used the framework mixer. Both the old tuner/MicroPython path and the current native
-  path deliver unscaled stereo S16LE from the same MP3 decoder to the same linear master.
-  Device readback showed the PulseAudio sinks and `pacat` stream at 100%, and the ALSA
-  Master Volume at 0 dB. No framework curve or Radio gain regression was found, so no gain
-  change was made. Stock firmware uses different volume controls; relative acoustic
-  loudness was not measured.
+  path deliver unscaled stereo S16LE from the same MP3 decoder to the same master path; that
+  investigation predates the taper. Device readback showed the PulseAudio sinks and `pacat`
+  stream at 100%, and the ALSA Master Volume at 0 dB. No framework curve or Radio gain
+  regression was found, so no gain change was made. Stock firmware uses different volume
+  controls; relative acoustic loudness was not measured.
 
 ### Bluetooth
 
@@ -391,6 +402,170 @@ speaker, and no acoustic or optical evidence was collected.
 - The daemon health check and LAN `/healthz` passed, the served SPA and theme assets matched the
   build, and all six expected runs were `APP_READY`. Both AirPlay DNS-SD records were visible
   from the host. No Apple-sender session or physical display/audio output was exercised.
+
+### 2026-11-20 deployment: singleton manifests, SPA, native runtime and all 11 app packages
+
+The working tree (HEAD `ce234e8` plus the reviewed uncommitted changes) was built for the
+Rockchip stock target and deployed with the canonical `capsulad-cli deploy` over ADB. This
+deployment replaced every installed application package, so no package from the earlier
+`single_instance` stack was left on disk for the new registry to skip.
+
+- **Artifacts.** `capsulad` 28,901,528 B md5 `c924d85ef72da877ce290be3af66c320`; `capsulad-cli`
+  8,781,976 B md5 `56a4c99e68fbb3a7bb51bf3d1fea3c92`; `lib/libcapsulad.so.1.0.0` 6,411,496 B
+  md5 `8a1cf6397425e6cc8872917cf7a2c29a` (SONAME `libcapsulad.so.1`; `DT_NEEDED`
+  `libgcc_s.so.1`, `libpthread.so.0`, `libm.so.6`, `libdl.so.2`, `libc.so.6`; maximum
+  `GLIBC_2.29`, below the board's 2.33 ceiling); `lib/capsulad-native.json` 72 B md5
+  `44de85796f781d5294d6ed62f563af68` (ABI 1.0, library `libcapsulad.so.1`);
+  `lib/capsulad-quickjs` 1,201,672 B md5 `55a70d7ca0b969d4fcececa58789487d`;
+  `lib/capsulad-micropython` 428,864 B md5 `a5007ea9bcfa3e8c3c3c71a5b94878ad`; both script
+  hosts are aarch64 ELF with the same ≤2.29 ceiling; boot hook md5
+  `752f16491f1867de9bfc06dbbe51aa12`. The daemon and CLI are static aarch64 Go binaries. The
+  SPA was rebuilt with `npm run build` before the daemon build; the served
+  `/assets/index-161e48dd.js` and `/` md5s matched the embedded files
+  (`6845e9a2…` and `c1d114c5…`).
+- **Packages.** All 11 installed packages were rebuilt from the same tree: `dev.hardware 0.1.0`,
+  `dev.micropython 0.1.0`, `dev.quickjs 0.1.0`, `org.capsulad.airplay 0.1.0`,
+  `org.capsulad.cadence 0.1.0`, `org.capsulad.dumbassistant 0.2.0`,
+  `org.capsulad.homeassistant 0.1.0`, `org.capsulad.marusia 0.1.0`, `org.capsulad.pa 0.1.0`,
+  `org.capsulad.radio 0.2.0`, `org.capsulad.simon 1.1.0`. The archives total 9,382,609 B.
+  The native packages declare `abi = "linux-gnu"` and passed the deploy ELF gate; AirPlay's
+  aarch64 package came from the pinned buster/FFmpeg recipe, the other native packages from the
+  repo-local glibc 2.31 sysroot toolchain.
+- **Deployment and the reset.** The first attempt refused before installing anything: with the
+  52.6 MiB directory bundle in tmpfs and five resident apps, the staged daemon's `-version`
+  probe died with `fatal error: out of memory allocating heap arena map`. The service was
+  stopped first through `/etc/init.d/S99btctl.sh stop`, and a detached `start-stop-daemon` run
+  then deployed the same bundle with `-staging /run` and `-timeout 300s`. It installed the 11
+  packages, the native runtime, the boot hook, the CLI and the daemon; one app directory
+  (`org.capsulad.cadence`) had been copied to the host rollback directory and removed first to
+  make the package-staging headroom explicit. During the final restart the unit reset: the
+  deploy process and its log disappeared with `/tmp`, the boot log shows
+  `2026-11-20T14:02:33 starting`, then no health line, then `14:03:35 starting` and
+  `14:03:37 daemon healthy`. The deploy's own exit and health gate were therefore not observed;
+  the post-boot installation was verified instead. The reset cause is not established.
+- **Post-boot gate.** `capsulad -health` exit 0; LAN `/healthz` returned `ok` and `/` returned
+  200. Installed daemon, CLI, runtime, metadata, script hosts, header and boot hook md5s match
+  the bundle files exactly; no `.prev` or staging file remains. `app list` reports the two
+  builtins plus all 11 packages at the versions above, and every installed `manifest.toml` has
+  **zero** `single_instance` keys, so the removed instance-policy key is not stranded anywhere.
+  Runs: `capsulad.clock` builtin plus `marusia`, `airplay`, `homeassistant` and `pa`
+  `APP_READY`, one run each, all native runs `sandbox=mountns` and mapping
+  `/capsulad/lib/libcapsulad.so.1.0.0` with no `(deleted)` entry. The interpreter hosts print
+  `quickjs-ng 0.18.0` and `micropython 1.29.0-preview`. The four native runs were replaced and
+  reloaded the new runtime; Radio remains `start_on_boot = false` and was exercised explicitly.
+- **Singleton.** Two `app start org.capsulad.radio` calls returned the same run and
+  `spawned=false` (`invocation=inv_25c7…`, then `inv_23fe…`), with one live run in `app runs`.
+  This is the semantic singleton contract after the per-app policy was removed.
+- **Settings.** Global settings were revision 3906 with master 9%, assistant `marusia`, timezone
+  `Asia/Irkutsk`, display baseline `capsulad.clock`, and the other saved values before and after
+  deployment; the pre-deploy `settings.json` md5 `432bd7d196a2cc0b9e954303f2b07ed3` still
+  matched after the deployment's restart. Radio was restored to its three original stations and
+  `station=3` after the tests (revision 15; values identical, revision advanced by the fixture
+  writes). AirPlay's settings revision advanced on startup, as it did in earlier deployments,
+  while its effective values stayed `name="Capsula Mini"`, `rtsp_port=7000`,
+  `buffer_ms=1500`, `ring_artwork=true`, `source_version="366.0"`, `ptp=true`; the receiver
+  identity rotation is app behaviour, not a deployment edit.
+- **Radio, digital frame and idle-exit evidence.** With a local MP3 fixture or the saved SomaFM
+  station, the receiver logged `state playing station audio` and the segment output wrote
+  `cells=[0 0 63 6] colon=false` (station 1). The `pause` action logged
+  `state paused … run exits in 1m0s` and wrote `cells=[0 6 48 0] colon=false`; at +60 s the run
+  logged `exiting run: pause expired`, `idle run ended; exiting`, exited code 0, and
+  `routing/capsulad.clock … reason=default_baseline` restored the configured clock baseline.
+  The `stop` action repeated the pause-sign frame, logged `state stopped playback`, held for the
+  full minute, then logged `exiting run: stop expired` and restored the same clock baseline.
+  The `always_display=false` tuning window also released to the clock baseline after 10 s before
+  the pause sign was drawn. These are daemon-rendered digital frames, not a photometric
+  measurement.
+- **AirPlay cover art, device.** An authorized legacy RAOP fixture sender on the LAN
+  (192.168.1.96) completed `ANNOUNCE`, `SETUP`, `RECORD`, a 209-byte red/blue PNG
+  `SET_PARAMETER` and `TEARDOWN` with 200s. The receiver logged
+  `cover art palette 2 colour(s)`, selected `light.ring.main` as
+  `app=org.capsulad.airplay … reason=capture`, and wrote the 12-pixel gradient
+  `[{31 0 0} {28 0 3} … {3 0 28} {0 0 31}]`. `TEARDOWN` restored the selected baseline
+  (no ring default app is configured, so the baseline frame is all zeros). No AirPlay app
+  setting was changed, and this is a fixture sender, not an Apple device.
+- **Master-volume taper, digital output.** With the MP3 fixture playing into `master`, a
+  48 kHz/16-bit stereo capture of `master.monitor` measured RMS **1943.54** at 100%,
+  **61.00** at 50% (−30.06 dB, matching the −30 dB taper point), **2.23** at 5%
+  (−58.8 dB, close to the −57 dB point), **3.22** at 9% (the user setting) and **0.00** at 0%.
+  This is the post-mixer digital stream; it is not an acoustic or electrical measurement.
+- **Tracing and runs restored.** The evidence window used
+  `CAPSULAD_OUTPUT_TRACE=1 /etc/init.d/S99btctl.sh restart`; the daemon inherited the flag and
+  wrote rendered frames. A final normal `S99btctl.sh restart` restored the default (the new
+  daemon's `/proc/<pid>/environ` contains no `CAPSULAD_*` variable), settings stayed at
+  revision 3913/9% with the same values, the baseline runs returned to `APP_READY` with single
+  runs, and Radio was stopped after its tests. There is no persistent trace flag or test file in
+  the installed stack.
+- **Limits and rollback.** No acoustic, photometric or electrical measurement was made; the
+  radio/ring frames are digital. The AirPlay sender was this repository's fixture, not an
+  iPhone/Mac, so sender compatibility and album-art rendering by an Apple source remain open;
+  the cover-art pixels are a daemon write, not an optical reading. The reset during the restart
+  removed the deploy transcript, so the exact deploy exit and health-gate timing are unobserved;
+  the cause of the reset is not established. No browser session was driven against the
+  post-deploy UI. Rollback material is in `_capsula-mini-deploy-backup/20261120/` on the build
+  host (old daemon md5 `85e1f071…`, CLI md5 `09aa588c…`, runtime md5 `7eea4722…`, settings and
+  the Cadence package); the device keeps no `.prev` after the accepted/rebooted stack.
+  `/data` had 8,817 KiB free at the end.
+
+### 2026-11-20 AirPlay app-only replacement: buffered playback and shared master volume
+
+Only `org.capsulad.airplay` was replaced. The installed daemon, CLI and native runtime were
+already byte-identical to the current build (`capsulad` 28,901,528 B md5
+`c924d85ef72da877ce290be3af66c320`, `capsulad-cli` 8,781,976 B md5
+`56a4c99e68fbb3a7bb51bf3d1fea3c92`, `libcapsulad.so.1.0.0` md5
+`8a1cf6397425e6cc8872917cf7a2c29a`), so this was a scoped live app replacement: no bundle
+deploy, no daemon restart and no boot-hook change.
+
+- **Artifact.** Built with `make airplay-target AIRPLAY_TARGET_ABI=linux-gnu` in the pinned
+  Debian buster/FFmpeg 7.1 container. Package 2,135,589 B sha256
+  `4f99b8c6be92fd68aa181e05fa41021a7e447bbc8a10085584f296bbce1db5fb`; member `airplay`
+  4,727,864 B sha256 `2ccce8bf1e4486c2307717e522b1346fbd45b3d7699d6af6eb35bedde10dfa86`.
+  Maximum ELF requirement is `GLIBC_2.28` (`fcntl64@GLIBC_2.28`, `log2f`/`powf@GLIBC_2.27`),
+  and the container's AAC decode fixtures passed. The optional container load smoke could not
+  dlopen the pulled device runtime because that runtime imports `GLIBC_2.29` while the builder
+  libc is 2.28; the on-device run is the load proof.
+- **Install path.** The AirPlay run was confirmed idle (no session since the last `TEARDOWN`;
+  `media list` showed the provider, not a live player), stopped with `app stop`, replaced by
+  the daemon-side `app install`, and started again. Installed `airplay` sha256 matches the
+  package member; run `run_127b959f83bddeeae62897` reports `APP_READY` with `sandbox=mountns`,
+  `capsulad -health` exits 0, and `/data` had 8,586 KiB free afterwards (no bundle or `.prev`
+  copy was written).
+- **Settings.** Revision advanced 108 -> 110. `name="Capsula Mini"`, `receiver_model`,
+  `rtsp_port=7000`, `buffer_ms=1500`, `pairing_pin`, `ring_artwork=true`,
+  `source_version="366.0"`, `features` and `ptp=true` were byte-identical before and after;
+  `pairings` stayed `e30=` (empty). Only the app-managed `device_identity` and `raop_key` were
+  replaced by the app's own startup writes (two revision bumps). The pre-update settings file
+  already carried an identity written by an earlier start, so this repeats existing startup
+  behaviour rather than an install-time edit; the app feeds JSON-quoted settings into its base64
+  decoders, which is consistent with the observed regeneration. No pair/unpair request was sent.
+- **Advertisement.** After the restart avahi/mDNS resolved `_airplay._tcp` as `Capsula Mini`
+  and `_raop._tcp` as `D2A765451051@Capsula Mini` (the six-byte device id rotates per app start;
+  it was `1A01E380F3B6` before). Both were withdrawn on `TEARDOWN` and republished.
+- **Bounded semantic scenario.** This repository's synthetic legacy RAOP sender from host
+  `192.168.1.138` (not Apple Music and not an Apple device) completed `ANNOUNCE`, `SETUP`
+  (`server_port=50124`), `RECORD`, DMAP metadata (`Fixture Tone` / `capsulad deploy check` /
+  `Bounded semantic scenario`), a 209-byte red/blue PNG, `progress: 0/1500/30000` and
+  `TEARDOWN` with 200s; it sent 280 paced RTP L16 44.1 kHz stereo packets (~2.2 s of a quiet
+  440 Hz tone). The Web UI overview projection, read through the daemon's MCP endpoint with a
+  temporary operator-scoped key (created for this check, revoked afterwards; reuse returned
+  401), reported `org.capsulad.airplay` / player `airplay` as `PLAYBACK_PLAYING`,
+  `media_name="Fixture Tone — capsulad deploy check"`, `duration_ms=30000`,
+  `position_ms=1500`, source `Test iPhone`. After `TEARDOWN` the projection was empty again.
+- **Ring and audio, digital.** The receiver logged `cover art palette 2 colour(s)`, routing
+  selected `light.ring.main` for `app=org.capsulad.airplay presentation=prs_9003320acf76a771aca8a0
+  reason=capture capture=cap_20f06521a31b9edb1d6aa1`, and the output wrote a 12-pixel gradient
+  (`[{31 0 0} {28 0 3} …]`, brightness 0.8). The playback stream opened as
+  `PCM_S16LE/44100/2` and closed on teardown. These are daemon/app writes, not an optical or
+  acoustic measurement.
+- **Limits.** No Apple sender (iPhone/Mac) was used, so Apple-sender compatibility, the
+  type-103 buffered AAC/ALAC path and Apple album-art rendering remain device gates; the fixture
+  is legacy type 96 PCM. No acoustic or optical evidence was collected. The per-start
+  replacement of `device_identity`/`raop_key` and the rotating advertised device id remain open
+  behaviour. The daemon logged `reply for unknown call` while the Web UI media watch polled
+  during the session; it had no visible effect and was not investigated. The pre-update package
+  is kept on the build host as `build/device-apps/org.capsulad.airplay-0.1.0.tar.gz` (member
+  `airplay` sha256 `6fb1faf18362afb92fe42b6d7d9f154286db48ca38fe8ba5d8208876f862c895`) for
+  rollback with `app install`.
 
 ## 2026-11-18 current-change evidence: AirPlay advertisement, Simon 1.1.0, radio and app guides
 
@@ -670,11 +845,13 @@ not the speaker; read the level stated in each part.
 
 ### AirPlay shared master volume
 
-- **Daemon and settings proof (host simulator).** Focused race checks exercised a matched
-  READY receiver and rejected other, mismatched, and expired callers. The authorized
-  call updated the durable master and produced 25% full scale at the digital mixer sink.
-  The store-commit guard and stale master reapplication checks passed. Related Bluetooth
-  volume regressions passed in the preceding focused run.
+- **Daemon and settings proof (host simulator, pre-taper).** Focused race checks exercised a
+  matched READY receiver and rejected other, mismatched, and expired callers. The authorized
+  call updated the durable master and, under that build's linear master, produced 25% full
+  scale at the digital mixer sink. The store-commit guard and stale master reapplication checks
+  passed. Related Bluetooth volume regressions passed in the preceding focused run. The current
+  taper supersedes the linear sink measurement; the authorization and persistence results are
+  unchanged.
 - **AirPlay protocol and PCM (host loopback).** Focused race tests exercised 5% startup
   reporting, authenticated sender writes, the mute/floor/max mapping, owner takeover,
   and settings readback. Realtime and buffered ALAC/AAC tests confirmed the receiver
@@ -691,6 +868,172 @@ not the speaker; read the level stated in each part.
   reboot. The deployment checks sent no media or volume-setting requests.
 - **iPhone acceptance (user report).** The user confirmed playback and both directions of
   master-volume synchronization after deployment. Mac behavior and acoustic gain were not measured.
+
+### AirPlay cover-art ring display (current change)
+
+- **Consumer-visible defect.** With a live legacy session and a real PNG cover-art
+  `SET_PARAMETER` (receiver log `cover art palette 2 colour(s)`), `dev state` still selected the
+  configured `capsulad.ring` baseline on `light.ring.main` (`SelectedAppID=capsulad.ring`,
+  `Reason=default_baseline`, `SelectedCaptureID=`), and the simulator ring stayed the baseline
+  teal `(0,169,138)`. `capsulad-cli media list` showed the AirPlay player in the same run. The app
+  opened only the `light.ring.main` presentation; the router selects the configured default app's
+  baseline or a presentation referenced by a capture, so the cover-art presentation was never
+  selected. The palette was parsed and logged but never reached the LEDs.
+- **Fix and host proof.** `hw.OpenRing` now opens the presentation and the node's routing capture
+  (`OpenCapture`, `CaptureModeUnspecified`), and `Ring.Close` releases the capture before closing
+  the presentation. `go test -tags ffmpeg -ldflags '-linkmode=external' ./internal/hw -run
+  TestOpenRing` passed its two tests, and
+  `go test -tags ffmpeg -ldflags '-linkmode=external' ./internal/session -run
+  TestCoverArtPaletteDrivesTheRing` passed after sending a real PNG over the legacy
+  `ANNOUNCE`/`SETUP`/`RECORD` path: the ring frame ended red-to-blue (pixel 0 `(30,0,0)`, pixel 11
+  `(0,0,30)` at the no-audio envelope floor), not the neutral breath. The full
+  `make test-airplay` suite passed all 18 test packages.
+- **Simulator consumer proof.** With the same fake sender and cover art, the fixed build's
+  `dev state` selected `SelectedAppID=org.capsulad.airplay`, `SelectedCaptureID=cap_…`,
+  `Reason=capture`, and the ring snapshot became the `(30,0,0) … (0,0,30)` gradient. The first
+  frame after `RECORD` is the documented neutral breath `(84,84,84)` until the image arrives; it
+  is then replaced.
+- **Ownership/baseline integrity.** Closing the sender connection restored
+  `SelectedAppID=capsulad.ring`, `Reason=default_baseline`, an empty capture, and the baseline
+  teal frame `(0,161,131)`. The release order is pinned by
+  `TestOpenRingAcquiresTheRoutingCapture` (capture close before presentation close), and a failed
+  capture closes the presentation without selecting it. No forced black frame is written.
+- **Startup independence and late-grant release (review fix).** The routing capture is granted by
+  the framework only after routing is available, and its request waits up to 10 s. `startRing`
+  previously called that acquisition inline, so a legacy `RECORD` reply and the first buffered
+  PCM write could sit behind a stalled grant. Acquisition now runs on its own goroutine, and the
+  ring factory takes the session-lifetime context (`session.RingFactory.OpenRing(ctx)`,
+  `hw.Runtime.OpenRing(ctx)`). Closing or cleaning up the session cancels that context, which
+  unblocks a stalled request; a grant that still arrives after teardown is closed by `Ring.Close`
+  in capture-then-presentation order, restoring the configured baseline without writing a blank
+  frame. `TestRecordDoesNotWaitForStalledRingCapture`,
+  `TestBufferedFirstPCMWriteDoesNotWaitForRingCapture` and
+  `TestLateRingGrantAfterTeardownIsClosed` deliberately stall the grant at those two startup
+  points and at teardown; `TestTeardownCancelsStalledRingAcquisition` proves teardown bounds the
+  wait, and `TestOpenRingCancellationClosesThePresentation` pins the cancelled acquisition path.
+  These tests and the artwork regression `TestCoverArtPaletteDrivesTheRing` passed under `-race`,
+  and the full `internal/hw` and
+  `internal/session` packages passed under `-race` with
+  `go test -race -tags ffmpeg -ldflags '-linkmode=external' ./internal/hw ./internal/session`.
+  These are host timing tests; they do not measure device routing latency.
+- **Evidence files.** `build/evidence-20261120-airplay-artwork/` holds the before/after
+  `dev state` JSON, the sender logs and a daemon excerpt. The run used `PACKAGE=0 sh
+  apps/airplay/build.sh` host binaries, the simulator daemon, the built-in `capsulad.ring`
+  baseline and a loopback fake RAOP sender; it does not prove device optics, an Apple sender or
+  an iPhone's album-art rendering.
+
+### AirPlay 2 now-playing metadata (current change)
+
+- **Wire evidence (upstream source, not this speaker).** Shairport Sync 5.6.3
+  (`7ce90d8`) reads modern Apple Music now-playing from `POST /command` on the main
+  encrypted RTSP control channel, not from legacy `SET_PARAMETER` DMAP/image:
+  `metadata/metadata_hub_handle_command_plist.c:82-159` handles
+  `type=updateMRNowPlayingInfo`, `params.type=npi-text`,
+  `params.mergePolicy=replace|update` and the record nested in `params.params`;
+  `kMRMediaRemoteNowPlayingInfoArtworkData` is a plist `data` item (raw JPEG)
+  handed to the cover-art processor, and `:513-542` handles
+  `updateMRPlaybackState` (`mrPlaybackState` 1/2/3/4). `rtsp.c:2128-2159` and
+  `:2224` route `/command` on the control connection; `ap2_event_receiver.c` only
+  sends receiver-to-sender messages and does not read inbound commands. The
+  no-streams `SETUP` is only the event-port negotiation: its `eventPort` is the
+  reverse channel the sender opens, and the reference also returns
+  `timingPort`/`timingPeerInfo` for a PTP setup; no now-playing data travels on
+  that channel. Shairport sets feature bit 50 for this plist path
+  (`shairport.c:1999-2040`); with bit 50
+  set it suppresses the classic DMAP/image metadata. Independent sender notes
+  (`music-assistant/airplay-cli`, `DESIGN.md` §8) give the same envelope and
+  record the artwork as JPEG bytes; Shairport issue #2182 records a ~194 KB
+  `ArtworkData` burst. `SETPEERS`/`SETPEERSX` are PTP peer-list notifications
+  (`Content-Type: /peer-list-changed` and `/peer-list-changed-x`); the reference
+  only logs and answers `200`, so they carry no metadata.
+- **Implementation and host proof.** One `applyCommandPlist` path reads the
+  nested record from `POST /command` on the encrypted control connection, from
+  the event channel and from a plist `SET_PARAMETER`. `replace` clears omitted
+  title/artist/album/timeline fields and the cover, `update` merges, and
+  `ArtworkData` is decoded through the existing JPEG/PNG palette code.
+  `updateMRPlaybackState` maps 1/2/3 to playing/paused/stopped and ignores 4
+  (not available). The record's informational `PlaybackRate` does not call the
+  transport rate path, so a metadata-only update cannot pause buffered audio or
+  discard its queue. `TestAirPlay2NowPlayingCommandDrivesMediaRingAndCleanup`
+  exercises pair-verify, encrypted `SETUP`/`RECORD`, the real `params.params`
+  shape on the event channel and directly on the encrypted control channel,
+  title/artist/album, duration 240500 ms/position 12250 ms, two different
+  `ArtworkData` images (red→blue, then green→yellow), `update` merge, `replace`
+  clearing (including the neutral ring), `updateMRPlaybackState` 2 → paused, an
+  ignored `updateMRSupportedCommands`, and teardown cleanup. The second full
+  `replace`, including its different artwork, is posted as `POST /command` on
+  the encrypted control connection, not only on the event-channel tolerance
+  path.
+  `TestNowPlayingPlistCandidateStateReplaysOnPromotion` proves candidate
+  metadata and paused state do not touch the idle board and are replayed after
+  `ANNOUNCE`, including the cover palette. `TestCoverArtPaletteDrivesTheRing`
+  keeps the legacy DMAP image path. `TestNowPlayingTimelineOnlyReplaysOnPromotion`
+  proves a candidate record carrying only duration and elapsed time replays
+  those fields after promotion. `TestFlatNowPlayingRecordStillApplies` keeps
+  the older flat record shape working separately from the command envelope.
+  `TestNowPlayingAndPromotionSharePublicationLock` proves a live update and the
+  promotion replay both wait for the session's one publication lock before
+  their board write becomes visible.
+- **Review corrections (host proof).** A malformed nested
+  `updateMRNowPlayingInfo` without the exact `params.type=npi-text` marker is
+  ignored instead of clearing the live title, artist and cover
+  (`TestAirPlay2NowPlayingCommandDrivesMediaRingAndCleanup`).
+  `TestBufferedType103PlaybackStatePrecedence` proves a pre-PCM
+  `updateMRPlaybackState` playing report leaves the type-103 player buffering,
+  the first successful PCM changes it to playing, an explicit paused and then
+  stopped report each survive a subsequent successful PCM write, and a later
+  explicit playing report is authoritative again.
+  `TestBufferedType103ResumeWithoutFreshPCMStaysBuffering` pauses and
+  immediately flushes real type-103 playout, sends an explicit playing report,
+  and proves the player stays buffering until a fresh anchor and PCM arrive.
+  `TestBufferedStaleWriteCompletionCannotRepaintPaused` retires a playing
+  generation with a real transport pause and delivers the old generation's
+  successful write completion; it is rejected and the board stays paused.
+  `TestBufferedImmediateFlushRetiresBeforePause` holds publication with an
+  in-flight write while a real immediate `FLUSHBUFFERED` retires the
+  generation, then checks the observed board sequence has no PLAYING after
+  PAUSED; its no-PCM subtest checks the pause is still published.
+  `TestBufferedSecondStreamConnectionPreservesPlayingEvidence` adds a second
+  type-103 stream and its data channel while the first stream is playing, then
+  proves an explicit playing report still reports playing rather than
+  buffering. PCM evidence is tracked per stream and every immediate flush
+  retires all affected streams before the pause becomes visible.
+  `TestTeardownStopsAudioBeforeRingRelease` blocks the ring `Close` in a gated
+  test ring and proves the superseded session's playback sink is aborted before
+  the ring release is entered; the old ordering would have kept the sink live
+  while the framework release was blocked. The transport itself is unchanged:
+  `updateMRPlaybackState` changes only the reported display state.
+- **Race proof.** The focused run
+  `go test -race -count=1 -ldflags '-linkmode=external' ./internal/session -run 'TestAirPlay2NowPlayingCommandDrivesMediaRingAndCleanup|TestNowPlayingPlistCandidateStateReplaysOnPromotion|TestNowPlayingTimelineOnlyReplaysOnPromotion|TestNowPlayingAndPromotionSharePublicationLock|TestFlatNowPlayingRecordStillApplies|TestBufferedType103PlaybackStatePrecedence|TestBufferedType103ResumeWithoutFreshPCMStaysBuffering|TestBufferedStaleWriteCompletionCannotRepaintPaused|TestBufferedImmediateFlushRetiresBeforePause|TestBufferedSecondStreamConnectionPreservesPlayingEvidence|TestTeardownStopsAudioBeforeRingRelease|TestTakeoverOnSessionRequestReleasesOldResources|TestRecordDoesNotWaitForStalledRingCapture|TestBufferedFirstPCMWriteDoesNotWaitForRingCapture|TestTeardownCancelsStalledRingAcquisition|TestLateRingGrantAfterTeardownIsClosed'`
+  passed. The type-103 state, resume, stale-completion, flush-order,
+  multi-stream-evidence, teardown and publication-lock regressions also passed
+  repeated race runs. The full
+  `./internal/session` package passed under `-race` and `./internal/hw` passed
+  with `-ldflags '-linkmode=external'`. These are host loopback results from
+  this repository's sender and harness.
+- **Open and not claimed.** This is not an Apple sender, a device deployment or
+  an optical/acoustic measurement. A real Apple Music session on the speaker
+  remains the gate. The session regression uses a small PNG fixture; the
+  upstream ~43-194 KB JPEG shape is source evidence, and no integrated large
+  artwork body was measured. The default advertised mask also sets bit 29,
+  which this repository labels `FeaturePlistMetadata`, but the public feature
+  table leaves bit 29 unnamed and assigns plist metadata to bit 50
+  (`MetadataFeature4`). It keeps the AP1 text/progress bits 16/17 alongside
+  bit 50, whereas Shairport sets bit 50 and omits 15/16/17 when it enables
+  plist metadata. No field observation yet shows whether a sender treats that
+  combination differently. If a real Apple session still sends no
+  `updateMRNowPlayingInfo`, compare the advertised mask before changing the
+  parser. Safe read-only device evidence is
+  `adb shell '/data/capsdemo/capsulad-cli -data-dir /data/capsdemo logs -app org.capsulad.airplay -n 300'`
+  (or `tail` of `/data/capsdemo/capsulad.log`) while the user plays from their
+  own phone: it should show `event channel established`, a
+  `session <ip>: <title> — <artist>` line and `cover art palette 1..3 colour(s)`,
+  with no `now-playing artwork rejected`. `settings app org.capsulad.airplay`
+  and `app provenance` confirm the installed build and that the default feature
+  mask (bit 50) is not overridden. These commands only read;
+  they do not restart the app, write settings, reinstall, or change the source
+  computer's AirPlay/output settings. Log lines and ring frames are software
+  submission, not optical or acoustic proof.
 
 ### Simon Says 1.1.0 (isolated simulator)
 
@@ -763,6 +1106,84 @@ not the speaker; read the level stated in each part.
   evidence, not a browser or physical result.
 - **Limits.** These are backend and browser evidence on the simulator; no sound was measured
   and no device or real station was used.
+
+### Internet Radio playback Stop, stopped Play and retained selection (host simulator)
+
+- **Focus and package.** The nested radio suite passed
+  `CGO_ENABLED=1 go test -race -count=1 -ldflags '-linkmode=external' ./...` from
+  `apps/radio`; the SPA suite passed 83 tests with one skip, including the new
+  `app-actions` cases for stopped Play. `org.capsulad.radio-0.2.0.tar.gz` was built from
+  `apps/radio` (sha256 `a454ae82172396afee20f1abbf2341658f2ca40632f307d84e9acdec736e787c`) and
+  installed in a fresh simulator data directory serving one local MP3 tone.
+- **Cold Play and playback Stop (PASS).** An external
+  `capsulad-cli app start org.capsulad.radio station=1` spawned a new run, logged
+  `settings ready revision=2 stations=1 station=1`, `session 1 playing station="Local tone"`,
+  and the media contract reported `PLAYBACK_PLAYING`. The `stop` action then closed the audio
+  stream, reported `PLAYBACK_STOPPED` with `MEDIA_PLAY` first in `supportedActions`, logged
+  `state stopped playback; run exits in 1m0s unless resumed`, and wrote the pause bars
+  `cells=[0 6 48 0]`; the run stayed `APP_READY`. A `play` action before the deadline logged
+  `session 2 playing station="Local tone"` and the player returned to `PLAYBACK_PLAYING`
+  without the old expiry ending it.
+- **Expiry and baseline (PASS).** A second `stop` at `2m13.076s` exited at `3m13.078s`
+  (`exiting run: stop expired`, 60.002 s later), the app run list became empty, the media
+  contract returned no player, and routing logged
+  `capsulad.clock ... reason=default_baseline` at `3m13.079s`, so the selected display baseline
+  returned with the run. The exit loop computes the remainder from the armed absolute deadline;
+  the focused unit test additionally wakes the loop mid-hold and rejects a restarted full-length
+  timer.
+- **Retained selection across immediate Dismiss (PASS).** With two stations configured,
+  `next` and `dismiss` were triggered back-to-back in one client (no delay). The app logged
+  `state stopped dismissed` and exited; the settings snapshot then read revision 4 with
+  `station=2`, and a fresh cold launch played `Tone B`. The shutdown flush runs after audio and
+  display release, uses a fresh bounded context, and a multi-second in-flight write cannot hold
+  it past the gate deadline (both covered by `radio` tests).
+- **Web UI path (dev-server SPA against the same simulator).** The stopped app page rendered
+  the new affordance: `Play` enabled with "Not running: Play launches the app with its saved
+  selection; it still exits when idle.", every other action disabled with "Launch the
+  application before using this action.", and the settings frame showing `Selected: 2 — Tone B`.
+  Clicking `Play` used the public launch command, started a run that played `Tone B` live, and
+  cleared the stopped hint; clicking `Stop` delivered the action (status `PLAYBACK_STOPPED`,
+  pause bars in the log) and clicking `Play` resumed `PLAYBACK_PLAYING`.
+- **Packaged embedded UI clicks (PASS, 2026-11-20 10:02–10:04Z).** The embedded SPA was rebuilt
+  (`internal/webui/dist/index.html` → `assets/index-161e48dd.js`) and compiled into a simulator
+  daemon (sha256 `7fb252a31827f32e9e19da6b0add9b003bc906f7c7d3bc27d1e9d5cc14e5efb0`). A fresh
+  simulator (`/tmp/webfinal/data`, `127.0.0.1:18444`, local MP3 server on `127.0.0.1:18767`)
+  served that binary with `org.capsulad.radio-0.2.0.tar.gz` (sha256
+  `bca8b2b63b1acee6cfd19d5a06d9f24f578a8a286e4e7308f9bca5258c272788`) installed; the saved
+  selection was `station=2` (`Tone B`). Every click below ran in the embedded page served by
+  that daemon, not the Vite dev server. Before the click-through, `cd web && npm test` passed
+  83 tests with one skip and `go test -ldflags '-linkmode=external' ./internal/webui` passed.
+  - **Overview.** With no radio run, **Actions → Play** was enabled in the DOM and the other five
+    declared actions were `disabled=true` with "Launch the application before using this
+    action." The enabled item also carried "Not running: Play launches the radio with its saved
+    station; it still exits when idle." Clicking it requested the application snapshot, sent the
+    public launch with the saved station, and the same document switched to Now Playing
+    `Tone B`, the radio badge `Running`, and the toast `Play requested`. The daemon log recorded
+    `started org.capsulad.radio run=run_3a6737457bb9f123ecfe5`,
+    `invocation=inv_ef60b8e9d6aa1b53806e4 delivered`,
+    `settings ready revision=2 stations=2 station=2`, `tuning Tone B`,
+    `session 1 playing station="Tone B"`, and a `display.segment.front` capture write.
+  - **Application detail.** The radio was stopped through the administrative CLI, then
+    **Settings for Internet Radio** was opened in the same embedded page. With no runs, the
+    `Play` action was enabled while Pause/Stop/Next/Previous/Dismiss were disabled. The separate
+    Launch form's `station` field was filled with `1` as an unsent draft; clicking the `Play`
+    action then logged `settings ready revision=2 stations=2 station=2`, `tuning Tone B`, and
+    `session 1 playing station="Tone B"` — the saved station 2, not the draft. The Launch field
+    still read `1` after the click, closing the dialog raised the unsaved-changes prompt, so the
+    cold Play neither consumed nor cleared that form.
+  - **Ready-run actions.** In Overview, Actions → Pause on the running radio logged
+    `action=pause invocation=actinv_24084e0a891d5ce2071d14 sent to
+    run=run_ce9e0b76dd7a39cc11c9d` followed by `state paused ... run exits in 1m0s unless
+    resumed` and the pause bars `cells=[0 6 48 0]`; the Now Playing card cleared. In the detail
+    view, Play on that paused run logged `action=play
+    invocation=actinv_30dfc9d08a91c613117618 sent to run=run_ce9e0b76dd7a39cc11c9d`,
+    `session 2 playing station="Tone B"`. Both an action and a cold-Play launch therefore
+    reached the daemon from both views in the embedded build.
+  - The earlier packaged-page attempt had waited for `[role="dialog"]`, but the application
+    modal is a native `<dialog class="modal">` with no ARIA role; the timeout was an automation
+    selector error, not a missing command path. The click-through above is the packaged result.
+- **Limits.** These are host simulator and browser evidence; no physical device, speaker output
+  or optical display measurement was used. The local MP3 tone is a fixture, not a real station.
 
 ### Internet Radio station-number setting
 
@@ -1046,6 +1467,14 @@ not the speaker; read the level stated in each part.
   returns both built-in documents with the expected headers and CSP.
 - All packaging, manifest validation, extraction limits, settings CAS, log rotation and
   supervisor policy paths.
+- **Singleton start reservation (manual vs recovery).** The supervisor's per-app start
+  reservation makes the no-live-run decision, spawn and run publication one step, so a recovery
+  restart and a manual launch cannot both spawn. `TestRecoveryAndManualStartShareAtomicReservation`
+  parks the recovery inside its reservation and proves a concurrent `StartIfAbsent` waits, attaches
+  to the recovery run and spawns nothing (two command attempts, one live run).
+  `TestManualLaunchRacingRecoveryRoutesToRecoveredRun` repeats the race through the daemon with the
+  recovery parked in the control-channel factory: `Launch` returns the recovery run with
+  `spawned=false` and its invocation is delivered to that run after READY.
 - The master-volume ceiling through the public API (`CGO_ENABLED=0 go test ./internal/daemon`,
   simulator sink, startup cue marker present so the jingle cannot overlap): full-scale S16 app
   playback measured **16383 at master 0.50**, **6553 at 0.20** and **3276 at 0.10** (exactly
@@ -1523,6 +1952,76 @@ not the speaker; read the level stated in each part.
   daemon); and neither "install while the daemon is stopped, then restart and see it active" nor
   the "cannot tell whether capsulad is running" refusal (a socket that fails for a reason other
   than absence) was exercised.
+
+### App lifecycle: one run per app (host, 2026-11-20)
+
+- **Manifest schema.** `single_instance` is removed from the manifest and every example. The
+  field has no compatibility shim: `TestRemovedSingleInstanceKeyIsRejected` loads a package that
+  still declares it and requires `unknown manifest keys: single_instance`. The registry treats
+  that as any malformed package (skip and log), so the daemon and its packages must be replaced
+  together;
+  [packaging-deployment.md](app_development/packaging-deployment.md#versioning-and-replacement)
+  records that requirement. `go test ./internal/manifest` passed.
+- **Launch contract.** A launch of an app with a live run is delivered as an invocation instead
+  of spawning a process; only an app with no live run spawns, and a stopping run refuses with
+  `FAILED_PRECONDITION`. `TestSimulatorVerticalSlice` re-launched the ready clock and required
+  the same run ID, `spawned=false`, a non-empty invocation ID and exactly one run, then launched
+  `test.probe` from two goroutines and required one run ID, exactly one
+  `spawned_new_process=true`, two invocation IDs and one supervised run. The probe fixture no
+  longer declares the removed field.
+- **Delayed restart.** A launch that wins a pending crash-restart backoff is the recovery; the
+  scheduled restart re-checks for a live run and skips. `TestPendingRestartDoesNotDuplicateALiveRun`
+  drives two crashes so the second replacement waits behind the 1 s backoff, starts a run
+  manually, then requires exactly three spawns and the launched run as the only live run.
+  `go test -ldflags '-linkmode=external' ./internal/supervisor` passed (11.313 s).
+- **Regressions.** `go test -ldflags '-linkmode=external' ./internal/daemon -run
+  'Launch|Stop|Restart|Recovery|Package' -count=1` passed (`ok`, 70.022 s), as did the focused
+  `TestSimulatorVerticalSlice` (8.97 s) and `TestLaunchDoesNotSucceedDuringBuiltinStop`.
+  `go build` over `./internal/manifest ./internal/daemon ./internal/webui ./cmd/capsulad
+  ./cmd/capsulad-cli` succeeded. Two full `./internal/daemon` runs bracketed the change; the
+  only failure that remains and also reproduces in isolation is the documented pre-existing
+  `TestDumbAssistantEndsAfterSpeechOverColoredRoom` timing failure.
+  `TestAirPlayMasterVolumeAuthorization` passes in the current shared tree (5.157 s) after the
+  concurrent master-taper slice updated its own expectation.
+- **Protocol and generated artifacts.** `InstalledApplication` and `AppView` reserve field 5 and
+  the name `single_instance`; the Go bindings, browser bindings and
+  `sdk/native/descriptors/capsulad-framework.protoset` were regenerated. The descriptor guard
+  (`go test -ldflags '-linkmode=external' ./internal/nativedescriptor`) passed. The app detail
+  page no longer prints an instance-policy label; `npm run build` regenerated the embedded SPA
+  (`index-b5c40ba9.js`) and the embedded-asset tests passed.
+- **Not verified.** No device update was performed in this change. The bundle's
+  replace-packages-then-restart-daemon order is the coordinated path; a daemon-only update over
+  packages installed by an older stack was not exercised on the unit. A deployed native library
+  that still describes the removed field is harmless because the daemon never sets it, so this
+  change requires no new SDK surface.
+
+### Internet Radio idle-run exit (host, 2026-11-20)
+
+- **Package lifecycle.** `apps/radio/manifest.toml` now declares `background = false`,
+  `start_on_boot = false` and `restart_on_failure = false` (and no removed `single_instance`
+  key): the app is not started at boot and a clean self-exit is not relaunched. The app arms one
+  idle expiry at startup and replaces it on a bare invocation or an idle station step; a new
+  session (Play/resume/retune) supersedes it by generation, so a stale timer cannot end a newer
+  stream.
+- **Nested Go suite.** From `apps/radio`,
+  `CGO_ENABLED=1 go test -count=1 -ldflags '-linkmode=external' ./...` passed for
+  `internal/radio` and `internal/stream`; the race run
+  `CGO_ENABLED=1 go test -race -count=1 -ldflags '-linkmode=external' ./...` also passed
+  (`internal/radio` 1.395 s, `internal/stream` 1.016 s on this host).
+- **What the new tests prove (controlled clock or shortened windows).** A pause reports
+  `PLAYBACK_PAUSED`, replaces the station number with the middle-cell pause bars, holds even with
+  `always_display` on until the pause deadline, then sets the terminal state and signals
+  `App.Done`. A resume through the session transition clears the armed deadline and the old timer
+  does not end the resumed run. A step on an idle run refreshes its window. Stop and dismiss
+  release display ownership and signal the exit. A terminal error exits when its tuning window
+  (or the one-minute always-display hold) ends. The display-loop exit test observes
+  `capture` closed before `presentation`, no blank frame, and the presentation closed on exit.
+- **Limits.** These are host unit tests only; no daemon, browser, app package build/install or
+  speaker was exercised in this change. Expiries ran on real timers with shortened windows, so a
+  full 60-second wall-clock hold was not observed. The segment frames are presentation-protocol
+  values, not emitted light, and no audio was measured. The framework's clean-exit/no-relaunch
+  behavior with the new manifest flags was not exercised on a device or simulator in this
+  change.
 
 ## First-party app packages
 
@@ -2086,12 +2585,14 @@ document stays stable.
 14. Measure the aarch64 cost of the per-app scratch pass and the limiter on the RK3308
     (four 1.008 GHz A35, 240 MiB RAM). The steady-state mixer path allocates nothing per tick,
     but the host gives no CPU or heap proxy for the target.
-15. Decide the product question left open by this change: whether the linear master should become
-    a global loudness curve (the report's `master^1.5` proposal) for every source. The deferred
-    curve would change the loudness of every cue, alert and app at every setting and redefine
-    what `master_volume` means to users; it needs an acoustic decision on the device, not a
-    simulator measurement. The linear master and the existing Bluetooth `master^1.5`/trim
-    behaviour are intentionally unchanged.
+15. Confirm the logarithmic master taper acoustically on the unit. The product decision is
+    settled: the persisted 0–1 position is a control position mapped once by the canonical mixer
+    to a 60 dB exponential/linear-dB gain (0 exact silence, 1 unity, 5 % about -57 dBFS, 60 %
+    about -24 dBFS), and the native Bluetooth sink uses that mixer stage alone while the
+    PulseAudio fallback applies the same taper locally. Host tests prove the digital gain but not
+    perceived loudness; the remaining gate is to listen at 5 / 10 / 30 / 60 / 100 %, including
+    cues and overlapping apps, and confirm the default position and the low end are usable on the
+    Mini's amplifier. No device acoustic run is recorded yet.
 16. Run one complete spoken turn on the device: the live-service evidence above settles that the
     service accepts the session credential and the WAV chunk framing, but not recognition of the
     captured speech, the codec of the returned `play_url` body, playback of that body, latency, or

@@ -216,8 +216,9 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   release a newer owner (a newer indication merely wins selection while the introduction remains
   privately owned and is destroyed by its own release).
   Cues are framework playback streams under the master gain: they never block boot or input
-  handling, and each toggle or step produces exactly one cue. The master volume is a ceiling on
-  every app's contribution, the mixer holds its output below full scale with a soft limiter, and
+  handling, and each toggle or step produces exactly one cue. The persisted 0–1 master position
+  is mapped once to an exponential 60 dB taper (linear in dB, so 5% is about -57 dBFS) and is the
+  ceiling on every app's contribution, the mixer holds its output below full scale with a soft limiter, and
   the PulseAudio **sink** is pinned at unity at startup and on volume changes, so the sink stage
   cannot rescale framework output. That pin covers the sink (device) volume only: `pacat`'s
   per-stream sink-input volume is a separate PulseAudio stage that the pin neither sets nor reads
@@ -266,8 +267,8 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   `PLAYBACK_PLAYING` are listed, and a provider with none is omitted entirely, so an idle, paused
   or unreadable provider never renders a row the user cannot act on and never an error card. It is
   a display policy, not a change to discovery or control: the Overview app list still shows a
-  stopped or paused app with its launch control and its declared actions (a radio's `play`, for
-  one); a READY but idle or paused provider is still reported and addressable through
+  stopped or paused app with its launch control and its declared actions; a READY but idle or
+  paused provider is still reported and addressable through
   `capsulad-cli media list`, `AppInterfaceService` and `ListPlayers`/`WatchPlayers`; and the
   Bluetooth source stays readable and commandable through
   `BluetoothMediaService.GetState`/`Command`, which need no panel row. A provider with no ready
@@ -317,11 +318,12 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   supported model. Volume sync is two way for display, one way for gain: a level the source reports
   becomes the framework master (phone slider → speaker), and a speaker-side change is written back to
   the source's AVRCP register so the phone's display follows. That write is a mirror, never a second
-  gain stage: the local curve stays the only attenuation, because writing the register as an
-  additional stage attenuated the same signal twice (10 % on both ends sounded near-silent) and
-  compensating the local trim for the source's share made 5 % far too loud. A report within four
-  AVRCP steps of a level written in the last five seconds is therefore treated as an echo and does
-  not move the master.
+  gain stage: the framework mixer's canonical taper stays the only attenuation on the native sink,
+  and the PulseAudio fallback applies that same taper locally because it bypasses the mixer.
+  Writing the register as an additional stage attenuated the same signal twice (10 % on both ends
+  sounded near-silent) and compensating the local trim for the source's share made 5 % far too
+  loud. A report within one AVRCP step of a level written in the last 900 ms is therefore treated
+  as an echo and does not move the master.
 - **Built-in startup.** At boot only a needed compiled-in app starts. The clock is framework-owned
   and starts whenever the segment display capability exists, preserving timers, alarms and the
   segment baseline even when another display provider is selected. The ring built-in is a provider
@@ -408,36 +410,56 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   paced PCM to the framework speaker in its own process. There is no companion app, no app-to-app
   audio hop and therefore no cross-app push authorization; the retired MicroPython front end and
   `org.capsulad.radio.tuner` are replaced under the same app id, and the stored `stations`,
-  `station` and `autoplay` settings survive the package replacement. The app is `background`,
-  `start_on_boot` and `single_instance`: it is already running to answer actions and the media
-  contract and stays idle until a station is played. Play or a retune shows the station number
-  with a dark colon, whether buffering or playing; paused uses the last decimal point. The
-  **Always display station number** setting defaults off: after 10 s the app releases its
-  `display.segment.front` capture and presentation, restoring the selected baseline without
-  affecting playback or the ring. A retune replaces that deadline. Enabling the setting while
-  active shows the number again; disabling it uses the current tuning deadline, not a new one.
-  Failure shows four dashes only while the app owns the display; a late failure does not bring
-  back an expired overlay. Stop or dismissal releases the display immediately. A device that
-  advertises no segment display plays without one and retries on the next state change.
-  A bare launch — including the invocation a boot start or a second `app start` delivers —
-  only makes sure the app is running and never starts audio; `autoplay` is off by default and
-  plays the selected station once, at the first settings snapshot after startup, never restarting
-  a radio the user stopped and never starting playback when the setting is changed later. A short
-  circle tap follows the normal media contract (the app is a standard provider, so the Web UI
-  "Now playing" panel and the swipes drive it), and the circle key's dismissal runs the app's
-  `dismiss` action. Pause is not a parked buffer: the station stream is closed and the queued tail
-  discarded, `PLAYBACK_PAUSED` is reported until play, and resuming re-dials the station.
-  Next/previous wrap the list and persist the new `station` number with a compare-and-swap update;
-  a live, paused or errored radio switches station immediately, while an idle radio only selects —
-  changing the stored `station` never implicitly starts audio. The packaged settings document
-  renders the parsed station list as a named picker and writes `station` through the sandboxed
-  `capsulad.settings-ui/1` bridge; an out-of-range stored selection is reported and does not start
-  audio, and the app never silently rewrites a deliberate selection. A station switch while active
-  replaces the owned playback: the previous session is cancelled and its late open, read or
-  failure cannot clear the newer stream or selection, and a stale own-write echo cannot revert it.
+  `station` and `autoplay` settings survive the package replacement. The app is
+  not a resident service: it is `background = false`, `start_on_boot = false` and
+  `restart_on_failure = false`, so it is not started at boot and a clean self-exit
+  is not relaunched; one run at most is alive. Play or a retune shows the station
+  number with a dark colon, whether buffering or playing. Paused replaces the
+  number with a pause sign — two full-height bars in the middle two cells, dark
+  colon — and holds that state and the run for one minute; Play inside the
+  minute cancels the stale expiry and re-dials, while the deadline passing
+  reports the terminal state and exits. The **Always display station number**
+  setting defaults off: after 10 s a playing radio releases its
+  `display.segment.front` capture and presentation, restoring the selected
+  baseline without affecting playback or the ring. A retune replaces that
+  deadline. Enabling the setting while playing shows the number again;
+  disabling it uses the current tuning deadline, not a new one. It never
+  extends the pause hold: a paused radio always ends after its minute.
+  Failure shows four dashes only while the app owns the display; with
+  `always_display` off the dashes use the tuning window, and with it on they
+  last until Stop/Dismiss, Next/Previous or at most one idle minute. A late
+  failure after the display was released exits without bringing back the
+  overlay. Stop, dismissal or a terminal expiry releases the display capture and
+  presentation immediately, so the selected baseline returns, and ends the run.
+  A device that advertises no segment display plays without one and retries on
+  the next state change.
+  A bare launch starts a run that only proves readiness and never starts audio,
+  but it waits one idle minute for Play rather than staying resident; a second
+  bare invocation while the run is alive refreshes that minute, and a station
+  step while idle does too. `autoplay` is off by default and plays the selected
+  station once, at the first settings snapshot after a launch, never restarting
+  a radio the user stopped and never starting playback when the setting is
+  changed later. A short circle tap follows the normal media contract (the app
+  is a standard provider while its run is alive, so the Web UI "Now playing"
+  panel and the swipes drive it), and the circle key's dismissal runs the app's
+  `dismiss` action. Pause is not a parked buffer: the station stream is closed
+  and the queued tail discarded, `PLAYBACK_PAUSED` is reported and the pause
+  sign held for one minute, and resuming re-dials the station.
+  Next/previous wrap the list and persist the new `station` number with a
+  compare-and-swap update; a live, paused or errored radio switches station
+  immediately, while an idle radio only selects and refreshes its idle minute —
+  changing the stored `station` never implicitly starts audio. The packaged
+  settings document renders the parsed station list as a named picker and writes
+  `station` through the sandboxed `capsulad.settings-ui/1` bridge; an
+  out-of-range stored selection is reported and does not start audio, and the
+  app never silently rewrites a deliberate selection. A station switch while
+  active replaces the owned playback: the previous session is cancelled and its
+  late open, read or failure cannot clear the newer stream or selection, and a
+  stale own-write echo cannot revert it.
   Streaming is bounded on every path: a read that goes idle for 10 s fails the stream, up to three
   reconnects with 1/2/4 s backoff run inside the same session, and a terminal failure reports
-  `PLAYBACK_STOPPED` in the contract with the reason logged. A stream
+  `PLAYBACK_STOPPED` in the contract with the reason logged, then ends the run when the error's
+  display window closes. A stream
   that never starts or goes silent cannot leave a stale `PLAYING` even with no user activity: an
   autonomous watchdog (500 ms ticks) bounds "no audio reached the speaker" at **60 s** while
   buffering or playing — ending as `radio did not start (no audio for 1m0s)` or `radio stalled (no
@@ -445,14 +467,16 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   legitimate retry window is never pre-empted. A finite file that ends is not a live station: its
   tail chunk is written, EOF triggers the same bounded reconnects and the app then ends in the
   error state, while a live stream stays playing. The media contract keeps exactly one player, id
-  `radio`: `ListPlayers`/`GetStatus` still expose the stopped entry, so the selected station stays
-  discoverable and `Play` can start it (the strict Web UI Now Playing projection hides it — a
-  consumer policy, not a different contract), `GetStatus`/command calls require a non-empty
-  `playerId` (`INVALID_ARGUMENT` when it is missing, `NOT_FOUND` for an unknown player), and
-  `WatchPlayers` sends a full snapshot first and then converges on each change without a slow
-  watcher blocking playback. `Close`/`SIGTERM` cancels the stream, aborts playback, closes the
-  presentation and waits for its loops; a killed process is covered by the framework, which
-  releases the run's presentation, capture and audio stream.
+  `radio`, for as long as the run is alive: `ListPlayers`/`GetStatus` expose the paused entry
+  during its hold, so the selected station stays discoverable and `Play` can resume it (the strict
+  Web UI Now Playing projection hides non-playing entries — a consumer policy, not a different
+  contract), `GetStatus`/command calls require a non-empty `playerId` (`INVALID_ARGUMENT` when it
+  is missing, `NOT_FOUND` for an unknown player), and `WatchPlayers` sends a full snapshot first
+  and then converges on each change without a slow watcher blocking playback. After the idle exit
+  there is no ready provider to discover or command, and a new launch is the recovery.
+  `Close`/`SIGTERM` cancels the stream, aborts playback, closes the presentation and waits for its
+  loops; a self-exit uses the same release path, and a killed process is covered by the framework,
+  which releases the run's presentation, capture and audio stream.
 - **AirPlay receiver (`org.capsulad.airplay`).** The trigger is a sender on the local link: it
   finds the receiver through the two mDNS records the daemon publishes and connects to the
   daemon-allocated control port. Opening a TCP connection, querying receiver information, or
@@ -480,10 +504,28 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   callers register the same instance and be told the name collides. Feedback is the standard media
   contract (buffering, then playing, with the sender's metadata) plus the ring: the cover-art
   palette with the audio envelope, or a dim neutral breath with no cover art, never an invented
-  image. A pause (`rate 0`) flushes queued audio and reports `PLAYBACK_PAUSED`; the ring
-  presentation and the playback stream are owned by the session and released on teardown,
-  connection loss, takeover, idle timeout, app stop or a settings change, and the playback stream
-  is aborted rather than drained so a stopped session makes no late sound. An authenticated
+  image. Modern AirPlay 2 now-playing arrives as the sender's `POST /command`
+  `updateMRNowPlayingInfo` plist (the event channel remains the receiver-to-sender notification
+  path): the receiver reads the `npi-text` record under `params.params` — title, artist, album,
+  duration, elapsed time and `kMRMediaRemoteNowPlayingInfoArtworkData` — treats `replace` as a
+  full record that clears omitted fields and artwork and `update` as a merge, and takes
+  playing/paused/stopped from a separate `updateMRPlaybackState` command; a nested record
+  without the exact `npi-text` marker is ignored instead of clearing the live record, and
+  promotion replays a timeline-only record's duration and position. Type-103 playback stays
+  buffering until decoded PCM reaches the sink, and an explicit paused/stopped report outranks
+  PCM-derived playing without moving the transport. A pause, immediate flush or reconnected
+  data channel retires the current PCM generation: an explicit playing report after that
+  boundary stays buffering until fresh PCM arrives, and a late write completion from the
+  retired generation cannot repaint the player. Evidence is per type-103 stream, and an
+  immediate `FLUSHBUFFERED` retires every affected generation before publishing the pause,
+  so consumers never observe PAUSED followed by a stale PLAYING. The record's informational
+  playback rate never moves the audio transport either. The legacy DMAP text, image and
+  `progress:` path remains for RAOP and senders that negotiate it. A pause (`rate 0`) flushes
+  queued audio and reports `PLAYBACK_PAUSED`; the ring
+  presentation, the routing capture that selects it and the playback stream are owned by the
+  session and released on teardown, connection loss, takeover, idle timeout, app stop or a
+  settings change; releasing the capture restores the selected ring baseline, and the playback
+  stream is aborted rather than drained so a stopped session makes no late sound. An authenticated
   type-103 buffered stream is staged by `SETUP` but remains silent until a valid
   `SETRATEANCHORTI` or `SETRATEANCHORTIME` anchor and audio arrive; the reference literal and
   the field client's full spelling name the same plist-bodied anchor. Its timeline is matched to
@@ -601,8 +643,8 @@ credential-mutating routes.
 Honest limits: the audible cue proves the mixer consumed a cue at the selected master gain and wrote
 it to the configured sink; it does not measure perceived loudness. The ceiling, per-app clamp,
 limiter and sink pin are **digital-output** guarantees about PCM submitted through the framework
-mixer — each app contributes at most the master level, an app cannot exceed that level with hot
-samples or extra streams, and the limiter keeps the bus below full scale. They say nothing about
+mixer — each app contributes at most the tapered master gain, an app cannot exceed that gain with
+hot samples or extra streams, and the limiter keeps the bus below full scale. They say nothing about
 acoustic level, speaker efficiency or room response. Audio already buffered in the hardware/PA sink
 or written by a non-framework path can still overlap the mixer's output — mixer-level exclusivity
 and the sink pin cannot reach into the sink's own queue, a sink whose volume cannot be read back
@@ -628,7 +670,7 @@ and a documentation-only change needs only the relevant rows.
 | Finish/cancel/error → baseline | Which streams, captures, presentations, timers and conversations must end? What replaces them? | Check resource cleanup plus the next successful backend output; test normal audio drain separately from abort. |
 | Stop/crash/disconnect → recover | Can an old callback or lost event leave a phantom owner or stale route? Can the feature be used again? | Exercise an abnormal exit and a fresh interaction; verify terminal events and convergence to current state. |
 | Save → restart/upgrade | Which user choices and in-flight state must persist? Are all affected package/settings versions compatible? | Restart through the supported service; re-read choices and exercise the installed package, not merely its API health. |
-| Volume/mixer change → output | Which gain stage changed? Does every source still pass the per-app ceiling, the limiter and the sink pin? Can an app exceed the configured level with hot samples, extra streams or a second app? | Drive full-scale S16, hot F32 and overlapping apps through the public playback API; measure the sink PCM (≤ master, ≤ limiter threshold), confirm hot F32 is clamped, and confirm the fifth stream is `RESOURCE_EXHAUSTED`. |
+| Volume/mixer change → output | Which gain stage changed? Does every source still pass the per-app ceiling, the tapered master, the limiter and the sink pin? Can an app exceed the configured gain with hot samples, extra streams or a second app? | Drive full-scale S16, hot F32 and overlapping apps through the public playback API; measure the sink PCM (≤ tapered master gain, ≤ limiter threshold), confirm hot F32 is clamped, and confirm the fifth stream is `RESOURCE_EXHAUSTED`. |
 
 For each relevant path, name the expected terminal owner/output and the allowed time to reach it.
 Distinguish deliberate product limits from missing behavior. Do not silently introduce a timeout,

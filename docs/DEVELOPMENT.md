@@ -266,7 +266,9 @@ install/remove path and the Apps page are simulator-verified, with the browser s
 refusals recorded in
 [VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).)
 
-`app start` on a singleton app delivers an invocation instead of spawning a second process.
+`app start` on a running app delivers an invocation instead of spawning a second process; every
+app is a singleton. A launch while the existing run is stopping is refused with
+`FAILED_PRECONDITION`.
 
 ## Deployment bundles
 
