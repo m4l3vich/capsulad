@@ -559,6 +559,23 @@ func (c *Client) AudioState(ctx context.Context) (AudioState, error) {
 	return state, err
 }
 
+// SetMasterVolume persists the device master volume, in [0,1], and returns the
+// updated mixer state. Local administrators may always call it. A supervised
+// app may call it only from the installed AirPlay receiver's authenticated
+// READY run; every other app receives PERMISSION_DENIED. A host without
+// process peer credentials (the simulator) refuses the app path.
+//
+// The level is the same durable setting the physical keys and the Web UI
+// change. It is not a per-app gain: the mixer still applies it once after
+// summing app streams.
+func (c *Client) SetMasterVolume(ctx context.Context, volume float32) (AudioState, error) {
+	var state AudioState
+	err := c.unaryJSON(ctx, audioService, "SetMasterVolume", struct {
+		Volume float32 `json:"volume,omitempty"`
+	}{Volume: volume}, &state)
+	return state, err
+}
+
 // ListAudioEndpoints discovers available capture and playback endpoints.
 func (c *Client) ListAudioEndpoints(ctx context.Context) ([]AudioEndpoint, error) {
 	var response struct {

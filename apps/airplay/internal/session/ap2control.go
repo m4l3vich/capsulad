@@ -128,12 +128,19 @@ func (s *Session) serveAP2Control(state *controlState) {
 		case controlAnchor:
 			// The sender's anchor frame carries the stream latency; the frame
 			// the master time refers to is AnchorFrameRef, and upstream anchors
-			// on AnchorFrame minus its fudge factor.
+			// on AnchorFrame minus its fudge factor. Type-103 playout is not
+			// timed by 0xD7: it only accepts SETRATEANCHORTI with its timeline.
 			for _, stream := range s.activeStreams() {
+				if stream.buffered != nil {
+					continue
+				}
 				stream.setAnchor(control.AnchorFrameRef, control.anchorPlayoutFrame(), control.RemoteTimeNS, control.LatencyFrames)
 			}
 		case controlTimeAnnounce:
 			for _, stream := range s.activeStreams() {
+				if stream.buffered != nil {
+					continue
+				}
 				stream.setTimeAnnounce(control.RTPTimestamp, 0)
 			}
 		}
@@ -148,6 +155,10 @@ func (s *Session) deliverResent(packet []byte) {
 		return
 	}
 	for _, stream := range s.activeStreams() {
+		if stream.buffered != nil {
+			// Type 103 is an ordered TCP stream with no resend channel.
+			continue
+		}
 		if stream.ssrc == 0 || stream.ssrc == parsed.SSRC {
 			stream.deliver(packet)
 			return

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -27,7 +28,7 @@ func (s *Session) dispatch(req *rtsp.Request) (*rtsp.Response, *channelKeys, err
 	switch req.Method {
 	case "OPTIONS":
 		response := rtsp.NewResponse(req.CSeq(), 200, "")
-		response.Set("Public", "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, FLUSHBUFFERED, SETRATE, SETRATEANCHORTIME, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET, PUT")
+		response.Set("Public", "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, FLUSHBUFFERED, SETRATEANCHORTI, SETRATEANCHORTIME, TEARDOWN, OPTIONS, POST, GET, PUT")
 		return response, nil, nil
 	case "GET":
 		if path == "/info" {
@@ -70,12 +71,19 @@ func (s *Session) dispatch(req *rtsp.Request) (*rtsp.Response, *channelKeys, err
 		return s.handleSetParameter(req)
 	case "GET_PARAMETER":
 		return s.handleGetParameter(req)
-	case "FLUSH", "FLUSHBUFFERED":
+	case "FLUSH":
 		return s.handleFlush(req)
+	case "FLUSHBUFFERED":
+		return s.handleFlushBuffered(req)
 	case "TEARDOWN":
 		return s.handleTeardown(req)
-	case "SETRATEANCHORTIME", "SETRATE":
+	case "SETRATEANCHORTI", "SETRATEANCHORTIME":
+		// The reference dispatch table names the operation SETRATEANCHORTI;
+		// an iPhone field client sent SETRATEANCHORTIME. Both are observed
+		// wire spellings of the same plist-bodied anchor operation.
 		return s.handleSetRateAnchorTime(req)
+	case "SETRATE":
+		return s.refuse(req, 501, "SETRATE is not implemented by the reference receiver")
 	case "SETMAGICCOOKIE":
 		return s.handleAcknowledgement(req)
 	case "SETPEERS", "SETPEERSX":
@@ -134,43 +142,56 @@ func (s *Session) handleInfo(req *rtsp.Request) (*rtsp.Response, *channelKeys, e
 			}
 		}
 	}
-	cfg := airplayinfo.Config{
-		Name:                s.displayName(),
-		DeviceID:            s.m.cfg.DeviceID,
-		PairingID:           s.m.store.Device.PairingID,
-		Model:               s.m.cfg.Model,
-		Manufacturer:        "capsulad",
-		SourceVersion:       s.m.cfg.SourceVersion,
-		Features:            s.m.advertisedFeatures(),
-		StatusFlags:         0,
-		VolumeDB:            s.volume(),
-		OutputLatencyMicros: uint64(s.m.cfg.FrameTarget.Microseconds()),
-		PairingLTPK:         s.m.store.Device.LTPK[:],
-	}
-	txt := airplayinfo.TXT(s.m.advertiseTXT(true))
-	document, err := airplayinfo.DeviceInfo(cfg, txt, qualifier)
+	txt := airplayinfo.TXT(s.m.advertiseTXT())
+	document, err := airplayinfo.DeviceInfo(s.infoConfig(), txt, qualifier)
 	if err != nil {
 		return s.refuse(req, 500, err.Error())
 	}
 	return s.respondPlist(req, document)
 }
 
-// infoConfig is the device-information configuration this session would serve;
-// the event channel's updateInfo document reuses it.
+// infoConfig is the device-information configuration this session serves; the
+// event channel's updateInfo document reuses it. Every capability field is
+// filled: airplayinfo treats zero as a meaningful value (no audio format, no
+// volume control), so leaving one unset would tell a sender this receiver can
+// play nothing even while mDNS advertises the same format bits. The reference
+// reports these values from one configuration in both /info and the DNS-SD
+// records (rtsp.c:1194-1248).
 func (s *Session) infoConfig() airplayinfo.Config {
 	return airplayinfo.Config{
-		Name:                s.displayName(),
-		DeviceID:            s.m.cfg.DeviceID,
-		PairingID:           s.m.store.Device.PairingID,
-		Model:               s.m.cfg.Model,
-		Manufacturer:        "capsulad",
-		SourceVersion:       s.m.cfg.SourceVersion,
-		Features:            s.m.advertisedFeatures(),
-		StatusFlags:         0,
-		VolumeDB:            s.volume(),
+		Name:               s.displayName(),
+		DeviceID:           s.m.cfg.DeviceID,
+		PairingID:          s.m.store.Device.PairingID,
+		Model:              s.m.cfg.Model,
+		Manufacturer:       "capsulad",
+		SourceVersion:      s.m.cfg.SourceVersion,
+		Features:           s.m.advertisedFeatures(),
+		StatusFlags:        s.m.advertisedStatus(),
+		VolumeDB:           s.masterVolumeDB(),
+		VV:                 airplayinfo.DefaultVV,
+		VolumeControlType:  airplayinfo.DefaultVolumeControlType,
+		AudioStreamFormats: airplayinfo.DefaultAudioStreamFormats,
+		// Buffered formats come from the advertised feature mask, not a second
+		// capability list: ALAC 48/24 stereo is always decodable and the two
+		// AAC-LC stereo formats follow the FFmpeg feature bit. An override that
+		// clears bit 40 (or both codec bits) therefore reports zero here too.
+		BufferStreamFormats: bufferedStreamFormats(s.m.advertisedFeatures()),
 		OutputLatencyMicros: uint64(s.m.cfg.FrameTarget.Microseconds()),
 		PairingLTPK:         s.m.store.Device.LTPK[:],
+		SenderAddress:       s.senderAddress(),
 	}
+}
+
+// senderAddress is the document's senderAddress: the live control connection's
+// "ip:port", which the reference formats from the peer (rtsp.c:1204-1207).
+func (s *Session) senderAddress() string {
+	if s.peer.Address == "" {
+		return ""
+	}
+	if s.peer.Port == 0 {
+		return s.peer.Address
+	}
+	return net.JoinHostPort(s.peer.Address, strconv.Itoa(s.peer.Port))
 }
 
 func (s *Session) displayName() string {
@@ -208,11 +229,11 @@ func (s *Session) handlePairSetup(req *rtsp.Request) (*rtsp.Response, *channelKe
 		if err != nil {
 			return nil, nil, err
 		}
-		resp, _, err := s.respondTLV(req, response)
+		resp, _, err := s.respondPairSetup(req, response)
 		s.m.logf("session from %s: transient pair-setup complete; channels keyed from the SRP secret", s.peer.Address)
 		return resp, keys, err
 	}
-	return s.respondTLV(req, response)
+	return s.respondPairSetup(req, response)
 }
 
 // handlePairVerify completes the Curve25519 exchange and yields the shared
@@ -239,14 +260,24 @@ func (s *Session) handlePairVerify(req *rtsp.Request) (*rtsp.Response, *channelK
 		s.m.logf("session from %s: pair-verify failed: %v", s.peer.Address, err)
 		return s.refuse(req, 470, "pair-verify failed")
 	}
-	if shared := s.verify.SharedSecret(); len(shared) > 0 {
-		s.shared = shared
+	// M3 may fail authentication while the RTSP exchange still returns 200 with
+	// a TLV error. The shared secret exists from M1 in either case, so keying
+	// or promoting on it alone would treat a rejected controller as verified
+	// (and would desynchronise a still-plaintext connection). Require the
+	// signature proof before retaining the identity or switching framing.
+	if state == tlv8.StateM3 && !s.verify.Verified() {
+		s.m.logf("session from %s: pair-verify M3 was not authenticated", s.peer.Address)
 	}
-	if id := s.verify.ControllerID(); id != "" {
-		s.controllerID = id
+	if s.verify.Verified() {
+		if shared := s.verify.SharedSecret(); len(shared) > 0 {
+			s.shared = shared
+		}
+		if id := s.verify.ControllerID(); id != "" {
+			s.controllerID = id
+		}
 	}
 	var upgrade *channelKeys
-	if state == tlv8.StateM3 && s.shared != nil && !s.encrypted {
+	if state == tlv8.StateM3 && s.verify.Verified() && s.shared != nil && !s.encrypted {
 		keys, err := s.channelUpgrade(s.shared)
 		if err != nil {
 			return nil, nil, err
@@ -427,7 +458,7 @@ func (s *Session) handleFeedback(req *rtsp.Request) (*rtsp.Response, *channelKey
 }
 
 // handleSenderCommand processes a command the sender pushes on the event
-// channel. Playback state is taken from SETRATEANCHORTIME; anything the sender
+// channel. Playback state is taken from SETRATEANCHORTI; anything the sender
 // sends here is treated as additional state (playback rate, now-playing info).
 func (s *Session) handleSenderCommand(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
 	body, err := s.readBody(req)
@@ -451,7 +482,7 @@ func (s *Session) noteSenderPlist(body []byte) {
 		return
 	}
 	if name := plistString(dict["deviceName"]); name != "" {
-		s.deviceName = name
+		s.setDeviceName(name)
 	}
 	params := dict
 	if nested, ok := plistDict(dict["params"]); ok {
@@ -513,6 +544,12 @@ func (s *Session) handleAnnounce(req *rtsp.Request) (*rtsp.Response, *channelKey
 //   - Legacy RAOP: a "Transport:" header (UDP ports chosen by the receiver, or
 //     interleaved RTP over the control connection).
 func (s *Session) handleSetup(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
+	// A SETUP is media ownership only when it stages a real audio stream. The
+	// event-only and remote-control-only forms configure channels; they must
+	// not take the player or advertisements from the current sender.
+	s.mu.Lock()
+	s.setupStartsMedia = false
+	s.mu.Unlock()
 	transport := req.Get("Transport")
 	if transport != "" {
 		return s.handleLegacySetup(req, transport)
@@ -529,87 +566,156 @@ func (s *Session) handleSetup(req *rtsp.Request) (*rtsp.Response, *channelKeys, 
 	if !ok {
 		return s.refuse(req, 400, "malformed SETUP body")
 	}
-	if gid := plistString(dict["gid"]); gid != "" {
-		// Upstream records the sender's group id and republishes it in mDNS;
-		// neither implementation synchronises playback across a group.
-		s.m.setGroupID(gid)
+	rawGID, gidPresent := dict["gid"]
+	gid := plistString(rawGID)
+	gidSet := gidPresent && gid != ""
+
+	rawStreams, streamsPresent := dict["streams"]
+	streamList, listOK := rawStreams.([]any)
+	if streamsPresent && !listOK {
+		// A present but non-list "streams" is a malformed stream SETUP, not
+		// the event-channel setup that omits the key. Refuse it before it can
+		// reserve ownership.
+		return s.refuse(req, 400, "malformed SETUP streams")
 	}
-	rawStreams, ok := dict["streams"].([]any)
-	if !ok || len(rawStreams) == 0 {
+	if !streamsPresent || len(streamList) == 0 {
 		// Announce the event channel: the sender connects to this port and the
 		// receiver writes its reverse commands there.
 		if err := s.ensureEventListener(); err != nil {
 			return s.refuse(req, 500, err.Error())
 		}
+		s.noteGroupID(gid, gidSet)
 		_, port := s.eventListener.Addr()
 		return s.respondPlist(req, map[string]any{"eventPort": int64(port)})
 	}
-	if len(rawStreams)+len(s.activeStreams()) > maxStreamsPerSession {
-		s.m.logf("session from %s: SETUP refused: %d active streams and %d requested exceed the cap of %d",
-			s.peer.Address, len(s.activeStreams()), len(rawStreams), maxStreamsPerSession)
+	if len(streamList)+len(s.activeStreams())+len(s.stagedStreams()) > maxStreamsPerSession {
+		s.m.logf("session from %s: SETUP refused: %d active and %d staged streams plus %d requested exceed the cap of %d",
+			s.peer.Address, len(s.activeStreams()), len(s.stagedStreams()), len(streamList), maxStreamsPerSession)
 		return s.refuse(req, 453, "too many audio streams in this session")
 	}
-	if err := s.ensureAP2Control(); err != nil {
-		return s.refuse(req, 500, err.Error())
-	}
-	descriptors := make([]any, 0, len(rawStreams))
-	for _, raw := range rawStreams {
+	plans := make([]airPlay2StreamPlan, 0, len(streamList))
+	for _, raw := range streamList {
 		streamDict, ok := raw.(map[string]any)
 		if !ok {
 			return s.refuse(req, 400, "malformed stream description")
 		}
-		descriptor, err := s.setupAirPlay2Stream(streamDict)
+		plan, err := s.planAirPlay2Stream(streamDict)
 		if err != nil {
 			s.m.logf("session from %s: SETUP refused: %v", s.peer.Address, err)
 			return s.refuse(req, 400, err.Error())
 		}
-		descriptors = append(descriptors, descriptor)
+		plans = append(plans, plan)
 	}
+	// All descriptors are validated before the control socket or any audio
+	// listener is opened, so a malformed or unsupported request has no side
+	// effects. The listeners must exist before the reply can name their ports.
+	if err := s.ensureAP2Control(); err != nil {
+		return s.refuse(req, 500, err.Error())
+	}
+	descriptors := make([]any, 0, len(plans))
+	mediaStaged := false
+	for _, plan := range plans {
+		if plan.controlOnly {
+			descriptors = append(descriptors, map[string]any{
+				"type":        int64(streamTypeRemoteControl),
+				"controlPort": int64(s.ap2ControlPort()),
+			})
+			continue
+		}
+		stream, err := s.newAudioStream(plan.spec)
+		if err != nil {
+			s.discardStagedStreams()
+			s.m.logf("session from %s: SETUP refused: %v", s.peer.Address, err)
+			return s.refuse(req, 400, err.Error())
+		}
+		s.stageStream(stream)
+		mediaStaged = true
+		descriptors = append(descriptors, stream.descriptor())
+	}
+	s.mu.Lock()
+	s.setupStartsMedia = mediaStaged
+	s.mu.Unlock()
+	// The group id is committed only with a successful SETUP: a candidate
+	// stages it until it owns the receiver; a live sender applies it now.
+	s.noteGroupID(gid, gidSet)
 	return s.respondPlist(req, map[string]any{"streams": descriptors})
 }
 
-func (s *Session) setupAirPlay2Stream(dict map[string]any) (map[string]any, error) {
-	streamType, _ := plistInt(dict["type"])
-	if streamType == 0 {
-		streamType = streamTypeRealtime
+// airPlay2StreamPlan is one validated SETUP descriptor. It holds no listener;
+// creation happens only after every descriptor in the request has passed
+// validation.
+type airPlay2StreamPlan struct {
+	spec        audioStreamSpec
+	controlOnly bool
+}
+
+// planAirPlay2Stream validates one type-96/130/103 descriptor. Type 103 is
+// accepted only on the authenticated control channel with the fixed 32-byte
+// session key and one of the buffered formats advertised in /info.
+func (s *Session) planAirPlay2Stream(dict map[string]any) (airPlay2StreamPlan, error) {
+	streamType := int64(streamTypeRealtime)
+	if raw, present := dict["type"]; present {
+		value, ok := plistUint64(raw)
+		if !ok || value > 1<<31 {
+			return airPlay2StreamPlan{}, fmt.Errorf("unsupported stream type value %v", raw)
+		}
+		if value != 0 {
+			streamType = int64(value)
+		}
 	}
-	if streamType == 130 {
+	if streamType == streamTypeRemoteControl {
 		// A remote-control stream exists only inside an authenticated session;
 		// the reference reaches this case on its PTP (encrypted) connection.
 		if !s.encrypted {
-			return nil, errors.New("stream type 130 requires an authenticated session")
+			return airPlay2StreamPlan{}, errors.New("stream type 130 requires an authenticated session")
 		}
 		// The reference acknowledges it by echoing a descriptor with the
 		// control port and creates nothing (rtsp.c case 130).
-		return map[string]any{
-			"type":        int64(130),
-			"controlPort": int64(s.ap2ControlPort()),
-		}, nil
+		return airPlay2StreamPlan{controlOnly: true}, nil
 	}
 	if streamType != streamTypeRealtime && streamType != streamTypeBuffered {
-		return nil, fmt.Errorf("unsupported stream type %d", streamType)
+		return airPlay2StreamPlan{}, fmt.Errorf("unsupported stream type %d", streamType)
 	}
-	codec, config, aacProfile, err := codecFromFormat(uint64(plistUint(dict["audioFormat"])))
+	format, formatOK := plistUint64(dict["audioFormat"])
+	codec, config, aacProfile := "", alac.Config{}, aac.Profile("")
+	var err error
+	if streamType == streamTypeBuffered {
+		if !s.encrypted {
+			return airPlay2StreamPlan{}, errors.New("buffered audio requires an authenticated control channel")
+		}
+		shk := plistData(dict["shk"])
+		if len(shk) != 32 {
+			return airPlay2StreamPlan{}, fmt.Errorf("buffered audio requires a 32-byte shk, got %d bytes", len(shk))
+		}
+		if !formatOK {
+			return airPlay2StreamPlan{}, errors.New("buffered audio requires an audioFormat")
+		}
+		codec, config, aacProfile, err = bufferedCodecFromFormat(format)
+	} else {
+		codec, config, aacProfile, err = codecFromFormat(plistUint(dict["audioFormat"]))
+	}
 	if err != nil {
-		return nil, err
+		return airPlay2StreamPlan{}, err
 	}
-	shk := plistData(dict["shk"])
-	spf, _ := plistInt(dict["spf"])
-	if spf <= 0 {
-		spf = int64(config.FrameLength)
+	spf := int(config.FrameLength)
+	if spf == 0 && codec == "aac" {
+		spf = 1024
 	}
-	stream, err := s.newAudioStream(audioStreamSpec{
+	if rawSPF, present := dict["spf"]; present {
+		value, ok := plistUint64(rawSPF)
+		if !ok || value == 0 || value > 1<<20 {
+			return airPlay2StreamPlan{}, fmt.Errorf("unsupported samples-per-frame value %v", rawSPF)
+		}
+		spf = int(value)
+	}
+	return airPlay2StreamPlan{spec: audioStreamSpec{
 		streamType:      int(streamType),
 		codec:           codec,
 		config:          config,
 		aacProfile:      aacProfile,
-		sharedKey:       shk,
-		samplesPerFrame: int(spf),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return stream.descriptor(), nil
+		sharedKey:       plistData(dict["shk"]),
+		samplesPerFrame: spf,
+	}}, nil
 }
 
 // handleLegacySetup honours the RAOP "Transport:" header.
@@ -657,6 +763,10 @@ func (s *Session) handleLegacySetup(req *rtsp.Request, transport string) (*rtsp.
 	if err != nil {
 		return s.refuse(req, 400, err.Error())
 	}
+	s.stageStream(stream)
+	s.mu.Lock()
+	s.setupStartsMedia = true
+	s.mu.Unlock()
 	response := rtsp.NewResponse(req.CSeq(), 200, "")
 	if spec.useUDP {
 		dataPort, controlPort := stream.udpPorts()
@@ -688,10 +798,20 @@ func parseInterleaved(value string) (int, int, error) {
 
 func (s *Session) handleRecord(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
 	_ = s.readBodyOptional(req)
+	realtime := false
 	for _, stream := range s.activeStreams() {
+		if stream.spec.streamType == streamTypeBuffered {
+			// A buffered stream starts only at a valid SETRATEANCHORTI. RECORD
+			// must not make its staged audio audible or report PLAYING before
+			// PCM has reached the sink.
+			continue
+		}
 		stream.begin()
+		realtime = true
 	}
-	s.setRate(1)
+	if realtime {
+		s.setRate(1)
+	}
 	response := rtsp.NewResponse(req.CSeq(), 200, "")
 	rate := 44100
 	if streams := s.activeStreams(); len(streams) > 0 {
@@ -717,16 +837,24 @@ func (s *Session) handleSetParameter(req *rtsp.Request) (*rtsp.Response, *channe
 			}
 			switch strings.ToLower(strings.TrimSpace(key)) {
 			case "volume":
+				// A malformed line is ignored, not interpreted as 0 dB:
+				// Shairport's atof would turn garbage into full volume, which
+				// is not a legitimate slider position.
 				if dB, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
-					s.setVolumeDB(dB)
+					s.applySenderVolume(dB)
+				} else {
+					s.m.logf("session from %s: volume change ignored: malformed value", s.peer.Address)
 				}
 			case "progress":
 				start, current, end, ok := dmap.ParseProgress(strings.TrimSpace(value))
 				if ok {
+					s.mu.Lock()
 					s.progress.start, s.progress.current, s.progress.end = start, current, end
 					s.progress.has = true
-					if s.m.board != nil {
-						s.m.board.SetProgress(s.boardGen, uint64(current))
+					gen := s.boardGen
+					s.mu.Unlock()
+					if s.m.board != nil && gen != 0 {
+						s.m.board.SetProgress(gen, uint64(current))
 					}
 				}
 			case "paused":
@@ -756,7 +884,7 @@ func (s *Session) handleSetParameter(req *rtsp.Request) (*rtsp.Response, *channe
 		if value, err := plist.Decode(body); err == nil {
 			if dict, ok := value.(map[string]any); ok {
 				if dB, ok := plistFloat(dict["volume"]); ok {
-					s.setVolumeDB(dB)
+					s.applySenderVolume(dB)
 				}
 			}
 		}
@@ -769,7 +897,11 @@ func (s *Session) handleGetParameter(req *rtsp.Request) (*rtsp.Response, *channe
 	wanted := strings.TrimSpace(string(body))
 	response := rtsp.NewResponse(req.CSeq(), 200, "")
 	if strings.Contains(wanted, "volume") || wanted == "" {
-		response.Body = []byte(fmt.Sprintf("volume: %.5f\r\n", s.volume()))
+		// The reference's exact reply (rtsp.c:3313-3322): a CRLF, the
+		// value with six decimals and a trailing CRLF. Unit 0 is reported as
+		// the -144 dB mute value; an unreadable master reports that same safe
+		// value rather than 0 dB/full scale.
+		response.Body = []byte(fmt.Sprintf("\r\nvolume: %.6f\r\n", s.masterVolumeDB()))
 		response.Set("Content-Type", "text/parameters")
 	}
 	return response, nil, nil
@@ -778,7 +910,95 @@ func (s *Session) handleGetParameter(req *rtsp.Request) (*rtsp.Response, *channe
 func (s *Session) handleFlush(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
 	_ = s.readBodyOptional(req)
 	for _, stream := range s.activeStreams() {
+		if stream.spec.streamType == streamTypeBuffered {
+			// Type 103 uses FLUSHBUFFERED with a sequence/timestamp range.
+			continue
+		}
 		stream.flush()
+	}
+	return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
+}
+
+// handleFlushBuffered applies the sender's buffered-audio flush range. A
+// missing flushFromSeq/flushFromTS pair is the immediate form: playback stops
+// and the obsolete range is discarded up to but not including flushUntilSeq;
+// an omitted until pair means the whole queue (the reference's zero endpoint).
+// With the from pair the request is deferred: blocks before flushFromSeq play,
+// the named range is discarded when the stream reaches it, and flushUntilSeq
+// itself resumes playout. Both endpoints are half-open, matching the reference:
+// the block at flushUntilSeq is decoded rather than discarded. The reference
+// selects by the 23-bit sequence numbers; timestamps are carried for the
+// protocol but do not override that selection. A present but malformed field,
+// a partial pair or an out-of-range value is refused before any audio or player
+// state changes.
+func (s *Session) handleFlushBuffered(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
+	body, err := s.readBody(req)
+	if err != nil {
+		return s.refuse(req, 400, err.Error())
+	}
+	if len(body) == 0 {
+		return s.refuse(req, 400, "FLUSHBUFFERED requires a plist body")
+	}
+	value, err := plist.Decode(body)
+	if err != nil {
+		return s.refuse(req, 400, "malformed FLUSHBUFFERED body")
+	}
+	dict, ok := value.(map[string]any)
+	if !ok {
+		return s.refuse(req, 400, "malformed FLUSHBUFFERED body")
+	}
+	fromSeq, fromSeqPresent, fromSeqOK := optionalPlistUint32(dict, "flushFromSeq")
+	fromTS, fromTSPresent, fromTSOK := optionalPlistUint32(dict, "flushFromTS")
+	untilSeq, untilSeqPresent, untilSeqOK := optionalPlistUint32(dict, "flushUntilSeq")
+	untilTS, untilTSPresent, untilTSOK := optionalPlistUint32(dict, "flushUntilTS")
+	if (fromSeqPresent && !fromSeqOK) || (fromTSPresent && !fromTSOK) ||
+		(untilSeqPresent && !untilSeqOK) || (untilTSPresent && !untilTSOK) {
+		return s.refuse(req, 400, "FLUSHBUFFERED fields must be 32-bit unsigned integers")
+	}
+	if fromSeqPresent != fromTSPresent {
+		return s.refuse(req, 400, "FLUSHBUFFERED requires flushFromSeq and flushFromTS together")
+	}
+	if untilSeqPresent != untilTSPresent {
+		return s.refuse(req, 400, "FLUSHBUFFERED requires flushUntilSeq and flushUntilTS together")
+	}
+	immediate := !fromSeqPresent
+	if !immediate && !untilSeqPresent {
+		return s.refuse(req, 400, "deferred FLUSHBUFFERED requires flushUntilSeq and flushUntilTS")
+	}
+	streams := s.activeStreams()
+	hasBuffered := false
+	for _, stream := range streams {
+		if stream.spec.streamType == streamTypeBuffered {
+			hasBuffered = true
+			break
+		}
+	}
+	if !hasBuffered {
+		return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
+	}
+	if immediate {
+		// The reference stops playout and invalidates the PTP anchor for an
+		// immediate flush. Keep the buffered range prefetch (untilSeq) intact
+		// for the wire reader; it decides which blocks are obsolete.
+		s.mu.Lock()
+		s.rate = 0
+		gen := s.boardGen
+		s.mu.Unlock()
+		if s.m.board != nil && gen != 0 {
+			s.m.board.SetPlayback(gen, media.StatePaused)
+		}
+	} else {
+		s.touch()
+	}
+	for _, stream := range streams {
+		if stream.spec.streamType != streamTypeBuffered {
+			continue
+		}
+		stream.bufferedFlush(
+			uint32(fromSeq&0x7fffff), uint32(fromTS),
+			uint32(untilSeq&0x7fffff), uint32(untilTS),
+			immediate,
+		)
 	}
 	return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
 }
@@ -791,23 +1011,101 @@ func (s *Session) handleTeardown(req *rtsp.Request) (*rtsp.Response, *channelKey
 	return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
 }
 
-// handleSetRateAnchorTime is the play/pause anchor: rate 1 starts (or resumes)
-// playout at rtpTime, rate 0 pauses it.
+// handleSetRateAnchorTime handles the buffered play anchor. The reference
+// dispatch table names it SETRATEANCHORTI (rtsp.c method_handlers), while an
+// iPhone field client sent SETRATEANCHORTIME; both spellings carry the same
+// plist body and route here, so there is one parser and one playout path.
+// Rate one names the RTP timestamp playing now and, for a buffered stream, the
+// PTP network-time fields that make that timestamp a valid play anchor. Rate
+// zero pauses. A malformed or incomplete anchor is refused before changing
+// playout.
 func (s *Session) handleSetRateAnchorTime(req *rtsp.Request) (*rtsp.Response, *channelKeys, error) {
-	body, _ := s.readBody(req)
-	if len(body) > 0 {
-		if value, err := plist.Decode(body); err == nil {
-			if dict, ok := value.(map[string]any); ok {
-				rate, _ := plistInt(dict["rate"])
-				if rate > 0 {
-					s.setRateAnchor(1, uint32(plistUint(dict["rtpTime"])))
-				} else {
-					s.setRate(0)
-				}
-			}
+	body, err := s.readBody(req)
+	if err != nil {
+		return s.refuse(req, 400, err.Error())
+	}
+	if len(body) == 0 {
+		return s.refuse(req, 400, "anchor requires a plist body")
+	}
+	value, err := plist.Decode(body)
+	if err != nil {
+		return s.refuse(req, 400, "malformed anchor body")
+	}
+	dict, ok := value.(map[string]any)
+	if !ok {
+		return s.refuse(req, 400, "malformed anchor body")
+	}
+	rate, ok := plistUint64(dict["rate"])
+	if !ok || rate > 1 {
+		return s.refuse(req, 400, "anchor rate must be 0 or 1")
+	}
+	if rate == 0 {
+		s.setRate(0)
+		return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
+	}
+
+	rawRTP, ok := plistUint32Bits(dict["rtpTime"])
+	if !ok {
+		return s.refuse(req, 400, "anchor requires a 32-bit rtpTime")
+	}
+	streams := s.activeStreams()
+	hasBuffered, hasRealtime := false, false
+	for _, stream := range streams {
+		switch stream.spec.streamType {
+		case streamTypeBuffered:
+			hasBuffered = true
+		case streamTypeRealtime:
+			hasRealtime = true
 		}
 	}
+
+	var networkNS, timelineID uint64
+	if hasBuffered {
+		var timelineOK bool
+		timelineID, timelineOK = plistUint64Bits(dict["networkTimeTimelineID"])
+		seconds, secondsOK := plistUint64(dict["networkTimeSecs"])
+		frac, fracOK := plistUint64Bits(dict["networkTimeFrac"])
+		if !timelineOK || timelineID == 0 || !secondsOK || !fracOK {
+			return s.refuse(req, 400, "buffered anchor requires a non-zero networkTimeTimelineID, networkTimeSecs and networkTimeFrac")
+		}
+		const nanosPerSecond = uint64(1_000_000_000)
+		if seconds > ^uint64(0)/nanosPerSecond {
+			return s.refuse(req, 400, "networkTimeSecs is out of range")
+		}
+		// networkTimeFrac is a binary fraction of a second: the high 32 bits
+		// scale to nanoseconds exactly as the reference does (rtsp.c
+		// handle_setrateanchori).
+		fracNS := ((frac >> 32) * nanosPerSecond) >> 32
+		networkNS = seconds*nanosPerSecond + fracNS
+		if networkNS < seconds*nanosPerSecond {
+			return s.refuse(req, 400, "network time is out of range")
+		}
+	}
+	if hasRealtime {
+		s.setRateAnchor(1, uint32(rawRTP))
+	}
+	if hasBuffered {
+		s.setBufferedAnchor(streams, timelineID, uint32(rawRTP), networkNS)
+	} else if !hasRealtime {
+		// No audio stream yet: record the rate without starting a player.
+		s.mu.Lock()
+		s.rate = 1
+		s.mu.Unlock()
+	}
 	return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
+}
+
+// setBufferedAnchor applies one validated sender anchor to every type-103
+// stream. The playout seam selects the PTP estimate by the sender's timeline
+// identifier; it never falls back to an unrelated source's offset. Without a
+// matching disciplined clock it uses its explicit local arrival fallback.
+func (s *Session) setBufferedAnchor(streams []*audioStream, timelineID uint64, rtpTime uint32, networkNS uint64) {
+	for _, stream := range streams {
+		if stream.spec.streamType != streamTypeBuffered {
+			continue
+		}
+		stream.bufferedAnchorPlay(timelineID, rtpTime, networkNS)
+	}
 }
 
 // setRate changes the play/pause state and reports it on the media contract.
@@ -817,43 +1115,40 @@ func (s *Session) setRateAnchor(rate float64, rtpTime uint32) {
 	s.mu.Lock()
 	previous := s.rate
 	s.rate = rate
+	gen := s.boardGen
 	s.mu.Unlock()
-	if previous == rate {
+	if previous == rate && rtpTime == 0 && rate != 0 {
 		return
 	}
 	if rate == 0 {
 		for _, stream := range s.activeStreams() {
+			if stream.spec.streamType == streamTypeBuffered {
+				// Buffered audio stops and discards obsolete queued sound; it
+				// resumes only through a fresh SETRATEANCHORTI.
+				stream.bufferedPause()
+				continue
+			}
 			stream.pause()
 		}
-		if s.m.board != nil {
-			s.m.board.SetPlayback(s.boardGen, media.StatePaused)
+		if s.m.board != nil && gen != 0 {
+			s.m.board.SetPlayback(gen, media.StatePaused)
 		}
 		return
 	}
+	realtime := false
 	for _, stream := range s.activeStreams() {
+		if stream.spec.streamType == streamTypeBuffered {
+			// The RTP timestamp alone is not a play anchor for buffered audio:
+			// only handleSetRateAnchorTime, after validating network time,
+			// resumes it.
+			continue
+		}
 		stream.resume(rtpTime)
+		realtime = true
 	}
-	if s.m.board != nil {
-		s.m.board.SetPlayback(s.boardGen, media.StatePlaying)
+	if realtime && s.m.board != nil && gen != 0 {
+		s.m.board.SetPlayback(gen, media.StatePlaying)
 	}
-}
-
-func (s *Session) setVolumeDB(dB float64) {
-	s.mu.Lock()
-	s.volumeDB = dB
-	s.mu.Unlock()
-}
-
-func (s *Session) volume() float64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.volumeDB
-}
-
-// gain is the sender volume folded with the configured trim; it is applied to
-// the PCM this app writes, so the framework's master volume stays the ceiling.
-func (s *Session) gain() float64 {
-	return media.GainFromDB(s.volume()) * s.m.cfg.VolumeTrim
 }
 
 func (s *Session) setMetadata(metadata dmap.Metadata) {
@@ -867,9 +1162,10 @@ func (s *Session) setMetadata(metadata dmap.Metadata) {
 			duration = uint64(s.progress.end - s.progress.start)
 		}
 	}
+	gen := s.boardGen
 	s.mu.Unlock()
-	if s.m.board != nil {
-		s.m.board.SetMetadata(s.boardGen, metadata.Title, metadata.Artist, metadata.Album, duration, position)
+	if s.m.board != nil && gen != 0 {
+		s.m.board.SetMetadata(gen, metadata.Title, metadata.Artist, metadata.Album, duration, position)
 	}
 	if metadata.Title != "" {
 		s.m.logf("session %s: %s — %s", s.peer.Address, metadata.Title, metadata.Artist)
@@ -914,6 +1210,17 @@ func (s *Session) respondTLV(req *rtsp.Request, body []byte) (*rtsp.Response, *c
 	response := rtsp.NewResponse(req.CSeq(), 200, "")
 	response.Body = body
 	response.Set("Content-Type", "application/pairing+tlv8")
+	return response, nil, nil
+}
+
+// respondPairSetup uses the reference receiver's content type for /pair-setup
+// replies. Shairport Sync's handle_pair_setup sends application/octet-stream
+// whenever the reply has a body; the other pairing endpoints keep
+// application/pairing+tlv8.
+func (s *Session) respondPairSetup(req *rtsp.Request, body []byte) (*rtsp.Response, *channelKeys, error) {
+	response := rtsp.NewResponse(req.CSeq(), 200, "")
+	response.Body = body
+	response.Set("Content-Type", "application/octet-stream")
 	return response, nil, nil
 }
 
@@ -986,6 +1293,27 @@ func codecFromFormat(format uint64) (string, alac.Config, aac.Profile, error) {
 	}
 }
 
+// bufferedCodecFromFormat configures the initial decoder for a type-103
+// descriptor. Only formats derived in bufferedStreamFormats are accepted:
+// ALAC 48 kHz/24-bit stereo (the observed 0x15000000 SSRC) and the two
+// AAC-LC stereo masks. A buffered packet may switch among those formats; the
+// wire reader owns that switch, while this initial decoder gives the stream a
+// concrete rate and channel count before the first packet arrives.
+func bufferedCodecFromFormat(format uint64) (string, alac.Config, aac.Profile, error) {
+	switch format {
+	case bufferedFormatALAC48S24Stereo:
+		return "alac", alac.Config{
+			FrameLength: 352, SampleRate: 48000, Channels: 2, BitDepth: 24,
+		}, "", nil
+	case bufferedFormatAAC44F24Stereo:
+		return aacCodec(aac.Config{Profile: aac.ProfileLC, SampleRate: 44100, Channels: 2})
+	case bufferedFormatAAC48F24Stereo:
+		return aacCodec(aac.Config{Profile: aac.ProfileLC, SampleRate: 48000, Channels: 2})
+	default:
+		return "", alac.Config{}, "", fmt.Errorf("unsupported buffered audio format mask 0x%x", format)
+	}
+}
+
 // aacCodec reports the decoder configuration for an AAC stream, or the reason
 // it cannot be played. The reason is only ever produced by a build without the
 // FFmpeg decoder.
@@ -1007,6 +1335,9 @@ func plistInt(value any) (int64, bool) {
 	case int64:
 		return v, true
 	case uint64:
+		if v > uint64(1<<63-1) {
+			return 0, false
+		}
 		return int64(v), true
 	case int:
 		return int64(v), true
@@ -1037,6 +1368,69 @@ func plistUint(value any) uint64 {
 		return uint64(v)
 	}
 	return 0
+}
+
+// plistUint64 accepts only non-negative plist integers. Protocol fields whose
+// exact width or presence matters (audio formats, sequence numbers and clock
+// anchors) use this rather than plistUint, which treats reals as integers and
+// loses the difference between an absent value and zero.
+func plistUint64(value any) (uint64, bool) {
+	switch v := value.(type) {
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case uint64:
+		return v, true
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	}
+	return 0, false
+}
+
+// plistUint64Bits reads an unsigned 64-bit plist integer by bit pattern. The
+// decoder returns an 8-byte integer as int64, so PTP clock IDs and binary
+// network-time fractions with the high bit set otherwise look negative.
+func plistUint64Bits(value any) (uint64, bool) {
+	switch v := value.(type) {
+	case int64:
+		return uint64(v), true
+	case uint64:
+		return v, true
+	case int:
+		return uint64(v), true
+	}
+	return 0, false
+}
+
+// plistUint32Bits reads an unsigned 32-bit protocol field. Compact binary
+// values are unsigned; negative 8-byte signed integers are not valid for these
+// fields. Only the 64-bit PTP fields use signed bit-pattern reinterpretation.
+func plistUint32Bits(value any) (uint32, bool) {
+	v, ok := plistUint64(value)
+	if !ok || v > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
+// optionalPlistUint32 distinguishes an absent key from a present but malformed
+// value, which matters for FLUSHBUFFERED's optional immediate-flush pair. A
+// present value must be an integer in the protocol's 32-bit field range.
+func optionalPlistUint32(dict map[string]any, key string) (value uint32, present, valid bool) {
+	raw, present := dict[key]
+	if !present {
+		return 0, false, true
+	}
+	v, ok := plistUint32Bits(raw)
+	if !ok {
+		return 0, true, false
+	}
+	return v, true, true
 }
 
 func plistFloat(value any) (float64, bool) {

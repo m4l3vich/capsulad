@@ -201,7 +201,8 @@ interface is privileged, and constrain egress destinations inside the handler th
   do not serve.
 - Read or update device settings, change master volume or microphone mute, force another app's
   capture, read diagnostics or retained logs, record or train wakewords, manage paired Bluetooth
-  devices, or launch/stop apps.
+  devices, or launch/stop apps. The installed AirPlay receiver is the single
+  framework-authorized exception for master volume; no manifest field can request it.
 - Address another app's configuration, runs, logs, assets-by-path assumptions or captures.
   `ApplicationConfigurationService` and run queries are scoped to the caller.
 - Claim another run or app, reuse another run's `run_id`, spoof the `capsulad-run-id` metadata, or
@@ -219,18 +220,28 @@ interface is privileged, and constrain egress destinations inside the handler th
 
 ## Administrator-only surfaces
 
-These methods reject a supervised-app identity with `PERMISSION_DENIED`. The full method index is
-in [services.md](services.md).
+These methods reject a supervised-app identity with `PERMISSION_DENIED`, with the one
+master-volume exception described below. The full method index is in [services.md](services.md).
 
 | Service | Administrator-only methods |
 |---|---|
 | `SettingsService` | `GetSettings`, `UpdateSettings`, `WatchSettings` |
 | `RoutingService` | `ForceRelease` |
-| `AudioService` | `SetMasterVolume`, `SetMicrophoneMuted` (`GetAudioState` is readable) |
+| `AudioService` | `SetMasterVolume` (administrator or the installed AirPlay receiver's authenticated READY run), `SetMicrophoneMuted` (`GetAudioState` is readable) |
 | `AssistantService` | wakeword sample recording/listing/deleting, classifier training |
 | `ApplicationService` | `Launch`, `Stop`, `InstallApplication`, `UninstallApplication` (`ListApplications`, `ListRuntimes`, `GetBinaryProvenance` are readable; run listings are app-scoped) |
 | `SystemService` | `SetBluetoothDiscoverable`, `SetBluetoothIncomingConnections`, `ListPairedDevices`, `UnpairDevice`, `GetWebUiSecurity` |
 | `DiagnosticsService` | `GetSnapshot`, `WatchLogs` |
+
+The `SetMasterVolume` exception is fixed daemon policy, not a permission a package can request.
+The installed AirPlay receiver (`org.capsulad.airplay`) follows an authenticated active sender's
+volume on the same persisted master the device keys and the Web UI control. The daemon accepts
+it only from that app's live READY run, and only when the Unix-socket peer PID (`SO_PEERCRED`) is
+the supervised process the daemon launched. A run-id claim, a request field or a manifest
+declaration is not enough; an unknown, stale, starting, stopping or virtual run is refused. On a
+host without peer credentials (the simulator) the app path fails closed. The trust that the
+receiver is the first-party package comes from the administrator installing it; the exception is
+compiled in and no other app ID can obtain it.
 
 `ApplicationConfigurationService.Describe` is readable because it exposes manifest metadata only.
 `Get`, `Update` and `TriggerAction` are app-scoped: an app may address itself, an administrator may

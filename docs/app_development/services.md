@@ -26,13 +26,18 @@ claimed only by its stable run ID together with the daemon's per-boot internal t
 only the daemon itself holds; a peer that merely shares the daemon PID (the Web UI,
 `capsulad-cli`, a framework cue) is an administrator, never `capsulad.clock` or `capsulad.ring`.
 
+One method has a fixed device-owner exception: the installed `org.capsulad.airplay` receiver's
+authenticated READY run may call `AudioService.SetMasterVolume`, because a phone or Mac is
+controlling the speaker's physical level. It is not a manifest permission; see
+[security.md](security.md#administrator-only-surfaces) and [audio.md](audio.md#volume-and-mute).
+
 | Service | App access |
 |---|---|
 | `DeviceService` | full |
 | `SettingsService` (device settings) | administrator only |
 | `RoutingService` | full for own captures; `ForceRelease` administrator only |
 | `PresentationService` | full, app identity required |
-| `AudioService` | full for streams and state reads; `SetMasterVolume`/`SetMicrophoneMuted` administrator only |
+| `AudioService` | full for streams and state reads; `SetMasterVolume` administrator or the installed AirPlay receiver's authenticated READY run; `SetMicrophoneMuted` administrator only |
 | `InputService` | own selected touch capture only |
 | `AssistantService` | `ListWakewordModels`, `BeginConversation`; wakeword sample/training RPCs administrator only |
 | `ApplicationService` | `ListApplications`, `ListRuntimes`, `GetBinaryProvenance`, own runs; `Launch`/`Stop`/`InstallApplication`/`UninstallApplication` administrator only |
@@ -204,7 +209,7 @@ has_valid_frame}` or `visibility{visible, reason}`.
 | `Capture` | request then server stream `CaptureAudioEvent` | app identity, indication required | Microphone PCM. |
 | `Playback` | bidi `PlaybackRequest` → `PlaybackEvent` | app identity | Speaker PCM. |
 | `GetAudioState` | unary `AudioState` | any local caller | Mixer and mute state. |
-| `SetMasterVolume` | unary `AudioState` | administrator | Persisted volume. |
+| `SetMasterVolume` | unary `AudioState` | administrator; also the installed AirPlay receiver's authenticated READY run | Persisted device volume. |
 | `SetMicrophoneMuted` | unary `AudioState` | administrator | Persisted mute. |
 
 `AudioEndpointInfo` = `{endpoint_id, direction, supported_formats[], processing_tap}`.
@@ -571,8 +576,8 @@ further away is the user's slider and is adopted at once, even while a write is 
 slider drag moves the speaker immediately rather than when the drag ends. The memory is bounded to
 the last four writes and is cleared on connect and disconnect. A source without a writable register
 changes nothing for the speaker: the refused write is logged once per session and the level stays
-local. An app that needs the current level reads `AudioService.GetAudioState`, and setting it is
-administrator-only.
+local. An app that needs the current level reads `AudioService.GetAudioState`; setting it is
+administrator-only except for the installed AirPlay receiver's authenticated READY run.
 
 The daemon also publishes this source in the browser protocol (`capsulad.web.v1`) as a media
 provider, and that provider is framework-owned rather than an app: `MediaProviderView.kind` is

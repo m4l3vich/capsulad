@@ -574,9 +574,9 @@ before the next turn.
   responder — the simulator answered `DiscoveryService/Browse` with `unknown service` — a broker
   must be named). Without one it publishes nothing and says so in the status sensor. It exports
   the surfaces the device advertises (ring, segment display, Bluetooth source) plus the sensor,
-  touch and diagnostics entities that are switched on; master volume and microphone mute are
-  administrator-only, so both are read-only entities, and the display is a face selector rather
-  than text because the framework ships no segment font. The Bluetooth source is enumerated
+  touch and diagnostics entities that are switched on; neither master volume nor microphone mute
+  is writable by the bridge, so both are read-only entities, and the display is a face selector
+  rather than text because the framework ships no segment font. The Bluetooth source is enumerated
   (`sensor` with `playing`/`idle`/`off`, a title sensor) with four transport buttons rather than a
   `media_player`, because Home Assistant's MQTT integration has no media-player platform. Sensor
   units are published in Home Assistant's vocabulary (`°C`, `lx`) and anything else verbatim

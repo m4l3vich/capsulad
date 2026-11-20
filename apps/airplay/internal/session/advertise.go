@@ -30,6 +30,7 @@ const DefaultModel = "AudioAccessory5,1"
 // only the bits this receiver actually implements are set.
 const (
 	FeatureAirPlayAudio       = 1 << 9  // AirPlay audio
+	FeatureFairPlayHandshake  = 1 << 14 // Authentication4: the /fp-setup handshake, not DRM content or MFi
 	FeatureAudioMetaProgress  = 1 << 16 // progress metadata
 	FeatureAudioMetaTxtDAAP   = 1 << 17 // DMAP/DACP text metadata
 	FeatureReceiveAudioPCM    = 1 << 18 // PCM audio
@@ -39,23 +40,32 @@ const (
 	FeaturePlistMetadata      = 1 << 29 // plist metadata
 	FeatureUnifiedAdvertising = 1 << 30 // unified advertising info
 	FeatureControlEncrypt     = 1 << 38 // encrypted control channel
+	FeatureBufferedAudio      = 1 << 40 // encrypted buffered audio (type 103)
 	FeatureHomeKitPairing     = 1 << 46 // HomeKit pairing
 	FeaturePeerManagement     = 1 << 47 // peer management (PTP timing)
 	FeatureTransientPairing   = 1 << 48 // transient (no-code) pairing
 	FeatureNowPlayingInfo     = 1 << 50 // now-playing information
 	FeatureAudioStreamConn    = 1 << 59 // stream connections
 	FeatureRFC2198Redundant   = 1 << 61 // RFC 2198 RTP redundancy
-	// Deliberately absent: buffered audio (bit 40) and the PTP clock (bit 41).
-	// This build decodes the realtime stream (and ALAC in a buffered stream
-	// container); it has no AAC/AAC-ELD decoder, so advertising buffered audio
-	// would promise a codec it cannot decode, and PTP is advertised by
-	// `ptp_enabled` only when the daemon grants a multicast listener.
+	// The PTP clock bit (41) is deliberately absent here. It is added only
+	// when the daemon grants a multicast listener and the playout path can
+	// consume the clock. Buffered audio (bit 40) is included below because the
+	// encrypted type-103 ALAC path is always available; AAC-LC buffered formats
+	// follow the same decoder gate as the AAC-LC feature bit.
 )
 
 // DefaultFeatures is the advertised feature set for a stock receiver without
-// PTP: realtime audio, ALAC and PCM, encrypted control channel, plist and DMAP
-// metadata, transient HomeKit pairing, remote control.
+// PTP: realtime and encrypted buffered audio, ALAC and PCM, encrypted control
+// channel, the FairPlay /fp-setup handshake, plist and DMAP metadata, transient
+// HomeKit pairing, remote control.
+//
+// Bit 14 is in the default because a field trial reached both the encrypted
+// event channel and a type-103 AAC SETUP with it set, and the pinned reference
+// default mask also sets it (shairport.c:1951). It claims only the implemented
+// /fp-setup handshake, never FairPlay content decryption or MFi; a features
+// override that omits it is honored.
 const DefaultFeatures = FeatureAirPlayAudio |
+	FeatureFairPlayHandshake |
 	FeatureAudioMetaProgress |
 	FeatureAudioMetaTxtDAAP |
 	FeatureReceiveAudioPCM |
@@ -64,16 +74,64 @@ const DefaultFeatures = FeatureAirPlayAudio |
 	FeaturePlistMetadata |
 	FeatureUnifiedAdvertising |
 	FeatureControlEncrypt |
+	FeatureBufferedAudio |
 	FeatureHomeKitPairing |
 	FeatureTransientPairing |
 	FeatureNowPlayingInfo
 
-// Status flags published in the `sf` TXT record and returned by /info.
+// Status flags published in the `sf`/`flags` TXT records and returned by /info.
+// The reference sets AudioCableAttached unconditionally for an audio receiver
+// (shairport.c:1771) and ReceiverSessionIsActive while a principal session
+// holds the play lock (rtsp.c:384), and the same value feeds both the mDNS
+// records and /info (rtsp.c:1197, bonjour_strings.c:100-125) so the two cannot
+// disagree.
 const (
 	StatusProblemsExist        = 1 << 0
+	StatusAudioCableAttached   = 1 << 2
 	StatusSupportsAirPlayCloud = 1 << 6
 	StatusReceiverSessionIsOn  = 1 << 17
 )
+
+// advertisedStatus is the statusFlags value every advertisement and /info
+// document reports: the receiver is an attached audio device, and the active
+// bit follows the live session rather than the caller's snapshot.
+func (m *Manager) advertisedStatus() uint64 {
+	status := uint64(StatusAudioCableAttached)
+	m.mu.Lock()
+	active := m.sessionActive
+	m.mu.Unlock()
+	if active {
+		status |= StatusReceiverSessionIsOn
+	}
+	return status
+}
+
+// Buffered audio format bits are the values Shairport Sync publishes in
+// /info and the values a type-103 packet carries in its SSRC format field.
+// ALAC/44.1 is intentionally absent: its 0xFACE buffered SSRC is explicitly
+// synthetic in the reference, unlike these three observed wire formats.
+const (
+	bufferedFormatALAC48S24Stereo uint64 = 1 << 21
+	bufferedFormatAAC44F24Stereo  uint64 = 1 << 22
+	bufferedFormatAAC48F24Stereo  uint64 = 1 << 23
+)
+
+// bufferedStreamFormats derives /info from the same feature mask as DNS-SD.
+// An override may narrow the formats, but it cannot make /info promise a codec
+// whose feature bit is clear or buffered audio while bit 40 is clear.
+func bufferedStreamFormats(features uint64) uint64 {
+	if features&FeatureBufferedAudio == 0 {
+		return 0
+	}
+	var formats uint64
+	if features&FeatureReceiveAudioALAC != 0 {
+		formats |= bufferedFormatALAC48S24Stereo
+	}
+	if features&FeatureReceiveAudioAACLC != 0 {
+		formats |= bufferedFormatAAC44F24Stereo | bufferedFormatAAC48F24Stereo
+	}
+	return formats
+}
 
 // cnList is the legacy RAOP codec list: 0 PCM, 1 ALAC, 2 AAC-LC.
 func cnList() string {
@@ -97,14 +155,12 @@ func hexStatus(v uint64) string { return fmt.Sprintf("0x%x", v) }
 // from the HomeKit pairing identity, `pi` the pairing identifier. The `name`
 // value is the DNS-SD-projected instance label, so the TXT record and the
 // instance agree even when a long saved name was shortened for the label.
-func (m *Manager) advertiseTXT(active bool) map[string]string {
-	// One feature source for mDNS and /info: the PTP bits appear only when a
-	// clock exists, because the playout path consumes it.
+func (m *Manager) advertiseTXT() map[string]string {
+	// One feature and status source for mDNS and /info: the PTP bits appear
+	// only when a clock exists, because the playout path consumes it, and the
+	// active bit follows the live session.
 	features := m.advertisedFeatures()
-	status := uint64(0)
-	if active {
-		status |= StatusReceiverSessionIsOn
-	}
+	status := m.advertisedStatus()
 	m.mu.Lock()
 	groupID := m.groupID
 	m.mu.Unlock()
@@ -142,11 +198,8 @@ func (m *Manager) advertiseTXT(active bool) map[string]string {
 // key across TXT strings is not interoperable. A legacy sender therefore uses
 // the unencrypted (`et=0`) path; the RSA decryption code remains for an
 // ANNOUNCE that carries rsaaeskey.
-func (m *Manager) advertiseRAOPTXT(active bool) map[string]string {
-	status := uint64(0)
-	if active {
-		status |= StatusReceiverSessionIsOn
-	}
+func (m *Manager) advertiseRAOPTXT() map[string]string {
+	status := m.advertisedStatus()
 	return map[string]string{
 		"am": m.cfg.Model,
 		"cn": cnList(), // PCM, ALAC, and AAC-LC when a decoder is compiled in
@@ -194,7 +247,6 @@ func (m *Manager) publishLocked(port int) error {
 		m.mu.Unlock()
 		return nil
 	}
-	active := m.sessionActive
 	previousAirplay, previousRAOP := m.airplay, m.raopID
 	m.airplay, m.raopID = "", ""
 	m.mu.Unlock()
@@ -217,7 +269,7 @@ func (m *Manager) publishLocked(port int) error {
 		Type:     "_airplay._tcp",
 		Instance: m.instanceLabel(),
 		Port:     port,
-		TXT:      m.advertiseTXT(active),
+		TXT:      m.advertiseTXT(),
 	})
 	if err != nil {
 		return fmt.Errorf("publish _airplay._tcp: %w", err)
@@ -226,7 +278,7 @@ func (m *Manager) publishLocked(port int) error {
 		Type:     "_raop._tcp",
 		Instance: raopInstanceName(m.cfg.DeviceID, m.displayName()),
 		Port:     port,
-		TXT:      m.advertiseRAOPTXT(active),
+		TXT:      m.advertiseRAOPTXT(),
 	})
 	m.mu.Lock()
 	m.airplay = airplayID

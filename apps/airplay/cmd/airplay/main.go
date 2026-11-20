@@ -228,9 +228,11 @@ func main() {
 // snapshot.
 func startReceiver(ctx context.Context, runtime *hw.Runtime, board *media.Board, values map[string]string) (*session.Manager, error) {
 	cfg := configFromSettings(values)
-	// The receiver may read the mixer master to report it to the sender; it
-	// never writes it, so the device level stays the ceiling.
-	cfg.MasterVolume = runtime.MasterVolume
+	// One master: the receiver reports the speaker's persisted level and the
+	// authenticated active sender may move it. The local UI, Bluetooth and the
+	// framework limiter all consume the same value.
+	cfg.MasterVolumeContext = runtime.MasterVolumeContext
+	cfg.SetMasterVolume = runtime.SetMasterVolume
 	var ptp session.PTPFactory
 	if hw.SettingBool(values, "ptp", true) {
 		ptp = runtime.PTPClock
@@ -263,7 +265,6 @@ func configFromSettings(values map[string]string) session.Config {
 		Port:          hw.SettingInt(values, "rtsp_port", 0),
 		RingEnabled:   hw.SettingBool(values, "ring_artwork", true),
 		FrameTarget:   time.Duration(hw.SettingInt(values, "buffer_ms", 1500)) * time.Millisecond,
-		VolumeTrim:    settingFloat(values, "volume_trim", 1),
 		SourceVersion: hw.SettingString(values, "source_version"),
 		Logf:          log.Printf,
 	}
@@ -285,22 +286,7 @@ func configFromSettings(values map[string]string) session.Config {
 	if cfg.FrameTarget > 4*time.Second {
 		cfg.FrameTarget = 4 * time.Second
 	}
-	if cfg.VolumeTrim <= 0 || cfg.VolumeTrim > 1 {
-		cfg.VolumeTrim = 1
-	}
 	return cfg
-}
-
-func settingFloat(values map[string]string, key string, fallback float64) float64 {
-	raw, ok := values[key]
-	if !ok || raw == "" {
-		return fallback
-	}
-	var f float64
-	if err := json.Unmarshal([]byte(raw), &f); err != nil {
-		return fallback
-	}
-	return f
 }
 
 // settingsFingerprint covers the settings that shape a receiver instance. The
@@ -309,7 +295,7 @@ func settingFloat(values map[string]string, key string, fallback float64) float6
 func settingsFingerprint(values map[string]string) string {
 	relevant := []string{
 		"name", "receiver_model", "rtsp_port", "ring_artwork", "buffer_ms",
-		"volume_trim", "source_version", "features", "ptp", "pairing_pin",
+		"source_version", "features", "ptp", "pairing_pin",
 	}
 	selected := make(map[string]string, len(relevant))
 	for _, key := range relevant {

@@ -285,9 +285,10 @@ func (w *Response) Add(name, value string) {
 }
 
 // WriteTo serialises the response: status line, headers, empty line and body.
-// When the body is non-empty a Content-Length header with the body length is
-// emitted, replacing any previously set Content-Length. With an empty body an
-// explicit Content-Length is preserved and none is added.
+// Content-Length is always emitted, with zero for an empty body, replacing any
+// previously set value. This matches the reference wire — shairport-sync always
+// sends the header and Apple receivers send `Content-Length: 0` — and keeps
+// consecutive replies unambiguously framed.
 func (w *Response) Write(out io.Writer) error {
 	reason := w.Reason
 	if reason == "" {
@@ -300,21 +301,18 @@ func (w *Response) Write(out io.Writer) error {
 	var head bytes.Buffer
 	fmt.Fprintf(&head, "RTSP/1.0 %d %s\r\n", w.Status, reason)
 
-	hasBody := len(w.Body) > 0
 	wroteLength := false
 	for _, h := range w.Headers {
 		if strings.EqualFold(h.Name, "Content-Length") {
-			if hasBody {
-				if !wroteLength {
-					fmt.Fprintf(&head, "Content-Length: %d\r\n", len(w.Body))
-					wroteLength = true
-				}
-				continue
+			if !wroteLength {
+				fmt.Fprintf(&head, "Content-Length: %d\r\n", len(w.Body))
+				wroteLength = true
 			}
+			continue
 		}
 		fmt.Fprintf(&head, "%s: %s\r\n", h.Name, h.Value)
 	}
-	if hasBody && !wroteLength {
+	if !wroteLength {
 		fmt.Fprintf(&head, "Content-Length: %d\r\n", len(w.Body))
 	}
 	head.WriteString("\r\n")

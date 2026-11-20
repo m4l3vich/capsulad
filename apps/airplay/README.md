@@ -27,15 +27,16 @@ standard library and `golang.org/x/crypto`.
 | AirPlay 2 realtime stream (type 96) | Implemented | ALAC, AAC-LC and raw PCM, 44.1/48 kHz, up to 2 channels; RTP **over UDP** to the daemon-allocated `dataPort`, decrypted with the sender's `shk` (ChaCha20-Poly1305, per-packet nonce in the trailing 8 bytes, RTP header bytes 4..12 as AAD). |
 | AP2 control plane (0xD4/0xD5/0xD6/0xD7) | Implemented | One session-wide UDP control socket, echoed as `controlPort`; the sender's sentinel/leftover filter matches upstream. `0xD5` resend requests are sent to the source address of the last control datagram, after a 100 ms reorder grace and at most every 250 ms per stream; `0xD6` resend responses are decrypted and played through the normal pipeline; `0xD7` provides the PTP anchor and stream latency; `0xD4` is accepted and recorded. No RTCP is sent or expected. |
 | PTP-driven playout | Implemented when the runtime grants the multicast listener | The 0xD7 anchor's master-clock instant is converted to local time with the PTP offset to schedule each frame; without a disciplined clock the receiver paces from packet arrival. The PTP feature bits are advertised only when a clock exists, so the advertisement cannot promise timing nothing consumes. |
-| AAC-LC decoding | Implemented (FFmpeg libavcodec) | The same decoder the upstream receiver links. The advertised formats are exactly upstream's: `AAC-LC/44.1K/F24/2` and `AAC-LC/48K/F24/2`. The AudioSpecificConfig is built from the format mask, and the decoder is verified against ffmpeg-encoded fixtures (sample-for-sample, mono bit-exact, stereo within 1 LSB of the encoder's own quantisation). |
+| AAC-LC decoding | Implemented (FFmpeg libavcodec) | The same decoder the upstream receiver links. Both `SETUP` paths accept upstream's AAC-LC/44.1K/F24/stereo and AAC-LC/48K/F24/stereo masks on FFmpeg builds. A build without the decoder withdraws only the buffered AAC formats and AAC feature bit; feature bit 40 and the pure-Go buffered ALAC format remain unless a feature override disables them. The AudioSpecificConfig is built from the format mask, and the decoder is verified against ffmpeg-encoded fixtures (sample-for-sample, mono bit-exact, stereo within 1 LSB of the encoder's own quantisation). |
 | AAC-ELD decoding | Decoder available, not advertised | FFmpeg's AAC decoder handles ELD, so the eight ELD format masks are accepted if a sender sends one. Upstream does **not** advertise any ELD format (its RTSP format list is AAC-LC only), and neither does this receiver, so no parity claim is made beyond the decoder. |
-| FairPlay handshake | Implemented, no DRM | `POST /fp-setup` serves the same fixed protocol replies as upstream (Shairport Sync `handle_fp_setup`), so a sender's handshake completes. Those constants decrypt nothing: FairPlay-encrypted content is not playable by either implementation. |
-| AirPlay 2 buffered stream (type 103) | Accepted for ALAC/PCM | TCP data channel with the 2-byte big-endian length prefix that includes its own two bytes. The advertised feature set does not claim buffered audio, so a sender only chooses it when its own policy does. |
+| FairPlay handshake | Implemented, no DRM | `POST /fp-setup` serves the same fixed protocol replies as upstream (Shairport Sync `handle_fp_setup`), so a sender's handshake completes. Those constants decrypt nothing: FairPlay-encrypted content is not playable by either implementation. Feature bit 14 (Authentication4) is advertised by default and claims only this handshake, never DRM content or MFi. |
+| AirPlay 2 buffered stream (type 103) | Implemented | Available only on the authenticated control channel, with a mandatory 32-byte `shk`. The daemon allocates the TCP `dataPort` and `SETUP` returns its actual 8 MiB bounded queue (and deliberately no `streamID`). Packets use the length-prefixed encrypted RTP layout and select ALAC 48 kHz/24-bit stereo (`0x15000000`, always available) or AAC-LC 44.1/48 kHz stereo (`0x16000000`/`0x17000000`, FFmpeg builds). Audio is buffered after `SETUP` until a valid `SETRATEANCHORTI` or the field client's `SETRATEANCHORTIME` anchor names `rtpTime` and network time; the anchor's timeline ID selects that sender's PTP source, and an absent or undisciplined source falls back to local arrival time rather than another source's offset. `FLUSHBUFFERED` implements immediate and deferred sequence/timestamp ranges, and pause, teardown, disconnect and takeover discard obsolete output. Playback state becomes PLAYING only after decoded PCM reaches the sink. |
 | Legacy RAOP (ANNOUNCE + SETUP + RTP) | Implemented, without the timing exchange | SDP parsing, `a=rsaaeskey` decrypted with the receiver's RSA key (RSA-OAEP/SHA-1, the reference's mode), AES-128-CBC audio, UDP transport with receiver-chosen data **and control** ports (the control socket is drained; retransmission recovery is not implemented because no packet cache is kept), or interleaved TCP RTP (`$` frames on the control connection). The RAOP NTP-style timing exchange is not implemented and the SETUP reply advertises `timing_port=0`, so a legacy sender gets no receiver clock service. The RSA key is not published in `_raop._tcp` (see [advertisement records](#transport-and-lifecycle-details)), so a sender that takes the key from the TXT record cannot use the encrypted RSA path; the legacy SETUP response body still carries the RSA public key. |
 | Metadata | Implemented | DMAP text (title/artist/album/composer/genre), `progress:` position, cover art (JPEG/PNG) as a ring palette. |
 | Remote control | Implemented | The sender's event channel is bidirectional: the receiver posts `sendMediaRemoteCommand` (play 0, pause 1, next 4, previous 5) with the standard `params` dictionary. |
 | Group membership advertisement | Implemented to upstream's level | A `gid` sent with `SETUP` is recorded and republished as the mDNS `gid` with `gcgl=0`, which is what upstream does. Neither implementation synchronises playback across a group, so multi-room audio is *not* claimed. |
-| Volume | Implemented app-side | The sender's dB value scales this app's PCM. A supervised app cannot write the device master volume, so the mixer's master and limiter remain the ceiling. |
+| Volume | Implemented; one persisted master | `SET_PARAMETER volume: dB` (text) and a binary-plist `volume` take the same path: only the promoted HAP-keyed active media owner can move the speaker master. Pause keeps ownership; candidates, event-only/type-130 connections, legacy plaintext RAOP and retired sessions get the reference's `200` no-op. The reference transfer is linear over the valid slider: -30..0 dB maps to master 0..1 (`(dB+30)/30`), -144 dB and values at or below -30 map to 0, and positive/non-finite/out-of-contract values are ignored rather than raising the speaker. `/info` `initialVolume`, `updateInfo`, `GET_PARAMETER` and `dvlc` all derive from that master; sender PCM is never scaled by it. | Shairport Sync `utilities/general_utilities.c:30-36` (transfer), `rtsp.c:3219-3247` (principal-only SET), `rtsp.c:1208` + `player.c:3398-3404` (initialVolume), `rtsp.c:3313-3322` (GET), `player.c:5420-5422` (persistence). |
+| Device volume pushed to the sender | Implemented as a notification, never an echo | Local controls, the Web UI, Bluetooth master changes and AirPlay itself update the same persisted framework master; when that master changes from the receiver side, the app posts one authoritative `dvlc` media-remote command on the event channel after `updateInfo`, at the actual master unit and bound to the channel generation. It does not emit artificial intermediate values; a delayed echo is suppressed only by exact/quantization-aware correlation with a value actually staged on that channel, and a newer genuine SET keeps its display state; if a superseded dvlc lands after that SET, the next pass repairs the sender presentation to the authoritative master without writing it. While that notification token remains armed, a corrective mirror is deferred; echo consumption or the bounded expiry releases the next regular pass. A sender's own `SET_PARAMETER` records the applied level, so the watcher sends no `dvlc` for it. Without a readable master, `/info`, `updateInfo` and `GET_PARAMETER` report -144 dB (mute) and nothing is posted; connecting never writes the master. | Upstream posts the same message from `remote/remote.c` (`ap2_event_send_unit_volume_notification`, payload 334-380; its local-change loop is 383-410) and never from its RTSP SET path; `player.c:3823-3828` re-applies the reported initial volume at playback start. The framework write is the existing `AudioService.SetMasterVolume`; it persists through `applyMasterVolume` and keeps the Bluetooth master gain in step. |
 | Timed playout (PTP) | Implemented when the runtime grants it | A PTP slave clock (`internal/ptp`) consumes the sender's Sync/Follow_Up stream through a daemon-allocated multicast listener; without it the receiver paces from the first packet's arrival. |
 
 ## Not implemented (and what it means)
@@ -44,15 +45,14 @@ standard library and `golang.org/x/crypto`.
 |---|---|---|
 | AAC decoding in a build without the FFmpeg tag | Such a build refuses AAC at `SETUP` with an explicit reason and does not advertise AAC. The shipped target (`make airplay`) always builds with the decoder and fails early if the libraries are missing. | The decoder is a build dependency, not an optional extra: see [FFmpeg](#ffmpeg-build-dependency). |
 | AAC-ELD advertisement | Accepted but not advertised, matching upstream. | Upstream's RTSP response lists AAC-LC formats only (`rtsp.c` `bufferStreamFormats`); FFmpeg could decode ELD but nothing asks for it. |
-| FairPlay-protected content | Not playable; only the handshake is answered. | Neither this receiver nor Shairport Sync implements the proprietary FairPlay cipher. |
+| FairPlay-protected content | Not playable; only the handshake is answered, and advertised bit 14 claims only that handshake. | Neither this receiver nor Shairport Sync implements the proprietary FairPlay cipher. |
 | MFi | Not attempted. | Requires Apple hardware; upstream's mDNS strings deliberately avoid claiming MFi (`RELEASENOTES.md`, discussion 1691). |
 | Pairing administration differences from upstream | Our model is deliberately stronger: pairings survive a restart, each has a stored permission, and the endpoints require an administrator session. | Upstream keeps pairings in an in-memory linked list with **no permissions** (`rtsp.c` `struct pairings`), answers `pair-list` with a hard-coded `Permissions = 1` and performs no session/authority check (`server_list` ignores the request), and a `pair-remove` of an unknown id still returns success (`server_add_remove_request` ignores the callback result). |
 | PTP on a runtime without a multicast listener | The receiver advertises no PTP bit, logs the condition once, and falls back to arrival-time pacing. Multi-room AirPlay sync is then not guaranteed. | PTP needs the sender's 224.0.0.1:319/320 multicast stream. A listener that cannot join the group cannot receive it; the app never pretends it does. |
 | Grouped/multi-room playback | One sender at a time; a second connection takes the session over. Group membership is advertised but playback is not synchronised. | Upstream is also a single principal session and only advertises `gid`/`gcgl`. |
-| AirPlay video / screen mirroring | Not offered; the audio-only feature bits are advertised. | Out of scope for an audio receiver. |
-| Type-130 remote-control stream (`SETUP`) | Refused with an explicit status. | Upstream binds it (`rtsp.c`); no sender flow in this record exercises it, so it is reported as a gap rather than guessed at. |
-| Device volume pushed to the sender | Not implemented. The sender's dB scales this app's PCM; the device's own volume keys are not forwarded back to the sender, because a supervised app cannot read or write the mixer's master volume through the framework's app API. | Upstream writes the vendor volume via `stereoctl` and posts a `dvlc` command on the event channel; the equivalent framework surface does not exist for apps. |
-| Exact `srcvers`/feature combination a given iOS release requires | Open device gate. | Senders switch behaviour on `srcvers` and on feature bits (remote control above 360, realtime at or below 355, `shk` above 350, buffered at bit 40, PTP at bit 41). Both fields are settings so a device test can pin them; see [README](README.md#interoperability-gate) below. |
+| AirPlay video / screen mirroring | Not offered; only audio and authentication feature bits are advertised. | Out of scope for an audio receiver. |
+| Type-130 remote-control stream (`SETUP`) | Acknowledged only inside an authenticated session. | The descriptor echoes `type=130` and the session `controlPort`; no listener is created. No sender flow in this record exercises it. |
+| Exact `srcvers`/feature combination a given iOS release requires | Open device gate. | Senders switch behaviour on `srcvers` and on feature bits (remote control above 360, realtime at or below 355, `shk` above 350, buffered at bit 40, PTP at bit 41, the `/fp-setup` authentication bit 14). Both fields are settings so a device test can pin them; see [README](README.md#interoperability-gate) below. |
 
 
 ## FFmpeg build dependency
@@ -74,7 +74,11 @@ this app, so there is no second receiver, no daemon and no non-SDK transport.
   available here, so the recorded package is a host build.
 - **Tests.** `make test-airplay` adds `-tags ffmpeg` when pkg-config finds the
   libraries; the AAC fixture and end-to-end tests then run. Without them those
-  tests are compiled out and the receiver honestly refuses AAC.
+  tests are compiled out and the receiver honestly refuses AAC. The type-103
+  integration test uses authenticated RTSP and the daemon transport seam on
+  loopback TCP with real ALAC frames, and adds the AAC subtest only when the
+  FFmpeg decoder is linked. Its deferred-flush proof holds an in-range frame in
+  pacing, then requires exact pre-range and endpoint PCM and an abort on teardown.
 
 ## Upstream comparison
 
@@ -85,15 +89,16 @@ NQPTP 1.2.9.
 | Upstream behaviour | Upstream evidence | This receiver |
 |---|---|---|
 | AirPlay 2 HomeKit pairing, transient and normal | `pair_ap/pair.c` (`pair_client_homekit_normal`, `pair_client_homekit_transient`), `rtsp.c` `handle_pair_setup` | Both messages are implemented; the receiver uses the transient path, like upstream's own receiver (no PIN is configured). |
+| Pair-setup response MIME | `rtsp.c` `handle_pair_setup` adds `Content-Type: application/octet-stream` when the body is non-empty | All TLV `/pair-setup` replies (M2/M4, and M6 on the normal path) send `application/octet-stream`; `/pair-verify` and the pairing-administration endpoints keep `application/pairing+tlv8`. A real Apple receiver uses a different MIME for setup, so this is a reference-matching candidate; the iPhone causality is still open. |
 | `/pair-pin-start` returns an empty 200 | `rtsp.c` `handle_pair_pin_start` | Returns 403 with a reason. No sender flow uses it after transient pairing. |
 | `/pair-add`, `/pair-remove`, `/pair-list`, `/pair-pin-start` | `rtsp.c` handlers + `pair_ap/pair_homekit.c` `server_add_remove`/`server_list`; in-memory `struct pairings` with no permissions; `pair-pin-start` empty 200 | Same wire shapes and TLV states; **stronger** ownership: masked-state persistence via CAS, per-controller admin permission, administrator-only access on the encrypted session, `kTLVError_Unknown` for an unknown removal, and self-removal ending the session. |
-| `/fp-setup` fixed replies | `rtsp.c` `handle_fp_setup` (four constants plus a header echo) | Same replies and selection rule, reproduced with the MIT notice in `NOTICE`. |
-| AAC-LC buffered formats `44.1K/F24/2` and `48K/F24/2` | `rtsp.c` `bufferStreamFormats` | Implemented, advertised (feature bit 20, RAOP `cn=0,1,2`) and covered by an end-to-end encrypted-RTP test. |
+| `/fp-setup` fixed replies | `rtsp.c` `handle_fp_setup` (four constants plus a header echo) | Same replies and selection rule, reproduced with the MIT notice in `NOTICE`; feature bit 14 (Authentication4) is in the default mask, as it is in the reference's default mask, and claims this handshake only. |
+| AAC-LC buffered formats `44.1K/F24/2` and `48K/F24/2` | `rtsp.c` `bufferStreamFormats`, `player.h` SSRC map | Implemented, advertised with feature bit 40 and the matching `/info` bits on FFmpeg builds, and exercised through the encrypted TCP type-103 path. |
 | AAC-ELD | not advertised by upstream (RTSP format list is AAC-LC only) | Not advertised; the FFmpeg decoder would accept it. |
-| ALAC realtime/buffered | `alac.c`, FFmpeg ALAC decoder | Implemented in Go and verified bit-exactly against ffmpeg fixtures. |
+| ALAC buffered 48 kHz/24-bit stereo | `player.h` `ALAC_48000_S24_2`; `rtsp.c` lossless `bufferStreamFormats` | Implemented in Go and advertised; the reference's `ALAC_44100_S16_2` buffered SSRC is marked synthetic and is not claimed. |
 | Legacy RAOP: SDP, RSA-OAEP key, AES-128-CBC, UDP/interleaved TCP | `rtsp.c` `handle_announce`, `rtp.c` | Implemented; RSA-OAEP/SHA-1 matches `common.c` `rsa_apply`. |
-| RTSP method set (`OPTIONS`, `ANNOUNCE`, `SETUP`, `RECORD`, `SET_PARAMETER`, `GET_PARAMETER`, `FLUSH`, `TEARDOWN`, `SETRATEANCHORTIME`, `SETMAGICCOOKIE`, `SETPEERS(X)`, `/feedback`, `/command`, `/audioMode`, `/configure`) | `rtsp.c` dispatch table | Implemented with the same semantics; unknown paths/methods get an explicit refusal. |
-| PTP timing through NQPTP (ports 319/320, multicast 224.0.0.1) | `AIRPLAY2.md` ("NQPTP must have exclusive access to ports 319 and 320") | A slave clock with a daemon-mediated multicast listener (`join_group`, group fixed to 224.0.0.1, LAN interfaces only). Lock quality is untested (no sender). |
+| RTSP method set (`OPTIONS`, `ANNOUNCE`, `SETUP`, `RECORD`, `SET_PARAMETER`, `GET_PARAMETER`, `FLUSH`, `FLUSHBUFFERED`, `TEARDOWN`, `SETRATEANCHORTI`, `SETRATEANCHORTIME`, `SETMAGICCOOKIE`, `SETPEERS(X)`, `/feedback`, `/command`, `/audioMode`, `/configure`) | `rtsp.c` dispatch table (the AP2 anchor handler literal is `SETRATEANCHORTI`; an iPhone field client sent the full spelling `SETRATEANCHORTIME`) | Both anchor spellings are advertised in `OPTIONS Public`, route to one handler and carry the same plist body; the other methods have the same semantics, and unknown paths/methods get an explicit refusal. |
+| PTP timing through NQPTP (ports 319/320, multicast 224.0.0.1) | `AIRPLAY2.md` ("NQPTP must have exclusive access to ports 319 and 320") | Bounded per-source slave fits behind one daemon-mediated multicast listener (`join_group`, group fixed to 224.0.0.1, LAN interfaces only); buffered anchors select by timeline ID. Lock quality is untested (no sender). |
 | Metadata: DMAP text, `progress:`, cover art, remote control over the event channel | `metadata/*`, `remote/remote.c`, `ap2_event_receiver.c` | Implemented to the same packet layouts (command numbers 0/1/4/5 and the `params` dictionary). |
 | Group advertisement `gid`/`gcgl` | `bonjour_strings.c`, `rtsp.c` SETUP | Implemented; no cross-receiver sync, exactly like upstream. |
 | No FairPlay or MFi content decryption | `handle_fp_setup` only; `RELEASENOTES.md` MFi note | Same: the handshake completes, DRM content is not decrypted, MFi is not claimed. |
@@ -111,8 +116,73 @@ NQPTP 1.2.9.
 - **Restarts** withdraw the old advertisement before publishing the new one; if the new
   configuration cannot start, the previous one is restored, so a rename cannot make the speaker
   vanish and a bad setting cannot leave the receiver dead.
+- **Pair-verify authentication.** The control channel is keyed only after M3's controller
+  signature verifies. A rejected M3 is `kTLVError_Authentication` inside an ordinary `200 OK`, so
+  the connection must not infer success from the RTSP status: it stays plaintext, keeps no
+  controller identity, and cannot become or take over the live session.
 - **Listener bookkeeping** drops each closed listener from the runtime's registry, so repeated
   settings restarts do not accumulate descriptors.
+- **Session ownership.** A TCP accept creates a candidate, not a session. A completed
+  pair-setup or pair-verify protects and keys that connection, but it is still not a media
+  session: it does not reserve ownership, start the player or board, set the active status flag,
+  withdraw the advertisements, or take over a live sender. Only an accepted media/session start
+  promotes the connection: an `ANNOUNCE`, or a `SETUP` that stages a real audio stream (AP2 type
+  96/103 or a legacy `Transport` SETUP). The event-only and type-130 control-only `SETUP` forms
+  configure channels and are acknowledged without media ownership, as in the reference receiver.
+  `OPTIONS`, `GET /info`, `/pair-setup`, `/pair-verify`, pairing administration, a malformed or
+  refused request, and a silent connection cannot take ownership, start the player or republish
+  the advertisements — which is what keeps the losing half of a sender's dual-stack/Happy
+  Eyeballs connection (immediately closed with no bytes) from killing the winning session.
+  Candidates are capped at four and expire after 30 seconds without a session request; an
+  encrypted candidate is bounded by the same policy. Shutdown cancels and joins them. A request
+  that will start a session reserves ownership before its success response is written and
+  commits only after the full response and any channel upgrade complete; a short write releases
+  the reservation and closes the candidate without a committed `200`. The reservation is bounded
+  at five seconds so a stalled peer cannot block later senders. A reserved candidate cannot be
+  evicted or expire mid-write, and the live sender keeps playing until the commit.
+- **Candidate visibility.** A connection that sends at least one request but never starts a
+  session leaves at most one log line per five seconds across the receiver: the request count,
+  an allowlisted last method and path class (`other` for anything else — the sender's path is
+  never echoed), the last response status (including the explicit `503` ownership refusal),
+  whether the last response write failed (including a bounded `503` refusal that timed out),
+  and the elapsed time. For an encrypted candidate the same line adds the post-upgrade request
+  count, the first and last allowlisted post-upgrade stage/status, the fixed HAP read outcome and
+  decrypted block count, and a fixed RTSP parse class kept distinct from HAP failures. Headers,
+  bodies, query strings, raw errors and payloads are never logged. A connection that sends
+  nothing — a dual-stack loser or a port probe — stays silent, and a session that was promoted
+  and later taken over is reported only by its own close line, never as a candidate.
+- **Response framing.** Every RTSP response states `Content-Length`, including `0` for an empty
+  body, and a supplied length is normalised to the body actually written. That matches the
+  reference wire (Apple receivers send `Content-Length: 0`; shairport-sync always writes the
+  header), so consecutive replies stay unambiguously framed for a sender that pipelines
+  requests.
+- **SETUP transaction.** A successful `SETUP` validates every requested descriptor before
+  opening the AP2 control socket or any audio listener. A malformed or unsupported stream, a
+  buffered stream on a plaintext channel, or a `shk` whose length is not 32 bytes is refused with
+  no listener or session side effect. Listeners open only after validation and the streams are
+  staged; no reader or playback loop runs and no sink opens until the session owns the receiver
+  and the success response has been written. A multi-stream `SETUP` that fails while opening a
+  listener discards every stream it staged and leaves the live sender, its gid, its advertisement
+  and its audio unchanged. A type-103 stream buffers after its reader starts but makes no sound
+  until a valid `SETRATEANCHORTI` or `SETRATEANCHORTIME` anchor; the descriptor names the real
+  8 MiB queue and omits `streamID`. The `gid` is staged with the candidate and applied on commit; an active sender's
+  successful `SETUP` applies it after the response, while a `SETUP` that omits `gid` preserves the
+  same owner's current group. On a committed takeover the new player generation starts before
+  the old sender's connection, streams, ring and event channel are released.
+- **Buffered control.** The AP2 anchor method is `SETRATEANCHORTI` in Shairport Sync's
+  dispatch table, while an iPhone field client sent `SETRATEANCHORTIME`; both observed
+  spellings route to one handler and carry the same plist body, with `networkTimeSecs`,
+  `networkTimeFrac` (a binary fraction), `networkTimeTimelineID`, `rtpTime` and `rate`.
+  Rate 1 requires a complete anchor for a buffered stream; rate 0 pauses and flushes.
+  `FLUSHBUFFERED` without `flushFromSeq`/`flushFromTS` is immediate through its
+  `flushUntilSeq`/`flushUntilTS` endpoint; omitting the until pair means the whole queue. With
+  that from pair it is deferred to the named range, which requires both until fields. Immediate
+  discards every queued sequence below the endpoint; deferred discards `[from, until)`. Both use
+  the reference's 23-bit sequence selection; timestamps travel on the wire but do not override it.
+  A present but malformed or out-of-range field, or a partial pair, is refused before playout
+  changes. `TEARDOWN`, a
+  control disconnect, an invalid takeover and shutdown abort the buffered reader and sink
+  promptly and release the player and ring.
 - **Advertisement ordering.** Session start/end, a group-id update and the *Re-advertise*
   action all publish through one serialized path. A second request waits, then withdraws and
   replaces the first record instead of racing the same instance, and shutdown waits for an
@@ -128,6 +198,17 @@ NQPTP 1.2.9.
   255-byte per-item limit before calling Avahi. A saved name longer than the 63-byte DNS-SD
   instance label is projected on a UTF-8 boundary for the label — and, after the 12-hex device id
   and `@`, for the `_raop` instance — while the setting and `/info` keep the full value.
+- **One capability source.** Both records and `/info` take `features` (and `/info`'s
+  `featuresEx`) from one mask, and `flags` / `sf` / `statusFlags` from one status value: bit 2
+  (audio receiver attached) plus bit 17 while a sender session is live. `/info` reports
+  `supportedFormats.audioStream=262144` (ALAC/44.1/S16/2). With buffered bit 40 set it reports
+  `bufferStream=0x200000` for ALAC 48/24 stereo and, only on an FFmpeg build, additionally
+  `0x400000|0x800000` for the AAC-LC 44.1/48 stereo formats. Clearing either codec bit removes
+  its formats; clearing bit 40 or both codec bits reports `bufferStream=0`. Feature overrides are
+  sanitized against the linked decoder, so a build cannot advertise AAC it lacks or a buffered
+  path with no playable format. The default mask also sets bit 14 (Authentication4), whose claim
+  is only the implemented `/fp-setup` handshake, not DRM content or MFi; an override that omits
+  that bit is honored. The reference's synthetic buffered ALAC 44.1 value is not advertised.
 
 ## Configuration
 
@@ -137,11 +218,10 @@ NQPTP 1.2.9.
 | `receiver_model` | text | `AudioAccessory5,1` | AirPlay model string. `AudioAccessory5,1` is what the upstream receiver patches in so senders draw the compact speaker icon; it is a compatibility string, not a hardware claim. |
 | `rtsp_port` | integer | `7000` | Requested control port; the daemon allocates it and a refusal falls back to an ephemeral port that is then advertised. |
 | `buffer_ms` | integer | `1500` | Playout cushion in milliseconds. |
-| `volume_trim` | number | `1.0` | Extra linear attenuation after the sender volume. |
 | `ring_artwork` | boolean | `true` | Cover-art gradient on the ring while a session is live. |
 | `source_version` | text | `366.0` | Advertised `srcvers`. |
-| `features` | text | empty | Decimal override of the advertised feature mask. |
-| `ptp` | boolean | `true` | Use the sender's PTP clock when the runtime grants a multicast listener. |
+| `features` | text | empty | Decimal override of the advertised feature mask; empty uses the receiver's default set, including bit 14 (the `/fp-setup` handshake) and buffered bit 40 where a codec is available. An override replaces the whole mask, so omitting bit 14 stops the handshake claim. The receiver clears AAC-LC and buffered bits it cannot back with an available decoder/format, so an override cannot make TXT, `featuresEx` or `/info` promise an unsupported path. |
+| `ptp` | boolean | `true` | Use the sender's PTP clock when the runtime grants a multicast listener. Buffered playout selects the fit by the anchor's timeline ID; without a matching disciplined source it uses local arrival timing. |
 | `pairing_pin` | text | `3939` | HomeKit setup code answered for transient and normal pair-setup. Changing it makes every sender pair again; empty restores `3939`. |
 | `device_identity`, `pairings`, `raop_key` | masked | empty | App-managed generated state: the HomeKit identity (`device_identity`), each paired sender's public key **and admin permission** (`pairings`, compare-and-swap), and the legacy RSA key used for an ANNOUNCE `rsaaeskey` (not advertised in mDNS). Clearing `pairings` revokes every paired sender. |
 
@@ -298,12 +378,13 @@ the recipe detects its libc and only uses a matching one, so a musl library is n
 a glibc package). Without one, `evidence.txt` records the SDK's missing-library message and
 says so explicitly.
 
-The tests are pure Go: they cover the pairing crypto, the RTSP/DMAP/plist/TLV
-codecs, ALAC against fixtures produced by a real encoder (ffmpeg), RTP
-encryption and reordering, the RAOP SDP/key exchange, the PTP clock, and one
-end-to-end session over in-memory transports (pair-verify → encrypted control
-channel → `SETUP` → encrypted RTP audio → ring frames → media state →
-`TEARDOWN`). They do not touch a device, a real sender or the network.
+The tests are pure Go except for the FFmpeg decoder and the loopback transport
+harness: they cover the pairing crypto, the RTSP/DMAP/plist/TLV codecs, ALAC
+against fixtures produced by a real encoder (ffmpeg), RTP encryption and
+reordering, the RAOP SDP/key exchange, the PTP clock, and end-to-end sessions
+over in-memory and real loopback TCP (pair-verify → encrypted control channel →
+`SETUP` → realtime or type-103 audio → ring/media state → `TEARDOWN`). They do
+not touch the speaker, an Apple sender or the LAN.
 
 ## Interoperability gate
 
@@ -318,12 +399,14 @@ confirmed on a device:
 
 1. that a current iOS release accepts this advertisement set and chooses a
    stream this build decodes (the `srcvers`/`features` settings exist to settle
-   that empirically);
-2. acoustic latency and PTP lock quality on the board (the app is board-agnostic: it uses
+   that empirically), including whether it selects type-103 buffered audio;
+2. that the buffered anchor's timeline ID matches the sender's PTP source and
+   that timing is stable without applying another source's clock;
+3. acoustic latency and PTP lock quality on the board (the app is board-agnostic: it uses
    framework listeners, presentations and playback, so it runs on the Rockchip rev 4 and on both
    Amlogic targets);
-3. behaviour of the sender's event channel for the four remote commands;
-4. anything about grouped playback.
+4. behaviour of the sender's event channel for the four remote commands;
+5. anything about grouped playback.
 
 See the app's [limits](#not-implemented-and-what-it-means) and
 [docs/VERIFICATION.md](../../docs/VERIFICATION.md) for the proof level.

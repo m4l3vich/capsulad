@@ -241,12 +241,28 @@ longer than the actual turn.
 | Operation | App access |
 |---|---|
 | `GetAudioState` | Readable. Returns `master_volume` (0–1), `microphone_muted`, `microphone_mute_is_hardware`. |
-| `SetMasterVolume`, `SetMicrophoneMuted` | Administrator only; a supervised app gets `PERMISSION_DENIED`. |
+| `SetMasterVolume` | Administrator, plus the installed AirPlay receiver's authenticated READY run. Every other supervised app gets `PERMISSION_DENIED`. |
+| `SetMicrophoneMuted` | Administrator only; a supervised app gets `PERMISSION_DENIED`. |
 
 `master_volume` is a **ceiling per app**, not a post-sum gain shared by everyone. The mixer
 starts at `0.6` and follows the persisted device setting; physical volume keys and the microphone
 key use the same persisted settings as the administrator surfaces, so an app must tolerate volume
 and mute changing at any time.
+
+The AirPlay exception is fixed daemon policy, not a manifest feature. A phone or Mac changing
+the sender volume is controlling the speaker's physical level, so the installed AirPlay receiver
+follows an authenticated session that owns the active media on the same persisted `master_volume`
+the keys and the Web UI use. Attaching, a probe request or an event-only connection does not move
+the level, and a retired sender cannot keep writing it. No package can opt in by declaring an
+interface, `provides`, a native-SDK requirement or any other manifest field: the daemon
+recognizes only the installed `org.capsulad.airplay` receiver, and only its live READY run whose
+Unix-socket peer PID matches the supervised process. A host that cannot report peer credentials
+(the simulator) refuses the app path. Trust in the receiver comes from the administrator
+installing the package; the run identity is not a request field.
+
+The receiver does not fold the sender level into its PCM. The master gain is applied once by
+the framework mixer after app streams are summed, and the soft limiter follows it, so a sender
+slider moves the same level as the volume keys instead of stacking a second gain stage.
 
 The gain stages, in order:
 
@@ -254,7 +270,7 @@ The gain stages, in order:
 |---|---|---|
 | Per-stream trim | `Playback.SetTrim`, daemon-internal; framework cues use a fixed `0.4` authored-level trim | No: not exposed by the app API or the SDK |
 | Conversation ducking | `0.25` with a 150 ms fade while a conversation is active | Indirectly, through `conversation_id` |
-| Master volume | `master_volume` (0–1, linear), applied once after each app's streams are summed and clamped | Read from `GetAudioState`; setting it is administrator-only |
+| Master volume | `master_volume` (0–1, linear), applied once after each app's streams are summed and clamped | Read from `GetAudioState`; administrator, plus the installed AirPlay receiver's authenticated READY run |
 | Soft limiter | threshold 0.95, 5 ms peak-hold attack window, 150 ms release, after the master gain | No |
 
 - Volume 0 or global mute denies a new microphone capture.

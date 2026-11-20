@@ -248,6 +248,11 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   leaves the socket, its live subscriptions and its epoch intact; only a real transport failure
   closes the socket and starts the reconnect. The wakeword area shows guided training and the real
   last 20 engine detections only.
+- **Web UI appearance.** The switch beside **Sign out** offers Light, Dark, and System.
+  The choice is saved in the browser, not on the speaker. System is the default and follows
+  the OS appearance live; Light and Dark stay fixed. Custom app settings use the embedded
+  daisyUI kit inside their isolated frame. The palette updates without reloading that frame,
+  discarding edits, or interrupting a save.
 - **Web UI app guide.** An app detail page offers its user guide — the package root `README.md`, or
   an embedded document for a compiled-in app — over the session-authenticated
   `GET /api/apps/{appID}/guide`, independent of the app's run state, so a stopped app can still
@@ -379,7 +384,7 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   `PlayResult` per accepted clip — its `detail` names the WAV's own format (`played 3200 frames at
   16000 Hz/1 ch`) — plus one `pa:` log line per call (`played`/`rejected`/`stalled`/`cancelled`,
   carrying both the WAV and mixer formats) and the daemon's own playback open/close records; there
-  is no presentation, no microphone and no volume control (master volume stays administrator-only).
+  is no presentation, no microphone and no permission to change the speaker's master volume.
   The app holds one playback stream per call at the current master gain, opens it without an
   internal deadline so a slow but conforming caller is not cut off, and releases it on every
   terminal path; the 15 s wait for the next request frame, the bounded drain and caller
@@ -405,14 +410,16 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   `org.capsulad.radio.tuner` are replaced under the same app id, and the stored `stations`,
   `station` and `autoplay` settings survive the package replacement. The app is `background`,
   `start_on_boot` and `single_instance`: it is already running to answer actions and the media
-  contract and stays idle until a station is played. Play shows the station number with a dark
-  colon while the stream dials (buffering), a lit colon while playing, the last decimal point
-  while paused, four dashes on error until `stop`/`dismiss` or a new `play`, and no presentation at
-  all when stopped, which restores the selected baseline. While it is active the app holds a
-  routing capture on `display.segment.front`, so the station display wins over the configured
-  default app, and it releases that capture before the presentation closes; a device that
-  advertises no segment display plays without one and retries the presentation on the next state
-  change. A bare launch — including the invocation a boot start or a second `app start` delivers —
+  contract and stays idle until a station is played. Play or a retune shows the station number
+  with a dark colon, whether buffering or playing; paused uses the last decimal point. The
+  **Always display station number** setting defaults off: after 10 s the app releases its
+  `display.segment.front` capture and presentation, restoring the selected baseline without
+  affecting playback or the ring. A retune replaces that deadline. Enabling the setting while
+  active shows the number again; disabling it uses the current tuning deadline, not a new one.
+  Failure shows four dashes only while the app owns the display; a late failure does not bring
+  back an expired overlay. Stop or dismissal releases the display immediately. A device that
+  advertises no segment display plays without one and retries on the next state change.
+  A bare launch — including the invocation a boot start or a second `app start` delivers —
   only makes sure the app is running and never starts audio; `autoplay` is off by default and
   plays the selected station once, at the first settings snapshot after startup, never restarting
   a radio the user stopped and never starting playback when the setting is changed later. A short
@@ -429,8 +436,8 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   replaces the owned playback: the previous session is cancelled and its late open, read or
   failure cannot clear the newer stream or selection, and a stale own-write echo cannot revert it.
   Streaming is bounded on every path: a read that goes idle for 10 s fails the stream, up to three
-  reconnects with 1/2/4 s backoff run inside the same session, and a terminal failure ends in the
-  error state (four dashes, `PLAYBACK_STOPPED` in the contract) with the reason logged. A stream
+  reconnects with 1/2/4 s backoff run inside the same session, and a terminal failure reports
+  `PLAYBACK_STOPPED` in the contract with the reason logged. A stream
   that never starts or goes silent cannot leave a stale `PLAYING` even with no user activity: an
   autonomous watchdog (500 ms ticks) bounds "no audio reached the speaker" at **60 s** while
   buffering or playing — ending as `radio did not start (no audio for 1m0s)` or `radio stalled (no
@@ -448,30 +455,53 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   releases the run's presentation, capture and audio stream.
 - **AirPlay receiver (`org.capsulad.airplay`).** The trigger is a sender on the local link: it
   finds the receiver through the two mDNS records the daemon publishes and connects to the
-  daemon-allocated control port. Advertisement is what makes the speaker appear in a sender's
-  output list, so it follows the DNS-SD limits the responder enforces rather than the saved
-  setting verbatim: both `_airplay._tcp` and `_raop._tcp` carry the same 32-byte ed25519 HomeKit
-  long-term public key as `pk` (64 lowercase hex characters), and the instance labels are a
-  rune-safe projection of the saved receiver name into the 63-byte DNS-SD limit — the `_raop`
+  daemon-allocated control port. Opening a TCP connection, querying receiver information, or
+  completing HomeKit pair-setup/pair-verify does not take ownership: pairing protects and keys
+  that connection but is not a media session. A successful media-start request is required
+  before a new connection can replace the active sender: an `ANNOUNCE` or a `SETUP` that stages
+  a real audio stream; event-only and control-only `SETUP` forms configure channels but do not
+  take the player. Failed pairing or stream setup leaves
+  the active sender, its audio, and its group unchanged. RAOP and AirPlay 2 setup replies report
+  the bound ports of the corresponding daemon-allocated audio listeners. Advertisement is what
+  makes the speaker
+  appear in a sender's output list, so it follows the DNS-SD limits the responder enforces rather
+  than the saved setting verbatim: both `_airplay._tcp` and `_raop._tcp` carry the same 32-byte
+  ed25519 HomeKit long-term public key as `pk` (64 lowercase hex characters), and the instance
+  labels are a rune-safe projection of the saved receiver name into the 63-byte DNS-SD limit — the `_raop`
   instance keeps its `<DEVICEID>@` prefix and shortens only the display part. The saved name and
   `/info` keep the full value; the legacy 2048-bit RSA key is never advertised (its base64 form is
   about 360 bytes and a single TXT item over 255 bytes is refused by the responder) and is used
   only to decrypt an `ANNOUNCE` that carries `rsaaeskey`, so a sender that takes its key from the
-  TXT record uses the unencrypted path. Republishing is serialized: one publish withdraws and
-  replaces both records atomically, and a close waits for an in-flight publish, so a session
-  start/end, a group-id change, a settings change or a replaced sender cannot make two callers
-  register the same instance and be told the name collides. Feedback is the standard media
+  TXT record uses the unencrypted path. The advertised authentication surface is HomeKit pairing
+  plus the `/fp-setup` handshake: feature bit 14 (Authentication4) is set by default, but it does
+  not enable FairPlay-protected playback or claim MFi. Republishing is serialized: one publish
+  withdraws and replaces both records atomically, and a close waits for an in-flight publish, so
+  a session start/end, a group-id change, a settings change or a replaced sender cannot make two
+  callers register the same instance and be told the name collides. Feedback is the standard media
   contract (buffering, then playing, with the sender's metadata) plus the ring: the cover-art
   palette with the audio envelope, or a dim neutral breath with no cover art, never an invented
   image. A pause (`rate 0`) flushes queued audio and reports `PLAYBACK_PAUSED`; the ring
   presentation and the playback stream are owned by the session and released on teardown,
   connection loss, takeover, idle timeout, app stop or a settings change, and the playback stream
-  is aborted rather than drained so a stopped session makes no late sound. Panel gestures and the
-  Web UI reach the sender through its event channel — the same standard media contract — and never
-  through a private daemon→sender path. Volume is applied app-side to this app's PCM, so the
-  mixer's master and limiter stay the ceiling. The wire behaviour is host-verified; no stream from
-  a live Apple sender and no acoustic output is claimed. See
-  [apps/airplay/README.md](../apps/airplay/README.md).
+  is aborted rather than drained so a stopped session makes no late sound. An authenticated
+  type-103 buffered stream is staged by `SETUP` but remains silent until a valid
+  `SETRATEANCHORTI` or `SETRATEANCHORTIME` anchor and audio arrive; the reference literal and
+  the field client's full spelling name the same plist-bodied anchor. Its timeline is matched to
+  that sender's PTP source, and an absent or undisciplined match uses local arrival timing rather
+  than another source's clock. Only decoded PCM reaching the sink changes the player to
+  `PLAYBACK_PLAYING`. Immediate `FLUSHBUFFERED` stops and discards sequences below its endpoint,
+  deferred ranges discard only `[from, until)`, and a fresh anchor is required to resume.
+  Invalid or unauthenticated buffered setup, malformed flush or anchor requests, and a short
+  `shk` are refused before changing listeners or the live sender.
+  Panel gestures and the Web UI reach the sender through its event channel — the same standard
+  media contract — and never through a private daemon→sender path. Volume has one control:
+  the persisted speaker master. Connecting reports the existing level without resetting it.
+  The authenticated sender that owns the media session can change it, including while paused;
+  probes, event-only connections, unauthenticated senders and a retired owner cannot. Speaker-side
+  changes are mirrored to the sender without a second PCM gain stage. Disconnect and takeover
+  do not reset the master; the framework mixer and limiter still apply. See
+  [VERIFICATION.md](VERIFICATION.md) for host and device evidence and the
+  [AirPlay app guide](../apps/airplay/README.md) for protocol details.
 - **Home Assistant bridge (`org.capsulad.homeassistant`).** The app is installed, started and
   configured with an MQTT broker (named, or discovered with mDNS when `broker_discover` is on);
   a launch while it runs is an invocation that forces a discovery/state republish. Feedback is a
@@ -547,6 +577,9 @@ credential-mutating routes.
   stay administrator reads. Per-app configuration, actions and run listings are scoped to the
   calling app; the administrator run table lists each built-in once under its own app ID with
   its real state, so a running clock shows as running and not as a Launch candidate.
+  The AirPlay receiver has a narrowly scoped exception for the master-volume setter only; its
+  authenticated READY run can follow the active AirPlay sender without gaining access to device
+  settings or microphone controls.
 - **Foreign data stays foreign.** Apps do not read another app's runs, settings or logs; the
   Bluetooth media view redacts the connected peer address/name for app callers while keeping the
   transport/now-playing fields a media provider needs; the shared asset store exposes only normalized

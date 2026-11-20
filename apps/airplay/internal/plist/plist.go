@@ -21,9 +21,13 @@ import (
 )
 
 // Value is the dynamic type produced by Decode and accepted by EncodeBinary.
-// Plausible Go types: nil, bool, int64, uint64 (UID), float64, string,
+// Plausible Go types: nil, bool, int64, uint64, UID, float64, string,
 // []byte, time.Time, []any and map[string]any.
 type Value = any
+
+// UID is a binary-plist UID object. It is deliberately distinct from an
+// integer so a UID cannot be mistaken for a numeric control field.
+type UID uint64
 
 const appleEpoch = 978307200 // seconds between 1970-01-01 and 2001-01-01 UTC
 
@@ -129,13 +133,12 @@ func (d *decoder) parseObject(index uint64, depth int) (any, error) {
 		}
 		v := beUint64(raw)
 		switch n {
-		case 1:
-			return int64(int8(v)), nil
-		case 2:
-			return int64(int16(v)), nil
-		case 4:
-			return int64(int32(v)), nil
+		case 1, 2, 4:
+			// Binary plist 1/2/4-byte integers are unsigned in format 00;
+			// do not sign-extend them (CFBinaryPList.c:1093-1109).
+			return int64(v), nil
 		case 8:
+			// An 8-byte integer is a signed 64-bit two's-complement value.
 			return int64(v), nil
 		case 16:
 			bi := new(big.Int).SetBytes(raw)
@@ -145,7 +148,10 @@ func (d *decoder) parseObject(index uint64, depth int) (any, error) {
 			if bi.IsInt64() {
 				return bi.Int64(), nil
 			}
-			return int64(v), nil
+			if bi.Sign() > 0 && bi.IsUint64() {
+				return bi.Uint64(), nil
+			}
+			return nil, fmt.Errorf("plist: integer outside signed/unsigned 64-bit range")
 		}
 		return nil, fmt.Errorf("plist: bad int width %d", n)
 	case 0x2: // real
@@ -206,7 +212,7 @@ func (d *decoder) parseObject(index uint64, depth int) (any, error) {
 		}
 		return string(utf16.Decode(u)), nil
 	case 0x8: // UID
-		n := int(lo)
+		n := int(lo) + 1
 		if n < 1 || n > 8 {
 			return nil, fmt.Errorf("plist: bad UID width %d", n)
 		}
@@ -214,7 +220,7 @@ func (d *decoder) parseObject(index uint64, depth int) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return beUint64(raw), nil
+		return UID(beUint64(raw)), nil
 	case 0xa: // array
 		count, start, err := d.count(off, lo)
 		if err != nil {
@@ -547,7 +553,9 @@ func (e *encoder) addValue(v any) (int, error) {
 	case int64:
 		return e.addScalar(markerAndInt(big.NewInt(x))), nil
 	case uint64:
-		return e.addScalar(encodeUID(x)), nil
+		return e.addScalar(markerAndUint(x)), nil
+	case UID:
+		return e.addScalar(encodeUID(uint64(x))), nil
 	case float64:
 		return e.addScalar(markerAndReal(x)), nil
 	case float32:
@@ -619,22 +627,41 @@ func putBE(x uint64, n int) []byte {
 	return b
 }
 
-// markerAndInt encodes a signed integer using the smallest width that fits.
+// markerAndUint encodes a non-negative Go uint64. Values above MaxInt64 use
+// the optional 16-byte unsigned representation so they do not alias a negative
+// signed 8-byte integer.
+func markerAndUint(x uint64) []byte {
+	if x <= math.MaxInt64 {
+		return markerAndInt(big.NewInt(int64(x)))
+	}
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf[8:], x)
+	return append([]byte{0x14}, buf...)
+}
+
+// markerAndInt encodes an integer in binary-plist format 00: positive values
+// use the shortest unsigned width, while every negative value that fits int64
+// is emitted as an 8-byte two's-complement integer (CFBinaryPList.c:1093-1109).
 func markerAndInt(v *big.Int) []byte {
-	if v.IsInt64() {
-		n := v.Int64()
+	if v.Sign() < 0 {
+		if v.IsInt64() {
+			return append([]byte{0x13}, putBE(uint64(v.Int64()), 8)...)
+		}
+	} else if v.IsUint64() {
+		x := v.Uint64()
 		switch {
-		case n >= math.MinInt8 && n <= math.MaxInt8:
-			return append([]byte{0x10}, byte(n))
-		case n >= math.MinInt16 && n <= math.MaxInt16:
-			return append([]byte{0x11}, putBE(uint64(n)&0xffff, 2)...)
-		case n >= math.MinInt32 && n <= math.MaxInt32:
-			return append([]byte{0x12}, putBE(uint64(n)&0xffffffff, 4)...)
+		case x <= 0xff:
+			return append([]byte{0x10}, byte(x))
+		case x <= 0xffff:
+			return append([]byte{0x11}, putBE(x, 2)...)
+		case x <= 0xffffffff:
+			return append([]byte{0x12}, putBE(x, 4)...)
 		default:
-			return append([]byte{0x13}, putBE(uint64(n), 8)...)
+			return append([]byte{0x13}, putBE(x, 8)...)
 		}
 	}
-	// Fall back to a two's-complement 16-byte integer.
+	// Values outside the signed/unsigned 64-bit range use the optional 16-byte
+	// representation, as in the reference encoder.
 	b := v.Bytes()
 	buf := make([]byte, 16)
 	if v.Sign() < 0 {
@@ -651,7 +678,7 @@ func encodeUID(v uint64) []byte {
 	if n == 0 {
 		n = 1
 	}
-	return append([]byte{0x80 | byte(n)}, putBE(v, n)...)
+	return append([]byte{0x80 | byte(n-1)}, putBE(v, n)...)
 }
 
 func markerAndReal(v float64) []byte {

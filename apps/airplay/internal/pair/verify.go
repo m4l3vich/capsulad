@@ -71,6 +71,11 @@ func (v *VerifyServer) handleM1(items []tlv8.Item) ([]byte, error) {
 	v.clientPub = append([]byte(nil), clientPub...)
 	v.shared = shared
 	v.encKey = hkdf32(shared, "Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info")
+	// A new M1 starts a new exchange: an earlier M3's proof must not authorize
+	// this one. The verified key is the proof flag, so clear it here as well as
+	// the identity it carried.
+	v.ltpk = nil
+	v.controllerID = ""
 	v.step = 1
 
 	sig := v.store.Device.sign(v.curvePub, []byte(v.store.Device.PairingID), v.clientPub)
@@ -103,7 +108,6 @@ func (v *VerifyServer) handleM3(items []tlv8.Item) ([]byte, error) {
 		return errorResponse(tlv8.StateM4, tlv8.ErrorAuthentication), nil
 	}
 	id := tlv8.GetString(sub, tlv8.TagIdentifier)
-	v.controllerID = id
 	sig, ok := tlv8.Get(sub, tlv8.TagSignature)
 	if !ok {
 		return errorResponse(tlv8.StateM4, tlv8.ErrorAuthentication), nil
@@ -115,12 +119,22 @@ func (v *VerifyServer) handleM3(items []tlv8.Item) ([]byte, error) {
 	if !ed25519.Verify(ed25519.PublicKey(ltpk), newHasher(v.clientPub, []byte(id), v.curvePub), sig) {
 		return errorResponse(tlv8.StateM4, tlv8.ErrorAuthentication), nil
 	}
+	// Record the controller identity only after the proof verified; a failed
+	// M3 must not leave a controller id or shared secret behind for the caller
+	// to promote.
+	v.controllerID = id
 	v.ltpk = append([]byte(nil), ltpk...)
 	v.step = 2
 	return tlv8.Encode(
 		tlv8.Item{Tag: tlv8.TagState, Value: []byte{tlv8.StateM4}},
 	), nil
 }
+
+// Verified reports whether M3 proved the controller's signature. Only then may
+// the caller use SharedSecret/ControllerID to key and own a channel; a failed
+// M3 is a TLV error inside a 200 response, not a transport failure. The stored
+// controller key is set in exactly the success path, so it is the proof flag.
+func (v *VerifyServer) Verified() bool { return len(v.ltpk) > 0 }
 
 // SharedSecret returns the X25519 shared secret established during M1/M3.
 func (v *VerifyServer) SharedSecret() []byte { return v.shared }

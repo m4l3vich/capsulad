@@ -294,8 +294,11 @@ func TestResponseRoundTrip(t *testing.T) {
 	}
 }
 
-func TestResponseEmptyBodyHasNoContentLength(t *testing.T) {
-	resp := NewResponse("8", 204, "")
+// TestResponseEmptyBodyCarriesZeroContentLength pins the reference-wire
+// framing: a reply with no body still states Content-Length: 0, as Apple
+// receivers and shairport-sync do.
+func TestResponseEmptyBodyCarriesZeroContentLength(t *testing.T) {
+	resp := NewResponse("8", 200, "")
 	var buf bytes.Buffer
 	if err := resp.Write(&buf); err != nil {
 		t.Fatalf("WriteTo: %v", err)
@@ -304,14 +307,53 @@ func TestResponseEmptyBodyHasNoContentLength(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing serialised response: %v", err)
 	}
-	if got := parsed.Get("Content-Length"); got != "" {
-		t.Fatalf("Content-Length = %q, want absent", got)
+	if got := parsed.Get("Content-Length"); got != "0" {
+		t.Fatalf("Content-Length = %q, want 0", got)
 	}
 	if len(parsed.Body) != 0 {
 		t.Fatalf("body = %q, want empty", parsed.Body)
 	}
 	if parsed.ContentLength() != 0 {
 		t.Fatalf("ContentLength = %d, want 0", parsed.ContentLength())
+	}
+}
+
+// TestResponsePipelinesHeaderOnlyReplies parses two consecutive header-only
+// replies from one stream, the shape a sender sees when it pipelines requests
+// on the control connection. A stale supplied Content-Length must be
+// normalised to the real body length, so the second reply still starts where
+// the first one ends.
+func TestResponsePipelinesHeaderOnlyReplies(t *testing.T) {
+	first := NewResponse("1", 200, "")
+	first.Add("Content-Length", "999") // stale value for an empty body
+	second := NewResponse("2", 200, "")
+
+	var buf bytes.Buffer
+	if err := first.Write(&buf); err != nil {
+		t.Fatalf("first WriteTo: %v", err)
+	}
+	if err := second.Write(&buf); err != nil {
+		t.Fatalf("second WriteTo: %v", err)
+	}
+
+	reader := bufio.NewReader(&buf)
+	for _, want := range []string{"1", "2"} {
+		parsed, err := ReadRequest(reader)
+		if err != nil {
+			t.Fatalf("parsing reply CSeq %s: %v", want, err)
+		}
+		if got := parsed.Get("CSeq"); got != want {
+			t.Fatalf("CSeq = %q, want %q", got, want)
+		}
+		if got := parsed.Get("Content-Length"); got != "0" {
+			t.Fatalf("CSeq %s: Content-Length = %q, want 0", want, got)
+		}
+		if len(parsed.Body) != 0 {
+			t.Fatalf("CSeq %s: body = %q, want empty", want, parsed.Body)
+		}
+	}
+	if reader.Buffered() != 0 {
+		t.Fatalf("%d unparsed trailing byte(s)", reader.Buffered())
 	}
 }
 

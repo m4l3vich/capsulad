@@ -84,5 +84,10 @@ type Sink interface {
 // it (arrival-time playout) when OpenClock returns nil.
 type Clock interface {
 	// Offset reports (master - local) nanoseconds and whether it is disciplined.
+	// It is the realtime path's independent aggregate estimate.
 	Offset() (int64, bool)
+	// OffsetForClockID reports the disciplined estimate for one sender PTP
+	// source. Buffered anchors use this method so another sender's clock can
+	// never be applied to this stream.
+	OffsetForClockID(clockID uint64) (int64, bool)
 }

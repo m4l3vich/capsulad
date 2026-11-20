@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"capsulad/internal/discovery"
 	"capsulad/internal/ids"
@@ -485,5 +486,54 @@ func TestLegacyWakewordsStayNilAcrossRoundTrip(t *testing.T) {
 	}
 	if got := reopened.Get().Values.Wakewords; got != nil {
 		t.Fatalf("legacy state became %#v", got)
+	}
+}
+
+// SetMasterVolume's check is the commit gate: it runs only after the store lock
+// is held, and a refusal leaves the snapshot untouched. This is what prevents a
+// queued daemon request from persisting after its authorization or context
+// changed behind an independent settings writer.
+func TestSetMasterVolumeCheckRunsAtStoreCommit(t *testing.T) {
+	store, err := OpenUser("", testLogs(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.Get()
+	denied := errors.New("denied at commit")
+	started := make(chan struct{})
+	checkRan := make(chan struct{}, 1)
+	done := make(chan error, 1)
+
+	store.mu.Lock()
+	go func() {
+		close(started)
+		_, err := store.SetMasterVolume(0.4, func() error {
+			checkRan <- struct{}{}
+			return denied
+		})
+		done <- err
+	}()
+	<-started
+	select {
+	case <-checkRan:
+		store.mu.Unlock()
+		t.Fatal("check ran while the store lock was held by another writer")
+	case <-time.After(20 * time.Millisecond):
+	}
+	store.mu.Unlock()
+	if err := <-done; !errors.Is(err, denied) {
+		t.Fatalf("commit check error = %v, want denied", err)
+	}
+	got := store.Get()
+	if got.Revision != before.Revision || got.Values.MasterVolume != before.Values.MasterVolume {
+		t.Fatalf("refused commit changed snapshot: rev %d -> %d, master %v -> %v",
+			before.Revision, got.Revision, before.Values.MasterVolume, got.Values.MasterVolume)
+	}
+
+	if _, err := store.SetMasterVolume(0.4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Get().Values.MasterVolume; got != 0.4 {
+		t.Fatalf("committed master = %v, want 0.4", got)
 	}
 }

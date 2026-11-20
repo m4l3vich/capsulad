@@ -1,59 +1,10 @@
 package media
 
 import (
-	"encoding/binary"
-	"math"
 	"reflect"
 	"sync"
 	"testing"
 )
-
-func TestGainFromDB(t *testing.T) {
-	cases := []struct {
-		dB   float64
-		want float64
-	}{
-		{0, 1},
-		{-6.0206, 0.5},
-		{-20, 0.1},
-		{-144, 0},
-		{-80, 0},
-		{3, 1},
-		{math.NaN(), 0},
-	}
-	for _, tc := range cases {
-		got := GainFromDB(tc.dB)
-		if math.Abs(got-tc.want) > 1e-4 {
-			t.Fatalf("GainFromDB(%v) = %v, want %v", tc.dB, got, tc.want)
-		}
-	}
-}
-
-func TestScalePCM16(t *testing.T) {
-	pcm := make([]byte, 8)
-	for i := 0; i < 4; i++ {
-		binary.LittleEndian.PutUint16(pcm[i*2:], 1000)
-	}
-	ScalePCM16(pcm, 0.5)
-	for i := 0; i < 4; i++ {
-		if got := int16(binary.LittleEndian.Uint16(pcm[i*2:])); got != 500 {
-			t.Fatalf("sample %d = %d, want 500", i, got)
-		}
-	}
-	// Clipping and silence.
-	binary.LittleEndian.PutUint16(pcm[0:2], 32000)
-	ScalePCM16(pcm, 2)
-	if got := int16(binary.LittleEndian.Uint16(pcm[0:2])); got != 32767 {
-		t.Fatalf("clipped sample = %d, want 32767", got)
-	}
-	binary.LittleEndian.PutUint16(pcm[0:2], 1234)
-	ScalePCM16(pcm, 0)
-	for i := range pcm {
-		if pcm[i] != 0 {
-			t.Fatalf("silence left byte %d = %d", i, pcm[i])
-		}
-	}
-}
 
 func TestSnapshotShape(t *testing.T) {
 	status := Status{

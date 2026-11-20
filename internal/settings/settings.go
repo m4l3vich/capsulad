@@ -292,6 +292,31 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 			}
 		}
 	}
+	return s.commitLocked(next)
+}
+
+// SetMasterVolume replaces only the device master volume. check runs after the
+// store lock is acquired and before any mutation, so an authorization or
+// context check cannot go stale while waiting for another settings writer; its
+// error leaves the stored snapshot, revision and subscribers untouched. check
+// must not call back into this store. Unlike Update there is no expected
+// revision: a serialized scalar control commits the value current under the
+// lock.
+func (s *UserStore) SetMasterVolume(v float64, check func() error) (UserSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if check != nil {
+		if err := check(); err != nil {
+			return UserSnapshot{}, err
+		}
+	}
+	next := cloneUser(s.values)
+	next.MasterVolume = v
+	return s.commitLocked(next)
+}
+
+// commitLocked validates, persists and publishes next. The caller holds s.mu.
+func (s *UserStore) commitLocked(next UserSettings) (UserSnapshot, error) {
 	next = normalize(next)
 	if err := validateUser(next); err != nil {
 		return UserSnapshot{}, err

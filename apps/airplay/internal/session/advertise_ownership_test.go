@@ -197,7 +197,7 @@ func TestDelayedRepublishUsesCurrentSessionState(t *testing.T) {
 		t.Fatalf("delayed publish: %v", err)
 	}
 
-	want := hexStatus(StatusReceiverSessionIsOn)
+	want := hexStatus(StatusAudioCableAttached | StatusReceiverSessionIsOn)
 	for _, serviceType := range []string{"_airplay._tcp", "_raop._tcp"} {
 		advert, ok := advertiser.find(serviceType)
 		if !ok {

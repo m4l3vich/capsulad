@@ -7,6 +7,7 @@ package session
 // the stronger ownership model this receiver documents.
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha512"
@@ -287,6 +288,12 @@ func TestPairSetupAndAdministration(t *testing.T) {
 	}
 	client.setStream(&rwStream{rw: encrypted})
 
+	// Pairing administration needs an authenticated controller, not media
+	// ownership: the pair-setup/pair-verify connection is still a candidate.
+	if got := mgr.Active(); got != nil {
+		t.Fatal("pairing administration took media ownership")
+	}
+
 	entries, code, err := pairList(t, client)
 	if err != nil || code != 0 {
 		t.Fatalf("pair-list: %v code=%d", err, code)
@@ -344,15 +351,24 @@ func TestPairSetupAndAdministration(t *testing.T) {
 	if code, err := pairResult(t, client, "/pair-remove", pairBody(tlv8.MethodRemovePairing, pairingID, nil, nil)); err != nil || code != 0 {
 		t.Fatalf("self remove: %v code=%d", err, code)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if !mgr.board.Live() {
-			break
+	// The candidate must be closed by the server after its success response;
+	// its board was never live, so board.Live alone would not prove this.
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := client.reader.ReadByte()
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("the self-removed candidate connection stayed open")
 		}
-		time.Sleep(10 * time.Millisecond)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the self-removed candidate connection was not closed")
 	}
-	if mgr.board.Live() {
-		t.Fatal("the session survived the removal of its controller")
+	waitUntil(t, "the self-removed candidate to leave the pending set", func() bool { return pendingCount(mgr) == 0 })
+	if mgr.Active() != nil {
+		t.Fatal("self-removal promoted the candidate")
 	}
 	if mgr.Store().ControllerCount() != 0 {
 		t.Fatalf("pairings left after self-removal: %d", mgr.Store().ControllerCount())
@@ -389,7 +405,10 @@ func TestPairSetupWrongCodeIsRefused(t *testing.T) {
 
 // pairSetupTransient is a real transient sender: /pair-pin-start, then M1..M4
 // with the transient flag, and no M5/M6 (pyatv hap_transient.py). It returns
-// the SRP session key the controller uses for the channel.
+// the SRP session key the controller uses for the channel. It also pins the
+// reference /pair-setup response MIME on both plaintext replies; the callers
+// continue on the encrypted channel, so the proof and keying stay covered end
+// to end.
 func pairSetupTransient(t *testing.T, client *rtspClient, password string) ([]byte, error) {
 	t.Helper()
 	if response, err := client.do("POST", "/pair-pin-start", "application/octet-stream", nil); err != nil {
@@ -404,6 +423,12 @@ func pairSetupTransient(t *testing.T, client *rtspClient, password string) ([]by
 	))
 	if err != nil {
 		return nil, err
+	}
+	if response.status != 200 {
+		t.Fatalf("pair-setup M2 answered %d", response.status)
+	}
+	if got := response.headers["content-type"]; got != "application/octet-stream" {
+		t.Fatalf("pair-setup M2 content type = %q, want application/octet-stream", got)
 	}
 	items, err := tlv8.Decode(response.body)
 	if err != nil {
@@ -429,6 +454,12 @@ func pairSetupTransient(t *testing.T, client *rtspClient, password string) ([]by
 	if err != nil {
 		return nil, err
 	}
+	if response.status != 200 {
+		t.Fatalf("pair-setup M4 answered %d", response.status)
+	}
+	if got := response.headers["content-type"]; got != "application/octet-stream" {
+		t.Fatalf("pair-setup M4 content type = %q, want application/octet-stream", got)
+	}
 	items, err = tlv8.Decode(response.body)
 	if err != nil {
 		return nil, err
@@ -447,8 +478,9 @@ func pairSetupTransient(t *testing.T, client *rtspClient, password string) ([]by
 }
 
 // TestTransientPairingDrivesTheWholeSession is the sender flow pyatv performs:
-// pair-pin-start, a four-state transient pair-setup, then every RTSP request and
-// the audio channel keyed from the SRP session secret, with no pair-verify.
+// pair-pin-start, a four-state transient pair-setup (whose helper pins the
+// reference M2/M4 response MIME), then every RTSP request and the audio channel
+// keyed from the SRP session secret, with no pair-verify.
 func TestTransientPairingDrivesTheWholeSession(t *testing.T) {
 	mgr, transport, _, _, sink, _, _ := newTestManager(t)
 	if err := mgr.Start(); err != nil {
@@ -576,5 +608,127 @@ func TestTransientPairingDrivesTheWholeSession(t *testing.T) {
 	}
 	if response, err := client.do("TEARDOWN", "/1", "", nil); err != nil || response.status != 200 {
 		t.Fatalf("TEARDOWN = %v %v", response, err)
+	}
+}
+
+// TestFailedPairVerifyDoesNotEncryptOrPromote pins the authentication boundary
+// of pair-verify. M3's proof is carried in a TLV inside an ordinary RTSP 200,
+// so a rejected controller is not a transport error: the response is 200 with
+// kTLVError_Authentication. The accessory computes the X25519 secret at M1,
+// before it knows whether M3 will prove the pairing, so keying or promoting on
+// the secret alone would treat a rejected controller as verified and switch a
+// still-plaintext connection to HAP framing. The live sender must survive.
+func TestFailedPairVerifyDoesNotEncryptOrPromote(t *testing.T) {
+	mgr, transport, advertiser, _, sink, _, pairingID := newTestManager(t)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	// A first connection acquires media ownership with an accepted ANNOUNCE.
+	// Transient pairing alone now protects and keys a connection but does not
+	// promote it, so the live baseline must come from a media request.
+	conn1, err := transport.dial(7000)
+	if err != nil {
+		t.Fatalf("dial live sender: %v", err)
+	}
+	client1 := newRTSPClient(conn1)
+	announce(t, client1)
+	waitUntil(t, "the announced live session", func() bool { return mgr.Active() != nil })
+	live := mgr.Active()
+	if live == nil {
+		t.Fatal("the first session was not promoted")
+	}
+	// Wait for the promotion's active republish, then treat that as the
+	// baseline: a rejected candidate must not add another one.
+	for i := 0; i < 200 && advertiser.count("_airplay._tcp") < 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	before := advertiser.count("_airplay._tcp")
+	writtenBefore, _ := sink.state()
+
+	// A second connection completes M1/M2 and then signs M3 with the wrong key.
+	conn2, err := transport.dial(7000)
+	if err != nil {
+		t.Fatalf("dial rejected sender: %v", err)
+	}
+	client2 := newRTSPClient(conn2)
+	curveKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("curve key: %v", err)
+	}
+	m1 := tlv8.Encode(
+		tlv8.Item{Tag: tlv8.TagState, Value: []byte{tlv8.StateM1}},
+		tlv8.Item{Tag: tlv8.TagPublicKey, Value: curveKey.PublicKey().Bytes()},
+	)
+	response, err := client2.do("POST", "/pair-verify", "application/pairing+tlv8", m1)
+	if err != nil {
+		t.Fatalf("pair-verify M1: %v", err)
+	}
+	items, err := tlv8.Decode(response.body)
+	if err != nil {
+		t.Fatalf("pair-verify M2: %v", err)
+	}
+	accessoryPub, _ := tlv8.Get(items, tlv8.TagPublicKey)
+	encryptedM2, _ := tlv8.Get(items, tlv8.TagEncryptedData)
+	if len(accessoryPub) != 32 || len(encryptedM2) == 0 {
+		t.Fatalf("M2 payload pub=%d enc=%d", len(accessoryPub), len(encryptedM2))
+	}
+	peer, err := ecdh.X25519().NewPublicKey(accessoryPub)
+	if err != nil {
+		t.Fatalf("accessory curve key: %v", err)
+	}
+	shared, err := curveKey.ECDH(peer)
+	if err != nil {
+		t.Fatalf("ECDH: %v", err)
+	}
+	verifyKey := hkdfKey(shared, "Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info")
+	_, wrongKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("wrong controller key: %v", err)
+	}
+	deviceInfo := append(append(append([]byte{}, curveKey.PublicKey().Bytes()...), []byte(pairingID)...), accessoryPub...)
+	sealed, err := sealNonce(verifyKey, "PV-Msg03", tlv8.Encode(
+		tlv8.Item{Tag: tlv8.TagIdentifier, Value: []byte(pairingID)},
+		tlv8.Item{Tag: tlv8.TagSignature, Value: ed25519.Sign(wrongKey, deviceInfo)},
+	))
+	if err != nil {
+		t.Fatalf("seal M3: %v", err)
+	}
+	m3 := tlv8.Encode(
+		tlv8.Item{Tag: tlv8.TagState, Value: []byte{tlv8.StateM3}},
+		tlv8.Item{Tag: tlv8.TagEncryptedData, Value: sealed},
+	)
+	response, err = client2.do("POST", "/pair-verify", "application/pairing+tlv8", m3)
+	if err != nil {
+		t.Fatalf("pair-verify M3: %v", err)
+	}
+	if response.status != 200 {
+		t.Fatalf("rejected M3 RTSP status = %d, want 200 with a TLV error", response.status)
+	}
+	items, err = tlv8.Decode(response.body)
+	if err != nil {
+		t.Fatalf("pair-verify M4: %v", err)
+	}
+	if _, ok := tlv8.GetUint8(items, tlv8.TagError); !ok {
+		t.Fatal("a bad M3 signature was not refused with a TLV error")
+	}
+
+	// The failed exchange must not switch framing: a plaintext request on the
+	// same socket still reaches the dispatcher.
+	if info, err := client2.do("GET", "/info", "", nil); err != nil || info.status != 200 {
+		t.Fatalf("failed pair-verify switched the channel to encrypted framing: %v %v", info, err)
+	}
+	if got := mgr.Active(); got != live {
+		t.Fatal("failed pair-verify promoted the rejected candidate over the live session")
+	}
+	if got := advertiser.count("_airplay._tcp"); got != before {
+		t.Fatalf("failed pair-verify republished advertisements: %d, want %d", got, before)
+	}
+	if written, _ := sink.state(); written != writtenBefore {
+		t.Fatalf("failed pair-verify changed the sink: %d, want %d", written, writtenBefore)
+	}
+	if info, err := client1.do("GET", "/info", "", nil); err != nil || info.status != 200 {
+		t.Fatalf("live session lost its channel: %v %v", info, err)
 	}
 }

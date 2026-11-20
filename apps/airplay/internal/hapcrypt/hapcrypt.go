@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -22,6 +23,77 @@ import (
 const maxOutbound = 1024
 
 var errBadTag = errors.New("hapcrypt: authentication tag mismatch")
+
+// ReadOutcome is a bounded classification of the terminal outcome of reading
+// an encrypted channel. It carries no error text, peer data or payload bytes,
+// so a close summary can report the token from ReadOutcomeToken.
+type ReadOutcome uint8
+
+const (
+	// ReadOK is the zero value: the last block read (if any) succeeded.
+	ReadOK ReadOutcome = iota
+	// ReadClosed is a clean close at a block boundary: no byte of the next
+	// 2-byte length prefix was received.
+	ReadClosed
+	// ReadTruncatedLength is a close or I/O failure after one byte of the
+	// 2-byte length prefix.
+	ReadTruncatedLength
+	// ReadTruncatedBlock is a close or I/O failure inside the ciphertext and
+	// authentication tag a length prefix promised.
+	ReadTruncatedBlock
+	// ReadAuthFailed is a ChaCha20-Poly1305 tag mismatch.
+	ReadAuthFailed
+	// ReadTransportError is an underlying stream failure before a complete
+	// block was received (for example a reset), not a clean close.
+	ReadTransportError
+)
+
+// ReadOutcomeToken returns the fixed, log-safe token for an outcome.
+func ReadOutcomeToken(outcome ReadOutcome) string {
+	switch outcome {
+	case ReadClosed:
+		return "eof"
+	case ReadTruncatedLength:
+		return "partial-length"
+	case ReadTruncatedBlock:
+		return "partial-body"
+	case ReadAuthFailed:
+		return "bad-tag"
+	case ReadTransportError:
+		return "io-error"
+	default:
+		return "none"
+	}
+}
+
+// readFailure couples the error readers already received with its bounded
+// outcome. The text and Unwrap chain are unchanged; the OS error is not
+// retained, so a caller that logs err.Error() cannot leak unvetted text.
+type readFailure struct {
+	outcome ReadOutcome
+	err     error
+}
+
+func (e *readFailure) Error() string { return e.err.Error() }
+func (e *readFailure) Unwrap() error { return e.err }
+
+// ReadOutcomeOf reports the bounded class of an error returned by ReadOne or
+// Read. A nil error is ReadOK; a clean io.EOF is ReadClosed; errors not
+// produced by this package are ReadTransportError. Wrapped errors keep their
+// class.
+func ReadOutcomeOf(err error) ReadOutcome {
+	if err == nil {
+		return ReadOK
+	}
+	var failure *readFailure
+	if errors.As(err, &failure) {
+		return failure.outcome
+	}
+	if errors.Is(err, io.EOF) {
+		return ReadClosed
+	}
+	return ReadTransportError
+}
 
 func derive(sharedSecret []byte, salt, info string) []byte {
 	r := hkdf.New(sha512.New, sharedSecret, []byte(salt), []byte(info))
@@ -77,6 +149,11 @@ type Session struct {
 	writeCounter uint64
 	readCounter  uint64
 	readBuf      []byte
+
+	// Telemetry for a bounded close summary. It is read from the connection
+	// goroutine and may be sampled by whoever ends the session.
+	readBlocks  atomic.Uint64
+	readOutcome atomic.Uint32
 }
 
 // NewSession creates an encrypted channel. writeKey seals outbound blocks,
@@ -108,26 +185,58 @@ func nonce(counter uint64) []byte {
 }
 
 // ReadOne reads and decrypts exactly one inbound block.
+//
+// The error vocabulary is unchanged: a clean close at a block boundary is
+// io.EOF, and every short read is io.ErrUnexpectedEOF so the session still ends
+// with "the control connection ended". ReadOutcomeOf recovers the bounded class
+// without exposing the underlying error text.
 func (s *Session) ReadOne() ([]byte, error) {
 	var lb [2]byte
 	n, err := io.ReadFull(s.rw, lb[:])
 	if err != nil {
-		if err == io.EOF && n == 0 {
+		if n == 0 && err == io.EOF {
+			s.readOutcome.Store(uint32(ReadClosed))
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("hapcrypt: reading block length: %w", io.ErrUnexpectedEOF)
+		outcome := ReadTruncatedLength
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			outcome = ReadTransportError
+		}
+		s.readOutcome.Store(uint32(outcome))
+		return nil, &readFailure{
+			outcome: outcome,
+			err:     fmt.Errorf("hapcrypt: reading block length: %w", io.ErrUnexpectedEOF),
+		}
 	}
 	length := int(binary.LittleEndian.Uint16(lb[:]))
 	body := make([]byte, length+chacha20poly1305.Overhead)
 	if _, err := io.ReadFull(s.rw, body); err != nil {
-		return nil, fmt.Errorf("hapcrypt: reading block body: %w", io.ErrUnexpectedEOF)
+		outcome := ReadTruncatedBlock
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			outcome = ReadTransportError
+		}
+		s.readOutcome.Store(uint32(outcome))
+		return nil, &readFailure{
+			outcome: outcome,
+			err:     fmt.Errorf("hapcrypt: reading block body: %w", io.ErrUnexpectedEOF),
+		}
 	}
 	plain, err := s.readAEAD.Open(nil, nonce(s.readCounter), body, lb[:])
 	if err != nil {
-		return nil, errBadTag
+		s.readOutcome.Store(uint32(ReadAuthFailed))
+		return nil, &readFailure{outcome: ReadAuthFailed, err: errBadTag}
 	}
 	s.readCounter++
+	s.readBlocks.Add(1)
+	s.readOutcome.Store(uint32(ReadOK))
 	return plain, nil
+}
+
+// ReadStats reports how many inbound blocks this channel decrypted and the
+// terminal outcome token of its last read. It is safe to call from another
+// goroutine and returns only bounded values for a sanitized close summary.
+func (s *Session) ReadStats() (blocks uint64, outcome string) {
+	return s.readBlocks.Load(), ReadOutcomeToken(ReadOutcome(s.readOutcome.Load()))
 }
 
 // Read decodes one inbound block (or serves what is buffered), returning as
@@ -154,7 +263,9 @@ func (s *Session) Read(p []byte) (int, error) {
 	return c, nil
 }
 
-// Write encodes p into outbound HAP blocks and writes them in one call.
+// Write encodes p into outbound HAP blocks and writes the ciphertext
+// completely, retrying a short count. It returns len(p) only when every block
+// reached the underlying writer; any error means the channel must close.
 func (s *Session) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -174,8 +285,25 @@ func (s *Session) Write(p []byte) (int, error) {
 		s.writeCounter++
 		off = end
 	}
-	if _, err := s.rw.Write(buf); err != nil {
-		return 0, err
+	// The underlying stream may accept fewer ciphertext bytes than offered:
+	// the public SDK's TCPStream.Write contract explicitly allows a short
+	// count with a nil error. Complete the write here as well; a partial
+	// encrypted frame desynchronizes the channel, so it is never reported as
+	// accepted plaintext. A writer that reports no progress is a short write,
+	// not something to spin on; closing the stream unblocks a stalled call.
+	written := 0
+	for written < len(buf) {
+		n, err := s.rw.Write(buf[written:])
+		if n < 0 || n > len(buf)-written {
+			return 0, io.ErrShortWrite
+		}
+		written += n
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, io.ErrShortWrite
+		}
 	}
 	return len(p), nil
 }

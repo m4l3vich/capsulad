@@ -142,11 +142,12 @@ func (d *Daemon) applySettings(snap settings.UserSnapshot) {
 		d.builtins.ring.setDeviceTimezone(v.Timezone)
 	}
 	timezoneChanged := prev != nil && prev.Timezone != v.Timezone
-	d.audio.SetMasterVolume(v.MasterVolume)
 	d.audio.SetMuted(v.MicrophoneMuted)
 	d.applyBluetoothSettings(v)
 	d.forgetBluetoothGain()
-	d.applyBluetoothGain(v.MasterVolume)
+	// This snapshot may be older than a direct key/Bluetooth/AirPlay change
+	// already committed; apply the durable master, not this queued field.
+	d.applyLatestMasterVolume()
 	d.wake.SetEnabled(v.WakewordEnabled)
 	d.wake.SetMuted(v.MicrophoneMuted)
 	// Per-word enablement and binding are settings, not engine state: applying

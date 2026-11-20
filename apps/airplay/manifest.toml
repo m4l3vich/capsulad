@@ -62,15 +62,6 @@ min = 300
 max = 4000
 
 [[settings]]
-key = "volume_trim"
-label = "Volume trim"
-description = "Extra linear attenuation applied after the sender's volume, 0.1 to 1.0. The framework's master volume still multiplies on top of it, so this cannot raise the receiver above the device level; a supervised app cannot move the device master volume itself."
-type = "number"
-default = 1.0
-min = 0.1
-max = 1.0
-
-[[settings]]
 key = "pairing_pin"
 label = "Pairing setup code"
 description = "The HomeKit setup code this receiver answers during pair-setup, for both the transient and the normal flow. It defaults to 3939, which is what the upstream receiver uses when no AirPlay password is configured, so existing senders keep working. A paired sender becomes an administrator and can add, list or remove other pairings over the encrypted pairing endpoints. Changing the code means every sender must pair again; empty restores the default."
@@ -94,7 +85,7 @@ default = "366.0"
 [[settings]]
 key = "features"
 label = "Feature bits override"
-description = "Decimal override for the advertised AirPlay feature bit mask. Empty uses the receiver's default set: realtime PCM/ALAC audio, AAC-LC when the build links the FFmpeg decoder, encrypted control channel, plist/DMAP metadata, transient HomeKit pairing and remote control. It deliberately omits buffered audio (40) and PTP (41) unless a multicast listener is granted. Set a number only to test a sender against a different capability set."
+description = "Decimal override for the advertised AirPlay feature bit mask. Empty uses the receiver's default set: realtime PCM/ALAC; AAC-LC (realtime and buffered) on FFmpeg builds; authenticated buffered audio (bit 40) with ALAC always available; encrypted control; plist/DMAP metadata; transient HomeKit pairing; the FairPlay /fp-setup handshake (bit 14; it does not enable protected playback or claim MFi); and remote control. PTP (bit 41) is separate: the ptp setting adds it only when the runtime grants a multicast listener. An override replaces the whole mask; the receiver still clears AAC-LC and buffered bits it cannot back with an available decoder/format."
 type = "text"
 default = ""
 

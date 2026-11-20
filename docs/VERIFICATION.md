@@ -116,6 +116,13 @@ stock Rockchip image.
 - Master-volume curve measured on the same path: 0 % silence, 1 % peak 58, 5 % peak 294,
   10 % peak 589, 20 % peak 1179.
 - Application microphone audio arrives over the bus and stops on the indication watchdog.
+- **Low-volume investigation (read-only ADB and source history).** The native Internet Radio
+  run used the framework mixer. Both the old tuner/MicroPython path and the current native
+  path deliver unscaled stereo S16LE from the same MP3 decoder to the same linear master.
+  Device readback showed the PulseAudio sinks and `pacat` stream at 100%, and the ALSA
+  Master Volume at 0 dB. No framework curve or Radio gain regression was found, so no gain
+  change was made. Stock firmware uses different volume controls; relative acoustic
+  loudness was not measured.
 
 ### Bluetooth
 
@@ -373,6 +380,18 @@ Detailed checked hashes are in `build/candidate-20261118T112139Z/DEPLOY-EVIDENCE
 local rollback artifacts are in `build/deploy-20261118T1925Z/`. No media was sent to the
 speaker, and no acoustic or optical evidence was collected.
 
+### 2026-11-19 deployment: Web appearance, Radio display and AirPlay UDP ports
+
+- After detached ADB deployment via `capsulad-cli deploy`, the boot log recorded `daemon healthy`.
+  Wi-Fi re-associated but did not obtain an IPv4 lease; local input continued and Radio logged
+  `Network is unreachable`. A physical power cycle restored the lease. No second deployment ran.
+- Post-recovery hashes matched the candidate daemon (`b5df3929…`) and every file in the Radio 0.2.0
+  and AirPlay 0.1.0 packages. The CLI, native runtime and stock boot hook were unchanged.
+  Global and Radio settings matched; AirPlay's effective values matched with a newer revision.
+- The daemon health check and LAN `/healthz` passed, the served SPA and theme assets matched the
+  build, and all six expected runs were `APP_READY`. Both AirPlay DNS-SD records were visible
+  from the host. No Apple-sender session or physical display/audio output was exercised.
+
 ## 2026-11-18 current-change evidence: AirPlay advertisement, Simon 1.1.0, radio and app guides
 
 This section records evidence for the current working tree only. It is not a deployment record,
@@ -424,6 +443,254 @@ not the speaker; read the level stated in each part.
 - **Open and not claimed.** No rebuilt AirPlay package has been deployed to the speaker, and no
   Apple sender, acoustic output or post-fix device advertisement is verified. The 611,072-byte
   pyatv loopback is a sender-library proof only.
+
+### AirPlay audio-port negotiation
+
+- **Field diagnosis (ADB logs and LAN sender).** Discovery resolved both service types and
+  RTSP responded, but RAOP replied with `server_port=0;control_port=0;timing_port=0` while the
+  daemon logged two nonzero UDP allocations. A pyatv sender reached setup and failed sending audio
+  to port zero. An AirPlay 2 SETUP probe also received `dataPort=0` and `controlPort=0` despite
+  successful allocation; teardown released the sockets.
+- **Host proof.** The AirPlay adapter race test verifies that a UDP listener without `Accept`
+  reports its bound port. The independent pyatv loopback regression delivered 611,072 bytes of
+  PCM; it exercises the session and decode path, not the device's allocation adapter.
+- **Open.** The fix was not deployed. Some macOS attempts in the device log also closed before
+  audio setup; the logs do not establish why. Post-fix Apple sender playback and acoustic output
+  remain unverified.
+
+### AirPlay iPhone connection ownership
+
+- **On-device trace before the ownership fix.** On two attempts an IPv4 connection to the
+  control port closed after 10–14 ms without sending any request. At the matching timestamps
+  the receiver logged that the IPv4 connection had superseded the iPhone's IPv6 session.
+  Discovery alone and the earlier port check did not exercise this path.
+- A separate `/info` check on the deployed build returned zero for the realtime format,
+  while the discovery records advertised ALAC. The source now reports the realtime format
+  and consistent status flags without advertising unimplemented buffered audio.
+- Host race regressions cover empty and discovery-only connections, failed verification and
+  partial SETUP, ownership expiry, and release of the old session on valid takeover.
+- **App-only ADB deployment.** The updated package (`12932062…`, binary `28c47ef0…`)
+  was installed live. AirPlay reached `APP_READY`; the daemon PID and boot ID were unchanged.
+  Both records resolved and `/info` reported realtime ALAC (`262144`) and no buffered audio.
+  User-facing settings retained their values. The managed identity and RSA key rotated at
+  startup, so pairing persistence is not verified. iPhone playback and acoustic output
+  remain unverified.
+
+### AirPlay iPhone control exchange after the ownership fix
+
+- A bounded IPv4/IPv6 device trace confirmed the iPhone connected over IPv6 and received
+  `200` for `OPTIONS` and `/command`. The empty IPv4 connection no longer evicted it.
+  After the operator deselected and reselected the receiver, the iPhone sent only
+  `OPTIONS`, received `200`, and disconnected. Neither capture showed `/info`, pairing,
+  `ANNOUNCE`, or audio `SETUP`. The trace recorded request types and status, not media or
+  authentication payloads.
+- A working Apple receiver on the LAN and the pinned Shairport Sync reference include
+  `Content-Length: 0` on empty RTSP responses; the deployed build omitted it. That is a
+  concrete wire difference, not proof of why the iPhone stopped. A post-change iPhone
+  session is still needed to establish whether matching the reference helps.
+- Host wire tests verify consecutive empty replies carry one `Content-Length: 0` each.
+  Session race tests verify the bounded candidate log classifies parsed requests and
+  reports failed response writes without exposing raw request data in the summary.
+- **App-only deployment and iPhone retry.** Binary `b5714623…` reached `APP_READY` without
+  a daemon restart. A LAN `OPTIONS` probe verified `200` and `Content-Length: 0`. On three
+  subsequent iPhone connections the candidate summary recorded six parsed requests, last
+  `OPTIONS` → `200`, and no session start. The user reported the same connection error.
+  Explicit length alone did not resolve playback.
+- A separate pyatv sender reached legacy `ANNOUNCE`, `SETUP`, `RECORD`, and `TEARDOWN` on the
+  same build, and receiver logs showed a PCM stream. This checks the legacy control path,
+  not AirPlay 2 selection or iPhone playback. The Bonjour capability mix differs from the
+  Apple and Shairport reference receivers; which difference matters to iOS is unverified.
+
+### AirPlay 2 buffered input (current change)
+
+- **Pinned wire evidence.** The reference dispatch literal is `SETRATEANCHORTI` (not
+  `SETRATEANCHORTIME`), with `networkTimeSecs`, a 64-bit binary `networkTimeFrac`,
+  `networkTimeTimelineID`, `rtpTime` and `rate`. Type-103 SSRCs are payload format codes:
+  `0x15000000` ALAC 48 kHz/24-bit stereo, `0x16000000` AAC-LC 44.1 kHz stereo and
+  `0x17000000` AAC-LC 48 kHz stereo; the reference marks its ALAC 44.1 buffered value
+  (`0xFACE`) synthetic. `SETUP` returns an 8 MiB `audioBufferSize`. Both
+  `FLUSHBUFFERED` forms use a half-open sequence range: immediate discards
+  sequences below `flushUntilSeq`, and a deferred request discards
+  `[flushFromSeq, flushUntilSeq)`. These were read from the pinned 5.6.2 source
+  (`rtsp.c`, `ap2_buffered_audio_processor.c`, `player.h`/`player.c`), not measured on this
+  speaker.
+- **User-reported sender A/B (one trial each).** A user iPhone connected to a temporary
+  Shairport Sync 5.5.2 clone. With buffered feature bit 40 set, the trial produced an AP2
+  `SETUP` and **3,553,526 decoded PCM bytes**. Clearing only bit 40 switched that clone to classic
+  `ANNOUNCE`/`RECORD` and produced **zero decoded audio** while the sender UI still looked
+  connected. This is a single-trial observation about the reference clone; it is not a test of
+  `org.capsulad.airplay` and does not prove the new capsulad path or any Apple sender plays it.
+- **Host verification (2026-11-19).** `go test -race` was run on the encrypted TCP
+  loopback path both with `-tags=ffmpeg` and without the tag. The tagged run delivered real
+  AAC-LC and ALAC frames to the framework sink; the untagged run delivered ALAC. The runs
+  covered pause, immediate/deferred flush, teardown, capability assertions and per-source PTP
+  tests. One test fixture initially failed because it manually forced an invalid pacing state;
+  this was a fixture defect, not a production behavior. Playout corrected only that fixture, and
+  the focused regression then passed in both tag modes. The combined run otherwise passed. These
+  are host loopback/digital-sink results, not device, acoustic or Apple-sender results.
+- **Dedicated wire/plist/capability checks.** Earlier `-race` checks for the buffered wire, plist
+  and airplayinfo passed. The optional Python plistlib check was skipped because
+  `PLISTLIB_PYTHON` was unset.
+- **Binary plist integer boundary.** The plist reader treats compact 1/2/4-byte integers as
+  unsigned and the writer emits positive values in the shortest unsigned width; negative values
+  are 8-byte two's-complement. Independent hand-built vectors cover `0x10 0xc8` = 200,
+  `0x11 0xffff` = 65535, `0x12 0xffffffff` = 4294967295, and 8-byte negative values. UIDs are a
+  distinct `plist.UID` type with the `low nibble + 1` width (`80 c8` = UID 200, `81 12 34` = UID
+  0x1234), not numeric integers; 16-byte integers outside the supported signed/unsigned 64-bit
+  range are rejected rather than truncated. Control tests encode a UID as `flushUntilSeq` and
+  `2^64+200` as a flush endpoint or `2^64+1` as an anchor rate and require `400` without changing
+  live play state. The 64-bit PTP timeline/fraction path retains signed-to-unsigned bit-pattern
+  handling. These vectors and control cases passed in the dedicated plist/session checks.
+- **App-only ADB deployment.** FFmpeg-enabled package `c4e7e91f…` (`0.1.0`, binary
+  `9038bfa2…`, GLIBC 2.28) was installed live on the stock RK3308 speaker. The old app was
+  removed first for storage headroom after its exact archive was backed up. The new run reached
+  `APP_READY` with the daemon PID, boot ID, other app runs and user-facing AirPlay preferences
+  unchanged. The app's managed identity rotated on start, as on earlier deployments.
+- **Device protocol evidence.** Both DNS-SD records and `/info` reported bit 40; `/info`
+  advertised buffered ALAC 48 kHz and AAC-LC 44.1/48 kHz (`0xE00000`). RTSP `OPTIONS` returned
+  `200`, and the app joined PTP multicast on UDP 319/320. This verifies the live advertisement
+  and listener setup, not a disciplined clock or decoded audio on the device.
+- **iPhone retry after deployment.** Four IPv6 attempts in the ADB logs reached transient
+  pair-setup completion and the receiver's encrypted control-channel transition. Each control
+  connection ended 8–20 ms later. No event or audio listener allocation or type-103 stream was
+  logged, and the user reported the same connection error. This is a later failure stage than
+  the earlier `OPTIONS`-only attempts. The logs do not establish whether the sender accepted
+  the pairing response or successfully exchanged an encrypted request.
+- **Early mDNS withdrawal in that window (read-only ADB log review).** In three of the four
+  attempts the app's first DNS-SD unpublish completed 5–6 ms after the encrypted-channel log
+  line and the sender's close followed a few milliseconds later; in the fourth attempt both
+  records had already been withdrawn by an earlier republish cycle when pairing completed. The
+  completion path had treated a completed HAP exchange as session ownership, set the active
+  status bit and started a full withdraw/re-add of both records. The reference receiver marks
+  itself active and updates TXT only after it accepts `ANNOUNCE` or the initial `SETUP`, and it
+  updates Avahi TXT in place rather than removing the services. The lifecycle mismatch is
+  corrected in source; the causal link to the iPhone's user-visible error remains **unproven**,
+  and no subsequent iPhone attempt confirmed the fix.
+- **Focused host verification for the lifecycle correction (no device run).** The session and
+  HAP packages passed `go test -race -ldflags '-linkmode=external'` (`./internal/session` and
+  `./internal/hapcrypt`), and the app module compiled with `go test -run '^$' ./...`. The
+  FFmpeg-tagged encrypted buffered integration path passed under `-race` with
+  `-tags ffmpeg -run 'TestBufferedType103PlaysAndControls'` (ALAC 48 kHz/24-bit and AAC-LC
+  44.1 kHz subtests), together with the new encrypted ownership, diagnostics and short-write
+  regressions. New
+  regressions use the real loopback transport: a successful transient pair-setup plus an
+  encrypted `GET /info` leaves the live sender, its media generation, the selected board state
+  and both advertisement counts unchanged; the encrypted event-only `SETUP` and the type-130
+  control-only `SETUP` are acknowledged without promotion, and connecting the event peer and
+  delivering `updateInfo` still leaves the owner untouched; a malformed `SETUP` on that
+  authenticated candidate leaves the prior owner; a later stream-bearing `SETUP` promotes it
+  and replays metadata and the acknowledged candidate group id that arrived while it was a
+  candidate. `TestFailedPairVerifyDoesNotEncryptOrPromote`
+  and `TestBufferedSetupRequiresAuthenticationAndKey` were migrated to establish media
+  ownership with an accepted request rather than pairing. Pairing administration still works
+  on an encrypted candidate while `Active()` is nil. The encrypted close-summary regression
+  pins `hap=eof/2` and `rtsp=none` for a clean two-block candidate close; a complete HAP block
+  carrying RTSP headers followed by an incomplete raw HAP frame is reported as
+  `hap=partial-body/1, rtsp=none`, while a complete HAP block carrying a truncated RTSP body is
+  `hap=eof/1, rtsp=body`. A late event `Accept` that completes after cleanup is rejected and
+  closed without an update or reader. A deterministic server-side write failure on
+  the successful `SETUP` response leaves the prior owner and media generation in place, closes
+  the candidate without a delivered `200`, and releases the reservation.
+- **Independent pyatv 0.18 transient-HAP control proof (host loopback).** The integrated source
+  was exercised by pyatv's own SRP and HAP-session code in
+  `build/evidence-20261120-hap-encrypted-control/result.txt`: M4 carried State=4 with a 64-byte
+  proof equal to `srptools H(A|M1|K)`, then encrypted `GET /info`, `OPTIONS *` and
+  `POST /feedback` each returned `200`. The receiver's sanitized close line was
+  `post-upgrade 3 … hap=eof/3, rtsp=none`, with no `ANNOUNCE`/`SETUP` and no playback
+  promotion. This verifies the encrypted candidate path and the diagnostics boundary; it is
+  not an iPhone, device or acoustic result.
+- **Live app-only update and iPhone retry.** Package `bcecabbd…` (AirPlay `0.1.0`, binary
+  `4451de01…`) reached `APP_READY` without restarting the daemon. Both DNS-SD records and
+  the buffered formats in `/info` were checked. In the retry window the speaker logged four
+  transient M4 completions, no discovery withdrawal or audio setup, and two rate-limited
+  summaries with `post-upgrade 0, hap=eof/0, rtsp=none`. The user still saw the same error.
+  The receiver saw no encrypted block before the two recorded closes; the logs do not
+  establish why the sender did not proceed.
+- **Pair-setup MIME comparison.** The candidate changes only the TLV `/pair-setup` response header to
+  `application/octet-stream` (M2/M4, and M6 on the normal path), matching Shairport Sync's
+  `handle_pair_setup`; the TLV bytes, M4 proof, status, header order and
+  plaintext-before-upgrade ordering are unchanged, and
+  `/pair-verify` and the pairing-administration endpoints keep
+  `application/pairing+tlv8`. A loopback regression pins both M2/M4 MIME values, the
+  sender proof and an encrypted `GET /info` after M4. The focused race run
+  (`TestTransientPairingDrivesTheWholeSession|TestPairingAndEncryptedProbeDoNotOwnMedia`)
+  passed. A real Apple receiver uses a different MIME for setup, so this is a
+  field-comparison candidate, not proof that the iPhone failure is fixed.
+  The app-only update (package `7933849a…`, binary `e36b106e…`) reached `APP_READY`
+  without restarting the daemon or changing user preferences. A live M1 probe verified the
+  M2 MIME change; that probe did not send M3. The managed receiver identity rotated on app
+  start, so the field comparison was not strictly one-variable. The user reported the same
+  connection error. The retry window recorded six transient pairing completions and three
+  rate-limited summaries at `post-upgrade 0, hap=eof/0, rtsp=none`, with no discovery
+  withdrawal or audio setup logged. The MIME change did not move those attempts past the
+  final pairing reply. The logs do not show whether the peer acknowledged that reply at
+  the TCP layer or opened a separate connection that never produced a parsed request.
+- **Passive IPv4/IPv6 TCP trace on the MIME build.** On three failed iPhone attempts,
+  the phone cumulatively acknowledged all 181 bytes of the final reply (112-byte header
+  and 69-byte body, identified by lengths and receiver log timing). It then sent FIN
+  without any further payload on each IPv6 connection. The trace saw only these three
+  connections from the phone to port 7000, with no separate follow-on connection in the
+  observed window. This establishes TCP delivery, not acceptance of the reply by iOS.
+  The trace recorded no payloads.
+- **iPhone Console evidence on the MIME build.** In two sessions, `airplayd` verified
+  M4 and logged `PairSetup transient client done -- server authenticated`. Immediately
+  afterward it logged `No supported authentication types`, then
+  `kAPEndpointDescriptionError_Unsupported` (`-71754`) in `apsession_ensureAuthenticated`.
+  This is after successful transient pairing and before audio setup. The log does not
+  name the missing authentication type or the exact receiver field responsible.
+- **Bit-14 trial on the speaker.** A temporary AirPlay settings override changed only
+  advertised bit 14 on both DNS-SD and `/info`; the main daemon stayed up and the
+  receiver identity rotated. In the 05:28 retry the iPhone connected and twice opened
+  the encrypted event channel and a type-103 AAC 48 kHz stereo stream. The receiver
+  repeatedly refused the full `SETRATEANCHORTIME` method before playout; the user heard
+  no sound and reported the iPhone slider jumping to 100%. The framework master read
+  5% after the attempt. No speaker output was demonstrated by the stream allocations.
+- **Full anchor method (host loopback).** The decoder-enabled race check exercised both
+  encrypted AAC-LC and ALAC with `SETRATEANCHORTIME` and observed decoded PCM at the
+  playback sink. The short reference spelling still reached the same validator.
+  The same run passed the default/override capability and `OPTIONS` checks for this
+  change. This is host sink evidence, not proof of device playback.
+- **Initial master-volume notification (host).** Focused FFmpeg-enabled race tests
+  verified that the receiver sends the initial `dvlc` snapshot only after `updateInfo`,
+  does not change session gain, retires a failed encrypted channel instead of reusing
+  it, and binds RTSP replies to the channel they came from. A subsequent focused race
+  run verified that event state application and channel replacement are serialized and
+  that late accepts after cleanup are closed. This establishes the receiver's messages
+  and state, not how iOS renders its volume slider.
+- **Live app-only update.** Package `fa2409d1…` (binary `5aa5f790…`) reached
+  `APP_READY` without restarting the daemon. The temporary feature override was cleared;
+  DNS-SD and `/info` retained bit 14 and buffered audio through the new defaults.
+  `OPTIONS` advertised both anchor methods. Master volume remained 5% and other
+  user-facing settings were unchanged; the receiver identity rotated on start.
+  These checks did not start pairing or playback.
+- **iPhone playback (user report).** On this build the user heard playback and reported
+  that the AirPlay slider initially matched the existing master. The AirPlay session
+  and speaker still had separate volume controls at this point. No PCM level, PTP
+  discipline, or memory usage at the 8 MiB bound was measured in this trial.
+
+### AirPlay shared master volume
+
+- **Daemon and settings proof (host simulator).** Focused race checks exercised a matched
+  READY receiver and rejected other, mismatched, and expired callers. The authorized
+  call updated the durable master and produced 25% full scale at the digital mixer sink.
+  The store-commit guard and stale master reapplication checks passed. Related Bluetooth
+  volume regressions passed in the preceding focused run.
+- **AirPlay protocol and PCM (host loopback).** Focused race tests exercised 5% startup
+  reporting, authenticated sender writes, the mute/floor/max mapping, owner takeover,
+  and settings readback. Realtime and buffered ALAC/AAC tests confirmed the receiver
+  submits decoded PCM without a separate sender gain. The final mirror regressions
+  covered a delayed echo after a newer slider move, repair after echo consumption or
+  expiry, and rejection of an obsolete notification. These are host results; iPhone
+  and Mac slider behavior with the shared master still require device confirmation.
+- **Coordinated device deployment.** Daemon `a24e54b3…` passed the boot-service health
+  gate; the live AirPlay update (package `bea3face…`, binary `4884b160…`) reached
+  `APP_READY`. Both DNS-SD records resolved, global settings were unchanged, and `/info`
+  reported `-28.5 dB` for the existing 5% master. The receiver identity rotated on startup.
+  The device rebooted during initial temporary staging, before installation; the cause was
+  not established. After staging fewer bytes, both update phases completed without another
+  reboot. The deployment checks sent no media or volume-setting requests.
+- **iPhone acceptance (user report).** The user confirmed playback and both directions of
+  master-volume synchronization after deployment. Mac behavior and acoustic gain were not measured.
 
 ### Simon Says 1.1.0 (isolated simulator)
 
@@ -497,6 +764,16 @@ not the speaker; read the level stated in each part.
 - **Limits.** These are backend and browser evidence on the simulator; no sound was measured
   and no device or real station was used.
 
+### Internet Radio station-number setting
+
+- The nested Radio module passed `go test -race -ldflags '-linkmode=external' ./...`. The
+  display regression exercises the tuning deadline and retune, the persistent preference,
+  the dark colon, and capture release before presentation close without a blank frame.
+  The focused race run also verifies the display deadline wakes without a redraw.
+- `cd web && node --test test/radio-settings.test.mjs` passed 6/6, including the checkbox's
+  patch when the station list has an unsaved draft or a save in flight. These are host
+  tests; this build's segment output and timing have not been checked on the speaker.
+
 ### App guide
 
 - The Web UI guide-render suite (`web/test/guide-render.test.mjs`) passed **4/4** node tests, and
@@ -515,6 +792,19 @@ not the speaker; read the level stated in each part.
   container with the glibc loader and also contained `README.md`. Built-in guide embedding was
   covered independently, and authentication plus rendering were verified in real Chrome.
 - These remain simulator/host/browser results; no device run of the guide path is recorded here.
+
+### Web UI appearance and app settings
+
+- The checked-in SPA and inline settings kit were rebuilt. `npm test` reported 75 passed,
+  one skipped, and no failures; the Go app UI and Web UI package tests passed.
+- In Chromium against the authenticated simulator, the shell and an open Clock settings
+  iframe followed both explicit choices and emulated OS changes in System. Switching
+  palettes kept an unsaved timezone draft and scroll position; a subsequent checkbox
+  edit saved normally. Explicit Light persisted across reload and ignored a dark OS
+  preference. Browser layout checks kept Close visible with a long dialog title at 320 and
+  390 px, and confirmed styled alarm-edit controls and a wrapping eight-stop ring palette
+  preview at 390 px.
+- These results cover the embedded UI in a host browser, not a deployment to the speaker.
 
 ## Verified only on the simulator or host
 

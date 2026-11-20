@@ -759,17 +759,96 @@ func (s *audioService) GetAudioState(ctx context.Context, _ *frameworkv1.GetAudi
 	return s.d.audioState(), nil
 }
 
-func (s *audioService) SetMasterVolume(ctx context.Context, req *frameworkv1.SetMasterVolumeRequest) (*frameworkv1.AudioState, error) {
-	if err := s.d.requireAdministrativeCaller(ctx, "master volume is a local administrator operation"); err != nil {
-		return nil, err
+// airPlayReceiverAppID is the one supervised app allowed to write the device
+// master as part of its product contract. The exception is compiled into the
+// daemon, not declared by a manifest: installing a package cannot opt into it,
+// and a built-in run (Virtual) is never resolved as this app.
+const airPlayReceiverAppID = "org.capsulad.airplay"
+
+const masterVolumeDenied = "master volume is a local administrator operation"
+
+// requireMasterVolumeCaller is the local-administrator gate plus one narrow
+// device-owner exception: the installed AirPlay receiver's authenticated READY
+// run may follow the sender's volume on the same persisted master the device
+// keys control. Every other supervised app stays denied. The receiver itself
+// decides which authenticated sender session owns the media; this gate only
+// establishes that the request came from that first-party app process.
+//
+// The exception is identity, not metadata. callerIdentity resolves the run
+// from the bus claim or the socket peer, and this check additionally requires
+// the Unix peer PID that the daemon launched to equal that run's child PID.
+// Hosts without peer credentials (the macOS simulator) fail closed: a run-id
+// claim alone is unguessable bookkeeping, not authentication.
+func (d *Daemon) requireMasterVolumeCaller(ctx context.Context) error {
+	if d.requireAdministrativeCaller(ctx, masterVolumeDenied) == nil {
+		return nil
 	}
-	if req.Volume < 0 || req.Volume > 1 {
-		return nil, status.Error(codes.InvalidArgument, "volume must be in [0,1]")
+	if d.isReadyAirPlayRun(ctx) {
+		return nil
 	}
-	if err := s.d.applyMasterVolume(float64(req.Volume)); err != nil {
+	return status.Error(codes.PermissionDenied, masterVolumeDenied)
+}
+
+// isReadyAirPlayRun reports whether ctx belongs to the live supervised process
+// of the installed AirPlay receiver's current READY run. A Starting, stopping
+// or virtual run never qualifies, and neither does a connection that merely
+// claims an AirPlay run ID without matching peer credentials.
+func (d *Daemon) isReadyAirPlayRun(ctx context.Context) bool {
+	if d.sup == nil {
+		return false
+	}
+	appID, runID, ok := d.callerIdentity(ctx)
+	if !ok || appID != airPlayReceiverAppID {
+		return false
+	}
+	run, ok := d.sup.Get(runID)
+	if !ok || run.AppID != airPlayReceiverAppID || run.Virtual || run.State != supervisor.Ready {
+		return false
+	}
+	creds := grpcpeer.FromContext(ctx)
+	return creds.OK && creds.PID > 0 && creds.PID == run.PID
+}
+
+// setMasterVolume is the public RPC transaction. It serializes on volumeMu and
+// passes a check into the settings store commit: the check runs under the store
+// lock immediately before the mutation, so a queued request whose deadline
+// expired, or whose AirPlay run stopped or was replaced while it waited for an
+// independent settings writer, does not persist. The returned state names this
+// call's applied level, not a value read after a later writer could have moved
+// the mixer.
+func (d *Daemon) setMasterVolume(ctx context.Context, v float64) (*frameworkv1.AudioState, error) {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return nil, status.Error(codes.InvalidArgument, "volume must be a finite value in [0,1]")
+	}
+	check := func() error {
+		if err := ctx.Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
+		if err := d.requireMasterVolumeCaller(ctx); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
+		return nil
+	}
+	d.volumeMu.Lock()
+	defer d.volumeMu.Unlock()
+	if err := d.applyMasterVolumeCheckedLocked(v, check); err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	return s.d.audioState(), nil
+	return &frameworkv1.AudioState{
+		MasterVolume:             float32(v),
+		MicrophoneMuted:          d.audio.Muted(),
+		MicrophoneMuteIsHardware: d.audio.HardwareMute(),
+	}, nil
+}
+
+func (s *audioService) SetMasterVolume(ctx context.Context, req *frameworkv1.SetMasterVolumeRequest) (*frameworkv1.AudioState, error) {
+	return s.d.setMasterVolume(ctx, float64(req.Volume))
 }
 
 func (s *audioService) SetMicrophoneMuted(ctx context.Context, req *frameworkv1.SetMicrophoneMutedRequest) (*frameworkv1.AudioState, error) {

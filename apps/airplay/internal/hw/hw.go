@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strconv"
 	"sync"
@@ -338,7 +339,8 @@ func (rt *Runtime) forget(key uint64) {
 	rt.mu.Unlock()
 }
 
-// trackedListener is a session.Listener whose Close releases its registry slot.
+// trackedListener adapts either daemon listener kind (TCP accept or UDP
+// datagram) and releases its registry slot on Close.
 type trackedListener struct {
 	rt    *Runtime
 	key   uint64
@@ -353,8 +355,16 @@ func (l *trackedListener) Accept() (session.Stream, error) {
 	return acceptor.Accept()
 }
 
+// addresser is the one method Addr needs. It is deliberately not
+// session.Listener: a UDP listener has no Accept, so asserting the full
+// listener interface here reported ("", 0) for every datagram socket and the
+// receiver answered SETUP with server_port=0 / dataPort=0.
+type addresser interface {
+	Addr() (address string, port int)
+}
+
 func (l *trackedListener) Addr() (string, int) {
-	addresser, ok := l.inner.(session.Listener)
+	addresser, ok := l.inner.(addresser)
 	if !ok {
 		return "", 0
 	}
@@ -451,7 +461,36 @@ type tcpStream struct {
 
 func (s *tcpStream) Read(p []byte) (int, error) { return s.stream.Read(context.Background(), p) }
 
-func (s *tcpStream) Write(p []byte) (int, error) { return s.stream.Write(context.Background(), p) }
+// tcpWriteStream is the SDK write half. capsulad.TCPStream.Write documents
+// that it may accept fewer bytes than len(p) and return a nil error, so it is
+// not by itself an io.Writer for the session's purposes.
+type tcpWriteStream interface {
+	Write(ctx context.Context, p []byte) (int, error)
+}
+
+// writeFull completes p through the SDK stream. A no-progress call is a short
+// write rather than a spin; a genuinely stalled native write is unblocked by
+// the session's existing reservation/refusal timeout closing the stream, so
+// this loop adds no unbounded wait of its own.
+func writeFull(stream tcpWriteStream, p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		n, err := stream.Write(context.Background(), p[written:])
+		if n < 0 || n > len(p)-written {
+			return written, io.ErrShortWrite
+		}
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+func (s *tcpStream) Write(p []byte) (int, error) { return writeFull(s.stream, p) }
 
 func (s *tcpStream) Close() error { return s.stream.Close() }
 
@@ -533,15 +572,29 @@ func (s *Sink) Abort() error           { return s.playback.Abort() }
 
 // --- mDNS ------------------------------------------------------------------
 
-// MasterVolume reads the framework mixer's master level (0..1). A supervised
-// app may read it but never write it: the level a person set on the device is
-// a ceiling, and the receiver only reports it to the sender.
-func (rt *Runtime) MasterVolume() (float64, bool) {
-	state, err := rt.client.AudioState(rt.ctx)
+// MasterVolumeContext reads the framework mixer's master level (0..1) under
+// the caller's deadline. A supervised app may read it; the level a person set
+// on the device is the speaker's one volume, and the receiver reports and
+// controls that same master.
+func (rt *Runtime) MasterVolumeContext(ctx context.Context) (float64, bool) {
+	state, err := rt.client.AudioState(ctx)
 	if err != nil {
 		return 0, false
 	}
 	return float64(state.MasterVolume), true
+}
+
+// SetMasterVolume writes the persisted framework master and returns the level
+// the framework applied. It is only called by the session for the current
+// HAP-keyed media owner, and the caller supplies a bounded context; the
+// framework admits the AirPlay run as an authenticated live app and persists
+// the value through the same path as the local controls.
+func (rt *Runtime) SetMasterVolume(ctx context.Context, level float64) (float64, error) {
+	state, err := rt.client.SetMasterVolume(ctx, float32(level))
+	if err != nil {
+		return 0, err
+	}
+	return float64(state.MasterVolume), nil
 }
 
 // Publish advertises one service through the daemon's responder and returns

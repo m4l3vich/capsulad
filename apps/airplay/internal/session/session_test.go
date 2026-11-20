@@ -12,6 +12,7 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -20,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 
+	"capsulad/apps/airplay/internal/airplayinfo"
 	"capsulad/apps/airplay/internal/hapcrypt"
 	"capsulad/apps/airplay/internal/media"
 	"capsulad/apps/airplay/internal/plist"
@@ -597,7 +600,7 @@ func TestRAOPInstanceNameFitsLabel(t *testing.T) {
 	names := []string{
 		"short",
 		strings.Repeat("a", 63),
-		strings.Repeat("ж", 31) + "a",  // 63 bytes, two-byte runes
+		strings.Repeat("ж", 31) + "a",   // 63 bytes, two-byte runes
 		strings.Repeat("🎛", 15) + "abc", // 63 bytes, four-byte runes
 	}
 	for _, name := range names {
@@ -619,8 +622,119 @@ func TestRAOPInstanceNameFitsLabel(t *testing.T) {
 	}
 }
 
+// TestInfoDocumentReportsAdvertisedCapabilities pins the GET /info wire value
+// a sender reads before pairing. Zero is meaningful for supportedFormats,
+// volumeControlType and vv, so a missing assignment advertises "no playable
+// format" while mDNS promises the matching feature bits. Reference values:
+// audioStream 262144, volumeControlType 3 and vv 2 (rtsp.c:1194-1248,
+// shairport.c:611); status flags and features are shared with the mDNS record.
+func TestInfoDocumentReportsAdvertisedCapabilities(t *testing.T) {
+	mgr, transport, _, _, _, _, _ := newTestManager(t)
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Close()
+
+	conn, err := transport.dial(7000)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	client := newRTSPClient(conn)
+	info, err := client.do("GET", "/info", "", nil)
+	if err != nil {
+		t.Fatalf("GET /info: %v", err)
+	}
+	if info.status != 200 || !strings.Contains(info.headers["content-type"], "binary-plist") {
+		t.Fatalf("GET /info = %d %v", info.status, info.headers)
+	}
+	decoded, err := plist.Decode(info.body)
+	if err != nil {
+		t.Fatalf("decode /info: %v", err)
+	}
+	infoDict, _ := decoded.(map[string]any)
+	if infoDict["deviceID"] != "aabbccddeeff" {
+		t.Fatalf("/info deviceID = %v", infoDict["deviceID"])
+	}
+	formats, ok := infoDict["supportedFormats"].(map[string]any)
+	if !ok {
+		t.Fatalf("/info supportedFormats = %T", infoDict["supportedFormats"])
+	}
+	if got := formats["audioStream"]; got != int64(262144) {
+		t.Errorf("/info audioStream = %v, want int64(262144)", got)
+	}
+	// Buffered audio is a real encrypted type-103 path. /info reports exactly
+	// the formats selected by the advertised feature bits, so the mDNS claim
+	// and the format declaration cannot disagree.
+	wantBuffered := bufferedStreamFormats(mgr.advertisedFeatures())
+	if got := formats["bufferStream"]; got != int64(wantBuffered) {
+		t.Errorf("/info bufferStream = %v, want %d from the advertised features", got, wantBuffered)
+	}
+	if wantBuffered == 0 {
+		t.Error("default receiver advertises no buffered formats")
+	}
+	if mgr.advertisedFeatures()&FeatureBufferedAudio == 0 {
+		t.Error("default receiver does not advertise buffered feature bit 40")
+	}
+	// The field sender reached the encrypted event channel and type-103 SETUP
+	// with bit 14 set. Its claim is the implemented /fp-setup handshake only.
+	if mgr.advertisedFeatures()&FeatureFairPlayHandshake == 0 {
+		t.Error("default receiver does not advertise feature bit 14 for the /fp-setup handshake")
+	}
+	if wantBuffered&bufferedFormatALAC48S24Stereo == 0 {
+		t.Error("default receiver does not advertise its always-available buffered ALAC format")
+	}
+	if got := infoDict["vv"]; got != int64(2) {
+		t.Errorf("/info vv = %v, want int64(2)", got)
+	}
+	if got := infoDict["volumeControlType"]; got != int64(3) {
+		t.Errorf("/info volumeControlType = %v, want int64(3)", got)
+	}
+	if got := infoDict["features"]; got != int64(mgr.advertisedFeatures()) {
+		t.Errorf("/info features = %v, want the advertised mask %d", got, mgr.advertisedFeatures())
+	}
+	if got := infoDict["featuresEx"]; got != airplayinfo.FeaturesEx(mgr.advertisedFeatures()) {
+		t.Errorf("/info featuresEx = %v, want %q", got, airplayinfo.FeaturesEx(mgr.advertisedFeatures()))
+	}
+	if got := infoDict["statusFlags"]; got != int64(mgr.advertisedStatus()) {
+		t.Errorf("/info statusFlags = %v, want the advertised flags %d", got, mgr.advertisedStatus())
+	}
+	if mgr.advertisedStatus()&StatusAudioCableAttached == 0 {
+		t.Error("/info and mDNS do not report the audio receiver as attached")
+	}
+
+	options, err := client.do("OPTIONS", "*", "", nil)
+	if err != nil || options.status != 200 {
+		t.Fatalf("OPTIONS = %v %v", options, err)
+	}
+	for _, method := range []string{"SETRATEANCHORTI", "SETRATEANCHORTIME"} {
+		if !strings.Contains(options.headers["public"], method) {
+			t.Errorf("OPTIONS Public %q omits %s", options.headers["public"], method)
+		}
+	}
+}
+
 func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	mgr, transport, advertiser, ring, sink, clientKey, pairingID := newTestManager(t)
+	master := 0.05
+	var masterMu sync.Mutex
+	var masterWrites []float64
+	readMaster := func() (float64, []float64) {
+		masterMu.Lock()
+		defer masterMu.Unlock()
+		return master, append([]float64(nil), masterWrites...)
+	}
+	mgr.cfg.MasterVolumeContext = func(context.Context) (float64, bool) {
+		masterMu.Lock()
+		defer masterMu.Unlock()
+		return master, true
+	}
+	mgr.cfg.SetMasterVolume = func(_ context.Context, level float64) (float64, error) {
+		masterMu.Lock()
+		master = level
+		masterWrites = append(masterWrites, level)
+		masterMu.Unlock()
+		return level, nil
+	}
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -636,6 +750,12 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	if advert.TXT["deviceid"] != "aabbccddeeff" || advert.TXT["features"] == "" {
 		t.Fatalf("advertisement TXT = %v", advert.TXT)
 	}
+	// Idle records still identify an attached audio receiver; the session bit
+	// appears only while a sender owns the session (both records share one
+	// status source with /info).
+	if got := advert.TXT["flags"]; got != hexStatus(StatusAudioCableAttached) {
+		t.Errorf("idle _airplay flags = %q, want %q", got, hexStatus(StatusAudioCableAttached))
+	}
 	raop, ok := advertiser.find("_raop._tcp")
 	if !ok {
 		t.Fatal("no _raop._tcp advertisement")
@@ -648,6 +768,9 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	}
 	if raop.TXT["am"] != DefaultModel || raop.TXT["ft"] == "" || raop.TXT["sf"] == "" {
 		t.Fatalf("_raop TXT = %v", raop.TXT)
+	}
+	if got := raop.TXT["sf"]; got != hexStatus(StatusAudioCableAttached) {
+		t.Errorf("idle _raop sf = %q, want %q", got, hexStatus(StatusAudioCableAttached))
 	}
 	for _, record := range []Advert{advert, raop} {
 		if len(record.Instance) > maxServiceInstanceBytes {
@@ -682,6 +805,12 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	if infoDict["deviceID"] != "aabbccddeeff" {
 		t.Fatalf("/info deviceID = %v", infoDict["deviceID"])
 	}
+	if got, ok := infoDict["initialVolume"].(float64); !ok || math.Abs(got-(-28.5)) > 1e-9 {
+		t.Fatalf("/info initialVolume = %v, want the 5%% master as -28.5 dB", infoDict["initialVolume"])
+	}
+	// The capability fields are asserted by
+	// TestInfoDocumentReportsAdvertisedCapabilities, which does not depend on
+	// the audio path.
 
 	// Pair-verify, then switch this connection to the encrypted control channel.
 	shared := pairVerify(t, client, pairingID, clientKey)
@@ -691,13 +820,6 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 		t.Fatalf("client channel: %v", err)
 	}
 	client.setStream(&rwStream{rw: encrypted})
-
-	// A sender volume of -6 dB is a linear gain of about 0.5 on our PCM.
-	volume := []byte("volume: -6.0206\r\n")
-	response, err := client.do("SET_PARAMETER", "/1", "text/parameters", volume)
-	if err != nil || response.status != 200 {
-		t.Fatalf("SET_PARAMETER volume = %v %v", response, err)
-	}
 
 	// SETUP: one realtime PCM stream with a sender-supplied stream key.
 	shk := make([]byte, 32)
@@ -747,6 +869,21 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	}
 	if record.headers["audio-latency"] == "" {
 		t.Fatalf("RECORD has no Audio-Latency header")
+	}
+
+	// A sender volume is the speaker's control position: it moves the one
+	// persisted master and must not introduce a second gain over this app's
+	// PCM. -6.0206 dB is very close to unit 0.8, not a 0.5 amplitude.
+	if response, err := client.do("SET_PARAMETER", "/1", "text/parameters", []byte("volume: -6.0206\r\n")); err != nil || response.status != 200 {
+		t.Fatalf("SET_PARAMETER volume = %v %v", response, err)
+	}
+	if master, writes := readMaster(); len(writes) != 1 || math.Abs(writes[0]-0.7993133333333333) > 1e-6 || math.Abs(master-writes[0]) > 1e-6 {
+		t.Fatalf("sender volume wrote %v (master %v), want one unit 0.7993", writes, master)
+	}
+	if response, err := client.do("GET_PARAMETER", "/1", "text/parameters", []byte("volume")); err != nil || response.status != 200 {
+		t.Fatalf("GET_PARAMETER volume = %v %v", response, err)
+	} else if got := string(response.body); got != "\r\nvolume: -6.020600\r\n" {
+		t.Fatalf("GET_PARAMETER body = %q, want the master as -6.0206 dB", got)
 	}
 
 	// Audio: 30 RTP packets of 352 stereo frames, encrypted exactly as the
@@ -804,13 +941,15 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 	if received < 10*len(samples) {
 		t.Fatalf("sink received %d bytes, want at least %d", received, 10*len(samples))
 	}
-	// 1000 * gain(0.5) = 500, allowing for the float path's rounding.
+	// The sender volume is a master control position, not a PCM amplitude: the
+	// decoded 1000-valued samples reach the sink unchanged. The framework mixer
+	// (not this app) applies the master.
 	first, ok := sink.firstSample()
 	if !ok {
 		t.Fatal("the sink has no complete sample")
 	}
-	if first < 495 || first > 505 {
-		t.Fatalf("first sample = %d, want about 500 (sender volume applied)", first)
+	if first != 1000 {
+		t.Fatalf("first sample = %d, want the decoded 1000 (no sender gain)", first)
 	}
 
 	// The media contract shows the player and its metadata.

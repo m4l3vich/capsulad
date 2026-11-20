@@ -17,19 +17,55 @@ import (
 
 // applyMasterVolume persists one validated master-volume level and applies it
 // to the local mixer immediately. The settings watcher also applies it, making
-// the call idempotent.
+// the call idempotent. volumeMu orders every canonical caller (physical keys,
+// Bluetooth adoption, the Web UI's audio control and the AirPlay receiver), so
+// two identical requests cannot race into divergent durable or live states.
 func (d *Daemon) applyMasterVolume(v float64) error {
-	if v < 0 || v > 1 {
-		return fmt.Errorf("volume must be in [0,1]")
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("volume must be a finite value in [0,1]")
 	}
-	if err := d.writeUserSettings([]string{"master_volume"}, func(s *settings.UserSettings) {
-		s.MasterVolume = v
-	}); err != nil {
+	d.volumeMu.Lock()
+	defer d.volumeMu.Unlock()
+	return d.applyMasterVolumeLocked(v)
+}
+
+// applyMasterVolumeLocked is the durable-write boundary. The caller holds
+// volumeMu from the mutation through the live apply, and v is already validated
+// as a finite [0,1] level. check runs under the settings store lock immediately
+// before the commit, so a queued request cannot persist after its context or
+// AirPlay run identity went away while it waited for an independent settings
+// writer.
+func (d *Daemon) applyMasterVolumeLocked(v float64) error {
+	return d.applyMasterVolumeCheckedLocked(v, nil)
+}
+
+func (d *Daemon) applyMasterVolumeCheckedLocked(v float64, check func() error) error {
+	if _, err := d.user.SetMasterVolume(v, check); err != nil {
 		return err
 	}
+	d.applyLiveMasterVolumeLocked(v)
+	return nil
+}
+
+// applyLiveMasterVolumeLocked applies one level to the mixer and then to the
+// Bluetooth gain. Callers hold volumeMu so the durable value and both live
+// consumers always observe the same order.
+func (d *Daemon) applyLiveMasterVolumeLocked(v float64) {
 	d.audio.SetMasterVolume(v)
 	d.applyBluetoothGain(v)
-	return nil
+}
+
+// applyLatestMasterVolume applies the newest durable master level to the mixer
+// and Bluetooth gain. The settings watcher can still be holding an older
+// queued snapshot when a physical key, a Bluetooth report or the AirPlay
+// receiver has already committed a newer level; reading the durable value
+// under volumeMu keeps that queued snapshot from briefly restoring the older
+// level. The watcher's unrelated settings reconciliation stays outside the
+// lock.
+func (d *Daemon) applyLatestMasterVolume() {
+	d.volumeMu.Lock()
+	defer d.volumeMu.Unlock()
+	d.applyLiveMasterVolumeLocked(d.user.Get().Values.MasterVolume)
 }
 
 // restoreVolumeAfterFullSwipe undoes the leading volume step of a full-panel

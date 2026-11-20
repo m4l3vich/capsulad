@@ -1,16 +1,13 @@
-// Package media holds the AirPlay receiver's player state and the audio
-// scalers that stand between the sender's volume and the framework mixer.
+// Package media holds the AirPlay receiver's player state.
 //
 // The app exposes exactly one player to the framework's
 // capsulad.contracts.media.v1.MediaPlayerService contract: the live AirPlay
-// session. Volume is applied inside the app because master volume is an
-// administrator-only setting for a supervised app (see
-// docs/app_development/audio.md); the framework's master volume therefore
-// remains the ceiling over everything this app contributes.
+// session. The speaker has one persisted master volume, owned by the framework
+// mixer; this app reports that master to the sender and never keeps a second
+// sender-gain stage over its PCM.
 package media
 
 import (
-	"math"
 	"strings"
 	"sync"
 )
@@ -380,53 +377,4 @@ func nameFromUserAgent(ua string) string {
 		return ""
 	}
 	return strings.TrimSpace(fields[0])
-}
-
-// GainFromDB converts a sender volume in decibels to a linear gain.
-//
-// AirPlay carries the sender's slider as dB in [-30, 0] with -144 (and
-// anything at or below -80) meaning silence. The framework mixer's master
-// volume still multiplies on top, so the app can never exceed the ceiling.
-func GainFromDB(dB float64) float64 {
-	if math.IsNaN(dB) || dB <= -80 {
-		return 0
-	}
-	if dB > 0 {
-		dB = 0
-	}
-	gain := math.Pow(10, dB/20)
-	if gain < 0 {
-		return 0
-	}
-	if gain > 1 {
-		return 1
-	}
-	return gain
-}
-
-// ScalePCM16 scales interleaved 16-bit little-endian PCM in place by gain.
-// A gain of 1 is a no-op; gain 0 produces silence.
-func ScalePCM16(pcm []byte, gain float64) {
-	if gain == 1 || len(pcm) < 2 {
-		return
-	}
-	if gain <= 0 {
-		for i := range pcm {
-			pcm[i] = 0
-		}
-		return
-	}
-	for i := 0; i+1 < len(pcm); i += 2 {
-		sample := int32(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
-		scaled := int32(float64(sample) * gain)
-		if scaled > 32767 {
-			scaled = 32767
-		}
-		if scaled < -32768 {
-			scaled = -32768
-		}
-		value := uint16(int16(scaled))
-		pcm[i] = byte(value)
-		pcm[i+1] = byte(value >> 8)
-	}
 }

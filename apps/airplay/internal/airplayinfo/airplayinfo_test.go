@@ -76,7 +76,7 @@ func testConfig(t *testing.T) Config {
 		VV:                  DefaultVV,
 		VolumeControlType:   DefaultVolumeControlType,
 		AudioStreamFormats:  DefaultAudioStreamFormats,
-		BufferStreamFormats: DefaultBufferStreamFormats,
+		BufferStreamFormats: 0x200000, // test fixture: ALAC 48K/F24/stereo
 		OutputLatencyMicros: 400000,
 		PairingLTPK:         pk,
 		SenderAddress:       "10.0.0.7:51000",
@@ -263,8 +263,8 @@ func TestAudioLatencies(t *testing.T) {
 }
 
 // TestSupportedFormatsBits pins the supportedFormats values and their encodings:
-// the reference hard-codes audioStream 262144 and sets the ALAC/44100/S16/2 bit
-// in bufferStream unconditionally (rtsp.c:1219-1227).
+// audioStream is the reference's 262144, and bufferStream is the caller's
+// explicit capability mask. This package has no second buffered default.
 func TestSupportedFormatsBits(t *testing.T) {
 	cfg := testConfig(t)
 	doc, err := DeviceInfo(cfg, testTXT(), false)
@@ -278,12 +278,12 @@ func TestSupportedFormatsBits(t *testing.T) {
 	if got := formats["audioStream"]; got != int64(262144) {
 		t.Errorf("audioStream = %v, want int64(262144)", got)
 	}
-	if got := formats["bufferStream"]; got != int64(0x40000) {
-		t.Errorf("bufferStream = %v, want int64(0x40000)", got)
+	if got := formats["bufferStream"]; got != int64(0x200000) {
+		t.Errorf("bufferStream = %v, want int64(0x200000)", got)
 	}
 	// The configurable bits are OR-able without disturbing the encodings.
 	cfg.AudioStreamFormats = 21235712
-	cfg.BufferStreamFormats = 0x40000 | 0x400000 | 0x800000
+	cfg.BufferStreamFormats = 0x200000 | 0x400000 | 0x800000
 	doc, err = DeviceInfo(cfg, testTXT(), false)
 	if err != nil {
 		t.Fatalf("DeviceInfo: %v", err)
@@ -292,8 +292,8 @@ func TestSupportedFormatsBits(t *testing.T) {
 	if got := formats["audioStream"]; got != int64(21235712) {
 		t.Errorf("audioStream = %v, want int64(21235712)", got)
 	}
-	if got := formats["bufferStream"]; got != int64(0xC40000) {
-		t.Errorf("bufferStream = %v, want int64(0xC40000)", got)
+	if got := formats["bufferStream"]; got != int64(0xE00000) {
+		t.Errorf("bufferStream = %v, want int64(0xE00000)", got)
 	}
 }
 

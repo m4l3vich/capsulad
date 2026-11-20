@@ -504,6 +504,7 @@ if !authorized {
 | `OpenMic(ctx, activationID, conversationID)` → `*Mic` | `Chunks()`, `Close`; PCM arrives as bytes |
 | `BeginConversation(ctx, activationID)` → `*Conversation` | assistant turn lifetime |
 | `AudioState`, `ListAudioEndpoints`, `UserSettings` | read-only state helpers |
+| `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master level; local administrators, and only the installed AirPlay receiver's authenticated READY run |
 | `BluetoothMediaState`, `WatchBluetoothMedia`, `BluetoothMediaCommand` | Bluetooth media bridge |
 | `Call`, `CallJSON`, `Stream`, `OpenStream`, `OpenBidi` | routed calls and framework streams |
 | `RegisterDescriptors(set)` | enable the JSON path for your own messages |
@@ -514,6 +515,14 @@ if !authorized {
 values. Both take a trailing `time.Duration` call timeout; `0` means no deadline beyond the
 context. `Stream`/`OpenStream`/`OpenBidi` return a `*Stream` with `Send`, `SendJSON`,
 `HalfClose`, `Recv`, `RecvJSON`, `Close`. `Recv` returns `io.EOF` at the end of a stream.
+
+`SetMasterVolume` is an ordinary JSON unary call, not a PCM path. It returns the applied
+`AudioState`; a level outside the finite `[0,1]` range is `INVALID_ARGUMENT`, and an app other
+than the installed AirPlay receiver's authenticated READY run is `PERMISSION_DENIED`. The daemon
+re-checks the request context and the caller's live identity at the settings commit boundary,
+after any wait for another settings writer: a request that expired while queued returns
+`CANCELLED`/`DEADLINE_EXCEEDED`, and a receiver run that stopped while the request waited returns
+`PERMISSION_DENIED`; neither persists a level.
 
 `WatchInput` takes no resource argument: the Go binding always subscribes to
 `touch.panel.main`. The framework models exactly one touch resource, and the daemon rejects any

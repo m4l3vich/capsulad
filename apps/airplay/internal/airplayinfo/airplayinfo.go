@@ -93,19 +93,6 @@ const DefaultVolumeControlType = 3
 // (rtsp.c:1219-1222).
 const DefaultAudioStreamFormats = 262144
 
-// DefaultBufferStreamFormats advertises the buffered (type 103) container as
-// carrying ALAC/44100/S16/2. 0x40000 is the record Shairport Sync always sets
-// on top of its configurable bits (rtsp.c:1226-1227); the other bits it ORs in
-// are conditional on decoders and channel layouts this receiver does not
-// promise:
-//
-//	0x00000400000 AAC-LC/44.1K/F24/2   rtsp.c:1225
-//	0x00000800000 AAC-LC/48K/F24/2     rtsp.c:1237
-//	0x00000200000 ALAC/48K/F24/2       rtsp.c:1235 (lossless mode only)
-//	0x10000000000 AAC-LC/48K/F24/7.1   rtsp.c:1241
-//	0x08000000000 AAC-LC/48K/F24/5.1   rtsp.c:1243
-const DefaultBufferStreamFormats = 0x40000
-
 // Config is the receiver's identity and capability set. Every field is a fact
 // about this device, never a value read back from a sender.
 type Config struct {
@@ -150,7 +137,9 @@ type Config struct {
 	StatusFlags uint64
 	// VolumeDB is the initial volume in dB, the document's `initialVolume`
 	// (a plist real). Shairport Sync fills it from suggested_volume
-	// (rtsp.c:1208).
+	// (rtsp.c:1208). The receiver reports its master through this field; when
+	// the master has never been readable it reports the safe -144 mute value
+	// rather than a full-volume default.
 	VolumeDB float64
 	// VV is the document's `vv`; DefaultVV is the Apple-device value.
 	VV uint64
@@ -162,8 +151,9 @@ type Config struct {
 	// sender, so this field has no default. DefaultAudioStreamFormats is the
 	// reference's value.
 	AudioStreamFormats uint64
-	// BufferStreamFormats is supportedFormats.bufferStream; see
-	// DefaultBufferStreamFormats for the reference's bit definitions.
+	// BufferStreamFormats is supportedFormats.bufferStream; 0 is meaningful to
+	// a sender. The receiver supplies only the formats its decoder and feature
+	// mask can honour, so this package has no second default.
 	BufferStreamFormats uint64
 	// OutputLatencyMicros is the audioLatencies entry's outputLatencyMicros.
 	// The OpenAirplay reference reports 400000 (ap2-receiver.py:80-94).
@@ -222,11 +212,9 @@ func playbackCapabilities() map[string]any {
 // is a key a reference emits.
 //
 // Numbers are int64 (and the volume a float64) so the plist encoder writes
-// plist integers and reals: plist.EncodeBinary writes a uint64 as a plist UID
-// (internal/plist/plist.go, addValue), which senders do not accept for
-// `features`, `statusFlags`, `vv`, `volumeControlType` or the supportedFormats
-// values. The reference writes all of them with plist_new_uint
-// (rtsp.c:1196-1211, :1220-1248).
+// plist integers and reals. UID values use plist.UID and are a distinct object
+// type; a uint64 is an ordinary integer. The reference writes all numeric
+// fields with plist_new_uint (rtsp.c:1196-1211, :1220-1248).
 //
 // The returned document aliases cfg.PairingLTPK.
 func DeviceInfo(cfg Config, txt TXT, qualifier bool) (map[string]any, error) {
