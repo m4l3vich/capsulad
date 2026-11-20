@@ -330,6 +330,7 @@ const (
 	CommandBgMusicPreload
 	CommandShowText
 	CommandSendEvent
+	CommandListen
 )
 
 func (k CommandKind) String() string {
@@ -346,6 +347,8 @@ func (k CommandKind) String() string {
 		return "show_text"
 	case CommandSendEvent:
 		return "send_event"
+	case CommandListen:
+		return "listen"
 	default:
 		return "unknown"
 	}
@@ -369,6 +372,8 @@ type Speech struct {
 	stream Stream
 	cancel context.CancelFunc
 	op     string
+	client *Client
+	opts   SpeechOptions
 
 	mu        sync.Mutex
 	sentInit  bool
@@ -377,6 +382,12 @@ type Speech struct {
 	chunkNum  int32
 	upload    *frameUploader
 	closeOnce sync.Once
+
+	// phraseID arrives in SpeechResponseInit. The commands live behind
+	// GET /phrase/result and are fetched by Result after the finish is
+	// delivered to the turn.
+	phraseID      string
+	resultFetched bool
 }
 
 // OpenSpeech opens the stream and sends init. The stream lifetime is the
@@ -393,7 +404,14 @@ func (c *Client) OpenSpeech(ctx context.Context, opts SpeechOptions) (*Speech, e
 		return nil, err
 	}
 
-	s := &Speech{stream: stream, cancel: cancel, op: "speech", upload: newFrameUploader(opts.Format)}
+	s := &Speech{
+		stream: stream,
+		cancel: cancel,
+		op:     "speech",
+		client: c,
+		opts:   opts,
+		upload: newFrameUploader(opts.Format),
+	}
 	init := BuildInit(opts, c.cfg.Serial, c.cfg.ClientVersion)
 	if err := s.sendMessage(&phrasepb.SpeechRequest{
 		Kind: &phrasepb.SpeechRequest_Init{Init: init},
@@ -505,7 +523,14 @@ func (s *Speech) Recv() (*Event, error) {
 	if err := proto.Unmarshal(payload, resp); err != nil {
 		return nil, fmt.Errorf("vkclient: decode SpeechResponse: %w", err)
 	}
-	return decodeResponse(resp)
+	event, err := decodeResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	if event.Kind == EventInit {
+		s.phraseID = event.PhraseID
+	}
+	return event, nil
 }
 
 // sendMessage marshals one request and writes it to the stream.

@@ -197,3 +197,55 @@ func TestSDKTransportFailedConnectIsSharedAndRetryable(t *testing.T) {
 		t.Fatalf("retry = %v, %v", client, err)
 	}
 }
+
+type fakeHTTP struct {
+	requests []capsulad.HTTPRequest
+}
+
+func (f *fakeHTTP) Close() error { return nil }
+
+func (f *fakeHTTP) Do(_ context.Context, request capsulad.HTTPRequest) (*capsulad.HTTPResponse, error) {
+	f.requests = append(f.requests, request)
+	return &capsulad.HTTPResponse{StatusCode: 200, Body: []byte("{}")}, nil
+}
+
+func TestSDKTransportNoRedirectsUsesZeroBudget(t *testing.T) {
+	var opened []capsulad.HTTPOptions
+	var clients []*fakeHTTP
+	transport := &sdkTransport{openHTTP: func(_ capsulad.Env, options capsulad.HTTPOptions) (httpDoer, error) {
+		opened = append(opened, options)
+		client := &fakeHTTP{}
+		clients = append(clients, client)
+		return client, nil
+	}}
+	ctx := context.Background()
+	if _, err := transport.Do(ctx, HTTPRequest{
+		Method:      "GET",
+		URL:         "https://vc.example/phrase/result?phrase_id=p",
+		NoRedirects: true,
+	}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.Do(ctx, HTTPRequest{
+		Method:      "GET",
+		URL:         "https://vc.example/phrase/result?phrase_id=p",
+		NoRedirects: true,
+	}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.Do(ctx, HTTPRequest{Method: "GET", URL: "https://vc.example/attach"}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("opened %d HTTP clients, want 2", len(opened))
+	}
+	if opened[0].FollowRedirects != 0 {
+		t.Fatalf("result client FollowRedirects = %d, want 0", opened[0].FollowRedirects)
+	}
+	if opened[1].FollowRedirects != 4 {
+		t.Fatalf("ordinary client FollowRedirects = %d, want 4", opened[1].FollowRedirects)
+	}
+	if len(clients) != 2 || len(clients[0].requests) != 2 || len(clients[1].requests) != 1 {
+		t.Fatalf("client use = %+v", clients)
+	}
+}

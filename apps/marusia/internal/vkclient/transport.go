@@ -35,6 +35,11 @@ type HTTPRequest struct {
 	URL    string
 	Header map[string]string
 	Body   []byte
+	// NoRedirects disables redirect following for this request. The phrase
+	// result query carries credential-class identifiers; a cross-origin
+	// Location must not receive them, even though the transport strips
+	// headers on a cross-origin hop.
+	NoRedirects bool
 }
 
 // HTTPResponse is a completed exchange; non-2xx is not an error.

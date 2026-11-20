@@ -23,6 +23,17 @@ type grpcHandle interface {
 		kind capsulad.CallKind, timeout time.Duration) (*capsulad.Stream, error)
 }
 
+// httpDoer is the native HTTP client surface. It is an interface so the
+// no-redirect client selection can be tested without loading libcapsulad.
+type httpDoer interface {
+	Close() error
+	Do(ctx context.Context, request capsulad.HTTPRequest) (*capsulad.HTTPResponse, error)
+}
+
+func openNativeHTTP(env capsulad.Env, options capsulad.HTTPOptions) (httpDoer, error) {
+	return capsulad.OpenHTTP(env, options)
+}
+
 // sdkTransport is the production adapter: every byte goes through the shared
 // libcapsulad HTTP/1.1 and remote gRPC clients, so this binary links neither
 // net/http, crypto/tls nor grpc-go.
@@ -30,15 +41,17 @@ type sdkTransport struct {
 	origin string
 	host   string
 	caPEM  []byte
-	// openGRPC is a test seam; nil uses capsulad.OpenGRPC.
+	// openGRPC and openHTTP are test seams; nil uses the native SDK.
 	openGRPC func(ctx context.Context, env capsulad.Env, url string,
 		opts capsulad.GRPCOptions) (grpcHandle, error)
+	openHTTP func(env capsulad.Env, opts capsulad.HTTPOptions) (httpDoer, error)
 
-	mu      sync.Mutex
-	http    *capsulad.HTTPClient
-	grpc    grpcHandle
-	attempt *grpcAttempt
-	closed  bool
+	mu             sync.Mutex
+	http           httpDoer
+	noRedirectHTTP httpDoer
+	grpc           grpcHandle
+	attempt        *grpcAttempt
+	closed         bool
 }
 
 // grpcAttempt is one in-flight connect. Waiters share its result and a Close
@@ -72,28 +85,44 @@ func NewSDKTransport(baseURL string, caPEM []byte) (Transport, error) {
 	}, nil
 }
 
-func (t *sdkTransport) httpClient() (*capsulad.HTTPClient, error) {
+func (t *sdkTransport) httpClient(noRedirects bool) (httpDoer, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return nil, ErrClosed
 	}
-	if t.http != nil {
+	if noRedirects {
+		if t.noRedirectHTTP != nil {
+			return t.noRedirectHTTP, nil
+		}
+	} else if t.http != nil {
 		return t.http, nil
 	}
-	client, err := capsulad.OpenHTTP(capsulad.FromEnv(), capsulad.HTTPOptions{
+	follow := 4
+	if noRedirects {
+		follow = 0
+	}
+	open := t.openHTTP
+	if open == nil {
+		open = openNativeHTTP
+	}
+	client, err := open(capsulad.FromEnv(), capsulad.HTTPOptions{
 		Roots:           "system",
 		CAPEM:           t.caPEM,
 		UserAgent:       "voice-agent/1",
 		MaxBody:         10 << 20,
-		FollowRedirects: 4,
+		FollowRedirects: follow,
 		ConnectTimeout:  20 * time.Second,
 		ReadTimeout:     30 * time.Second,
 	})
 	if err != nil {
 		return nil, err
 	}
-	t.http = client
+	if noRedirects {
+		t.noRedirectHTTP = client
+	} else {
+		t.http = client
+	}
 	return client, nil
 }
 
@@ -182,7 +211,7 @@ func (t *sdkTransport) grpcClient(ctx context.Context) (grpcHandle, error) {
 }
 
 func (t *sdkTransport) Do(ctx context.Context, req HTTPRequest, timeout time.Duration) (*HTTPResponse, error) {
-	client, err := t.httpClient()
+	client, err := t.httpClient(req.NoRedirects)
 	if err != nil {
 		return nil, err
 	}
@@ -239,12 +268,15 @@ func (t *sdkTransport) Close() error {
 		return nil
 	}
 	t.closed = true
-	httpClient, grpcClient := t.http, t.grpc
-	t.http, t.grpc = nil, nil
+	httpClient, noRedirectClient, grpcClient := t.http, t.noRedirectHTTP, t.grpc
+	t.http, t.noRedirectHTTP, t.grpc = nil, nil, nil
 	t.mu.Unlock()
 	var first error
-	if httpClient != nil {
-		if err := httpClient.Close(); err != nil {
+	for _, client := range []httpDoer{httpClient, noRedirectClient} {
+		if client == nil {
+			continue
+		}
+		if err := client.Close(); err != nil && first == nil {
 			first = err
 		}
 	}

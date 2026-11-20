@@ -38,9 +38,13 @@ type fakeStream struct {
 	onEOS  func()
 	onSend func(n int32)
 
-	events chan *vkclient.Event
-	done   chan struct{}
-	once   sync.Once
+	events       chan *vkclient.Event
+	done         chan struct{}
+	once         sync.Once
+	resultEvents []*vkclient.Event
+	resultErr    error
+	resultFn     func(context.Context) ([]*vkclient.Event, error)
+	resultCalls  int
 }
 
 func newFakeStream(onEOS func()) *fakeStream {
@@ -87,12 +91,31 @@ func (s *fakeStream) Abort(reason string) error {
 }
 
 func (s *fakeStream) Recv() (*vkclient.Event, error) {
+	// Prefer queued frames over a simultaneous close, so this fake mirrors the
+	// real stream: a finish followed immediately by EOF still delivers finish.
+	select {
+	case event := <-s.events:
+		return event, nil
+	default:
+	}
 	select {
 	case event := <-s.events:
 		return event, nil
 	case <-s.done:
 		return nil, io.EOF
 	}
+}
+
+func (s *fakeStream) Result(ctx context.Context) ([]*vkclient.Event, error) {
+	s.mu.Lock()
+	s.resultCalls++
+	fn := s.resultFn
+	events, err := s.resultEvents, s.resultErr
+	s.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	return events, err
 }
 
 func (s *fakeStream) Close() { s.once.Do(func() { close(s.done) }) }
@@ -953,5 +976,119 @@ func TestTurnNoAnswerNamesTheInitFacts(t *testing.T) {
 		if !strings.Contains(result.Detail, want) {
 			t.Fatalf("detail = %q; it must contain %q", result.Detail, want)
 		}
+	}
+}
+
+func TestTurnDeliversFinishAndResultBeforeEOF(t *testing.T) {
+	stream := newFakeStream(nil)
+	stream.onEOS = func() {
+		stream.events <- &vkclient.Event{Kind: vkclient.EventInit, PhraseID: "p-1", ChunkLengthHintMS: 20}
+		stream.events <- &vkclient.Event{Kind: vkclient.EventFinish, Finish: vkclient.FinishResult}
+		stream.Close()
+	}
+	stream.resultEvents = []*vkclient.Event{
+		{Kind: vkclient.EventTextSoFar, Text: "answer"},
+		{Kind: vkclient.EventCommands, Commands: []vkclient.Command{
+			{Kind: vkclient.CommandPlayURL, URL: "https://tts.example/stream?stream_id=1"},
+		}},
+	}
+	chunks := make(chan []byte, 8)
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := Run(ctx, Options{
+		Endpoint:      &fakeEndpoint{stream: stream},
+		Chunks:        chunks,
+		Player:        &fakePlayer{},
+		EndSilence:    40 * time.Millisecond,
+		MaxSpeech:     2 * time.Second,
+		ResultTimeout: time.Second,
+	})
+	if result.Outcome != Completed {
+		t.Fatalf("outcome = %v (%s)", result.Outcome, result.Detail)
+	}
+	if result.Text != "answer" || result.PlayedURL != "https://tts.example/stream?stream_id=1" {
+		t.Fatalf("result = %+v", result)
+	}
+	if stream.resultCalls != 1 {
+		t.Fatalf("result calls = %d, want 1", stream.resultCalls)
+	}
+}
+
+func TestTurnResultFetchHasSeparateDeadline(t *testing.T) {
+	stream := newFakeStream(nil)
+	stream.onEOS = func() {
+		stream.events <- &vkclient.Event{Kind: vkclient.EventInit, PhraseID: "p-1", ChunkLengthHintMS: 20}
+		stream.events <- &vkclient.Event{Kind: vkclient.EventFinish, Finish: vkclient.FinishResult}
+	}
+	stream.resultFn = func(ctx context.Context) ([]*vkclient.Event, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	chunks := make(chan []byte, 8)
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := Run(ctx, Options{
+		Endpoint:        &fakeEndpoint{stream: stream},
+		Chunks:          chunks,
+		Player:          &fakePlayer{},
+		EndSilence:      40 * time.Millisecond,
+		MaxSpeech:       2 * time.Second,
+		TerminalTimeout: time.Second,
+		ResultTimeout:   50 * time.Millisecond,
+	})
+	if result.Outcome != NoAnswer {
+		t.Fatalf("outcome = %v (%s)", result.Outcome, result.Detail)
+	}
+	if strings.Contains(result.Detail, "no terminal frame") {
+		t.Fatalf("result timeout was misreported as a missing terminal frame: %s", result.Detail)
+	}
+	if !strings.Contains(result.Detail, "phrase result could not be fetched") {
+		t.Fatalf("detail does not name the result fetch: %s", result.Detail)
+	}
+	if stream.resultCalls != 1 {
+		t.Fatalf("result calls = %d, want 1", stream.resultCalls)
+	}
+}
+
+func TestTurnEOSBeforeFinishStillFetchesResult(t *testing.T) {
+	stream := newFakeStream(nil)
+	stream.onEOS = func() {
+		stream.events <- &vkclient.Event{Kind: vkclient.EventInit, PhraseID: "p-1", ChunkLengthHintMS: 20}
+		// The live service sends eos before the answer and terminal finish.
+		stream.events <- &vkclient.Event{Kind: vkclient.EventEOS}
+		stream.events <- &vkclient.Event{Kind: vkclient.EventFinish, Finish: vkclient.FinishResult}
+		stream.Close()
+	}
+	stream.resultEvents = []*vkclient.Event{
+		{Kind: vkclient.EventTextSoFar, Text: "answer"},
+		{Kind: vkclient.EventCommands, Commands: []vkclient.Command{
+			{Kind: vkclient.CommandPlayURL, URL: "https://tts.example/stream?stream_id=1"},
+		}},
+	}
+	chunks := make(chan []byte, 8)
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	chunks <- loudFrame()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := Run(ctx, Options{
+		Endpoint:      &fakeEndpoint{stream: stream},
+		Chunks:        chunks,
+		Player:        &fakePlayer{},
+		EndSilence:    40 * time.Millisecond,
+		MaxSpeech:     2 * time.Second,
+		ResultTimeout: time.Second,
+	})
+	if result.Outcome != Completed {
+		t.Fatalf("outcome = %v (%s)", result.Outcome, result.Detail)
+	}
+	if result.Text != "answer" || result.PlayedURL != "https://tts.example/stream?stream_id=1" {
+		t.Fatalf("result = %+v", result)
 	}
 }

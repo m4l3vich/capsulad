@@ -193,7 +193,15 @@ func (t *testTransport) Do(ctx context.Context, req HTTPRequest, timeout time.Du
 	for name, value := range req.Header {
 		request.Header.Set(name, value)
 	}
-	response, err := t.http.Do(request)
+	client := t.http
+	if req.NoRedirects {
+		clone := *t.http
+		clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &clone
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}

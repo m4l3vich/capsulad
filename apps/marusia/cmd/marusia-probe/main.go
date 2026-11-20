@@ -20,6 +20,15 @@
 //	MARUSIA_PROBE_ACTIVATION_TYPE    init client_options.activation_type; empty
 //	                        by default, otherwise one of the vendor's own wire
 //	                        values: listen_command, keyword, button, flowmode
+//	MARUSIA_PROBE_SDK_RESULT when "1", call the production Speech.Result after
+//	                        the stream ends and print the recovered events
+//	MARUSIA_PROBE_RESULT     when "1", also GET /phrase/result and print its
+//	                        status and byte count (the body is not logged)
+//	MARUSIA_PROBE_RESULT_OUT optional new 0600 file for the sensitive raw
+//	                        result body; refuses to overwrite an existing file
+//	MARUSIA_PROBE_STREAM     when "1", authenticate and GET the first tts
+//	                        stream_id, then print its Content-Type and decoded
+//	                        duration through the production media path
 //
 // What it reports: the init phrase id and QoS, the chunk accounting, every
 // text_so_far, every command, the play_url, and then the HTTP status,
@@ -30,13 +39,16 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"capsulad/apps/marusia/internal/media"
 	"capsulad/apps/marusia/internal/redact"
 	"capsulad/apps/marusia/internal/vkclient"
 	"capsulad/apps/marusia/internal/vkproto/clientpb"
@@ -138,12 +150,42 @@ func main() {
 	defer stream.Close()
 
 	type frame struct {
+		phraseID string
 		text     string
 		playURL  string
 		commands []string
 		finish   string
 	}
 	result := &frame{}
+	consume := func(event *vkclient.Event) {
+		switch event.Kind {
+		case vkclient.EventInit:
+			result.phraseID = event.PhraseID
+			log.Printf("probe: init phrase=%s chunk_hint=%dms status_interval=%dms",
+				event.PhraseID, event.ChunkLengthHintMS, event.StatusIntervalMS)
+		case vkclient.EventStatus:
+			log.Printf("probe: status chunks=%d audio=%dms status_num=%d", event.Status.ChunksReceived,
+				event.Status.AudioReceivedMS, event.Status.StatusNum)
+		case vkclient.EventTextSoFar:
+			result.text = event.Text
+			log.Printf("probe: text_so_far %q", event.Text)
+		case vkclient.EventCommands:
+			for _, command := range event.Commands {
+				result.commands = append(result.commands, command.Kind.String())
+				if command.URL != "" {
+					result.playURL = command.URL
+					log.Printf("probe: command %s url=%s", command.Kind, redact.URL(command.URL))
+					continue
+				}
+				log.Printf("probe: command %s text=%q event=%q", command.Kind, command.Text, command.Event)
+			}
+		case vkclient.EventFinish:
+			result.finish = event.Finish.String()
+			log.Printf("probe: finish %s abort=%q", event.Finish, event.AbortReason)
+		case vkclient.EventEOS:
+			log.Printf("probe: eos")
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -157,31 +199,9 @@ func main() {
 				log.Printf("probe: stream error: %v", err)
 				return
 			}
-			switch event.Kind {
-			case vkclient.EventInit:
-				log.Printf("probe: init phrase=%s chunk_hint=%dms status_interval=%dms",
-					event.PhraseID, event.ChunkLengthHintMS, event.StatusIntervalMS)
-			case vkclient.EventStatus:
-				log.Printf("probe: status chunks=%d audio=%dms status_num=%d", event.Status.ChunksReceived,
-					event.Status.AudioReceivedMS, event.Status.StatusNum)
-			case vkclient.EventTextSoFar:
-				result.text = event.Text
-				log.Printf("probe: text_so_far %q", event.Text)
-			case vkclient.EventCommands:
-				for _, command := range event.Commands {
-					result.commands = append(result.commands, command.Kind.String())
-					if command.URL != "" {
-						result.playURL = command.URL
-						log.Printf("probe: command %s url=%s", command.Kind, redact.URL(command.URL))
-						continue
-					}
-					log.Printf("probe: command %s text=%q event=%q", command.Kind, command.Text, command.Event)
-				}
-			case vkclient.EventFinish:
-				result.finish = event.Finish.String()
-				log.Printf("probe: finish %s abort=%q", event.Finish, event.AbortReason)
-			case vkclient.EventEOS:
-				log.Printf("probe: eos")
+			consume(event)
+			if event.Kind == vkclient.EventFinish {
+				return
 			}
 		}
 	}()
@@ -202,10 +222,36 @@ func main() {
 	if err := stream.EOS(); err != nil {
 		log.Printf("probe: eos: %v", err)
 	}
+	timedOut := false
 	select {
 	case <-done:
 	case <-time.After(45 * time.Second):
+		timedOut = true
 		log.Printf("probe: timed out waiting for the terminal frame")
+		// Cancel the stream and join the receiver before any result work so
+		// result.phraseID cannot be read while the receiver is still writing.
+		stream.Close()
+		<-done
+	}
+	if timedOut {
+		log.Printf("probe: giving up after the terminal-frame timeout")
+		return
+	}
+
+	if env("MARUSIA_PROBE_SDK_RESULT", "") == "1" && result.finish == vkclient.FinishResult.String() {
+		// Match the turn's order: release the gRPC stream after the terminal
+		// finish, then fetch the stored result over HTTP.
+		stream.Close()
+		events, err := stream.Result(ctx)
+		if err != nil {
+			log.Printf("probe: sdk result: %v", err)
+		}
+		for _, event := range events {
+			consume(event)
+		}
+	}
+	if result.phraseID != "" && env("MARUSIA_PROBE_RESULT", "") == "1" {
+		fetchPhraseResult(base, sessionID, secret, deviceID, result.phraseID)
 	}
 
 	log.Printf("probe: RESULT text=%q finish=%q commands=%v play_url=%q",
@@ -215,6 +261,109 @@ func main() {
 		return
 	}
 	fetch(result.playURL)
+}
+
+// writeCaptured creates a new 0600 file for an explicitly requested sensitive
+// raw payload. It refuses to overwrite an existing path, so a file created with
+// broader permissions cannot be retained by accident.
+func writeCaptured(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Chmod(0600); err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	return err
+}
+
+// fetchPhraseResult asks the vendor's HTTP result endpoint for the commands of
+// a completed phrase. The stock agent's phrase_result_getter uses the same
+// endpoint; this probe call exists to test whether the gRPC stream's terminal
+// finish is the whole reply or only a signal to fetch the result separately.
+func fetchPhraseResult(base, sessionID, secret, deviceID, phraseID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client, err := capsulad.OpenHTTP(capsulad.FromEnv(), capsulad.HTTPOptions{
+		Roots:           "system",
+		UserAgent:       "voice-agent/1",
+		MaxBody:         1 << 20,
+		FollowRedirects: 0,
+		ConnectTimeout:  10 * time.Second,
+		ReadTimeout:     20 * time.Second,
+	})
+	if err != nil {
+		log.Printf("probe: result http: %v", err)
+		return
+	}
+	defer client.Close()
+	query := url.Values{}
+	query.Set("phrase_id", phraseID)
+	query.Set("capabilities_hex", vkclient.DefaultCapabilitiesHex)
+	query.Set("device_id", deviceID)
+	query.Set("session_id", sessionID)
+	resultURL := strings.TrimRight(base, "/") + "/phrase/result?" + query.Encode()
+	response, err := client.Do(ctx, capsulad.HTTPRequest{
+		Method: "GET",
+		URL:    resultURL,
+		Header: map[string]string{
+			"Accept":        "application/json",
+			"Authorization": "Bearer " + secret,
+		},
+		Timeout: 20 * time.Second,
+	})
+	if err != nil {
+		log.Printf("probe: result: request failed")
+		return
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		log.Printf("probe: result status=%d", response.StatusCode)
+		return
+	}
+	if out := env("MARUSIA_PROBE_RESULT_OUT", ""); out != "" {
+		if err := writeCaptured(out, response.Body); err != nil {
+			log.Printf("probe: result capture: %v", err)
+		}
+	}
+	log.Printf("probe: result status=%d bytes=%d", response.StatusCode, len(response.Body))
+	if env("MARUSIA_PROBE_STREAM", "") != "1" {
+		return
+	}
+	var parsed struct {
+		Result struct {
+			Commands []struct {
+				Type     string `json:"type"`
+				StreamID string `json:"stream_id"`
+			} `json:"commands"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body, &parsed); err != nil {
+		log.Printf("probe: result parse: %v", err)
+		return
+	}
+	for _, command := range parsed.Result.Commands {
+		if command.Type != "tts" || command.StreamID == "" {
+			continue
+		}
+		query := url.Values{}
+		query.Set("stream_id", command.StreamID)
+		streamURL := strings.TrimRight(base, "/") + "/stream?" + query.Encode()
+		fetcher := &media.Fetch{MaxBytes: media.MaxBody}
+		body, contentType, err := fetcher.FetchMedia(ctx, streamURL, "Bearer "+secret)
+		if err != nil {
+			log.Printf("probe: stream %s: %s", command.StreamID, redact.ErrorText(err, streamURL))
+			continue
+		}
+		pcm, err := media.DecodeMedia(body, contentType)
+		if err != nil {
+			log.Printf("probe: stream %s decode: %v", command.StreamID, err)
+			continue
+		}
+		log.Printf("probe: stream content-type=%q bytes=%d decoded_bytes=%d ms=%d",
+			contentType, len(body), len(pcm), len(pcm)/2*1000/media.PlaybackRate)
+	}
 }
 
 // fetch reports the TTS media header through the same native HTTP client the
@@ -250,6 +399,12 @@ func fetch(rawURL string) {
 	}
 	log.Printf("probe: MEDIA status=%d content_type=%q bytes=%d first=%s",
 		resp.StatusCode, resp.Header["content-type"], len(resp.Body), hex.EncodeToString(head))
+	pcm, err := media.DecodeMedia(resp.Body, resp.Header["content-type"])
+	if err != nil {
+		log.Printf("probe: MEDIA decode: %v", err)
+		return
+	}
+	log.Printf("probe: MEDIA decoded bytes=%d ms=%d", len(pcm), len(pcm)/2*1000/media.PlaybackRate)
 }
 
 // readWAV returns the data chunk of a 16 kHz mono 16-bit PCM WAV.

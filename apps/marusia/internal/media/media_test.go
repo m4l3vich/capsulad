@@ -306,3 +306,74 @@ func TestDecodeNamesUnsupportedContainers(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeMediaL16BigEndianMono(t *testing.T) {
+	const frames = 2400 // 100 ms at 24 kHz
+	raw := make([]byte, frames*2)
+	for i := range frames {
+		binary.BigEndian.PutUint16(raw[i*2:], uint16(int16(1000)))
+	}
+	decoded, err := DecodeMedia(raw, "audio/l16;rate=24000;channels=1;endianness=big-endian")
+	if err != nil {
+		t.Fatalf("DecodeMedia: %v", err)
+	}
+	wantFrames := frames * PlaybackRate / 24000
+	if len(decoded) != wantFrames*2 {
+		t.Fatalf("decoded %d bytes, want %d", len(decoded), wantFrames*2)
+	}
+	for i := range wantFrames {
+		got := int16(binary.LittleEndian.Uint16(decoded[i*2:]))
+		if got < 998 || got > 1002 {
+			t.Fatalf("sample %d = %d, want 1000", i, got)
+		}
+	}
+}
+
+func TestDecodeL16StereoDownmix(t *testing.T) {
+	raw := make([]byte, 4)
+	binary.BigEndian.PutUint16(raw[0:2], uint16(int16(1000)))
+	binary.BigEndian.PutUint16(raw[2:4], uint16(int16(2000)))
+	decoded := DecodeL16(raw, 2, true)
+	if len(decoded) != 2 {
+		t.Fatalf("decoded %d bytes, want 2", len(decoded))
+	}
+	if got := int16(binary.LittleEndian.Uint16(decoded)); got != 1500 {
+		t.Fatalf("downmixed sample = %d, want 1500", got)
+	}
+}
+
+type recordingTransport struct {
+	request  HTTPRequest
+	response *HTTPResponse
+}
+
+func (t *recordingTransport) Do(_ context.Context, req HTTPRequest, _ time.Duration) (*HTTPResponse, error) {
+	t.request = req
+	return t.response, nil
+}
+
+func TestFetchMediaSendsAuthorizationAndReturnsType(t *testing.T) {
+	transport := &recordingTransport{response: &HTTPResponse{
+		StatusCode: 200,
+		Body:       []byte("abcdef"),
+		Header:     map[string]string{"Content-Type": "audio/l16;rate=24000;channels=1;endianness=big-endian"},
+	}}
+	fetcher := &Fetch{Transport: transport}
+	body, contentType, err := fetcher.FetchMedia(context.Background(),
+		"https://vc.example/stream?stream_id=stream-1", "Bearer session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "abcdef" {
+		t.Fatalf("body = %q", body)
+	}
+	if !strings.HasPrefix(contentType, "audio/l16") {
+		t.Fatalf("content type = %q", contentType)
+	}
+	if got := transport.request.Header["Authorization"]; got != "Bearer session-1" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := transport.request.Header["User-Agent"]; got != "voice-agent/1" {
+		t.Fatalf("User-Agent = %q", got)
+	}
+}

@@ -98,3 +98,32 @@ func TestReadWAVRejectsOtherFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteCapturedCreates0600AndRefusesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "result.json")
+	if err := writeCaptured(path, []byte("first")); err != nil {
+		t.Fatalf("writeCaptured new file: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("capture mode = %04o, want 0600", got)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "first" {
+		t.Fatalf("capture content = %q, %v", data, err)
+	}
+
+	existing := filepath.Join(dir, "existing.json")
+	if err := os.WriteFile(existing, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCaptured(existing, []byte("new")); err == nil {
+		t.Fatal("writeCaptured overwrote an existing file")
+	}
+	if data, err := os.ReadFile(existing); err != nil || string(data) != "old" {
+		t.Fatalf("existing file changed: %q, %v", data, err)
+	}
+}

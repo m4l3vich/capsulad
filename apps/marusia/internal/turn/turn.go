@@ -121,6 +121,10 @@ type Stream interface {
 	EOS() error
 	Abort(reason string) error
 	Recv() (*vkclient.Event, error)
+	// Result fetches the commands stored for the phrase after the terminal
+	// finish frame. The turn gives it its own deadline, separate from the
+	// terminal-frame timer.
+	Result(ctx context.Context) ([]*vkclient.Event, error)
 	// ChunksSent reports the chunk frames written to the service, used for the
 	// per-turn audio summary. It must be cheap and safe after EOS.
 	ChunksSent() int32
@@ -167,6 +171,8 @@ type Options struct {
 	MaxSpeech       time.Duration
 	EndSilence      time.Duration
 	TerminalTimeout time.Duration
+	// ResultTimeout bounds the phrase-result fetch after the terminal finish.
+	ResultTimeout time.Duration
 }
 
 const (
@@ -174,6 +180,7 @@ const (
 	defaultMaxSpeech  = 15 * time.Second
 	defaultEndSilence = 700 * time.Millisecond
 	defaultTerminal   = 15 * time.Second
+	defaultResult     = 10 * time.Second
 )
 
 // Run executes one turn. It always releases the stream before returning; the
@@ -190,6 +197,7 @@ func Run(ctx context.Context, opts Options) (result Result) {
 	maxSpeech := durationOr(opts.MaxSpeech, defaultMaxSpeech)
 	endSilence := durationOr(opts.EndSilence, defaultEndSilence)
 	terminalTimeout := durationOr(opts.TerminalTimeout, defaultTerminal)
+	resultTimeout := durationOr(opts.ResultTimeout, defaultResult)
 
 	show := func(state State) {
 		if opts.Indicator != nil {
@@ -228,21 +236,26 @@ func Run(ctx context.Context, opts Options) (result Result) {
 			serviceStatus, statusSeen, statusFrames)
 	}()
 
-	// One receiver goroutine owns Recv. The turn loop owns every send.
-	events := make(chan *vkclient.Event, 16)
-	recvErr := make(chan error, 1)
+	// One receiver goroutine owns Recv. Frames travel on one channel so a
+	// recovered finish and a following EOF cannot be reordered: the turn sees
+	// every event before the stream error that follows it.
+	type recvFrame struct {
+		event *vkclient.Event
+		err   error
+	}
+	frames := make(chan recvFrame, 16)
 	go func() {
 		for {
 			event, err := stream.Recv()
 			if err != nil {
 				select {
-				case recvErr <- err:
+				case frames <- recvFrame{err: err}:
 				case <-ctx.Done():
 				}
 				return
 			}
 			select {
-			case events <- event:
+			case frames <- recvFrame{event: event}:
 			case <-ctx.Done():
 				return
 			}
@@ -261,6 +274,8 @@ func Run(ctx context.Context, opts Options) (result Result) {
 		terminalFrameErr string
 		streamErr        string
 		authLost         bool
+		resultErr        string
+		finishResult     bool
 	)
 
 	cancelTurn := func(reason string) {
@@ -285,6 +300,69 @@ func Run(ctx context.Context, opts Options) (result Result) {
 		return true
 	}
 
+	handleEvent := func(event *vkclient.Event) {
+		if event == nil {
+			return
+		}
+		switch event.Kind {
+		case vkclient.EventInit:
+			if opts.PhraseOpened != nil {
+				opts.PhraseOpened()
+			}
+			logf("marusia: phrase %q opened (chunk hint %d ms)", event.PhraseID, event.ChunkLengthHintMS)
+			if event.ChunkLengthHintMS > 0 && event.ChunkLengthHintMS != vkclient.FrameMS {
+				logf("marusia: server chunk hint %d ms differs from the fixed %d ms upload framing",
+					event.ChunkLengthHintMS, vkclient.FrameMS)
+			}
+		case vkclient.EventTextSoFar:
+			text = event.Text
+		case vkclient.EventCommands:
+			for _, command := range event.Commands {
+				switch command.Kind {
+				case vkclient.CommandPlayURL:
+					if command.URL != "" && playURL == "" {
+						playURL = command.URL
+					}
+				case vkclient.CommandShowText:
+					logf("marusia: server text: %s", command.Text)
+				case vkclient.CommandSendEvent:
+					logf("marusia: server asked for event %q; interactive skills are not supported", command.Event)
+				default:
+					logf("marusia: ignoring %s command (not supported by this build)", command.Kind)
+				}
+			}
+		case vkclient.EventFinish:
+			terminal = true
+			finish = event.Finish.String()
+			finishResult = event.Finish == vkclient.FinishResult
+			if event.Finish == vkclient.FinishAbort {
+				terminalFrameErr = event.AbortReason
+				if terminalFrameErr == "" {
+					terminalFrameErr = "server aborted the phrase"
+				}
+			}
+		case vkclient.EventEOS:
+			// The live service sends eos before the recovered text/commands
+			// and the terminal finish. It acknowledges the end of the upload,
+			// not the end of the turn; stopping here would skip the result.
+			logf("marusia: server end-of-stream frame")
+		case vkclient.EventStatus:
+			statusFrames++
+			if event.Status != nil {
+				serviceStatus = *event.Status
+				statusSeen = true
+			}
+		case vkclient.EventKeywordConfirmed:
+			// Confirmation only changes what the vendor server will do
+			// with the audio; it is not a counter this turn needs.
+		case vkclient.EventUnknown:
+			logf("marusia: ignoring an unknown server frame")
+		}
+		if terminal {
+			sending = false
+		}
+	}
+
 	turnStart := time.Now()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -299,76 +377,22 @@ func Run(ctx context.Context, opts Options) (result Result) {
 			}
 			return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
 
-		case err := <-recvErr:
-			if terminal {
-				continue
-			}
-			if isCancel(err) {
-				return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
-			}
-			rejected := authRejected(err)
-			streamErr = fmt.Sprintf("speech stream ended before a terminal frame: %v", err)
-			terminal = true
-			sending = false
-			authLost = authLost || rejected
-
-		case event := <-events:
-			if event == nil {
-				continue
-			}
-			switch event.Kind {
-			case vkclient.EventInit:
-				if opts.PhraseOpened != nil {
-					opts.PhraseOpened()
+		case frame := <-frames:
+			if frame.err != nil {
+				if terminal {
+					continue
 				}
-				logf("marusia: phrase %q opened (chunk hint %d ms)", event.PhraseID, event.ChunkLengthHintMS)
-				if event.ChunkLengthHintMS > 0 && event.ChunkLengthHintMS != vkclient.FrameMS {
-					logf("marusia: server chunk hint %d ms differs from the fixed %d ms upload framing",
-						event.ChunkLengthHintMS, vkclient.FrameMS)
+				if isCancel(frame.err) {
+					return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
 				}
-			case vkclient.EventTextSoFar:
-				text = event.Text
-			case vkclient.EventCommands:
-				for _, command := range event.Commands {
-					switch command.Kind {
-					case vkclient.CommandPlayURL:
-						if command.URL != "" && playURL == "" {
-							playURL = command.URL
-						}
-					case vkclient.CommandShowText:
-						logf("marusia: server text: %s", command.Text)
-					case vkclient.CommandSendEvent:
-						logf("marusia: server asked for event %q; interactive skills are not supported", command.Event)
-					default:
-						logf("marusia: ignoring %s command (not supported by this build)", command.Kind)
-					}
-				}
-			case vkclient.EventFinish:
+				rejected := authRejected(frame.err)
+				streamErr = fmt.Sprintf("speech stream ended before a terminal frame: %v", frame.err)
 				terminal = true
-				finish = event.Finish.String()
-				if event.Finish == vkclient.FinishAbort {
-					terminalFrameErr = event.AbortReason
-					if terminalFrameErr == "" {
-						terminalFrameErr = "server aborted the phrase"
-					}
-				}
-			case vkclient.EventEOS:
-				terminal = true
-			case vkclient.EventStatus:
-				statusFrames++
-				if event.Status != nil {
-					serviceStatus = *event.Status
-					statusSeen = true
-				}
-			case vkclient.EventKeywordConfirmed:
-				// Confirmation only changes what the vendor server will do
-				// with the audio; it is not a counter this turn needs.
-			case vkclient.EventUnknown:
-				logf("marusia: ignoring an unknown server frame")
-			}
-			if terminal {
 				sending = false
+				authLost = authLost || rejected
+				continue
 			}
+			handleEvent(frame.event)
 
 		case <-opts.Release:
 			// A release is one edge. Clearing the local copy disarms the arm:
@@ -452,6 +476,29 @@ func Run(ctx context.Context, opts Options) (result Result) {
 	// slow download cannot keep the speech connection alive.
 	stream.Close()
 
+	// A result finish only announces that the phrase is complete. Fetch the
+	// stored commands under a deadline of their own, tied to turn
+	// cancellation, so a slow result request cannot be mistaken for a missing
+	// terminal frame.
+	if finishResult && !aborted {
+		if ctx.Err() != nil {
+			return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
+		}
+		resultCtx, cancelResult := context.WithTimeout(ctx, resultTimeout)
+		recovered, err := stream.Result(resultCtx)
+		cancelResult()
+		if err != nil {
+			if ctx.Err() != nil {
+				return Result{Outcome: Dismissed, Text: text, PlayedURL: playURL}
+			}
+			resultErr = err.Error()
+			logf("marusia: phrase result unavailable: %s", resultErr)
+		}
+		for _, event := range recovered {
+			handleEvent(event)
+		}
+	}
+
 	if streamErr != "" {
 		return Result{Outcome: Failed, Detail: streamErr, Text: text, PlayedURL: playURL, AuthRejected: authLost}
 	}
@@ -466,10 +513,16 @@ func Run(ctx context.Context, opts Options) (result Result) {
 			// claim a turn that said nothing. The init facts are included
 			// because "no text" is the symptom of an init the service would
 			// not recognize: the keyword policy and the capability payload
-			// this turn actually sent. This is the line a probe run has to
-			// move.
+			// this turn actually sent. A result-fetch failure is reported as
+			// such: without the result body the turn cannot claim recognition
+			// produced nothing.
 			detail := fmt.Sprintf("the service returned no answer: recognition produced no text and no command "+
 				"(keyword_mode=%s, capabilities=%dB)", opts.Speech.KeywordMode(), effectiveCapabilitiesLen(opts.Speech))
+			if resultErr != "" {
+				detail = fmt.Sprintf("the service returned no answer: the phrase result could not be fetched "+
+					"(keyword_mode=%s, capabilities=%dB; result fetch: %s)",
+					opts.Speech.KeywordMode(), effectiveCapabilitiesLen(opts.Speech), resultErr)
+			}
 			if finish != "" {
 				detail += " (terminal frame: " + finish + ")"
 			}

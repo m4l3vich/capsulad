@@ -28,9 +28,10 @@ recovered evidence for maintainers.
     `session.json` (its `device_settings.json` is read beside it).
   - **"keyword not confirmed":** keep *Keyword policy* at `no_kw`. `kw_params`
     is only valid when the captured phrase really begins with the wake word.
-  - **A turn produces no audio:** check the logs for the returned TTS URL,
-    HTTP status and decode. Ogg Opus, MP3, AAC, FLAC, 24/32-bit and float WAV
-    replies are refused with one actionable line.
+  - **A turn produces no audio:** check the logs for the phrase result, the
+    returned `tts` stream URL, HTTP status and decode. WAV and `audio/l16` are
+    supported; Ogg Opus, MP3, AAC, FLAC, 24/32-bit and float WAV replies are
+    refused with one actionable line.
   - **A plaintext endpoint warning appears:** that is deliberate; the service
     and credentials are not protected on `http://`.
   - **It never starts:** installing and launching need a compatible native
@@ -41,14 +42,15 @@ voice-agent turn recovered from the vendor binary shipped on this hardware:
 
 ```
 activation → visible ring indication → resolve session (settings → vendor file → attach)
-           → Phrase/Speech bidi stream: init → 80 ms WAV chunks → eos
-           → commands (play_url) → HTTPS fetch → decode → playback
-           → release everything
+           → Phrase/Speech bidi stream: init → 80 ms WAV chunks → eos → terminal finish
+           → GET /phrase/result (phrase_id, capabilities_hex, device_id, session_id)
+           → commands (text, tts stream_id, listen) → GET /stream?stream_id=...
+           → decode (WAV or audio/l16) → playback → release everything
 ```
 
 It claims `voice_assistant` like `apps/dumbassistant`, but performs real
 recognition: the microphone audio goes to the vendor's service and the reply is
-whatever TTS URL that service returns.
+whatever `tts` body that service returns.
 
 ## What leaves the device
 
@@ -66,16 +68,26 @@ A turn sends the following to the configured vendor endpoint:
 | Client capability payload: the `capabilities_json` setting, default `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}` | `SpeechRequestInit.client_options.capabilities.json` | the device capability token the shipped firmware advertised on `/connect`; the field the previous build omitted |
 | Optional `client_data_json` (empty by default) | `SpeechRequestInit.client_options.client_data.json` | operator-provided vendor payload; unset unless configured |
 | Timezone name and the keyword policy | `SpeechRequestInit` | vendor's own init surface |
+| Phrase id, capability token, device id and session id | `GET /phrase/result` query, with the session bearer | retrieve the text/tts/listen commands the gRPC stream announces only with its terminal finish |
+| The TTS `stream_id` from the phrase result | `GET /stream?stream_id=…`, with the session bearer | download the speech body the result command names |
 
 The attach reply's account id is decoded for the log and is never sent, and
 `DeviceService.GetInfo` is a local framework call over the Unix socket, not
 egress; only the `device_id` it reports can be forwarded as the identity above.
 
-The reply path fetches the URL from `CommandPlayUrl` with
-`User-Agent: voice-agent/1`. That URL is chosen by the server; the app does not
-contact any other host. A vendor TTS URL carries its signature in the query
-string, so every log line and error reports it as `scheme://host/path` only —
-the query and the fragment never reach the log.
+The gRPC stream's terminal `finish result` does not carry the answer. The app
+follows the shipped agent's `phrase_result_getter` path: `GET /phrase/result`
+with the phrase id and identity, then `GET /stream?stream_id=…` for the `tts`
+command's body. Both use `User-Agent: voice-agent/1`; the stream body also
+carries the session bearer. Those URLs are chosen by the server; the app does
+not contact any other host. The bearer is read when the stream body is
+requested, so a first-turn provisioning attach is visible to the media fetch.
+It is scoped to the exact configured scheme/host/port and the generated
+`/stream` path: a server-chosen `play_url` on another origin (for example a
+music provider, or the same host over plaintext HTTP) is fetched with only
+`User-Agent`, never the vendor session. A vendor TTS URL carries its signature
+in the query string, so every log line and error reports it as
+`scheme://host/path` only — the query and the fragment never reach the log.
 
 The transport is TLS for every `https://` endpoint, which is four of the five
 recovered deployments. `test2` is plaintext `http://` in the vendor's own table;
@@ -207,11 +219,12 @@ does.
 
 ## Media formats
 
-Playback (`CommandPlayUrl` bodies):
+Playback (`play_url` and `tts` bodies):
 
 | Format | Support |
 |---|---|
 | RIFF/WAVE, linear PCM, 16-bit, mono or stereo, 8–192 kHz | yes; mixed to mono and resampled to 16 kHz |
+| `audio/l16`, linear 16-bit, mono or stereo, 8–192 kHz, big- or little-endian | yes; converted to mono s16le and resampled. The live 2026-11-21 TTS stream returned `audio/l16;rate=24000;channels=1;endianness=big-endian` |
 | Ogg Opus, MP3, AAC, FLAC, 24/32-bit or float WAV, RF64 | no; the turn fails with one actionable log line and the ring shows the error state |
 | `http`/`https` only, ≤ 10 MiB, ≤ 4 redirects, 30 s total | enforced |
 
@@ -237,14 +250,26 @@ zero-pads the last 80 ms block, so the header size always matches the payload.
 
 ## Command surface
 
-If a phrase ends cleanly with neither `text_so_far` nor a command, the turn is
-reported as **no answer** — one line naming the terminal frame — and never as a
-success. When the uploaded PCM stayed below the silence floor, it is reported as
-**no audio** instead: the service had nothing to recognize, so an empty result
-there is not evidence about the recognition gate. `play_url` plays; `show_text`
-is logged; `send_event` is logged as unsupported; preload/background-music
-commands are ignored. Interactive skills, flowmode, music providers, VK account
-linking and `GetResult` are out of scope.
+The service also sends an `eos` frame before the answer and the terminal
+`finish result`; `eos` is an upload acknowledgement, not the end of the turn,
+and the app keeps reading until `finish`. The terminal `finish result` is a
+signal, not the answer. After it, the app fetches `GET /phrase/result`; the
+returned `text` command is logged
+and used as the turn text, `tts` is played through `/stream?stream_id=…`,
+`play_url` is played directly, `listen` is logged as unsupported (this build
+does not open a follow-up turn), `send_event` is logged as unsupported, and
+preload/background-music commands are ignored. The result fetch has its own
+deadline after the terminal finish, so a slow result request is reported as a
+result-fetch failure, not as a missing terminal frame; its failures log only
+the failure class and HTTP status, never the response body or a redirect
+`Location`. If the result fetch fails or is empty, the turn is reported as
+**no answer** with the fetch detail, never as a success. When the uploaded PCM
+stayed below the silence floor, it is reported as **no audio** instead.
+`Phrase/GetResult` remains `Unimplemented`; the HTTP
+result endpoint is the recovered path the stock agent's `phrase_result_getter`
+uses. Interactive skills, flowmode, music providers and VK account linking are
+out of scope; the direct GENERAL init plus the result fetch works without the
+stock control-plane `grpc_flowmode`/`grpc_mainflow` toggles.
 
 ## Turn audio evidence
 
@@ -270,11 +295,10 @@ silence), the service's own status frames counted **44 chunks / 3520 ms** —
 everything up to its last 1 s status interval — and `pre_open_dropped=0`. The
 audio therefore reached the service as valid 80 ms frames with the utterance
 start intact, `status_num` was 2 (logged, still not interpreted), and the
-service still returned `finish result` with no text and no command. That is the
-vendor's recognition gate, named with counters instead of a hypothesis. The
-remaining limit is scope: one captured turn proves this transport and capture
-path and this gate, not that every future utterance will be gated the same way
-or that the vendor will ever transcribe this unit.
+service returned `finish result` with no text and no command. That empty finish
+was not a recognition failure: the answer was behind the separate
+`GET /phrase/result` endpoint, which this build now fetches. The counters still
+prove capture and upload; they are not a recognition result by themselves.
 
 The RMS is accumulated in the endpointer from the samples it already reads, so
 measuring a turn adds no copy, no extra pass and no blocking to capture. Below
@@ -353,7 +377,14 @@ MARUSIA_PROBE_SERIAL=… MARUSIA_PROBE_WAV=/path/16k-mono.wav \
 the recovered Capsula Mini token), `MARUSIA_PROBE_CLIENT_DATA_JSON` sets
 `client_data` (empty by default), and `MARUSIA_PROBE_KEYWORD_MODE` defaults to
 `no_kw` — the same policy the app's own turns send, so a probe run reproduces a
-real turn. `MARUSIA_PROBE_ACTIVATION_TYPE` sets `client_options.activation_type`
+real turn. `MARUSIA_PROBE_SDK_RESULT=1` calls the production `Speech.Result`
+after the stream ends and prints the recovered events; `MARUSIA_PROBE_RESULT=1`
+also fetches `/phrase/result` and prints its status and byte count, and
+`MARUSIA_PROBE_STREAM=1` fetches and decodes the authenticated `/stream` body
+through the production media path. The raw result body is never logged.
+`MARUSIA_PROBE_RESULT_OUT` explicitly captures it to a **new** 0600 file and
+refuses to overwrite an existing path; treat that file as sensitive.
+`MARUSIA_PROBE_ACTIVATION_TYPE` sets `client_options.activation_type`
 and is empty by default, which is also what the app's own turns send; the vendor's
 shipped client always names one of its four wire values (`listen_command`,
 `keyword`, `button`, `flowmode`), so an operator reproducing that init sets the
@@ -377,12 +408,13 @@ MARUSIA_PROBE_KEYWORD_MODE=kw_params \
 
 It prints the keyword policy, the activation type and the capability/client-data
 payload sizes before the turn, then the init QoS, the chunk accounting with the
-service's own status counter, every `text_so_far`, every
-command, the `play_url` (shortened to `scheme://host/path`, because the query is
-the signature), and then the HTTP status, `Content-Type`, size and first bytes of
-that URL. No credential is written to disk or to the log; the probe is refused
-outright without them. It is a diagnostic, not a test: it needs network egress and
-a live session.
+service's own status counter, every `text_so_far`, every command, the `play_url`
+(shortened to `scheme://host/path`, because the query is the signature), and with
+`MARUSIA_PROBE_STREAM=1` the authenticated `/stream` `Content-Type`, size and
+decoded duration. Credentials are never written to disk or to the log; the
+optional raw result capture is a separate, explicit 0600 file. The probe is
+refused outright without credentials. It is a diagnostic, not a test: it needs
+network egress and a live session.
 
 On this workstation the gRPC dial to the production host fails from a bare macOS
 process (Happy-Eyeballs/DNS), and container DNS is intermittent; a Linux container
@@ -403,7 +435,8 @@ docker run --rm --platform linux/arm64 --entrypoint bash \
 Proven from the recovered descriptors and string table: message shapes and field
 numbers, the RPC path, the metadata header set and order, the attach JSON keys,
 the 16 kHz mono capture rate, the `play_url`/`show_text`/`send_event` command
-family, and that TTS arrives as a URL.
+family, and that the answer arrives in the separate phrase result as a `tts`
+command naming a stream id.
 
 Proven live against the production deployment with the device's own session
 (2026-11-15):
@@ -422,6 +455,27 @@ Proven live against the production deployment with the device's own session
 | `eos` with the request side left open | clean `finish` then end of stream |
 | `Phrase/GetResult` | `Unimplemented` |
 | the recovery session (`session.json`) on the gRPC surface | accepted, no attach performed |
+
+### Phrase result and TTS body (2026-11-21)
+
+The gRPC stream alone was not the answer path. On the same device and session,
+a GENERAL `Phrase/Speech` turn with `no_kw`, 80 ms WAV chunks and the recovered
+capability payload returned only the terminal `finish result` with no text and
+no command. The app now fetches the commands exactly as the stock agent's
+`phrase_result_getter` does:
+
+| Observation | Result |
+|---|---|
+| gRPC frame order | `eos` arrives before `text_so_far`/commands and the terminal `finish result`; `eos` is not treated as terminal |
+| `GET /phrase/result?phrase_id=…&capabilities_hex=…&device_id=…&session_id=…` with the session bearer, redirects disabled | `200` with `result.commands`: `text`, `tts` (`stream_id`) and `listen` |
+| `GET /stream?stream_id=…` with the session bearer | `200`, `audio/l16;rate=24000;channels=1;endianness=big-endian`, 349,200 bytes |
+| `media.DecodeMedia` on that body | 7,275 ms of 16 kHz mono s16le |
+| stock production turn on the same device/session (2026-11-21) | `phrase_result_getter` commands `text`/`tts`/`listen`, then `media_fetcher` fetched the `/stream` body |
+
+The stock control plane advertised `grpc_flowmode=1` and `grpc_mainflow=1`, but
+the direct GENERAL probe above produced the same result commands without either
+toggle. The recovered result endpoint is therefore the missing app step, not
+flowmode or credentials.
 
 ### Capability payload and keyword policy (2026-11-17)
 
@@ -453,6 +507,10 @@ both from recoverable evidence rather than a guess:
   `no_kw`. The default stays `no_kw`, since the wake-word pre-roll path is the
   only unproven part of the claim.
 
+The terminal `finish` these earlier turns observed is not a recognition verdict:
+the answer is behind the separate phrase-result endpoint described above. The
+capability and keyword work is init correctness, not the missing answer path.
+
 What is *not* recovered: the exact JSON schema the vendor puts in
 `capabilities.json` (`bytes json = 1`). The binary sets the field present but its
 value comes from the control connection, and no schema string exists in the
@@ -463,29 +521,19 @@ payload is known.
 
 Unproven, and therefore not claimed by the app:
 
-- **Recognition itself.** No live turn has been run since the capability payload
-  and the `no_kw` default landed, because no session credential is available in
-  this tree. The remaining gate is one real probe turn: with the recovered
-  capability payload and `no_kw` the terminal frame must carry `text_so_far` or
-  a `play_url`; a prompt whose audio starts with the wake word should also be
-  run once with `MARUSIA_PROBE_KEYWORD_MODE=kw_params` to confirm the wake-word
-  path. Every earlier attempt — `kw_params` (which aborts "keyword not
-  confirmed", including for a real human recording of "Маруся"),
-  `strict_kw`/`no_kw` with no capability payload, 20/80/160 ms chunks, 8 and
-  16 kHz, Ogg-Opus as one chunk and as Ogg pages, silence padding,
-  `use_asrld_recognize`, and `activation_type` in {"", keyword, button, "listen
-  command"} — ended with zero text. If the probe still returns zero text with
-  the payload present, the next step is `client_data` from the control
-  connection, which is why `client_data_json` exists.
-- **The TTS media type.** No `play_url` was ever returned, so the body was never
-  fetched. The decoder therefore still accepts WAV PCM only and names whatever
-  else arrives (Ogg, MP3, FLAC, MP4/AAC, RF64) in one line. Adding a decoder is
-  the next step once the media type is observed.
+- **Opus TTS.** The stock log's `tts` command carried `encoder:"opus"`; the
+  2026-11-21 result used `encoder:null` and `/stream` returned `audio/l16`. This
+  build plays WAV and `audio/l16`; an Opus body remains undecoded and fails with
+  the Ogg line. The app does not send an encoder preference yet.
+- **Follow-up listen.** The result's `listen` command (`forced_listen`,
+  `listen_previous_intent`, `min_waiting_time`) is logged but not acted on; the
+  app returns to idle instead of opening the follow-up turn.
 - The service accepting an attach with an empty `xtoken_id`: it does not (4002
   "xtoken_id is required"). The attach path therefore exists only for a
   provisioned unit.
-- `mode = GENERAL`, empty `brand`, empty `activation_type`, and no `player_data`
-  or coordinates (`client_data` is only sent when `client_data_json` is set).
+- `brand`, `activation_type` and `player_data` are not populated; the live
+  GENERAL path did not need them, but their effect on other skills is
+  unverified. `client_data` is only sent when `client_data_json` is set.
 - Port 443 for `https` bases.
 - Local end-of-speech is an energy gate (learned noise floor, 700 ms hangover,
   6 s no-speech, 15 s cap). Server `status_num` values are logged in the turn

@@ -758,3 +758,43 @@ func TestPlaintextWarningFiresOnce(t *testing.T) {
 		t.Fatalf("a plaintext endpoint without any credential must not warn: %q", output)
 	}
 }
+
+func TestMediaAuthorizationScopesToVendorOrigin(t *testing.T) {
+	const auth = "Bearer session-1"
+	origin := vendorOrigin("https://vc.go.mail.ru")
+	if got := mediaAuthorization("https://vc.go.mail.ru/stream?stream_id=1", origin, auth); got != auth {
+		t.Fatalf("vendor stream authorization = %q, want %q", got, auth)
+	}
+	if got := mediaAuthorization("https://vc.go.mail.ru:443/stream?stream_id=1", origin, auth); got != auth {
+		t.Fatalf("vendor stream authorization with explicit :443 = %q, want %q", got, auth)
+	}
+	if got := mediaAuthorization("http://vc.go.mail.ru/stream?stream_id=1", origin, auth); got != "" {
+		t.Fatalf("plaintext same-host authorization = %q, want empty", got)
+	}
+	if got := mediaAuthorization("https://vc.go.mail.ru:8443/stream?stream_id=1", origin, auth); got != "" {
+		t.Fatalf("different-port authorization = %q, want empty", got)
+	}
+	if got := mediaAuthorization("https://vc.go.mail.ru/reply.wav", origin, auth); got != "" {
+		t.Fatalf("non-stream vendor path authorization = %q, want empty", got)
+	}
+	if got := mediaAuthorization("https://media.example/stream?stream_id=1", origin, auth); got != "" {
+		t.Fatalf("third-party media authorization = %q, want empty", got)
+	}
+	if got := mediaAuthorization("https://vc.go.mail.ru/stream", nil, auth); got != "" {
+		t.Fatalf("nil origin authorization = %q, want empty", got)
+	}
+}
+
+func TestAuthorizationReadsCurrentProvisionedSession(t *testing.T) {
+	client, err := vkclient.New(vkclient.Config{BaseURL: "https://vc.go.mail.ru"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := authorization(client); got != "" {
+		t.Fatalf("authorization before provisioning = %q, want empty", got)
+	}
+	client.SetSession(vkclient.Session{SessionID: "session-1", SessionSecret: "secret-1"})
+	if got := authorization(client); got != "Bearer secret-1" {
+		t.Fatalf("authorization after provisioning = %q", got)
+	}
+}

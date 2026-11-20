@@ -1,8 +1,9 @@
-// Package media fetches and decodes the TTS media a play_url command points
-// at. The vendor streams TTS as a URL, not as audio frames, and its own decoder
-// is a proprietary library; this package supports the minimum a strict
-// implementation can prove: RIFF/WAVE 16-bit PCM, mono or stereo, any rate,
-// resampled to the framework's 16 kHz mono s16le playback layout.
+// Package media fetches and decodes the TTS body a play_url or result tts
+// command points at. The vendor streams TTS as a URL, not as audio frames, and
+// its own decoder is a proprietary library; this package supports the minimum
+// a strict implementation can prove: RIFF/WAVE 16-bit PCM and raw audio/l16,
+// mono or stereo, any rate, resampled to the framework's 16 kHz mono s16le
+// playback layout.
 package media
 
 import (
@@ -11,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"mime"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,17 +97,25 @@ func (f *Fetch) nativeClient(limit int64) (*capsulad.HTTPClient, error) {
 // carries its signature in the query string, so the raw value must never reach
 // a log line or an operator message.
 func (f *Fetch) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	body, _, err := f.FetchMedia(ctx, rawURL, "")
+	return body, err
+}
+
+// FetchMedia is Fetch plus the Authorization header the vendor's /stream body
+// requires and the response Content-Type needed to decode raw audio/l16. The
+// header is passed per request so a shared Fetch cannot race a rotated session.
+func (f *Fetch) FetchMedia(ctx context.Context, rawURL, authHeader string) ([]byte, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		// The URL parser's error embeds the input, query included; only its
 		// reason is reported.
-		return nil, fmt.Errorf("media: invalid play_url %s: %v", redact.URL(rawURL), parseReason(err))
+		return nil, "", fmt.Errorf("media: invalid play_url %s: %v", redact.URL(rawURL), parseReason(err))
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("media: play_url %s must use http or https", redact.URL(rawURL))
+		return nil, "", fmt.Errorf("media: play_url %s must use http or https", redact.URL(rawURL))
 	}
 	if parsed.Host == "" {
-		return nil, fmt.Errorf("media: play_url %s has no host", redact.URL(rawURL))
+		return nil, "", fmt.Errorf("media: play_url %s has no host", redact.URL(rawURL))
 	}
 	limit := f.MaxBytes
 	if limit <= 0 {
@@ -113,9 +124,13 @@ func (f *Fetch) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	// The vendor's media player identifies itself this way; it is the only
 	// header the recon recovered for media fetches.
 	headers := map[string]string{"User-Agent": "voice-agent/1"}
+	if authHeader != "" {
+		headers["Authorization"] = authHeader
+	}
 
 	var body []byte
 	var status int
+	var contentType string
 	if f.Transport != nil {
 		response, err := f.Transport.Do(ctx, HTTPRequest{
 			Method: "GET",
@@ -123,13 +138,14 @@ func (f *Fetch) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 			Header: headers,
 		}, 30*time.Second)
 		if err != nil {
-			return nil, fetchError(rawURL, err)
+			return nil, "", fetchError(rawURL, err)
 		}
 		status, body = response.StatusCode, response.Body
+		contentType = headerValue(response.Header, "content-type")
 	} else {
 		client, err := f.nativeClient(limit)
 		if err != nil {
-			return nil, fmt.Errorf("media: open http client: %w", err)
+			return nil, "", fmt.Errorf("media: open http client: %w", err)
 		}
 		response, err := client.Do(ctx, capsulad.HTTPRequest{
 			Method:  "GET",
@@ -138,17 +154,32 @@ func (f *Fetch) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 			Timeout: 30 * time.Second,
 		})
 		if err != nil {
-			return nil, fetchError(rawURL, err)
+			return nil, "", fetchError(rawURL, err)
 		}
 		status, body = response.StatusCode, response.Body
+		contentType = headerValue(response.Header, "content-type")
 	}
 	if status < 200 || status > 299 {
-		return nil, fmt.Errorf("media: fetch %s: HTTP %d", redact.URL(rawURL), status)
+		return nil, "", fmt.Errorf("media: fetch %s: HTTP %d", redact.URL(rawURL), status)
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("media: %s exceeds the %d MiB playback limit", redact.URL(rawURL), limit>>20)
+		return nil, "", fmt.Errorf("media: %s exceeds the %d MiB playback limit", redact.URL(rawURL), limit>>20)
 	}
-	return body, nil
+	return body, contentType, nil
+}
+
+// headerValue reads a response header case-insensitively; the native client
+// lowercases names while test adapters may preserve the canonical spelling.
+func headerValue(header map[string]string, name string) string {
+	if value := header[name]; value != "" {
+		return value
+	}
+	for key, value := range header {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
 }
 
 // fetchError wraps a transport failure without the signed URL. The transport's
@@ -271,6 +302,57 @@ func DecodeToPlayback(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return Resample(pcm, format.SampleRate, PlaybackRate), nil
+}
+
+// DecodeMedia decodes the body the /stream endpoint returns. The endpoint's
+// observed reply is raw audio/l16 (24 kHz mono big-endian in the 2026-11-21
+// live turn), not a container; a WAV body remains accepted for the play_url
+// path.
+func DecodeMedia(data []byte, contentType string) ([]byte, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err == nil && strings.EqualFold(mediaType, "audio/l16") {
+		rate := intParam(params["rate"], 8000)
+		channels := intParam(params["channels"], 1)
+		if channels < 1 || channels > 2 {
+			return nil, fmt.Errorf("media: audio/l16 has %d channels (need mono or stereo)", channels)
+		}
+		if rate < 8000 || rate > 192000 {
+			return nil, fmt.Errorf("media: audio/l16 rate %d is outside the supported range", rate)
+		}
+		bigEndian := !strings.EqualFold(params["endianness"], "little-endian")
+		return Resample(DecodeL16(data, channels, bigEndian), rate, PlaybackRate), nil
+	}
+	return DecodeToPlayback(data)
+}
+
+// DecodeL16 converts linear 16-bit PCM to mono s16le at the source rate.
+// bigEndian selects the wire byte order; channels may be mono or stereo.
+func DecodeL16(data []byte, channels int, bigEndian bool) []byte {
+	if channels < 1 {
+		channels = 1
+	}
+	frameBytes := channels * 2
+	frames := len(data) / frameBytes
+	out := make([]byte, frames*2)
+	order := binary.ByteOrder(binary.LittleEndian)
+	if bigEndian {
+		order = binary.BigEndian
+	}
+	for i := range frames {
+		var sum int32
+		for channel := range channels {
+			sum += int32(int16(order.Uint16(data[i*frameBytes+channel*2:])))
+		}
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(sum/int32(channels))))
+	}
+	return out
+}
+
+func intParam(value string, fallback int) int {
+	if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+		return parsed
+	}
+	return fallback
 }
 
 // downmixToMono averages stereo pairs so a mono upload/playback stream carries

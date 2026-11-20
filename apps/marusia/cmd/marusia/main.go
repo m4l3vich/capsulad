@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -617,9 +618,15 @@ func (a *app) runActivation(activation *capsulad.Activation) {
 			openOnce.Do(func() { close(opened) })
 		},
 		PreOpenDrops: func() int { return int(preOpenDropped.Load()) },
-		Player:       &speaker{client: a.client, fetch: a.fetch, conversationID: conversationID},
-		Indicator:    ring,
-		Logf:         log.Printf,
+		Player: &speaker{
+			client:         a.client,
+			fetch:          a.fetch,
+			conversationID: conversationID,
+			protocol:       protocol,
+			vendorOrigin:   vendorOrigin(protocol.BaseURL()),
+		},
+		Indicator: ring,
+		Logf:      log.Printf,
 	})
 
 	// Release the microphone before anything can be shown for the terminal
@@ -913,14 +920,85 @@ type speaker struct {
 	client         *capsulad.Client
 	fetch          *media.Fetch
 	conversationID string
+	// protocol is read when the media request is made, so a first-turn attach
+	// that installs the session during Authorize is visible to the /stream
+	// bearer. vendorOrigin is the configured scheme/host/port; only the
+	// generated /stream URL on that origin receives the bearer.
+	protocol     *vkclient.Client
+	vendorOrigin *url.URL
+}
+
+// authorization builds the bearer for the /stream fetch from the protocol
+// client's current session. It is empty when the client has no secret.
+func authorization(client *vkclient.Client) string {
+	if client == nil {
+		return ""
+	}
+	secret := client.Session().SessionSecret
+	if secret == "" {
+		return ""
+	}
+	return "Bearer " + secret
+}
+
+// vendorOrigin is the configured endpoint with default ports made explicit.
+func vendorOrigin(raw string) *url.URL {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	parsed.Path = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed
+}
+
+func effectivePort(parsed *url.URL) string {
+	if parsed.Port() != "" {
+		return parsed.Port()
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+// mediaAuthorization returns the session bearer only for the generated vendor
+// /stream request. A server-chosen play_url may name another scheme, host or
+// port (or the same host over plaintext HTTP); sending the vendor session there
+// would leak the credential. The comparison includes the effective port so an
+// explicit :443 and the https default are the same origin, while :80 over
+// https is not.
+func mediaAuthorization(rawURL string, origin *url.URL, authorization string) string {
+	if authorization == "" || origin == nil {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if parsed.Path != "/stream" {
+		return ""
+	}
+	if !strings.EqualFold(parsed.Scheme, origin.Scheme) || !strings.EqualFold(parsed.Hostname(), origin.Hostname()) {
+		return ""
+	}
+	if effectivePort(parsed) != effectivePort(origin) {
+		return ""
+	}
+	return authorization
 }
 
 func (s *speaker) Play(ctx context.Context, url string) error {
-	body, err := s.fetch.Fetch(ctx, url)
+	body, contentType, err := s.fetch.FetchMedia(ctx, url, mediaAuthorization(url, s.vendorOrigin, authorization(s.protocol)))
 	if err != nil {
 		return err
 	}
-	pcm, err := media.DecodeToPlayback(body)
+	pcm, err := media.DecodeMedia(body, contentType)
 	if err != nil {
 		return err
 	}
