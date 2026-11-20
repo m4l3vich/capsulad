@@ -202,13 +202,15 @@ func cuePeak(t *testing.T, volume float64) int {
 }
 
 func TestRecordingCueRespectsMasterVolume(t *testing.T) {
-	low := cuePeak(t, 0.25)
+	const lowLevel = 0.5
+	low := cuePeak(t, lowLevel)
 	high := cuePeak(t, 1.0)
 	if low == 0 || high == 0 {
 		t.Fatalf("cue produced no audio (low=%d high=%d)", low, high)
 	}
 	ratio := float64(high) / float64(low)
-	if ratio < 3.5 || ratio > 4.5 {
-		t.Fatalf("cue does not track master volume: low=%d high=%d ratio=%.2f, want about 4", low, high, ratio)
+	want := 1 / audio.MasterVolumeGain(lowLevel)
+	if ratio < want*0.95 || ratio > want*1.05 {
+		t.Fatalf("cue does not track the master taper: low=%d high=%d ratio=%.2f, want about %.2f", low, high, ratio, want)
 	}
 }

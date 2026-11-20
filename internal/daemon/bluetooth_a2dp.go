@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -342,27 +341,12 @@ func (d *Daemon) stopBluetoothStreamFor(address string) {
 	}
 }
 
-// setBluetoothStreamTrim applies the product volume curve to the Bluetooth
-// stream only. The mixer already multiplies the master once, so the trim is
-// sqrt(master) and the stream's effective gain is master^1.5.
-func (d *Daemon) setBluetoothStreamTrim(level float64) {
-	if level < 0 {
-		level = 0
-	}
-	if level > 1 {
-		level = 1
-	}
-	d.btStreamMu.Lock()
-	stream := d.btStream
-	d.btStreamMu.Unlock()
-	if stream != nil {
-		stream.setTrim(math.Sqrt(level))
-	}
-}
-
 // a2dpStream is one acquired transport plus its persistent decoder and mixer
 // stream. The decoder keeps its synthesis history across RTP packets, so there
-// are no chunk boundaries and no decoder subprocess.
+// are no chunk boundaries and no decoder subprocess. Its mixer stream stays at
+// unity trim: the framework mixer owns the single master taper, so a second
+// level-dependent gain here would make Bluetooth quieter than every other
+// source at the same persisted level.
 type a2dpStream struct {
 	d         *Daemon
 	address   string
@@ -502,19 +486,9 @@ func (s *a2dpStream) ensurePlayback(rate, channels int) (*audio.Playback, error)
 	if err != nil {
 		return nil, err
 	}
-	p.SetTrim(math.Sqrt(s.d.user.Get().Values.MasterVolume))
 	s.playback = p
 	s.d.logs.Infof("bluetooth", "", "A2DP mixer stream opened at %d Hz/%d channels", rate, channels)
 	return p, nil
-}
-
-func (s *a2dpStream) setTrim(v float64) {
-	s.playbackMu.Lock()
-	p := s.playback
-	s.playbackMu.Unlock()
-	if p != nil {
-		p.SetTrim(v)
-	}
 }
 
 func (s *a2dpStream) stop() {

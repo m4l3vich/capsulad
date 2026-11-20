@@ -402,8 +402,9 @@ persists it and applies the local gain, so moving the phone's slider moves the s
 on the speaker (dial, keys, Web UI, an app) is written back to the source's register so the source's
 own level display can follow it; the write is a display mirror, applied asynchronously and never on
 the key or render path, coalesced over about 100 ms so the leading step of a full-panel swipe and its
-revert produce one write, and the local curve (`sqrt(master)` on top of the mixer's own master factor)
-remains the only gain stage, with no compensation factor for the source's share. Field evidence from
+revert produce one write, and the native sink's only gain stage is the framework mixer's canonical
+60 dB logarithmic master taper, with no per-stream trim and no compensation factor for the source's
+share. Field evidence from
 the deployed build: every speaker-side change logs `transport volume mirrored to the source: N%` and
 BlueZ accepts the write with no refusal — whether the peer applies or displays it is the peer's
 decision, and this MacBook does not move its own level display. That is not chased further on our
@@ -420,19 +421,19 @@ cannot inherit it, and adds no polling. A source without a writable register is 
 write is refused, logged once per session at Debug, and the speaker keeps attenuating locally while a
 source-side slider still drives the master.
 A source is **not** trusted as the only attenuation:
-with the capsulad master at 5 % and a source output at minimum, the transport volume can read
-~6/127 while the captured stream is near full scale and the speaker ~90–100 % loud — the slider
-moved without attenuating the stream. Proof level: D-Bus property read plus digital capture;
+with the capsulad master at 5 % (then linear) and a source output at minimum, the transport volume
+could read ~6/127 while the captured stream was near full scale and the speaker ~90–100 % loud —
+the slider moved without attenuating the stream. Proof level: D-Bus property read plus digital capture;
 loudness is acoustic.
 
-With PulseAudio as fallback owner the loopback carries a local safety gain of master^1.5 (cube-root
-compensated, because PA sink-input volume is cubic) while the source is held at a fixed 90 % trim; a
-linear master is too hot at 5–7 % on this amplifier, and gain and trim are applied on source/route
-changes and volume events rather than by periodic re-assert. Audible Bluetooth level is bounded by
-master^1.5 and at most about 0.73 × it. Three numeric stages cannot all equal the master — one must
-be neutral — so the master is the one synced value and the source register is its mirror, with the
-PA source (90 %) and the loopback (cube-root) as the gain stages. The framework volume cue peaks at
-0.22 of full scale.
+With PulseAudio as fallback owner the loopback carries the same canonical taper as its local safety
+gain (cube-root compensated, because PA sink-input volume is cubic) while the source is held at a
+fixed 90 % trim; gain and trim are applied on source/route changes and volume events rather than by
+periodic re-assert. The fallback bypasses the framework mixer, so this is the local equivalent of
+the mixer stage, not a second taper on the native sink; its effective level is the canonical gain
+times the 90 % source trim (at most 0.9 × the canonical gain). The master position is the one synced
+value and the source register is its mirror. The framework volume cue still peaks at 0.22 of full
+scale at unity master, before the taper.
 
 PulseAudio's `module-bluez5-device` is reloaded with `avrcp_absolute_volume=0` on every source
 connect in the fallback path, because PA recreates it with the default (1) on a profile reconnect;

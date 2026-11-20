@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 )
 
@@ -262,11 +263,13 @@ func (d *Daemon) setBluetoothSourceFixed(address string) {
 	_ = exec.Command("pactl", "set-source-volume", source, "90%").Run()
 }
 
-// setBluetoothPlaybackGain applies the framework master to the Bluetooth
-// loopback as a local safety gain, and it is the only gain stage: the device
-// module is decoupled from AVRCP (avrcp_absolute_volume=0), so the transport
-// volume the daemon mirrors to the source changes the source's display and not
-// the stream. It is needed because the Mac's AVRCP volume is not a reliable
+// setBluetoothPlaybackGain applies the canonical framework master taper to the
+// Bluetooth loopback as a local safety gain. This fallback bypasses the
+// framework mixer, so it must carry the same curve the mixer would have applied;
+// it is not a second stage on the native sink. The device module is decoupled
+// from AVRCP (avrcp_absolute_volume=0), so the transport volume the daemon
+// mirrors to the source changes the source's display and not the stream. The
+// local gain is needed because the Mac's AVRCP volume is not a reliable
 // attenuation: the slider can move while the stream stays near full scale.
 // PulseAudio sink-input volume is cubic, so the cube root yields the requested
 // linear gain.
@@ -274,20 +277,9 @@ func (d *Daemon) setBluetoothPlaybackGain(level float64) {
 	if d.dev.Platform() == backend.PlatformSimulator {
 		return
 	}
-	if level < 0 {
-		level = 0
-	}
-	if level > 1 {
-		level = 1
-	}
-	// Perceptual/safety curve: a linear master is still too hot at the low
-	// end on this amplifier, and the Mac may not attenuate AVRCP at all. The
-	// 1.5 exponent keeps the low end quiet while 40 % stays usable.
-	effective := math.Pow(level, 1.5)
-	pct := int(math.Round(math.Cbrt(effective) * 100))
-	if level <= 0.01 {
-		pct = 0
-	}
+	// The level is a control position, not an amplitude; use the one taper the
+	// mixer uses so the two Bluetooth routes sound the same.
+	pct := bluetoothSinkInputPercent(level)
 	go func() {
 		for attempt := 0; attempt < 6; attempt++ {
 			if index := loopbackSinkInputIndex(); index != "" {
@@ -301,6 +293,14 @@ func (d *Daemon) setBluetoothPlaybackGain(level float64) {
 			}
 		}
 	}()
+}
+
+// bluetoothSinkInputPercent converts a master position to the PulseAudio
+// sink-input percentage that produces its canonical gain. PA applies a cubic
+// curve to sink-input volume, so the cube root of the taper is the percentage
+// whose output equals the framework mixer's gain.
+func bluetoothSinkInputPercent(level float64) int {
+	return int(math.Round(math.Cbrt(audio.MasterVolumeGain(level)) * 100))
 }
 
 func loopbackSinkInputIndex() string {

@@ -78,9 +78,12 @@ type Advert struct {
 	TXT      map[string]string
 }
 
-// RingFactory opens the ring presentation.
+// RingFactory opens the ring presentation and its routing capture. ctx lives
+// for the whole ring: cancelling it bounds a stalled grant and owns both
+// framework streams. The caller closes a ring that a cancelled acquisition
+// still returns.
 type RingFactory interface {
-	OpenRing() (Ring, error)
+	OpenRing(ctx context.Context) (Ring, error)
 }
 
 // SinkFactory opens a framework playback stream.

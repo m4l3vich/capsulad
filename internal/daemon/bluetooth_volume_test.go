@@ -23,6 +23,21 @@ import (
 
 const volumeTestAddress = "AA:BB:CC:DD:EE:FF"
 
+// TestBluetoothFallbackUsesCanonicalTaper pins the PulseAudio fallback's local
+// gain: PA applies a cubic sink-input curve, so the written percentage is the
+// cube root of the same taper the framework mixer uses. This is a local
+// equivalent of the mixer, not a second curve.
+func TestBluetoothFallbackUsesCanonicalTaper(t *testing.T) {
+	for _, tc := range []struct {
+		level float64
+		want  int
+	}{{0, 0}, {0.05, 11}, {0.5, 32}, {1, 100}} {
+		if got := bluetoothSinkInputPercent(tc.level); got != tc.want {
+			t.Errorf("master %.2f -> %d%% sink-input, want %d%%", tc.level, got, tc.want)
+		}
+	}
+}
+
 // volumeTestDaemon returns the running daemon with its simulator manager and a
 // connected source. Native mode is on so the local gain path never reaches a
 // host PulseAudio; the simulators do not implement the A2DP sink, so the stream

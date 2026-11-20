@@ -517,19 +517,78 @@ func (rt *Runtime) PTPClock() session.Clock {
 
 // --- presentations and playback ------------------------------------------
 
-// Ring opens the ring presentation. Ownership is by presentation: the frame
-// written here is the device output until the presentation closes.
-type Ring struct {
-	presentation *capsulad.Presentation
+// ringResource is the LED ring resource an AirPlay session drives.
+const ringResource = "light.ring.main"
+
+// ringPresentation and ringCapture are the framework surface the ring needs.
+// They exist so a unit test can prove the capture obligation (presentation,
+// then the routing capture that selects it) without the framework runtime;
+// production is sdkRinger.
+type ringPresentation interface {
+	ID() string
+	Ring(pixels []capsulad.RGB) error
+	Close() error
 }
 
-// OpenRing acquires the LED ring presentation.
-func (rt *Runtime) OpenRing() (session.Ring, error) {
-	presentation, err := rt.client.OpenPresentation(rt.ctx, "light.ring.main")
+type ringCapture interface {
+	Close()
+}
+
+type ringer interface {
+	OpenPresentation(ctx context.Context, resourceID string) (ringPresentation, error)
+	OpenCapture(ctx context.Context, resourceID, presentationID string, mode capsulad.CaptureMode) (ringCapture, error)
+}
+
+// sdkRinger adapts *capsulad.Client (concrete returns) to the testable seam.
+type sdkRinger struct{ client *capsulad.Client }
+
+func (s sdkRinger) OpenPresentation(ctx context.Context, resourceID string) (ringPresentation, error) {
+	return s.client.OpenPresentation(ctx, resourceID)
+}
+
+func (s sdkRinger) OpenCapture(ctx context.Context, resourceID, presentationID string,
+	mode capsulad.CaptureMode) (ringCapture, error) {
+	return s.client.OpenCapture(ctx, resourceID, presentationID, mode)
+}
+
+// Ring owns the ring presentation and the routing capture that selects it.
+// The frames reach the hardware only while the capture wins routing; releasing
+// both restores whatever baseline the device had selected.
+type Ring struct {
+	presentation ringPresentation
+	capture      ringCapture
+}
+
+// openRing publishes the presentation and acquires the capture that makes it
+// routable. A presentation alone is not selected: the daemon keeps the
+// configured ring baseline on the hardware, so the cover-art palette would
+// never reach the LEDs. The capture is the app's claim on the resource; its
+// release restores the selected baseline. ctx bounds the grant wait and owns
+// the returned streams, so a cancelled acquisition closes the presentation it
+// already opened instead of leaving an unroutable one behind.
+func openRing(ctx context.Context, r ringer) (session.Ring, error) {
+	presentation, err := r.OpenPresentation(ctx, ringResource)
 	if err != nil {
 		return nil, err
 	}
-	return &Ring{presentation: presentation}, nil
+	capture, err := r.OpenCapture(ctx, ringResource, presentation.ID(), capsulad.CaptureModeUnspecified)
+	if err != nil {
+		_ = presentation.Close()
+		return nil, fmt.Errorf("capture the LED ring: %w", err)
+	}
+	return &Ring{presentation: presentation, capture: capture}, nil
+}
+
+// OpenRing acquires the LED ring presentation and its routing capture under
+// ctx. The capture grant may wait for routing, so the caller acquires beside
+// playback and cancels ctx at session teardown; the context must stay live
+// while the returned ring is in use, because it also owns both framework
+// streams.
+func (rt *Runtime) OpenRing(ctx context.Context) (session.Ring, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return openRing(ctx, sdkRinger{client: rt.client})
 }
 
 // Pixels writes one 12-pixel frame.
@@ -544,8 +603,12 @@ func (r *Ring) Pixels(pixels []byte) error {
 	return r.presentation.Ring(frame)
 }
 
-// Close releases the ring presentation.
-func (r *Ring) Close() error { return r.presentation.Close() }
+// Close releases the routing capture first, which hands the resource back to
+// the selected baseline, then destroys the presentation.
+func (r *Ring) Close() error {
+	r.capture.Close()
+	return r.presentation.Close()
+}
 
 // Sink is a framework playback stream on audio.output.speaker.
 type Sink struct {

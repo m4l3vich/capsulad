@@ -60,7 +60,9 @@ type Transport interface {
 	OpenUDPListener(address string, port int, joinGroup string) (UDPListener, error)
 }
 
-// Ring is the ring presentation the receiver drives while a session is live.
+// Ring is the ring presentation the receiver drives while a session is live,
+// including the routing capture that selects it. Close releases both and
+// returns the resource to the configured baseline.
 type Ring interface {
 	// Pixels writes one frame; the slice is 12 RGB triples, pixel 0 at the top.
 	Pixels(pixels []byte) error

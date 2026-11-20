@@ -137,10 +137,42 @@ func playAndMeasure(t *testing.T, m *Manager, sink *levelSink, appID string, for
 	return sink.peak()
 }
 
-// TestMixerAppliesLinearMaster pins the unchanged linear master below the
-// limiter threshold. The earlier contract was verified at 1.0 as well; that
+// TestMasterVolumeGainIsLogarithmic pins the taper itself: the persisted
+// position is exponential in amplitude and linear in dB, with exact silence
+// and unity at the ends. A 5% position is far below the old linear factor.
+func TestMasterVolumeGainIsLogarithmic(t *testing.T) {
+	if got := MasterVolumeGain(0); got != 0 {
+		t.Fatalf("gain at 0 = %v, want exact silence", got)
+	}
+	if got := MasterVolumeGain(1); got != 1 {
+		t.Fatalf("gain at 1 = %v, want exact unity", got)
+	}
+	for _, level := range []float64{-0.5, math.NaN(), 1.5, math.Inf(1)} {
+		got := MasterVolumeGain(level)
+		if math.IsNaN(got) || got < 0 || got > 1 {
+			t.Fatalf("gain at %v = %v, want a finite [0,1] value", level, got)
+		}
+	}
+	five := MasterVolumeGain(0.05)
+	if want := math.Pow(10, -57.0/20); math.Abs(five-want) > 1e-12 {
+		t.Fatalf("gain at 5%% = %.12f, want %.12f (-57 dB)", five, want)
+	}
+	if five > 0.05/10 {
+		t.Fatalf("gain at 5%% = %.6f; the taper must be much quieter than a linear 0.05", five)
+	}
+	if want := math.Pow(10, -30.0/20); math.Abs(MasterVolumeGain(0.5)-want) > 1e-12 {
+		t.Fatalf("gain at 50%% = %.12f, want %.12f (-30 dB)", MasterVolumeGain(0.5), want)
+	}
+	db := func(level float64) float64 { return 20 * math.Log10(MasterVolumeGain(level)) }
+	if step1, step2 := db(0.5)-db(0.25), db(0.75)-db(0.5); math.Abs(step1-step2) > 1e-9 {
+		t.Fatalf("equal position steps are not equal dB steps: %.12f vs %.12f", step1, step2)
+	}
+}
+
+// TestMixerAppliesMasterTaper pins the tapered master below the limiter
+// threshold. The earlier linear contract was verified at 1.0 as well; that
 // level now passes through the limiter and is covered separately.
-func TestMixerAppliesLinearMaster(t *testing.T) {
+func TestMixerAppliesMasterTaper(t *testing.T) {
 	format := backend.AudioFormat{Format: backend.S16LE, RateHz: 44100, Channels: 2}
 	clip := s16FullScale(44100, 4410*4)
 	for _, vol := range []float64{0.5, 0.25, 0.1} {
@@ -148,7 +180,7 @@ func TestMixerAppliesLinearMaster(t *testing.T) {
 		m := newLevelManager(t, sink)
 		m.SetMasterVolume(vol)
 		peak := playAndMeasure(t, m, sink, "test.audio", format, clip, 400*time.Millisecond)
-		want := s16Level(vol)
+		want := s16Level(MasterVolumeGain(vol))
 		if diff := peak - want; diff < -2 || diff > 2 {
 			t.Errorf("master %.2f: sink peak %d, want %d ±2", vol, peak, want)
 		}
@@ -156,9 +188,8 @@ func TestMixerAppliesLinearMaster(t *testing.T) {
 	}
 }
 
-// TestMixerFullScaleAtUnityIsLimited documents the one non-linear level: at
-// master 1.0 a full-scale stream sits at the limiter threshold, not at the
-// int16 rail.
+// TestMixerFullScaleAtUnityIsLimited documents the limiter at unity: a
+// full-scale stream sits at the limiter threshold, not at the int16 rail.
 func TestMixerFullScaleAtUnityIsLimited(t *testing.T) {
 	sink := &levelSink{}
 	m := newLevelManager(t, sink)
@@ -174,7 +205,7 @@ func TestMixerFullScaleAtUnityIsLimited(t *testing.T) {
 
 func TestF32OutOfRangeClamped(t *testing.T) {
 	format := backend.AudioFormat{Format: backend.F32LE, RateHz: 48000, Channels: 2}
-	want := s16Level(0.1)
+	want := s16Level(MasterVolumeGain(0.1))
 	for _, amp := range []float32{1, 2, 10, 100} {
 		sink := &levelSink{}
 		m := newLevelManager(t, sink)
@@ -219,7 +250,7 @@ func TestPerAppCeilingWithManyStreams(t *testing.T) {
 	}
 	time.Sleep(250 * time.Millisecond)
 	peak := sink.peak()
-	want := s16Level(0.6)
+	want := s16Level(MasterVolumeGain(0.6))
 	if diff := peak - want; diff < -2 || diff > 2 {
 		t.Fatalf("%d concurrent full-scale streams peaked %d, want the per-app ceiling %d", maxPlaybackStreamsPerApp, peak, want)
 	}
@@ -234,7 +265,7 @@ func TestPerAppCeilingWithManyStreams(t *testing.T) {
 func TestLimiterPreventsClippingOverlappingApps(t *testing.T) {
 	sink := &levelSink{}
 	m := newLevelManager(t, sink)
-	m.SetMasterVolume(0.9)
+	m.SetMasterVolume(1)
 	format := backend.AudioFormat{Format: backend.S16LE, RateHz: 48000, Channels: 2}
 	sink.reset()
 	a, err := m.OpenPlayback("app.a", "run-a", "audio.output.speaker", format, "")
@@ -271,7 +302,7 @@ func TestLimiterPreventsClippingOverlappingApps(t *testing.T) {
 	}
 	peak = playAndMeasure(t, m, sink, "app.c",
 		backend.AudioFormat{Format: backend.S16LE, RateHz: 48000, Channels: 2}, quiet, 200*time.Millisecond)
-	want := s16Level(0.5 * 0.9)
+	want := s16Level(0.5 * MasterVolumeGain(1))
 	if diff := peak - want; diff < -50 || diff > 2 {
 		t.Fatalf("post-release quiet peak %d, want about %d", peak, want)
 	}
@@ -282,10 +313,10 @@ func TestDuckingUnaffectedByCeiling(t *testing.T) {
 	m := newLevelManager(t, sink)
 	m.SetMasterVolume(0.5)
 	format := backend.AudioFormat{Format: backend.S16LE, RateHz: 48000, Channels: 2}
-	// Without a conversation, a stream plays at the master level.
+	// Without a conversation, a stream plays at the tapered master gain.
 	peak := playAndMeasure(t, m, sink, "test.audio", format, s16FullScale(48000, 4800), 150*time.Millisecond)
-	if diff := peak - s16Level(0.5); diff < -2 || diff > 2 {
-		t.Fatalf("unducked stream peak %d, want 0.5 FS", peak)
+	if diff := peak - s16Level(MasterVolumeGain(0.5)); diff < -2 || diff > 2 {
+		t.Fatalf("unducked stream peak %d, want the master taper", peak)
 	}
 	// An unrelated stream ducks to 0.25 with the existing 150 ms fade. The
 	// stream must be open for the fade to run: gain starts at unity when a
@@ -305,7 +336,7 @@ func TestDuckingUnaffectedByCeiling(t *testing.T) {
 	other.Close()
 	time.Sleep(30 * time.Millisecond)
 	peak = sink.peak()
-	want := s16Level(0.5 * 0.25)
+	want := s16Level(MasterVolumeGain(0.5) * 0.25)
 	if diff := peak - want; diff < -2 || diff > 2 {
 		t.Fatalf("ducked stream peak %d, want %d", peak, want)
 	}
@@ -328,7 +359,7 @@ func TestCueTrimStillApplies(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	p.Close()
 	time.Sleep(30 * time.Millisecond)
-	want := s16Level(0.5 * 0.4)
+	want := s16Level(MasterVolumeGain(0.5) * 0.4)
 	if peak := sink.peak(); peak-want < -2 || peak-want > 2 {
 		t.Fatalf("trimmed cue peak %d, want %d", peak, want)
 	}

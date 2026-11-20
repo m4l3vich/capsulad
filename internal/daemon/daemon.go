@@ -239,7 +239,13 @@ type Daemon struct {
 	invMu       sync.Mutex
 	invocations map[string]*invocationRecord
 	pending     map[string][]*invocationRecord
-	lastSel     map[string]string
+	// delivery records each run's invocation-routing state under invMu. The
+	// zero value (absent) is STARTING, where launches queue; APP_READY flips it
+	// to deliveryReady before pending is drained, and run cleanup flips it to
+	// deliveryEnded so a late launch cannot append an invocation nothing will
+	// flush. Launch routing and the append share invMu with both transitions.
+	delivery map[string]runDelivery
+	lastSel  map[string]string
 
 	// activations records framework-issued assistant activations so microphone
 	// pre-roll is attached only to a real activation delivered to that app, not
@@ -440,15 +446,17 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	}
 	d := &Daemon{
 		cfg: cfg, ctx: ctx, cancel: cancel, clock: clock, logs: logs, bootID: ids.New("boot"),
-		hardwareSerial: readHardwareSerialAt(serialPath, serialFields),
-		internalToken:  internalToken,
-		prov:           map[string]provenance.Result{},
-		invocations:    map[string]*invocationRecord{}, pending: map[string][]*invocationRecord{},
-		activations: map[string]activationGrant{},
-		lastSel:     map[string]string{},
-		runSubs:     map[int]chan supervisor.Run{},
-		closing:     make(chan struct{}),
-		uiChanges:   uichanges.New(),
+		hardwareSerial:    readHardwareSerialAt(serialPath, serialFields),
+		internalToken:     internalToken,
+		prov:              map[string]provenance.Result{},
+		invocations:       map[string]*invocationRecord{},
+		pending:           map[string][]*invocationRecord{},
+		delivery:          map[string]runDelivery{},
+		activations:       map[string]activationGrant{},
+		lastSel:           map[string]string{},
+		runSubs:           map[int]chan supervisor.Run{},
+		closing:           make(chan struct{}),
+		uiChanges:         uichanges.New(),
 		installSlot:       make(chan struct{}, 1),
 		installIdleBudget: defaultInstallIdleBudget,
 	}

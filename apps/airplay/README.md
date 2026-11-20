@@ -11,10 +11,13 @@ The app is a normal supervised package. It never binds a socket: the daemon
 allocates every listener (the RTSP control port, each audio channel and the
 event channel) and passes the descriptor over the run's control channel. It
 never talks to hardware: audio goes to `audio.output.speaker`, the ring is a
-`light.ring.main` presentation, and the daemon's Avahi responder publishes the
-mDNS records. No HTTP, TLS or gRPC stack is bundled; the AirPlay protocol, its
-pairing crypto and its codecs are implemented in this package on top of the Go
-standard library and `golang.org/x/crypto`.
+`light.ring.main` presentation with the routing capture that selects it, and
+the daemon's Avahi responder publishes the mDNS records. The ring capture is
+acquired beside playback and owned by the sender session, so a grant waiting
+on routing never delays `RECORD` or the first buffered PCM block. No HTTP, TLS
+or gRPC stack is bundled; the AirPlay protocol, its pairing crypto and its
+codecs are implemented in this package on top of the Go standard library and
+`golang.org/x/crypto`.
 
 ## Supported sender flows
 
@@ -32,7 +35,7 @@ standard library and `golang.org/x/crypto`.
 | FairPlay handshake | Implemented, no DRM | `POST /fp-setup` serves the same fixed protocol replies as upstream (Shairport Sync `handle_fp_setup`), so a sender's handshake completes. Those constants decrypt nothing: FairPlay-encrypted content is not playable by either implementation. Feature bit 14 (Authentication4) is advertised by default and claims only this handshake, never DRM content or MFi. |
 | AirPlay 2 buffered stream (type 103) | Implemented | Available only on the authenticated control channel, with a mandatory 32-byte `shk`. The daemon allocates the TCP `dataPort` and `SETUP` returns its actual 8 MiB bounded queue (and deliberately no `streamID`). Packets use the length-prefixed encrypted RTP layout and select ALAC 48 kHz/24-bit stereo (`0x15000000`, always available) or AAC-LC 44.1/48 kHz stereo (`0x16000000`/`0x17000000`, FFmpeg builds). Audio is buffered after `SETUP` until a valid `SETRATEANCHORTI` or the field client's `SETRATEANCHORTIME` anchor names `rtpTime` and network time; the anchor's timeline ID selects that sender's PTP source, and an absent or undisciplined source falls back to local arrival time rather than another source's offset. `FLUSHBUFFERED` implements immediate and deferred sequence/timestamp ranges, and pause, teardown, disconnect and takeover discard obsolete output. Playback state becomes PLAYING only after decoded PCM reaches the sink. |
 | Legacy RAOP (ANNOUNCE + SETUP + RTP) | Implemented, without the timing exchange | SDP parsing, `a=rsaaeskey` decrypted with the receiver's RSA key (RSA-OAEP/SHA-1, the reference's mode), AES-128-CBC audio, UDP transport with receiver-chosen data **and control** ports (the control socket is drained; retransmission recovery is not implemented because no packet cache is kept), or interleaved TCP RTP (`$` frames on the control connection). The RAOP NTP-style timing exchange is not implemented and the SETUP reply advertises `timing_port=0`, so a legacy sender gets no receiver clock service. The RSA key is not published in `_raop._tcp` (see [advertisement records](#transport-and-lifecycle-details)), so a sender that takes the key from the TXT record cannot use the encrypted RSA path; the legacy SETUP response body still carries the RSA public key. |
-| Metadata | Implemented | DMAP text (title/artist/album/composer/genre), `progress:` position, cover art (JPEG/PNG) as a ring palette. |
+| Metadata | Implemented | AirPlay 2 now-playing commands arrive as `POST /command` plists on the main encrypted RTSP control channel (`updateMRNowPlayingInfo` with an `npi-text` record: title/artist/album, duration, elapsed time, playback rate and embedded JPEG/PNG artwork), plus the legacy RAOP DMAP text and `progress:` parameter; both reach the media contract and the ring palette. Inbound commands on the event channel are also accepted as a tolerance, though Apple's sender and the reference receiver carry them on the control channel. |
 | Remote control | Implemented | The sender's event channel is bidirectional: the receiver posts `sendMediaRemoteCommand` (play 0, pause 1, next 4, previous 5) with the standard `params` dictionary. |
 | Group membership advertisement | Implemented to upstream's level | A `gid` sent with `SETUP` is recorded and republished as the mDNS `gid` with `gcgl=0`, which is what upstream does. Neither implementation synchronises playback across a group, so multi-room audio is *not* claimed. |
 | Volume | Implemented; one persisted master | `SET_PARAMETER volume: dB` (text) and a binary-plist `volume` take the same path: only the promoted HAP-keyed active media owner can move the speaker master. Pause keeps ownership; candidates, event-only/type-130 connections, legacy plaintext RAOP and retired sessions get the reference's `200` no-op. The reference transfer is linear over the valid slider: -30..0 dB maps to master 0..1 (`(dB+30)/30`), -144 dB and values at or below -30 map to 0, and positive/non-finite/out-of-contract values are ignored rather than raising the speaker. `/info` `initialVolume`, `updateInfo`, `GET_PARAMETER` and `dvlc` all derive from that master; sender PCM is never scaled by it. | Shairport Sync `utilities/general_utilities.c:30-36` (transfer), `rtsp.c:3219-3247` (principal-only SET), `rtsp.c:1208` + `player.c:3398-3404` (initialVolume), `rtsp.c:3313-3322` (GET), `player.c:5420-5422` (persistence). |
@@ -99,7 +102,7 @@ NQPTP 1.2.9.
 | Legacy RAOP: SDP, RSA-OAEP key, AES-128-CBC, UDP/interleaved TCP | `rtsp.c` `handle_announce`, `rtp.c` | Implemented; RSA-OAEP/SHA-1 matches `common.c` `rsa_apply`. |
 | RTSP method set (`OPTIONS`, `ANNOUNCE`, `SETUP`, `RECORD`, `SET_PARAMETER`, `GET_PARAMETER`, `FLUSH`, `FLUSHBUFFERED`, `TEARDOWN`, `SETRATEANCHORTI`, `SETRATEANCHORTIME`, `SETMAGICCOOKIE`, `SETPEERS(X)`, `/feedback`, `/command`, `/audioMode`, `/configure`) | `rtsp.c` dispatch table (the AP2 anchor handler literal is `SETRATEANCHORTI`; an iPhone field client sent the full spelling `SETRATEANCHORTIME`) | Both anchor spellings are advertised in `OPTIONS Public`, route to one handler and carry the same plist body; the other methods have the same semantics, and unknown paths/methods get an explicit refusal. |
 | PTP timing through NQPTP (ports 319/320, multicast 224.0.0.1) | `AIRPLAY2.md` ("NQPTP must have exclusive access to ports 319 and 320") | Bounded per-source slave fits behind one daemon-mediated multicast listener (`join_group`, group fixed to 224.0.0.1, LAN interfaces only); buffered anchors select by timeline ID. Lock quality is untested (no sender). |
-| Metadata: DMAP text, `progress:`, cover art, remote control over the event channel | `metadata/*`, `remote/remote.c`, `ap2_event_receiver.c` | Implemented to the same packet layouts (command numbers 0/1/4/5 and the `params` dictionary). |
+| Metadata: now-playing command plists on the encrypted control channel, DMAP text, `progress:`, cover art, remote control over the event channel | `metadata/metadata_hub_handle_command_plist.c` (`updateMRNowPlayingInfo` / `npi-text` / `mergePolicy`, `kMRMediaRemoteNowPlayingInfo*`, `updateMRPlaybackState`), `rtsp.c` `handle_command` (AP2 only, dispatched from the control connection's `handle_post`), `metadata/hub.c`, `remote/remote.c`, `ap2_event_receiver.c` (write-only for receiver→sender commands) | The AirPlay 2 command record is read at the same nesting, with `replace`/`update` merge semantics, title/artist/album, duration/elapsed time and `ArtworkData`; PlaybackRate is informational and does not move the transport. The legacy DMAP and `progress:` layouts remain. Remote control uses command numbers 0/1/4/5 and the `params` dictionary. |
 | Group advertisement `gid`/`gcgl` | `bonjour_strings.c`, `rtsp.c` SETUP | Implemented; no cross-receiver sync, exactly like upstream. |
 | No FairPlay or MFi content decryption | `handle_fp_setup` only; `RELEASENOTES.md` MFi note | Same: the handshake completes, DRM content is not decrypted, MFi is not claimed. |
 | MP3/AAC/Opus decoders | upstream's FFmpeg build enables AAC and ALAC only | ALAC (Go) and AAC (FFmpeg) are implemented; Opus is refused; MP3 is not an AirPlay audio codec. |
@@ -180,9 +183,12 @@ NQPTP 1.2.9.
   discards every queued sequence below the endpoint; deferred discards `[from, until)`. Both use
   the reference's 23-bit sequence selection; timestamps travel on the wire but do not override it.
   A present but malformed or out-of-range field, or a partial pair, is refused before playout
-  changes. `TEARDOWN`, a
-  control disconnect, an invalid takeover and shutdown abort the buffered reader and sink
-  promptly and release the player and ring.
+  changes. An immediate `FLUSHBUFFERED` retires every affected type-103 playout generation
+  before it publishes the pause, so a stale write completion cannot turn PAUSED into PLAYING
+  and back. `TEARDOWN`, a
+  control disconnect, an invalid takeover and shutdown stop the buffered reader and abort its
+  sink before releasing the ring capture, then release the player. A stalled framework capture
+  release therefore cannot keep the old sender's queued audio draining.
 - **Advertisement ordering.** Session start/end, a group-id update and the *Re-advertise*
   action all publish through one serialized path. A second request waits, then withdraws and
   replaces the first record instead of racing the same instance, and shutdown waits for an
@@ -232,9 +238,11 @@ NQPTP 1.2.9.
 - **Feedback.** The player appears through the media contract (buffering, then
   playing); the ring shows the cover palette with the audio envelope, or a dim
   neutral breath without cover art. No cover art is ever invented.
-- **Ownership.** The ring presentation and the playback stream are owned by the
-  session and released on teardown, connection loss, takeover, idle timeout,
-  app stop or receiver settings change.
+- **Ownership.** The ring presentation, the routing capture that selects it and
+  the playback stream are owned by the session and released on teardown,
+  connection loss, takeover, idle timeout, app stop or receiver settings change.
+  Releasing the capture returns the ring to the device's selected baseline; the
+  presentation is closed after it.
 - **Interruption.** A pause (`rate 0`) flushes queued audio and reports
   `PLAYBACK_PAUSED`; a resume re-anchors playout. Panel gestures and the Web UI
   reach the sender through the event channel; they are never a private
@@ -246,11 +254,67 @@ NQPTP 1.2.9.
   returns to the device's selected baseline, and the playback stream is aborted
   (not drained) so a stopped session makes no late sound.
 
+### Now-playing metadata
+
+- **Trigger.** A paired AirPlay 2 sender posts `updateMRNowPlayingInfo` command
+  plists as `POST /command` on the **main encrypted RTSP control channel**, in
+  the shape `type=updateMRNowPlayingInfo`, `params.type=npi-text`,
+  `params.params.kMRMediaRemoteNowPlayingInfo…`. Title, artist, album, duration,
+  elapsed time and the embedded `kMRMediaRemoteNowPlayingInfoArtworkData` image
+  come from that record; its playback rate is carried but treated as
+  informational (see Interruption and merging). `updateMRPlaybackState`
+  (`mrPlaybackState` 1/2/3) reports playing, paused and stopped. A plist
+  `SET_PARAMETER` and the legacy RAOP DMAP/`progress:` path feed the same session
+  state, so a sender can use whichever flow it negotiates.
+  Inbound commands on the event channel are accepted too; that is a tolerance
+  for the receiver's bidirectional channel, not the Apple Music wire path.
+- **Feedback.** Every command is answered with `200` on the channel it arrived
+  on. The receiver publishes the merged title/artist/album, duration and
+  position through the media contract (`ListPlayers`/`WatchPlayers`), which the
+  Web UI's Now Playing card displays, and shows the artwork palette on
+  `light.ring.main` with brightness following the outgoing PCM envelope. The
+  bookkeeping is session state, not a new framework interface.
+- **Ownership.** A candidate's commands are stored on its `Session` and never
+  reach the live board (the board generation is zero) or another sender's ring;
+  promotion replays the text, timeline (including a record that carries only
+  duration and elapsed time), artwork and last playback state into the
+  generation the new owner starts. The replay and live updates share one
+  publication order, so a slow artwork decode cannot repaint an older record
+  over a newer one. A command that arrives after a takeover carries the retired
+  generation and is dropped by the board's generation check.
+- **Interruption and merging.** `mergePolicy=update` changes only the fields the
+  record carries, so a title/position update keeps the current artist, album and
+  cover. `mergePolicy=replace` clears the previous record first: fields the new
+  record omits disappear, and a cover the new record does not carry (or whose
+  image cannot be decoded) clears the palette instead of leaving the last
+  track's colours under a new title. A nested record is accepted only when
+  `params.type` is exactly `npi-text`; a malformed envelope is ignored rather
+  than read as a replace that would clear the live record. The older flat
+  record form keeps its separate keys-only rule. The record's `PlaybackRate` is
+  informational: it never pauses or resumes audio and never discards queued
+  sound, because the transport follows `SETRATEANCHORTI`/`SETRATEANCHORTIME`,
+  `PAUSE` and `RECORD`. `updateMRPlaybackState` is display feedback, not a
+  transport command: a type-103 player stays buffering until decoded PCM
+  reaches the sink, and an explicit paused or stopped report outranks
+  PCM-derived playing, so an in-flight packet cannot repaint it. A pause,
+  immediate flush or reconnected data channel retires the current PCM
+  generation; an explicit playing report after that boundary stays buffering
+  until fresh PCM arrives, and a late completion from the retired generation
+  cannot repaint it either. PCM evidence is per type-103 stream: opening or
+  pausing one stream does not erase another stream's current evidence. The
+  first cover on a fresh
+  session is preceded by the documented neutral breath; no artwork is invented.
+- **Cleanup.** `TEARDOWN`, connection loss, takeover, idle timeout and app stop
+  release the media player, the ring presentation and its routing capture, and
+  the session's playback state. The elapsed position is shown as the sender
+  reported it; the receiver does not extrapolate it from the record's timestamp.
+
 ## Interface
 
 This app provides `capsulad.contracts.media.v1.MediaPlayerService` (descriptor
 `proto/media.protoset`, documentation `docs/media.md`). It consumes
-`light.ring.main` (presentation) and `audio.output.speaker` (playback), and it
+`light.ring.main` (presentation and routing capture) and `audio.output.speaker`
+(playback), and it
 publishes `_airplay._tcp` and `_raop._tcp` through the daemon's responder. Both records carry the
 same ed25519 HomeKit `pk`; the daemon rejects a TXT item over 255 bytes, which is why the legacy
 RSA key is not in either record.
@@ -383,8 +447,12 @@ harness: they cover the pairing crypto, the RTSP/DMAP/plist/TLV codecs, ALAC
 against fixtures produced by a real encoder (ffmpeg), RTP encryption and
 reordering, the RAOP SDP/key exchange, the PTP clock, and end-to-end sessions
 over in-memory and real loopback TCP (pair-verify → encrypted control channel →
-`SETUP` → realtime or type-103 audio → ring/media state → `TEARDOWN`). They do
-not touch the speaker, an Apple sender or the LAN.
+`SETUP` → realtime or type-103 audio → now-playing command plists with two
+different cover images → media state → `TEARDOWN`). The now-playing regression
+uses the sender's nested `updateMRNowPlayingInfo`/`npi-text` plists, asserts the
+`replace`/`update` merge rules, the artwork palette on the ring, playback-state
+feedback and the candidate-to-owner replay; it runs under `-race` with the other
+session lifecycle tests. They do not touch the speaker, an Apple sender or the LAN.
 
 ## Interoperability gate
 

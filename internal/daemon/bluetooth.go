@@ -207,14 +207,16 @@ func bluetoothVolumeStep(level float64) uint16 {
 }
 
 // applyBluetoothGain applies the framework master locally and mirrors it to the
-// source. The local stage is unchanged and remains the only gain: writing the
-// AVRCP register used to attenuate the same signal twice (10 % on both ends
-// sounded near-silent, because the product curve already scales the stream by the
-// master), and compensating the local trim for the source's share made it far too
-// loud — macOS reports the written value back without attenuating the A2DP
-// stream, so the "confirmation" that the source applies it is not evidence. The
-// write that remains is the display mirror: the source's own level indicator
-// follows the speaker, and the peer's echo of it is filtered instead of adopted.
+// source. On the native sink the local gain is the framework mixer's canonical
+// taper and nothing else: writing the AVRCP register used to attenuate the same
+// signal twice (10 % on both ends sounded near-silent), and compensating the
+// local trim for the source's share made it far too loud — macOS reports the
+// written value back without attenuating the A2DP stream, so the "confirmation"
+// that the source applies it is not evidence. The PulseAudio fallback bypasses
+// the mixer, so it applies the same canonical taper as its local safety gain.
+// The write that remains is the display mirror: the source's own level
+// indicator follows the speaker, and the peer's echo of it is filtered instead
+// of adopted.
 func (d *Daemon) applyBluetoothGain(level float64) {
 	if d.bt == nil {
 		return
@@ -226,9 +228,10 @@ func (d *Daemon) applyBluetoothGain(level float64) {
 	}
 	d.btGain, d.btGainSet = level, true
 	d.btMu.Unlock()
-	if d.bluetoothNative() {
-		d.setBluetoothStreamTrim(level)
-	} else {
+	if !d.bluetoothNative() {
+		// The PulseAudio fallback bypasses the framework mixer, so it carries
+		// the canonical taper as its local safety gain. The native sink writes
+		// into the mixer and needs no second stage.
 		d.setBluetoothPlaybackGain(level)
 	}
 	d.mirrorBluetoothVolume(level)
@@ -577,8 +580,9 @@ func (d *Daemon) watchBluetooth() {
 				d.applyBluetoothSourceVolume(ev.Volume)
 			case bluetooth.EventVolumeUnavailable:
 				// Once per source session: the host has no writable absolute
-				// volume, so the master level only moves the local trim. The
-				// media detail says so as well.
+				// volume, so the master level only moves the local mixer taper
+				// (or the fallback's local safety gain). The media detail says
+				// so as well.
 				d.logs.Warnf("bluetooth", "", "%s", ev.Detail)
 			case bluetooth.EventTransport:
 				// BlueZ configured a usable transport; acquire it now instead

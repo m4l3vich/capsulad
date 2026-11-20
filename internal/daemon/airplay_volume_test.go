@@ -31,7 +31,6 @@ name = "AirPlay receiver fixture"
 version = "0.1.0"
 background = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "native"
@@ -78,6 +77,40 @@ func airPlayVolumeDaemon(t *testing.T) *Daemon {
 // output are both checked. Every other identity is denied before any write.
 func TestAirPlayMasterVolumeAuthorization(t *testing.T) {
 	d := airPlayVolumeDaemon(t)
+
+	// A live run that has not completed APP_READY is not an authorization
+	// source even when its app ID and PID match. A native app is a singleton,
+	// so the not-ready fixture must be the app's only run: exercise it before
+	// the ready receiver starts. Start a real child that never connects to the
+	// bus and leave it parked in Starting.
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "airplay-not-ready")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notReadyManifest := &manifest.Manifest{
+		ID: airPlayReceiverAppID, Name: "AirPlay not ready", Version: "0.1.0",
+		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeNative, Path: filepath.Base(script)},
+	}
+	notReadyManifest.Dir = scriptDir
+	beforeNotReady := d.user.Get().Values.MasterVolume
+	starting, spawned, err := d.sup.StartIfAbsent(notReadyManifest, "test-airplay-not-ready")
+	if err != nil || !spawned {
+		t.Fatalf("start not-ready fixture: spawned=%v err=%v", spawned, err)
+	}
+	if _, err := setMasterVolumeRPC(d, airPlayVolumeContext(starting.RunID, starting.PID, true), 0.5); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("not-ready AirPlay run code = %v, want PermissionDenied", status.Code(err))
+	}
+	if got := d.user.Get().Values.MasterVolume; got != beforeNotReady {
+		t.Fatalf("not-ready AirPlay run changed durable master from %v to %v", beforeNotReady, got)
+	}
+	if !d.sup.Stop(starting.RunID) {
+		t.Fatal("stop not-ready fixture")
+	}
+	waitFor(t, 5*time.Second, "not-ready fixture removed", func() bool {
+		_, found := d.sup.Get(starting.RunID)
+		return !found
+	})
 
 	airRunID, _, spawned, err := d.Launch(airPlayReceiverAppID, map[string]string{})
 	if err != nil || !spawned {
@@ -127,9 +160,9 @@ func TestAirPlayMasterVolumeAuthorization(t *testing.T) {
 	sendAndDrain(t, stream, fullScaleS16(24000))
 	time.Sleep(50 * time.Millisecond)
 	peak := outputPeak(tail.LastOutput())
-	wantPeak := s16Code(level)
+	wantPeak := s16Code(audio.MasterVolumeGain(level))
 	if diff := peak - wantPeak; diff < -2 || diff > 2 {
-		t.Fatalf("master %v sink peak %d, want %d ±2", level, peak, wantPeak)
+		t.Fatalf("master %v sink peak %d, want tapered gain %d ±2", level, peak, wantPeak)
 	}
 
 	before := d.user.Get().Values.MasterVolume
@@ -179,30 +212,6 @@ func TestAirPlayMasterVolumeAuthorization(t *testing.T) {
 	if got := d.audio.MasterVolume(); got != before {
 		t.Fatalf("expired queued writer changed mixer master from %v to %v", before, got)
 	}
-
-	// A live run that has not completed APP_READY is not an authorization
-	// source even when its app ID and PID match. Start a real child that
-	// never connects to the bus and park it in Starting.
-	scriptDir := t.TempDir()
-	script := filepath.Join(scriptDir, "airplay-not-ready")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	m := &manifest.Manifest{
-		ID: airPlayReceiverAppID, Name: "AirPlay not ready", Version: "0.1.0",
-		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeNative, Path: filepath.Base(script)},
-	}
-	m.Dir = scriptDir
-	starting, err := d.sup.Start(m, "test-airplay-not-ready")
-	if err != nil {
-		t.Fatalf("start not-ready fixture: %v", err)
-	}
-	deny("not ready", airPlayVolumeContext(starting.RunID, starting.PID, true))
-	d.sup.Stop(starting.RunID)
-	waitFor(t, 5*time.Second, "not-ready fixture removed", func() bool {
-		_, found := d.sup.Get(starting.RunID)
-		return !found
-	})
 
 	// A queued writer must not persist after the AirPlay owner is stopped
 	// while it waits. Stop the run under the held write lock, then let the

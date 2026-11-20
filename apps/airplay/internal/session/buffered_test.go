@@ -734,7 +734,7 @@ func TestBufferedConnectionClaimRejectsAuthenticatedReplacement(t *testing.T) {
 	stream.connID = 7
 	stream.connAuthenticated = true
 	stream.mu.Unlock()
-	if id, _, claimed := stream.beginConnection(true); claimed || id != 0 {
+	if id, _, _, claimed := stream.beginConnection(true); claimed || id != 0 {
 		t.Fatalf("authenticated owner was replaced: id=%d claimed=%v", id, claimed)
 	}
 	stream.mu.Lock()
@@ -744,7 +744,7 @@ func TestBufferedConnectionClaimRejectsAuthenticatedReplacement(t *testing.T) {
 	}
 	stream.connAuthenticated = false
 	stream.mu.Unlock()
-	if id, _, claimed := stream.beginConnection(true); !claimed || id != 8 {
+	if id, _, _, claimed := stream.beginConnection(true); !claimed || id != 8 {
 		t.Fatalf("unauthenticated replacement claim = %d/%v, want 8/true", id, claimed)
 	}
 }

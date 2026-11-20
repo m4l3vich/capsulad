@@ -1119,3 +1119,674 @@ func TestBufferedFeatureOverridesRemainTruthful(t *testing.T) {
 		}
 	}
 }
+
+// type103Rig is one authenticated type-103 session over the real loopback
+// transport: control channel, staged stream, data connection and the shared
+// key the sender encrypts records with.
+type type103Rig struct {
+	mgr    *Manager
+	board  *media.Board
+	owner  *Session
+	client *rtspClient
+	data   *realStream
+	shk    []byte
+	stream *audioStream
+}
+
+func startType103Rig(t *testing.T, rings RingFactory, sinks SinkFactory) *type103Rig {
+	t.Helper()
+	transport := &realTransport{}
+	t.Cleanup(transport.Close)
+	board := media.NewBoard()
+	mgr, err := NewManager(Config{
+		DeviceID: "aabbccddeeff", Name: "Type-103 State Test", Port: 0,
+		FrameTarget: 100 * time.Millisecond, RingEnabled: true, Logf: t.Logf,
+	}, transport, &fakeAdvertiser{}, rings, sinks, board, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	port := mgr.advertisedPort()
+
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("controller key: %v", err)
+	}
+	const controllerID = "type103-state-controller"
+	mgr.Store().SetControllerLTPK(controllerID, public)
+	control := dialTCPStream(t, port)
+	t.Cleanup(func() { _ = control.Close() })
+	client := newRTSPClient(control)
+	shared := pairVerify(t, client, controllerID, private)
+	keys := hapcrypt.ControlChannelKeys(shared)
+	encrypted, err := hapcrypt.NewSession(control, keys.Inbound, keys.Outbound)
+	if err != nil {
+		t.Fatalf("encrypted control channel: %v", err)
+	}
+	client.setStream(&rwStream{rw: encrypted})
+
+	shk := make([]byte, 32)
+	if _, err := rand.Read(shk); err != nil {
+		t.Fatalf("shk: %v", err)
+	}
+	body, err := plist.EncodeBinary(map[string]any{
+		"streams": []any{map[string]any{
+			"type":        int64(streamTypeBuffered),
+			"audioFormat": int64(bufferedFormatALAC48S24Stereo),
+			"spf":         int64(352),
+			"shk":         shk,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode SETUP: %v", err)
+	}
+	setup, err := client.do("SETUP", "/1", "application/x-apple-binary-plist", body)
+	if err != nil || setup.status != 200 {
+		t.Fatalf("type-103 SETUP = %v %v", setup, err)
+	}
+	decoded, err := plist.Decode(setup.body)
+	if err != nil {
+		t.Fatalf("decode SETUP: %v", err)
+	}
+	setupDict, _ := decoded.(map[string]any)
+	streams, _ := setupDict["streams"].([]any)
+	if len(streams) != 1 {
+		t.Fatalf("SETUP streams = %v", setupDict["streams"])
+	}
+	streamDict, _ := streams[0].(map[string]any)
+	dataPort := int(plistUint(streamDict["dataPort"]))
+	if dataPort == 0 {
+		t.Fatalf("SETUP descriptor has no dataPort: %v", streamDict)
+	}
+	data := dialTCPStream(t, dataPort)
+	t.Cleanup(func() { _ = data.Close() })
+
+	waitUntil(t, "the type-103 owner", func() bool { return mgr.Active() != nil })
+	owner := mgr.Active()
+	waitUntil(t, "the launched type-103 stream", func() bool {
+		return len(owner.activeStreams()) == 1 && owner.activeStreams()[0].buffered != nil
+	})
+	// A new buffered data connection resets the anchor and queue when it is
+	// accepted. Wait for that generation before a test sends its first record
+	// and anchor, or the accept could discard both.
+	buffered := owner.activeStreams()[0].buffered
+	waitUntil(t, "the type-103 data connection", func() bool {
+		buffered.mu.Lock()
+		defer buffered.mu.Unlock()
+		return buffered.connID != 0
+	})
+	return &type103Rig{
+		mgr: mgr, board: board, owner: owner, client: client,
+		data: data, shk: shk, stream: owner.activeStreams()[0],
+	}
+}
+
+func (r *type103Rig) waitQueued(t *testing.T, want int) {
+	t.Helper()
+	waitForBuffered(t, "the buffered record to be admitted", func() bool {
+		r.stream.buffered.mu.Lock()
+		defer r.stream.buffered.mu.Unlock()
+		return r.stream.buffered.pendingLocked() >= want
+	})
+}
+
+func (r *type103Rig) playAnchor(t *testing.T, timestamp uint32) {
+	t.Helper()
+	body, err := plist.EncodeBinary(map[string]any{
+		"networkTimeSecs":       time.Now().Unix(),
+		"networkTimeFrac":       int64(0),
+		"networkTimeTimelineID": int64(1),
+		"rtpTime":               int64(timestamp),
+		"rate":                  int64(1),
+	})
+	if err != nil {
+		t.Fatalf("encode anchor: %v", err)
+	}
+	response, err := r.client.do("SETRATEANCHORTIME", "/1", "application/x-apple-binary-plist", body)
+	if err != nil || response.status != 200 {
+		t.Fatalf("SETRATEANCHORTIME = %v %v", response, err)
+	}
+}
+
+func sendPlaybackState(t *testing.T, client *rtspClient, state int64) {
+	t.Helper()
+	body, err := plist.EncodeBinary(map[string]any{
+		"type":   "updateMRPlaybackState",
+		"params": map[string]any{"mrPlaybackState": state},
+	})
+	if err != nil {
+		t.Fatalf("encode playback state: %v", err)
+	}
+	response, err := client.do("POST", "/command", "application/x-apple-binary-plist", body)
+	if err != nil || response.status != 200 {
+		t.Fatalf("updateMRPlaybackState %d = %v %v", state, response, err)
+	}
+}
+
+func playbackState(board *media.Board) string {
+	state, _ := board.Snapshot()["playbackState"].(string)
+	return state
+}
+
+// TestBufferedType103PlaybackStatePrecedence covers both directions of the
+// display rule: a sender's "playing" report cannot paint first until decoded
+// PCM reaches the sink, and PCM already in flight cannot repaint over an
+// explicit paused or stopped report. The transport is untouched by the report.
+func TestBufferedType103PlaybackStatePrecedence(t *testing.T) {
+	sinks := &reopeningSinks{}
+	rig := startType103Rig(t, fakeRings{ring: &fakeRing{}}, sinks)
+	board := rig.board
+	if got := playbackState(board); got != string(media.StateBuffering) {
+		t.Fatalf("fresh type-103 state = %q, want buffering", got)
+	}
+
+	// The sender reports playing before any PCM: the player is still filling
+	// its buffer, so it must not claim playback that has not happened.
+	sendPlaybackState(t, rig.client, 1)
+	if got := playbackState(board); got == string(media.StatePlaying) {
+		t.Fatal("a pre-PCM playing report repainted the buffered player as playing")
+	}
+
+	frames := bufferedALAC352Frames(4)
+	const base uint32 = 90_000
+	if err := sendBufferedPacket(rig.data, rig.shk, 0, base, bufferedSSRCALAC48, frames[0]); err != nil {
+		t.Fatalf("first packet: %v", err)
+	}
+	rig.waitQueued(t, 1)
+	rig.playAnchor(t, base)
+	waitForBuffered(t, "the first decoded PCM", func() bool {
+		written, _ := sinks.state()
+		return written > 0
+	})
+	waitForBuffered(t, "the player to report playing after PCM", func() bool {
+		return playbackState(board) == string(media.StatePlaying)
+	})
+
+	// An explicit pause freezes the display even though the transport and the
+	// already-anchored queue continue to deliver PCM.
+	sendPlaybackState(t, rig.client, 2)
+	waitForBuffered(t, "the paused report", func() bool {
+		return playbackState(board) == string(media.StatePaused)
+	})
+	before, _ := sinks.state()
+	if err := sendBufferedPacket(rig.data, rig.shk, 1, base+352, bufferedSSRCALAC48, frames[1]); err != nil {
+		t.Fatalf("packet after pause report: %v", err)
+	}
+	waitForBuffered(t, "PCM after the pause report", func() bool {
+		written, _ := sinks.state()
+		return written > before
+	})
+	if got := playbackState(board); got != string(media.StatePaused) {
+		t.Fatalf("PCM overwrote the explicit paused report with %q", got)
+	}
+
+	// The same rule applies to stopped, and a later explicit playing report is
+	// authoritative again once real PCM has already been observed.
+	sendPlaybackState(t, rig.client, 3)
+	waitForBuffered(t, "the stopped report", func() bool {
+		return playbackState(board) == string(media.StateStopped)
+	})
+	before, _ = sinks.state()
+	if err := sendBufferedPacket(rig.data, rig.shk, 2, base+704, bufferedSSRCALAC48, frames[2]); err != nil {
+		t.Fatalf("packet after stop report: %v", err)
+	}
+	waitForBuffered(t, "PCM after the stop report", func() bool {
+		written, _ := sinks.state()
+		return written > before
+	})
+	if got := playbackState(board); got != string(media.StateStopped) {
+		t.Fatalf("PCM overwrote the explicit stopped report with %q", got)
+	}
+	sendPlaybackState(t, rig.client, 1)
+	waitForBuffered(t, "the explicit playing report", func() bool {
+		return playbackState(board) == string(media.StatePlaying)
+	})
+}
+
+// gatedRing blocks Close until the test releases it, so teardown order is
+// observable rather than timing-dependent.
+type gatedRing struct {
+	mu           sync.Mutex
+	frames       int
+	closed       bool
+	closeStarted chan struct{}
+	closeRelease chan struct{}
+	startOnce    sync.Once
+	releaseOnce  sync.Once
+}
+
+func newGatedRing() *gatedRing {
+	return &gatedRing{closeStarted: make(chan struct{}), closeRelease: make(chan struct{})}
+}
+
+func (r *gatedRing) Pixels(pixels []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(pixels) != 36 {
+		return fmt.Errorf("ring frame is %d bytes", len(pixels))
+	}
+	r.frames++
+	return nil
+}
+
+func (r *gatedRing) Close() error {
+	r.startOnce.Do(func() { close(r.closeStarted) })
+	<-r.closeRelease
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *gatedRing) release() { r.releaseOnce.Do(func() { close(r.closeRelease) }) }
+
+func (r *gatedRing) wasClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+type gatedRings struct{ ring *gatedRing }
+
+func (g gatedRings) OpenRing(context.Context) (Ring, error) { return g.ring, nil }
+
+// TestTeardownStopsAudioBeforeRingRelease pins the takeover invariant: a
+// blocked routing-capture release must not keep a superseded sender's audio
+// sink alive. The sink is aborted before the ring release is even entered.
+func TestTeardownStopsAudioBeforeRingRelease(t *testing.T) {
+	ring := newGatedRing()
+	sink := &fakeSink{}
+	rig := startType103Rig(t, gatedRings{ring: ring}, fakeSinks{sink: sink})
+	t.Cleanup(ring.release)
+
+	frames := bufferedALAC352Frames(2)
+	const base uint32 = 120_000
+	if err := sendBufferedPacket(rig.data, rig.shk, 0, base, bufferedSSRCALAC48, frames[0]); err != nil {
+		t.Fatalf("first packet: %v", err)
+	}
+	rig.waitQueued(t, 1)
+	rig.playAnchor(t, base)
+	waitForBuffered(t, "the sink to receive PCM", func() bool {
+		written, _ := sink.state()
+		return written > 0
+	})
+	waitUntil(t, "the acquired ring presentation", func() bool {
+		rig.owner.mu.Lock()
+		defer rig.owner.mu.Unlock()
+		return rig.owner.ring != nil
+	})
+
+	// A second sender's ANNOUNCE takes the session over.
+	nextConn := dialTCPStream(t, rig.mgr.advertisedPort())
+	defer nextConn.Close()
+	nextClient := newRTSPClient(nextConn)
+	announce(t, nextClient)
+	waitUntil(t, "the successor to own the session", func() bool {
+		active := rig.mgr.Active()
+		return active != nil && active != rig.owner
+	})
+	select {
+	case <-ring.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown never reached the ring release")
+	}
+	if _, aborted := sink.state(); !aborted {
+		t.Fatal("the superseded audio sink was still live while the ring release was blocked")
+	}
+	if ring.wasClosed() {
+		t.Fatal("the ring reported closed before the harness released it")
+	}
+}
+
+func (r *type103Rig) sendRate(t *testing.T, rate int64) {
+	t.Helper()
+	body, err := plist.EncodeBinary(map[string]any{"rate": rate})
+	if err != nil {
+		t.Fatalf("encode rate %d: %v", rate, err)
+	}
+	response, err := r.client.do("SETRATEANCHORTIME", "/1", "application/x-apple-binary-plist", body)
+	if err != nil || response.status != 200 {
+		t.Fatalf("SETRATEANCHORTIME rate %d = %v %v", rate, response, err)
+	}
+}
+
+func (r *type103Rig) immediateFlush() error {
+	body, err := plist.EncodeBinary(map[string]any{})
+	if err != nil {
+		return fmt.Errorf("encode immediate flush: %w", err)
+	}
+	response, err := r.client.do("FLUSHBUFFERED", "/1", "application/x-apple-binary-plist", body)
+	if err != nil {
+		return err
+	}
+	if response.status != 200 {
+		return fmt.Errorf("FLUSHBUFFERED immediate = %d", response.status)
+	}
+	return nil
+}
+
+func (r *type103Rig) sendImmediateFlush(t *testing.T) {
+	t.Helper()
+	if err := r.immediateFlush(); err != nil {
+		t.Fatalf("FLUSHBUFFERED immediate: %v", err)
+	}
+}
+
+// startPlayingType103 brings one type-103 stream to PLAYING through a real
+// decoded PCM write and returns the frame/base used for its first record.
+func startPlayingType103(t *testing.T) (*type103Rig, *reopeningSinks, []byte, uint32) {
+	t.Helper()
+	sinks := &reopeningSinks{}
+	rig := startType103Rig(t, fakeRings{ring: &fakeRing{}}, sinks)
+	frames := bufferedALAC352Frames(2)
+	const base uint32 = 150_000
+	if err := sendBufferedPacket(rig.data, rig.shk, 0, base, bufferedSSRCALAC48, frames[0]); err != nil {
+		t.Fatalf("first packet: %v", err)
+	}
+	rig.waitQueued(t, 1)
+	rig.playAnchor(t, base)
+	waitForBuffered(t, "the first decoded PCM", func() bool {
+		written, _ := sinks.state()
+		return written > 0
+	})
+	waitForBuffered(t, "the player to report playing", func() bool {
+		return playbackState(rig.board) == string(media.StatePlaying)
+	})
+	return rig, sinks, frames[1], base
+}
+
+// TestBufferedType103ResumeWithoutFreshPCMStaysBuffering covers both transport
+// boundaries. A successful write before the boundary belongs to the retired
+// generation, so an explicit Playing report after a pause or immediate flush
+// shows buffering until a fresh anchor and PCM arrive.
+func TestBufferedType103ResumeWithoutFreshPCMStaysBuffering(t *testing.T) {
+	t.Run("pause", func(t *testing.T) {
+		rig, sinks, frame, base := startPlayingType103(t)
+		rig.sendRate(t, 0)
+		waitForBuffered(t, "the transport pause", func() bool {
+			return playbackState(rig.board) == string(media.StatePaused)
+		})
+		sendPlaybackState(t, rig.client, 1)
+		waitForBuffered(t, "buffering after the report", func() bool {
+			return playbackState(rig.board) == string(media.StateBuffering)
+		})
+		if got := playbackState(rig.board); got == string(media.StatePlaying) {
+			t.Fatal("an explicit playing report repainted a paused generation with no PCM")
+		}
+
+		before, _ := sinks.state()
+		next := base + 352
+		if err := sendBufferedPacket(rig.data, rig.shk, 1, next, bufferedSSRCALAC48, frame); err != nil {
+			t.Fatalf("post-pause packet: %v", err)
+		}
+		rig.waitQueued(t, 1)
+		rig.playAnchor(t, next)
+		waitForBuffered(t, "fresh PCM after the pause", func() bool {
+			written, _ := sinks.state()
+			return written > before
+		})
+		waitForBuffered(t, "playing after fresh PCM", func() bool {
+			return playbackState(rig.board) == string(media.StatePlaying)
+		})
+	})
+
+	t.Run("flush", func(t *testing.T) {
+		rig, sinks, frame, base := startPlayingType103(t)
+		rig.sendImmediateFlush(t)
+		waitForBuffered(t, "the immediate flush pause", func() bool {
+			return playbackState(rig.board) == string(media.StatePaused)
+		})
+		sendPlaybackState(t, rig.client, 1)
+		waitForBuffered(t, "buffering after the report", func() bool {
+			return playbackState(rig.board) == string(media.StateBuffering)
+		})
+		if got := playbackState(rig.board); got == string(media.StatePlaying) {
+			t.Fatal("an explicit playing report repainted a flushed generation with no PCM")
+		}
+
+		before, _ := sinks.state()
+		next := base + 352
+		if err := sendBufferedPacket(rig.data, rig.shk, 1, next, bufferedSSRCALAC48, frame); err != nil {
+			t.Fatalf("post-flush packet: %v", err)
+		}
+		rig.waitQueued(t, 1)
+		rig.playAnchor(t, next)
+		waitForBuffered(t, "fresh PCM after the flush", func() bool {
+			written, _ := sinks.state()
+			return written > before
+		})
+		waitForBuffered(t, "playing after fresh PCM", func() bool {
+			return playbackState(rig.board) == string(media.StatePlaying)
+		})
+	})
+}
+
+// stageAdditionalType103 stages one more type-103 stream on the active session
+// and connects its data channel without sending PCM.
+func stageAdditionalType103(t *testing.T, rig *type103Rig) (*audioStream, *realStream) {
+	t.Helper()
+	shk := make([]byte, 32)
+	if _, err := rand.Read(shk); err != nil {
+		t.Fatalf("second shk: %v", err)
+	}
+	body, err := plist.EncodeBinary(map[string]any{
+		"streams": []any{map[string]any{
+			"type":        int64(streamTypeBuffered),
+			"audioFormat": int64(bufferedFormatALAC48S24Stereo),
+			"spf":         int64(352),
+			"shk":         shk,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode second SETUP: %v", err)
+	}
+	setup, err := rig.client.do("SETUP", "/1", "application/x-apple-binary-plist", body)
+	if err != nil || setup.status != 200 {
+		t.Fatalf("second type-103 SETUP = %v %v", setup, err)
+	}
+	decoded, err := plist.Decode(setup.body)
+	if err != nil {
+		t.Fatalf("decode second SETUP: %v", err)
+	}
+	dict, _ := decoded.(map[string]any)
+	streams, _ := dict["streams"].([]any)
+	if len(streams) != 1 {
+		t.Fatalf("second SETUP streams = %v", dict["streams"])
+	}
+	streamDict, _ := streams[0].(map[string]any)
+	dataPort := int(plistUint(streamDict["dataPort"]))
+	if dataPort == 0 {
+		t.Fatalf("second SETUP descriptor has no dataPort: %v", streamDict)
+	}
+	data := dialTCPStream(t, dataPort)
+	t.Cleanup(func() { _ = data.Close() })
+	waitUntil(t, "the second type-103 stream", func() bool {
+		return len(rig.owner.activeStreams()) == 2
+	})
+	live := rig.owner.activeStreams()[1]
+	if live.buffered == nil {
+		t.Fatal("the second stream is not buffered")
+	}
+	waitUntil(t, "the second data connection", func() bool {
+		live.buffered.mu.Lock()
+		defer live.buffered.mu.Unlock()
+		return live.buffered.connID != 0
+	})
+	return live, data
+}
+
+// TestBufferedSecondStreamConnectionPreservesPlayingEvidence proves the PCM
+// evidence is per stream. Opening the second type-103 data channel must not
+// erase the first stream's current evidence, so an explicit playing report
+// stays playing instead of falling back to buffering.
+func TestBufferedSecondStreamConnectionPreservesPlayingEvidence(t *testing.T) {
+	rig, _, _, _ := startPlayingType103(t)
+	if got := playbackState(rig.board); got != string(media.StatePlaying) {
+		t.Fatalf("first stream state = %q, want playing", got)
+	}
+	stageAdditionalType103(t, rig)
+	sendPlaybackState(t, rig.client, 1)
+	if got := playbackState(rig.board); got != string(media.StatePlaying) {
+		t.Fatalf("second data channel cleared the first stream's evidence: %q", got)
+	}
+}
+
+func playbackStates(events <-chan map[string]any) []string {
+	var states []string
+	for {
+		select {
+		case event := <-events:
+			updated, _ := event["updated"].(map[string]any)
+			if state, ok := updated["playbackState"].(string); ok {
+				states = append(states, state)
+			}
+		default:
+			return states
+		}
+	}
+}
+
+func assertNoPlayingAfterPause(t *testing.T, states []string) {
+	t.Helper()
+	paused := false
+	for _, state := range states {
+		switch {
+		case state == string(media.StatePaused):
+			paused = true
+		case state == string(media.StatePlaying) && paused:
+			t.Fatalf("playing republished after pause: %v", states)
+		}
+	}
+	if !paused {
+		t.Fatalf("flush never published paused: %v", states)
+	}
+}
+
+// TestBufferedImmediateFlushRetiresBeforePause pins the WatchPlayers order.
+// FLUSHBUFFERED must retire every affected generation before it publishes the
+// pause, so a completed stale write cannot produce PAUSED→PLAYING→PAUSED. The
+// no-PCM case must still publish the pause.
+func TestBufferedImmediateFlushRetiresBeforePause(t *testing.T) {
+	t.Run("stale completion", func(t *testing.T) {
+		rig, sinks, frame, base := startPlayingType103(t)
+		_, events, unsubscribe := rig.board.Subscribe()
+		defer unsubscribe()
+
+		stream := rig.stream.buffered
+		stream.mu.Lock()
+		before := stream.generation
+		stream.mu.Unlock()
+		beforeBytes, _ := sinks.state()
+		// Hold publication so the flush must retire the generation before its
+		// pause can become visible; the in-flight completion is queued behind
+		// the same lock.
+		rig.owner.publishMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				rig.owner.publishMu.Unlock()
+			}
+		}()
+		if err := sendBufferedPacket(rig.data, rig.shk, 1, base+352, bufferedSSRCALAC48, frame); err != nil {
+			t.Fatalf("second packet: %v", err)
+		}
+		if err := waitForBufferedState(t, "the in-flight write", func() bool {
+			written, _ := sinks.state()
+			stream.mu.Lock()
+			writing := stream.writing
+			stream.mu.Unlock()
+			return written > beforeBytes && writing
+		}); err != nil {
+			t.Fatal(err)
+		}
+		flushDone := make(chan error, 1)
+		go func() { flushDone <- rig.immediateFlush() }()
+		if err := waitForBufferedState(t, "the flush generation retirement", func() bool {
+			stream.mu.Lock()
+			defer stream.mu.Unlock()
+			return stream.generation != before
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rig.owner.publishMu.Unlock()
+		locked = false
+		if err := <-flushDone; err != nil {
+			t.Fatalf("immediate flush: %v", err)
+		}
+		waitForBuffered(t, "the flushed pause", func() bool {
+			return playbackState(rig.board) == string(media.StatePaused)
+		})
+		time.Sleep(50 * time.Millisecond)
+		assertNoPlayingAfterPause(t, playbackStates(events))
+	})
+
+	t.Run("no PCM", func(t *testing.T) {
+		sinks := &reopeningSinks{}
+		rig := startType103Rig(t, fakeRings{ring: &fakeRing{}}, sinks)
+		_, events, unsubscribe := rig.board.Subscribe()
+		defer unsubscribe()
+		rig.sendImmediateFlush(t)
+		waitForBuffered(t, "the no-PCM pause", func() bool {
+			return playbackState(rig.board) == string(media.StatePaused)
+		})
+		assertNoPlayingAfterPause(t, playbackStates(events))
+	})
+}
+
+func waitForBufferedState(t *testing.T, what string, condition func() bool) error {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s", what)
+}
+
+// TestBufferedStaleWriteCompletionCannotRepaintPaused drives a real transport
+// pause after PCM has played, then delivers the completion of the packet whose
+// generation the pause retired. The stale completion must be rejected and the
+// board must remain paused.
+func TestBufferedStaleWriteCompletionCannotRepaintPaused(t *testing.T) {
+	rig, _, _, _ := startPlayingType103(t)
+	stream := rig.stream.buffered
+	stream.mu.Lock()
+	staleGeneration := stream.generation
+	staleSink := stream.sink
+	stream.mu.Unlock()
+	if staleSink == nil {
+		t.Fatal("the playing stream has no sink")
+	}
+
+	rig.sendRate(t, 0)
+	waitForBuffered(t, "the transport pause", func() bool {
+		return playbackState(rig.board) == string(media.StatePaused)
+	})
+	rig.owner.mu.Lock()
+	ready := rig.owner.bufferedPCMReadyLocked()
+	rig.owner.mu.Unlock()
+	if ready {
+		t.Fatal("the pause left the previous generation's PCM evidence live")
+	}
+	first, committed, err := stream.commitWrite(staleGeneration, 0, staleSink, nil)
+	if err != nil {
+		t.Fatalf("stale completion: %v", err)
+	}
+	if first || committed {
+		t.Fatal("a write from the retired generation committed after the pause")
+	}
+	rig.owner.mu.Lock()
+	ready = rig.owner.bufferedPCMReadyLocked()
+	rig.owner.mu.Unlock()
+	if ready {
+		t.Fatal("the stale completion restored the previous generation's PCM evidence")
+	}
+	if got := playbackState(rig.board); got != string(media.StatePaused) {
+		t.Fatalf("stale completion repainted the board as %q", got)
+	}
+}

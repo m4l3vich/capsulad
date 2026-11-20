@@ -66,6 +66,17 @@ type Session struct {
 	writeMu      sync.Mutex
 	eventWriteMu sync.Mutex
 
+	// publishMu serializes one session's metadata, palette, timeline and
+	// playback-state publication, including the candidate replay done by
+	// promotion. The in-memory merge and the board write therefore stay in one
+	// order, so a slow artwork decode cannot publish an older record after a
+	// newer one. It is never held together with s.mu across I/O: s.mu protects
+	// only the merge/snapshot, and board calls, artwork decoding and logging
+	// happen outside it. Lock order is lifecycleMu, then publishMu, then s.mu.
+	// A per-stream b.mu snapshot may be taken under s.mu; no code takes s.mu
+	// while holding b.mu, and commitWrite releases b.mu before taking s.mu.
+	publishMu sync.Mutex
+
 	mu                 sync.Mutex
 	setup              *pair.SetupServer
 	verify             *pair.VerifyServer
@@ -134,9 +145,24 @@ type Session struct {
 	palette       []artwork.RGB
 	envelopeState *artwork.Envelope
 	envelopeLevel float64
-	ring          Ring
-	ringDone      chan struct{}
-	progress      progress
+	// npiDurationMS/npiElapsedMS are the AirPlay 2 now-playing record's
+	// timeline. Presence matters because "replace" clears omitted fields and
+	// because zero is a legitimate position.
+	npiDurationMS  uint64
+	npiElapsedMS   uint64
+	npiHasDuration bool
+	npiHasElapsed  bool
+	// pendingPlayback is the newest updateMRPlaybackState report. A candidate
+	// can send one before it owns the board; promotion replays it.
+	pendingPlayback media.PlaybackState
+	ring            Ring
+	ringDone        chan struct{}
+	// ringCtx is the lifetime of the ring presentation and its routing
+	// capture. Acquisition runs beside playback, so teardown cancels this
+	// context instead of waiting for a stalled grant.
+	ringCtx    context.Context
+	ringCancel context.CancelFunc
+	progress   progress
 
 	boardGen   uint64
 	done       chan struct{}
@@ -197,6 +223,7 @@ type Session struct {
 
 func newSession(m *Manager, conn Stream) *Session {
 	masterCtx, masterCancel := context.WithCancel(context.Background())
+	ringCtx, ringCancel := context.WithCancel(context.Background())
 	s := &Session{
 		m:                  m,
 		conn:               conn,
@@ -209,6 +236,8 @@ func newSession(m *Manager, conn Stream) *Session {
 		volumeKick:         make(chan struct{}, 1),
 		masterCtx:          masterCtx,
 		masterCancel:       masterCancel,
+		ringCtx:            ringCtx,
+		ringCancel:         ringCancel,
 		promotedCh:         make(chan struct{}),
 		candidateTimeout:   candidateRequestTimeout,
 		reservationTimeout: reservationTimeout,
@@ -355,6 +384,13 @@ func (s *Session) setUserAgentOnce(userAgent string) {
 		return
 	}
 	s.userAgent = userAgent
+	s.mu.Unlock()
+
+	// The first request only publishes the refined source name. Later requests
+	// take the cheap path above and never wait for a metadata publication.
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	s.mu.Lock()
 	source := media.NamesFromSource(s.userAgent, s.deviceName, s.peer.Address)
 	gen := s.boardGen
 	s.mu.Unlock()
@@ -366,6 +402,8 @@ func (s *Session) setUserAgentOnce(userAgent string) {
 // setDeviceName records the event channel's device name and refreshes the live
 // board's source name, unless this connection is still a candidate.
 func (s *Session) setDeviceName(name string) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
 	s.mu.Lock()
 	s.deviceName = name
 	source := media.NamesFromSource(s.userAgent, s.deviceName, s.peer.Address)
@@ -380,33 +418,35 @@ func (s *Session) setDeviceName(name string) {
 // to a newly started board generation. Event-channel updates that arrived
 // while this connection was a candidate are stored on the Session and would
 // otherwise never reach the board because their generation was still zero.
+// It shares publishMu with live updates so promotion cannot replay an older
+// snapshot after a newer update, and the board calls stay outside s.mu.
 func (s *Session) replayPendingState(gen uint64) {
 	if s.m.board == nil || gen == 0 {
 		return
 	}
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Keep the snapshot and its board publication under the same lock so an
-	// event update cannot land between them and then be overwritten by this
-	// older replay. Board mutations carry the new generation and are safe to
-	// call here; they do not acquire s.mu.
 	source := media.NamesFromSource(s.userAgent, s.deviceName, s.peer.Address)
 	metadata := s.metadata
 	progress := s.progress
+	duration, position := s.nowPlayingProgressLocked()
+	npiTimeline := s.npiHasDuration || s.npiHasElapsed
+	buffered := s.hasBufferedMediaLocked()
+	bufferedReady := s.bufferedPCMReadyLocked()
+	playback, hasPlayback := senderPlaybackState(s.pendingPlayback, buffered, bufferedReady)
+	s.mu.Unlock()
+
 	s.m.board.SetSourceName(gen, source)
-	if metadata.Title != "" || metadata.Artist != "" || metadata.Album != "" {
-		position := uint64(0)
-		duration := uint64(0)
-		if progress.has {
-			position = uint64(progress.current)
-			if progress.end > progress.start {
-				duration = uint64(progress.end - progress.start)
-			}
-		}
+	if metadata.Title != "" || metadata.Artist != "" || metadata.Album != "" ||
+		npiTimeline || progress.has {
+		// A timeline-only record has no title, artist or album but still
+		// carries the duration and position the player must show. SetMetadata
+		// publishes all five fields, so the text condition cannot gate it.
 		s.m.board.SetMetadata(gen, metadata.Title, metadata.Artist, metadata.Album, duration, position)
 	}
-	if progress.has {
-		s.m.board.SetProgress(gen, uint64(progress.current))
+	if hasPlayback {
+		s.m.board.SetPlayback(gen, playback)
 	}
 }
 
@@ -548,6 +588,7 @@ func (s *Session) close(reason string) {
 		s.lifecycleMu.Unlock()
 		close(s.done)
 		s.cancelMasterVolume()
+		s.cancelRing()
 		if s.conn != nil {
 			_ = s.conn.Close()
 		}
@@ -568,17 +609,21 @@ func (s *Session) cleanup(reason string) {
 		s.lifecycleMu.Unlock()
 		close(s.done)
 		s.cancelMasterVolume()
+		s.cancelRing()
 		// The read loop can return on a parse error or protocol refusal without
 		// close ever running; the control socket must not outlive the session.
 		if s.conn != nil {
 			_ = s.conn.Close()
 		}
 	})
-	s.stopRing()
+	// Audio is always stopped before the ring release. Closing the routing
+	// capture can wait for the framework, and a superseded sender's buffered
+	// playout must not keep draining while that release is in flight.
 	s.discardStagedStreams()
 	for _, stream := range s.activeStreams() {
 		stream.stop()
 	}
+	s.stopRing()
 	s.eventMu.Lock()
 	if s.eventConn != nil {
 		_ = s.eventConn.Close()
@@ -599,6 +644,42 @@ func (s *Session) activeStreams() []*audioStream {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*audioStream(nil), s.streams...)
+}
+
+// hasBufferedMediaLocked reports whether this session has a type-103 stream,
+// including one staged by SETUP but not yet launched during promotion. Callers
+// hold s.mu.
+func (s *Session) hasBufferedMediaLocked() bool {
+	for _, stream := range s.streams {
+		if stream.spec.streamType == streamTypeBuffered {
+			return true
+		}
+	}
+	for _, stream := range s.staged {
+		if stream.spec.streamType == streamTypeBuffered {
+			return true
+		}
+	}
+	return false
+}
+
+// bufferedPCMReadyLocked reports whether any live type-103 stream has a
+// successful write for its current playout generation. The evidence is
+// per-stream: pausing or flushing one stream does not erase another stream's
+// current evidence. Callers hold s.mu; no b.mu holder acquires s.mu.
+func (s *Session) bufferedPCMReadyLocked() bool {
+	for _, stream := range s.streams {
+		if stream.spec.streamType != streamTypeBuffered || stream.buffered == nil {
+			continue
+		}
+		stream.buffered.mu.Lock()
+		ready := stream.buffered.published
+		stream.buffered.mu.Unlock()
+		if ready {
+			return true
+		}
+	}
+	return false
 }
 
 // --- RTSP loop ------------------------------------------------------------

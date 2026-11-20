@@ -472,33 +472,16 @@ func (s *Session) handleSenderCommand(req *rtsp.Request) (*rtsp.Response, *chann
 }
 
 // noteSenderPlist folds the state a sender plist carries into the session.
+// The now-playing commands are described in nowplaying.go; this function only
+// decodes the envelope so every entry point (event channel, control POST
+// /command, feedback and plist SET_PARAMETER) shares one interpretation.
 func (s *Session) noteSenderPlist(body []byte) {
 	value, err := plist.Decode(body)
 	if err != nil {
 		return
 	}
-	dict, ok := value.(map[string]any)
-	if !ok {
-		return
-	}
-	if name := plistString(dict["deviceName"]); name != "" {
-		s.setDeviceName(name)
-	}
-	params := dict
-	if nested, ok := plistDict(dict["params"]); ok {
-		params = nested
-	}
-	if rate, ok := plistInt(params["kMRMediaRemoteNowPlayingInfoPlaybackRate"]); ok {
-		if rate > 0 {
-			s.setRate(1)
-		} else {
-			s.setRate(0)
-		}
-	}
-	if title := plistString(params["kMRMediaRemoteNowPlayingInfoTitle"]); title != "" {
-		artist := plistString(params["kMRMediaRemoteNowPlayingInfoArtist"])
-		album := plistString(params["kMRMediaRemoteNowPlayingInfoAlbum"])
-		s.setMetadata(dmap.Metadata{Title: title, Artist: artist, Album: album})
+	if dict, ok := value.(map[string]any); ok {
+		s.applyCommandPlist(dict)
 	}
 }
 
@@ -848,14 +831,18 @@ func (s *Session) handleSetParameter(req *rtsp.Request) (*rtsp.Response, *channe
 			case "progress":
 				start, current, end, ok := dmap.ParseProgress(strings.TrimSpace(value))
 				if ok {
+					s.publishMu.Lock()
 					s.mu.Lock()
 					s.progress.start, s.progress.current, s.progress.end = start, current, end
 					s.progress.has = true
+					metadata := s.metadata
+					duration, position := s.nowPlayingProgressLocked()
 					gen := s.boardGen
 					s.mu.Unlock()
 					if s.m.board != nil && gen != 0 {
-						s.m.board.SetProgress(gen, uint64(current))
+						s.m.board.SetMetadata(gen, metadata.Title, metadata.Artist, metadata.Album, duration, position)
 					}
+					s.publishMu.Unlock()
 				}
 			case "paused":
 				if strings.TrimSpace(value) == "true" {
@@ -982,11 +969,7 @@ func (s *Session) handleFlushBuffered(req *rtsp.Request) (*rtsp.Response, *chann
 		// for the wire reader; it decides which blocks are obsolete.
 		s.mu.Lock()
 		s.rate = 0
-		gen := s.boardGen
 		s.mu.Unlock()
-		if s.m.board != nil && gen != 0 {
-			s.m.board.SetPlayback(gen, media.StatePaused)
-		}
 	} else {
 		s.touch()
 	}
@@ -997,8 +980,14 @@ func (s *Session) handleFlushBuffered(req *rtsp.Request) (*rtsp.Response, *chann
 		stream.bufferedFlush(
 			uint32(fromSeq&0x7fffff), uint32(fromTS),
 			uint32(untilSeq&0x7fffff), uint32(untilTS),
-			immediate,
+			immediate, !immediate,
 		)
+	}
+	if immediate {
+		// Every affected generation has been retired above. Publishing the
+		// pause once here means WatchPlayers cannot observe PAUSED before a
+		// later stale completion is invalidated, including the no-PCM case.
+		s.publishTransportPaused(true)
 	}
 	return rtsp.NewResponse(req.CSeq(), 200, ""), nil, nil
 }
@@ -1124,14 +1113,16 @@ func (s *Session) setRateAnchor(rate float64, rtpTime uint32) {
 		for _, stream := range s.activeStreams() {
 			if stream.spec.streamType == streamTypeBuffered {
 				// Buffered audio stops and discards obsolete queued sound; it
-				// resumes only through a fresh SETRATEANCHORTI.
-				stream.bufferedPause()
+				// resumes only through a fresh SETRATEANCHORTI. Retire the
+				// generation quietly; one pause is published after every
+				// affected stream is invalidated.
+				stream.bufferedPause(false)
 				continue
 			}
 			stream.pause()
 		}
 		if s.m.board != nil && gen != 0 {
-			s.m.board.SetPlayback(gen, media.StatePaused)
+			s.publishTransportPaused(true)
 		}
 		return
 	}
@@ -1152,30 +1143,27 @@ func (s *Session) setRateAnchor(rate float64, rtpTime uint32) {
 }
 
 func (s *Session) setMetadata(metadata dmap.Metadata) {
+	s.publishMu.Lock()
 	s.mu.Lock()
 	s.metadata = metadata
-	position := uint64(0)
-	duration := uint64(0)
-	if s.progress.has {
-		position = uint64(s.progress.current)
-		if s.progress.end > s.progress.start {
-			duration = uint64(s.progress.end - s.progress.start)
-		}
-	}
+	duration, position := s.nowPlayingProgressLocked()
 	gen := s.boardGen
 	s.mu.Unlock()
 	if s.m.board != nil && gen != 0 {
 		s.m.board.SetMetadata(gen, metadata.Title, metadata.Artist, metadata.Album, duration, position)
 	}
+	s.publishMu.Unlock()
 	if metadata.Title != "" {
 		s.m.logf("session %s: %s — %s", s.peer.Address, metadata.Title, metadata.Artist)
 	}
 }
 
 func (s *Session) setPalette(palette []artwork.RGB) {
+	s.publishMu.Lock()
 	s.mu.Lock()
 	s.palette = palette
 	s.mu.Unlock()
+	s.publishMu.Unlock()
 	if length := len(palette); length > 0 {
 		s.m.logf("session %s: cover art palette %d colour(s)", s.peer.Address, length)
 	}
@@ -1328,23 +1316,6 @@ func aacCodec(cfg aac.Config) (string, alac.Config, aac.Profile, error) {
 func plistDict(value any) (map[string]any, bool) {
 	dict, ok := value.(map[string]any)
 	return dict, ok
-}
-
-func plistInt(value any) (int64, bool) {
-	switch v := value.(type) {
-	case int64:
-		return v, true
-	case uint64:
-		if v > uint64(1<<63-1) {
-			return 0, false
-		}
-		return int64(v), true
-	case int:
-		return int64(v), true
-	case float64:
-		return int64(v), true
-	}
-	return 0, false
 }
 
 func plistUint(value any) uint64 {

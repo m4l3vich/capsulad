@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -232,6 +233,10 @@ func (s *Session) commitStreams() {
 	s.staged = nil
 	s.streams = append(s.streams, staged...)
 	s.mu.Unlock()
+	// A playback report may have arrived before this SETUP. Reapply it now that
+	// the stream types are known, so a type-103 stream stays buffering until
+	// decoded PCM reaches the sink.
+	s.reconcilePlaybackState()
 	for _, stream := range staged {
 		stream.launch()
 		s.m.logf("session from %s: stream %d type %d codec %s %d Hz %d ch", s.peer.Address, stream.id, stream.spec.streamType, stream.spec.codec, stream.spec.config.SampleRate, stream.spec.config.Channels)
@@ -640,9 +645,7 @@ func (st *audioStream) playLoop() {
 		st.frames++
 		st.lastPop = time.Now()
 		st.mu.Unlock()
-		if st.s.m.board != nil {
-			st.s.m.board.SetPlayback(st.s.boardGen, media.StatePlaying)
-		}
+		st.s.publishRealtimePCMPlaying()
 	}
 }
 
@@ -797,7 +800,9 @@ func (s *Session) markAudio() {
 // --- ring presentation -----------------------------------------------------
 
 // startRing acquires the ring presentation for the duration of the session and
-// keeps it up to date from the cover palette and the PCM envelope.
+// keeps it up to date from the cover palette and the PCM envelope. Acquisition
+// runs beside playback: the routing capture may wait seconds for another owner,
+// and RECORD or the first buffered PCM must not wait for the LEDs.
 func (s *Session) startRing() {
 	if !s.m.cfg.RingEnabled || s.m.rings == nil {
 		return
@@ -815,11 +820,26 @@ func (s *Session) startRing() {
 	done := make(chan struct{})
 	s.ringDone = done
 	s.mu.Unlock()
-	ring, err := s.m.rings.OpenRing()
+	go s.acquireRing(done)
+}
+
+// acquireRing opens the ring under the session's lifetime context. A grant that
+// arrives after teardown is closed immediately; its capture is released before
+// the presentation, restoring the configured baseline.
+func (s *Session) acquireRing(done chan struct{}) {
+	ring, err := s.m.rings.OpenRing(s.ringContext())
 	if err != nil {
-		s.m.logf("session %s: ring presentation unavailable: %v", s.peer.Address, err)
+		select {
+		case <-s.done:
+			// The session ended while the framework was considering the
+			// grant; a refused acquisition has nothing to release.
+		default:
+			s.m.logf("session %s: ring presentation unavailable: %v", s.peer.Address, err)
+		}
 		s.mu.Lock()
-		s.ringDone = nil
+		if s.ringDone == done {
+			s.ringDone = nil
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -849,6 +869,21 @@ func (s *Session) startRing() {
 	default:
 	}
 	go s.ringLoop(done, ring)
+}
+
+// ringContext is the lifetime of the ring presentation and its capture. A
+// literal Session in a test may not have one.
+func (s *Session) ringContext() context.Context {
+	if s.ringCtx != nil {
+		return s.ringCtx
+	}
+	return context.Background()
+}
+
+func (s *Session) cancelRing() {
+	if s.ringCancel != nil {
+		s.ringCancel()
+	}
 }
 
 func (s *Session) ringLoop(done chan struct{}, ring Ring) {

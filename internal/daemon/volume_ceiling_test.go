@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/audio"
 	"capsulad/internal/backend"
 )
 
@@ -125,8 +126,8 @@ func TestDaemonMasterVolumeEndToEnd(t *testing.T) {
 			sendAndDrain(t, stream, fullScaleS16(24000))
 			time.Sleep(50 * time.Millisecond)
 			peak := outputPeak(tail.LastOutput())
-			want := s16Code(vol)
-			t.Logf("master=%.2f sink peak=%d (%.3f FS)", vol, peak, float64(peak)/32767)
+			want := s16Code(audio.MasterVolumeGain(vol))
+			t.Logf("master=%.2f gain=%.6f sink peak=%d (%.3f FS)", vol, audio.MasterVolumeGain(vol), peak, float64(peak)/32767)
 			if diff := peak - want; diff < -2 || diff > 2 {
 				t.Errorf("master %.2f: sink peak %d, want %d ±2", vol, peak, want)
 			}
@@ -171,7 +172,7 @@ func TestDaemonF32HotChunkIsClamped(t *testing.T) {
 	sendAndDrain(t, stream, f32Constant(24000, 10))
 	time.Sleep(50 * time.Millisecond)
 	peak := outputPeak(tail.LastOutput())
-	want := s16Code(0.1)
+	want := s16Code(audio.MasterVolumeGain(0.1))
 	t.Logf("F32 amplitude 10 at master 0.10 sink peak=%d (%.3f FS)", peak, float64(peak)/32767)
 	if diff := peak - want; diff < -2 || diff > 2 {
 		t.Fatalf("F32 amplitude 10 at master 0.1: sink peak %d, want %d", peak, want)

@@ -358,7 +358,7 @@ func (s *fakeSink) state() (pcm int, aborted bool) {
 
 type fakeRings struct{ ring *fakeRing }
 
-func (f fakeRings) OpenRing() (Ring, error) { return f.ring, nil }
+func (f fakeRings) OpenRing(context.Context) (Ring, error) { return f.ring, nil }
 
 type fakeSinks struct{ sink *fakeSink }
 

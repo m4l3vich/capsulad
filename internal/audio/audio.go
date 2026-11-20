@@ -52,7 +52,32 @@ const (
 	limiterThreshold = 0.95
 	limiterAttackMS  = 5
 	limiterReleaseMS = 150
+
+	// masterTaperRangeDB is the attenuation at the quietest non-zero master
+	// position. The persisted [0,1] value is a control position, so the mixer
+	// maps it to gain with a constant number of decibels per position step
+	// instead of treating the position itself as an amplitude.
+	masterTaperRangeDB = 60.0
 )
+
+// MasterVolumeGain maps the persisted master-volume position to the mixer's
+// linear gain. The position is not an amplitude: it is exponential in
+// amplitude and linear in decibels across a 60 dB range, so 5% is about
+// -57 dBFS, 50% about -30 dBFS and 100% unity. Zero is exact silence and one
+// is exact unity. An app observes the position through GetAudioState; the
+// canonical mixer applies this gain, and it is recomputed on a volume change
+// rather than in the per-sample or per-tick path. The PulseAudio Bluetooth
+// fallback calls the same helper because that route bypasses the mixer.
+func MasterVolumeGain(level float64) float64 {
+	level = clamp01(level)
+	if level <= 0 || math.IsNaN(level) {
+		return 0
+	}
+	if level >= 1 {
+		return 1
+	}
+	return math.Pow(10, masterTaperRangeDB*(level-1)/20)
+}
 
 // ErrPlaybackLimit reports that the app already holds
 // maxPlaybackStreamsPerApp concurrent playback streams. The media service maps
@@ -136,7 +161,8 @@ type Manager struct {
 
 	mu            sync.Mutex
 	started       bool
-	volume        float64
+	volume        float64 // persisted control position, [0,1]
+	masterGain    float64 // taper(volume), cached so the mix loop never computes pow
 	muted         bool
 	hardwareMute  bool
 	playbacks     map[string]*Playback
@@ -193,7 +219,8 @@ func NewManager(parent context.Context, clock *ids.Clock, logs *logbus.Bus, dev 
 	}
 	return &Manager{
 		ctx: ctx, cancel: cancel, clock: clock, logs: logs, dev: dev, opts: opts, out: out,
-		volume: 0.6, playbacks: map[string]*Playback{}, captures: map[string]*capture{},
+		volume: 0.6, masterGain: MasterVolumeGain(0.6),
+		playbacks: map[string]*Playback{}, captures: map[string]*capture{},
 		conversations: map[string]conversation{},
 		dspEnabled:    !opts.CaptureDSP.Disabled && captureDSPSupported(dev.CaptureFormat()),
 	}
@@ -319,8 +346,10 @@ func (m *Manager) Close() {
 
 func (m *Manager) SetMasterVolume(v float64) {
 	v = clamp01(v)
+	gain := MasterVolumeGain(v)
 	m.mu.Lock()
 	m.volume = v
+	m.masterGain = gain
 	m.mu.Unlock()
 	if err := m.dev.SetMasterVolume(1); err != nil {
 		m.logs.Warnf("audio", "", "sink gain pin incomplete: %v", err)
@@ -496,8 +525,9 @@ func (p *Playback) CloseInput() {
 }
 
 // SetTrim applies a stream-specific linear gain on top of the mixer master.
-// It is not touched by ducking, so a caller can implement a product volume
-// curve for one stream while the master remains the single UI value.
+// It is not touched by ducking, so a caller can set an authored cue or source
+// level for one stream; the master taper remains the only volume-dependent
+// stage.
 func (p *Playback) SetTrim(v float64) {
 	v = clamp01(v)
 	p.mu.Lock()
@@ -654,7 +684,7 @@ func (m *Manager) mixLoop() {
 		for _, p := range m.playbacks {
 			playbacks = append(playbacks, p)
 		}
-		volume := m.volume
+		masterGain := m.masterGain
 		cueID := m.cueID
 		anyConversation := len(m.conversations) > 0
 		convs = convs[:0]
@@ -759,12 +789,12 @@ func (m *Manager) mixLoop() {
 			}
 		}
 
-		vol := float32(volume)
+		gainMaster := float32(masterGain)
 		for i := 0; i < len(mix); i += 2 {
-			l := finite32(mix[i] * vol)
-			r := finite32(mix[i+1] * vol)
-			// The master volume is applied once, here, after every app has
-			// contributed at most its ceiling.
+			l := finite32(mix[i] * gainMaster)
+			r := finite32(mix[i+1] * gainMaster)
+			// The tapered master gain is applied once, here, after every app
+			// has contributed at most its ceiling.
 			peak := abs32(l)
 			if a := abs32(r); a > peak {
 				peak = a

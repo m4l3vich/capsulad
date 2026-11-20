@@ -117,8 +117,8 @@ type bufferedStream struct {
 	connID            uint64
 	connAuthenticated bool
 
-	playRequested  bool
-	anchorSet      bool
+	playRequested bool
+	anchorSet     bool
 	// anchorRTP is the sender's validated trim anchor. paceRTP is a separate
 	// arrival-time reference that may be rebased after a gap without changing
 	// which pre-anchor PCM is admissible.
@@ -137,14 +137,14 @@ type bufferedStream struct {
 	generation uint64
 	cancel     chan struct{}
 
-	immediateDrop  bool
-	immediateUntil uint32
-	deferred       []bufferedFlushRange
-	flushRevision  uint64
-	droppingRange  bool
-	pacing         bool
-	pacingSequence uint32
-	writing        bool
+	immediateDrop   bool
+	immediateUntil  uint32
+	deferred        []bufferedFlushRange
+	flushRevision   uint64
+	droppingRange   bool
+	pacing          bool
+	pacingSequence  uint32
+	writing         bool
 	writingSequence uint32
 
 	hasLastSeq  bool
@@ -482,13 +482,24 @@ func abortBufferedSink(sink Sink) {
 	}
 }
 
-func (b *bufferedStream) publishPausedLocked() {
+// publishPausedLocked retires this stream's current PCM evidence and reports
+// whether it had a visible playing state. The caller publishes the pause after
+// b.mu is released, so the session publication lock is never acquired under the
+// queue lock.
+func (b *bufferedStream) publishPausedLocked() bool {
 	if !b.published {
-		return
+		return false
 	}
 	b.published = false
-	if b.st != nil && b.st.s.m.board != nil {
-		b.st.s.m.board.SetPlayback(b.st.s.boardGen, media.StatePaused)
+	return b.st != nil && b.st.s != nil && b.st.s.m != nil
+}
+
+// noteTransportPaused optionally publishes the pause after this stream's own
+// evidence was retired under b.mu. A bare stream built by a unit test has no
+// session; it only exercises the queue.
+func (b *bufferedStream) noteTransportPaused(publish bool) {
+	if b.st != nil && b.st.s != nil {
+		b.st.s.publishTransportPaused(publish)
 	}
 }
 
@@ -513,14 +524,18 @@ func (st *audioStream) bufferedAnchorPlay(timelineID uint64, rtpTime uint32, net
 	b.mu.Unlock()
 }
 
-func (st *audioStream) bufferedPause() {
+// bufferedPause retires this type-103 stream's playout generation. When
+// publish is false the caller publishes one pause after retiring every
+// affected stream, so WatchPlayers never observes PAUSED before a stale
+// generation is invalidated.
+func (st *audioStream) bufferedPause(publish bool) {
 	if st.buffered == nil {
 		return
 	}
 	st.s.mu.Lock()
 	st.s.rate = 0
 	st.s.mu.Unlock()
-	st.buffered.pause()
+	st.buffered.pauseWithPublish(publish)
 }
 
 // bufferedFlush preserves the complete sender range. Both immediate and
@@ -530,7 +545,7 @@ func (st *audioStream) bufferedPause() {
 // permitted prefetch for the next play anchor. Timestamp bounds are accepted as
 // part of the sender's request but sequence numbers select packets, as in the
 // reference.
-func (st *audioStream) bufferedFlush(fromSeq uint32, _ uint32, untilSeq uint32, _ uint32, immediate bool) {
+func (st *audioStream) bufferedFlush(fromSeq uint32, _ uint32, untilSeq uint32, _ uint32, immediate, publish bool) {
 	if st.buffered == nil {
 		return
 	}
@@ -539,7 +554,7 @@ func (st *audioStream) bufferedFlush(fromSeq uint32, _ uint32, untilSeq uint32, 
 		st.s.rate = 0
 		st.s.mu.Unlock()
 	}
-	st.buffered.flush(fromSeq, untilSeq, immediate)
+	st.buffered.flushWithPublish(fromSeq, untilSeq, immediate, publish)
 }
 
 func (b *bufferedStream) installAndPlayLocked(timelineID uint64, rtpTime uint32, masterNS uint64) {
@@ -609,6 +624,10 @@ func (b *bufferedStream) installAndPlayLocked(timelineID uint64, rtpTime uint32,
 }
 
 func (b *bufferedStream) pause() {
+	b.pauseWithPublish(true)
+}
+
+func (b *bufferedStream) pauseWithPublish(publish bool) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -625,13 +644,26 @@ func (b *bufferedStream) pause() {
 	b.writing = false
 	b.bumpGenerationLocked()
 	sink := b.detachSinkLocked()
-	b.publishPausedLocked()
+	paused := b.publishPausedLocked()
 	b.cond.Broadcast()
 	b.mu.Unlock()
 	abortBufferedSink(sink)
+	if publish {
+		// Clear this stream's PCM evidence and, when it had a visible playing
+		// state, report the pause.
+		b.noteTransportPaused(paused)
+	}
 }
 
 func (b *bufferedStream) flush(fromSeq, untilSeq uint32, immediate bool) {
+	b.flushWithPublish(fromSeq, untilSeq, immediate, true)
+}
+
+// flushWithPublish applies one FLUSH range. When publish is false the immediate
+// path still retires this stream's generation and evidence but leaves the
+// transport-pause publication to the caller, which retires every affected
+// stream first.
+func (b *bufferedStream) flushWithPublish(fromSeq, untilSeq uint32, immediate, publish bool) {
 	fromSeq &= bufferedSequenceMask
 	untilSeq &= bufferedSequenceMask
 
@@ -680,7 +712,7 @@ func (b *bufferedStream) flush(fromSeq, untilSeq uint32, immediate bool) {
 	b.writing = false
 	b.bumpGenerationLocked()
 	stale = b.detachSinkLocked()
-	b.publishPausedLocked()
+	paused := b.publishPausedLocked()
 	all := untilSeq == 0
 	b.applyImmediateQueueLocked(untilSeq, all)
 	b.deferred = b.deferred[:0]
@@ -688,6 +720,9 @@ func (b *bufferedStream) flush(fromSeq, untilSeq uint32, immediate bool) {
 	b.cond.Broadcast()
 	b.mu.Unlock()
 	abortBufferedSink(stale)
+	if publish {
+		b.noteTransportPaused(paused)
+	}
 }
 
 func (b *bufferedStream) stop() {
@@ -1140,6 +1175,60 @@ func (b *bufferedStream) noteDecodeFailure(generation, timing uint64) Sink {
 	return sink
 }
 
+// commitWrite serializes one completed sink write against the stream's current
+// playout generation and the session's playback publication. It rechecks the
+// generation under publishMu, the same lock a transport pause, flush or
+// reconnect uses to clear buffered evidence, so a completion that lost its
+// generation cannot publish PLAYING after PAUSED. It returns committed=false for
+// a superseded or deferred write; callers do not count that write.
+func (b *bufferedStream) commitWrite(generation uint64, sequence uint32, sink Sink, writeErr error) (first, committed bool, err error) {
+	s := b.st.s
+	s.publishMu.Lock()
+	b.mu.Lock()
+	if b.writingSequence == sequence {
+		b.writing = false
+	}
+	if b.sink != sink {
+		// A pause, flush or generation boundary already retired this exact
+		// stream; never reattach it.
+		sink = nil
+	}
+	if !b.validGenerationLocked(generation) || b.inDeferredRangeLocked(sequence) {
+		if sink != nil {
+			b.sink = nil
+			b.sinkSSRC = 0
+		}
+		b.mu.Unlock()
+		s.publishMu.Unlock()
+		abortBufferedSink(sink)
+		return false, false, nil
+	}
+	if writeErr != nil {
+		if sink != nil {
+			b.sink = nil
+			b.sinkSSRC = 0
+		}
+		b.mu.Unlock()
+		s.publishMu.Unlock()
+		abortBufferedSink(sink)
+		return false, false, writeErr
+	}
+	first = !b.published
+	b.published = true
+	b.mu.Unlock()
+
+	s.mu.Lock()
+	gen := s.boardGen
+	report := s.pendingPlayback
+	s.mu.Unlock()
+	if gen != 0 && s.m.board != nil &&
+		report != media.StatePaused && report != media.StateStopped {
+		s.m.board.SetPlayback(gen, media.StatePlaying)
+	}
+	s.publishMu.Unlock()
+	return first, true, nil
+}
+
 func (b *bufferedStream) writePCM(format bufferedFormat, pcm []byte, sequence uint32, generation, timing, revision uint64) (bool, error) {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
@@ -1198,46 +1287,17 @@ func (b *bufferedStream) writePCM(format bufferedFormat, pcm []byte, sequence ui
 	b.mu.Unlock()
 
 	err := sink.Write(pcm)
-
-	b.mu.Lock()
-	if b.writingSequence == sequence {
-		b.writing = false
-	}
-	if b.sink != sink {
-		// A pause, flush or generation boundary already retired this exact
-		// stream; never reattach it.
-		sink = nil
-	}
-	generationValid := b.validGenerationLocked(generation)
-	inRange := b.inDeferredRangeLocked(sequence)
-	if !generationValid || inRange {
-		if sink != nil {
-			b.sink = nil
-			b.sinkSSRC = 0
-		}
-		b.mu.Unlock()
-		abortBufferedSink(sink)
-		return false, nil
-	}
+	// A successful write may predate a routine rate-one anchor refresh. The
+	// pinned player continues across that refresh, so commitWrite validates the
+	// generation (not the timing epoch) and keeps the sink when it is still the
+	// current one.
+	first, committed, err := b.commitWrite(generation, sequence, sink, err)
 	if err != nil {
-		if sink != nil {
-			b.sink = nil
-			b.sinkSSRC = 0
-		}
-		b.mu.Unlock()
-		abortBufferedSink(sink)
 		return false, err
 	}
-	// A successful write may predate a routine rate-one anchor refresh. The
-	// pinned player continues across that refresh, so keep the sink and allow
-	// this already-committed PCM; the next packet uses the new timing epoch.
-	first := !b.published
-	b.published = true
-	if b.st.s.m.board != nil {
-		b.st.s.m.board.SetPlayback(b.st.s.boardGen, media.StatePlaying)
+	if !committed {
+		return false, nil
 	}
-	b.mu.Unlock()
-
 	b.st.mu.Lock()
 	b.st.frames++
 	b.st.lastPop = time.Now()
@@ -1380,22 +1440,22 @@ func (b *bufferedStream) recycle(packet bufferedPacket) {
 // beginConnection claims the next data-connection generation. A replacement
 // invalidates playout, drops queued/old PCM, and requires a fresh play anchor;
 // this prevents a reconnecting or stale socket from mixing generations.
-func (b *bufferedStream) beginConnection(reset bool) (uint64, Sink, bool) {
+func (b *bufferedStream) beginConnection(reset bool) (id uint64, stale Sink, paused, claimed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return 0, nil, false
+		return 0, nil, false, false
 	}
 	if reset && b.connAuthenticated {
 		// The live reader authenticated before this accept could claim the
 		// channel. Reject the replacement under the same lock.
-		return 0, nil, false
+		return 0, nil, false, false
 	}
 	b.connID++
 	b.connAuthenticated = false
-	id := b.connID
+	id = b.connID
 	if !reset {
-		return id, nil, true
+		return id, nil, false, true
 	}
 	b.playRequested = false
 	b.anchorSet = false
@@ -1407,14 +1467,14 @@ func (b *bufferedStream) beginConnection(reset bool) (uint64, Sink, bool) {
 	b.pacing = false
 	b.writing = false
 	b.bumpGenerationLocked()
-	sink := b.detachSinkLocked()
-	b.publishPausedLocked()
+	stale = b.detachSinkLocked()
+	paused = b.publishPausedLocked()
 	b.clearQueueLocked()
 	b.deferred = b.deferred[:0]
 	b.droppingRange = false
 	b.immediateDrop = false
 	b.cond.Broadcast()
-	return id, sink, true
+	return id, stale, paused, true
 }
 
 func (b *bufferedStream) currentConnection(id uint64) bool {
@@ -1471,8 +1531,12 @@ func (st *audioStream) serveBufferedDataConnections(listener Listener) {
 			st.s.close("buffered audio decoder: " + err.Error())
 			return
 		}
-		id, stale, claimed := st.buffered.beginConnection(previous != nil)
+		id, stale, paused, claimed := st.buffered.beginConnection(previous != nil)
 		abortBufferedSink(stale)
+		if claimed {
+			// The reset generation has no PCM evidence of its own.
+			st.s.publishTransportPaused(paused)
+		}
 		if !claimed || !st.buffered.currentConnection(id) {
 			_ = conn.Close()
 			if !claimed {
@@ -1548,5 +1612,3 @@ func (st *audioStream) readBufferedData(conn Stream, id uint64, decoder *rtp.Buf
 		st.buffered.enqueue(id, packet)
 	}
 }
-
-
