@@ -78,3 +78,44 @@ func TestBuiltinDocumentsExistAndAreSelfContained(t *testing.T) {
 		t.Fatal("unknown built-in document accepted")
 	}
 }
+
+// The settings kit is a locally built Tailwind + daisyUI stylesheet, not a
+// hand-written component clone and not a CDN reference. Both palettes the Web
+// UI offers must be present so a theme message is only an attribute swap.
+func TestSettingsKitIsLocalDaisyUIWithBothThemes(t *testing.T) {
+	css := string(KitCSS())
+	if len(css) > 160*1024 {
+		t.Fatalf("kit is %d bytes, want at most 160 KiB", len(css))
+	}
+	for _, want := range []string{
+		"daisyUI", ".btn", ".card", ".input", ".textarea", ".select", ".checkbox", ".alert", ".badge",
+		"[data-theme=capsulad]", "[data-theme=capsulad-dark]", "color-scheme: dark",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("kit missing %q", want)
+		}
+	}
+	for _, bad := range []string{"@import", "@font-face", "url(http", "url('http", `url("http`} {
+		if strings.Contains(css, bad) {
+			t.Errorf("kit contains %q", bad)
+		}
+	}
+}
+
+func TestWrapDocumentCarriesTheFrameThemeBootstrap(t *testing.T) {
+	out := string(WrapDocument([]byte("<html><head></head><body>hi</body></html>")))
+	for _, want := range []string{
+		"capsulad-theme=",
+		"function applyTheme",
+		"data-theme",
+		"capsulad.settings-ui/1:",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("wrapped document missing %q", want)
+		}
+	}
+	if !strings.Contains(HeaderContentSecurityPolicy(), "sandbox allow-scripts") ||
+		!strings.Contains(HeaderContentSecurityPolicy(), "connect-src 'none'") {
+		t.Fatal("frame CSP changed")
+	}
+}

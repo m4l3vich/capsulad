@@ -8,9 +8,11 @@
     "dev": "vite",
     "fonts": "python3 scripts/build-icon-font.py",
     "check:icons": "node scripts/check-icon-font.mjs",
-    "build": "npm run check:icons && vite build",
+    "build": "npm run check:icons && npm run build:kit && vite build",
     "preview": "vite preview",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "build:kit": "node scripts/build-settings-kit.mjs",
+    "check:kit": "node scripts/build-settings-kit.mjs --check"
   },
   "dependencies": {
     "material-symbols": "^0.48.3",

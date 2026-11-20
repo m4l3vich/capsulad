@@ -8,10 +8,11 @@ the app runs:
 * `PLAYBACK_PLAYING` while decoded audio is being queued to the speaker;
 * `PLAYBACK_PAUSED` while paused;
 * `PLAYBACK_STOPPED` when idle or after a terminal failure. The failure reason
-  is logged and shown as four dashes on the segment display. A stopped entry
-  remains visible to `ListPlayers`/`GetStatus` so its selected station stays
-  discoverable and controllable; the Web UI's Now Playing panel only lists
-  actively playing entries.
+  is logged and, while the segment display is owned, shown as four dashes; with
+  `always_display` off that ownership ends 10 seconds after the last tuning
+  attempt. A stopped entry remains visible to `ListPlayers`/`GetStatus` so its
+  selected station stays discoverable and controllable; the Web UI's Now
+  Playing panel only lists actively playing entries.
 
 `Play` opens the selected station, `Pause` closes the stream, `SkipNext` and
 `SkipPrevious` change the selected station (wrapping) and keep playback live

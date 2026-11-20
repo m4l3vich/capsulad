@@ -16,6 +16,18 @@ export const MAX_QUEUE = 16
 
 const HEX32 = /^[0-9a-f]{32}$/
 
+export const FRAME_THEMES = Object.freeze(['light', 'dark'])
+
+/** The frame needs only the resolved palette, not the user's mode. */
+export function normalizeTheme(value) {
+  return value === 'dark' ? 'dark' : 'light'
+}
+
+function themeFragment(url, theme) {
+  const base = String(url).split('#')[0]
+  return base + '#capsulad-theme=' + normalizeTheme(theme)
+}
+
 export function createChannelToken() {
   const bytes = new Uint8Array(16)
   if (globalThis.crypto?.getRandomValues) {
@@ -127,12 +139,13 @@ function normalizeValues(values) {
  * a stale/navigated frame cannot touch a newer page.
  */
 export class SettingsFrameHost {
-  constructor({ iframe, appId, schema, revision, values, applyChanges, onStatus }) {
+  constructor({ iframe, appId, schema, revision, values, applyChanges, onStatus, theme: frameTheme }) {
     this.iframe = iframe
     this.appId = appId
     this.schema = schema || { settings: [] }
     this.revision = Number(revision) || 0
     this.values = normalizeValues(values)
+    this.theme = normalizeTheme(frameTheme)
     this.token = createChannelToken()
     this.keys = new Set((this.schema.settings || []).map((s) => s.key))
     this.applyChanges = applyChanges
@@ -160,7 +173,7 @@ export class SettingsFrameHost {
   // exist. Navigation happens on the barrier's first load.
   arm(url) {
     if (!this.mounted || this.navigated || !url) return false
-    this.pendingURL = url
+    this.pendingURL = themeFragment(url, this.theme)
     return true
   }
 
@@ -194,7 +207,8 @@ export class SettingsFrameHost {
       apiVersion: BRIDGE_API_VERSION,
       schema: this.schema,
       revision: this.revision,
-      values: this.values
+      values: this.values,
+      theme: this.theme
     })
   }
 
@@ -278,6 +292,25 @@ export class SettingsFrameHost {
       this.inflight = false
       if (this.mounted) this.pump()
     }
+  }
+
+  /**
+   * Forward a resolved palette into an open frame. This is an attribute swap
+   * in the child: no reload, no init, no state/results are replayed, so drafts,
+   * pending patches, focus and scroll position are untouched. Before init the
+   * theme rides on the URL fragment and init itself.
+   */
+  setTheme(theme) {
+    const next = normalizeTheme(theme)
+    if (!this.mounted || this.violated || this.theme === next) return
+    this.theme = next
+    if (!this.initSent) return
+    this.post({
+      type: BRIDGE_PREFIX + 'theme',
+      channel: this.token,
+      appId: this.appId,
+      theme: next
+    })
   }
 
   updateState({ revision, values }) {

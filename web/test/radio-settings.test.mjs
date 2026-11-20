@@ -89,7 +89,7 @@ function makeElement(tag) {
 }
 
 function mount() {
-  const ids = ['picker', 'stations', 'autoplay', 'save', 'status', 'state-pill', 'selection-note']
+  const ids = ['picker', 'stations', 'autoplay', 'always-display', 'save', 'status', 'state-pill', 'selection-note']
   const elements = new Map(ids.map((id) => [id, makeElement(id === 'stations' ? 'textarea' : 'div')]))
   const document = {
     documentElement: { scrollHeight: 240 },
@@ -125,11 +125,12 @@ function mount() {
     for (const fn of (windowListeners.message || []).slice()) fn({ source: parent, data })
   }
 
-  function values({ stations, station = 1, autoplay = false }) {
+  function values({ stations, station = 1, autoplay = false, always_display: alwaysDisplay = false }) {
     return [
       { key: STATIONS, valueJson: JSON.stringify(stations), hasValue: true },
       { key: 'station', valueJson: String(station), hasValue: true },
-      { key: 'autoplay', valueJson: autoplay ? 'true' : 'false', hasValue: true }
+      { key: 'autoplay', valueJson: autoplay ? 'true' : 'false', hasValue: true },
+      { key: 'always_display', valueJson: alwaysDisplay ? 'true' : 'false', hasValue: true }
     ]
   }
 
@@ -139,7 +140,7 @@ function mount() {
       channel: CHANNEL,
       appId: 'org.capsulad.radio',
       apiVersion: 1,
-      schema: { settings: [{ key: STATIONS }, { key: 'station' }, { key: 'autoplay' }] },
+      schema: { settings: [{ key: STATIONS }, { key: 'station' }, { key: 'autoplay' }, { key: 'always_display' }] },
       revision: initial.revision || 1,
       values: values(initial)
     })
@@ -152,7 +153,7 @@ function mount() {
       channel: CHANNEL,
       appId: 'org.capsulad.radio',
       revision: initial.revision || 1,
-      schema: { settings: [{ key: STATIONS }, { key: 'station' }, { key: 'autoplay' }] },
+      schema: { settings: [{ key: STATIONS }, { key: 'station' }, { key: 'autoplay' }, { key: 'always_display' }] },
       values: values(initial)
     })
   }
@@ -201,6 +202,7 @@ function mount() {
     reject,
     patches,
     stations: elements.get('stations'),
+    alwaysDisplay: elements.get('always-display'),
     status: elements.get('status'),
     save: elements.get('save'),
     type(text) {
@@ -209,6 +211,11 @@ function mount() {
     },
     clickSave() {
       elements.get('save').dispatch('click')
+    },
+    toggleAlwaysDisplay(checked) {
+      const element = elements.get('always-display')
+      element.checked = checked
+      element.dispatch('change')
     }
   }
 }
@@ -305,4 +312,80 @@ test('a repeated initial value is not acknowledged by an uncorrelated state', ()
 
   ui.state({ stations: A_TEXT, revision: 6 })
   assert.equal(ui.stations.value, A_TEXT)
+})
+
+test('the settings document exposes the canonical daisyUI controls', () => {
+  assert.match(documentHTML, /id="stations"[^>]*class="textarea textarea-bordered[^"]*"/)
+  assert.match(documentHTML, /id="autoplay"[^>]*class="checkbox"/)
+  assert.match(documentHTML, /id="always-display"[^>]*class="checkbox"/)
+  assert.match(documentHTML, /class="btn btn-primary"/)
+  assert.match(documentHTML, /class="alert" id="status"/)
+  assert.match(documentHTML, /id="status"[^>]*hidden/)
+  assert.match(documentHTML, /status\.hidden = !text/)
+  assert.match(documentHTML, /Always display station number/)
+})
+
+test('always display starts unchecked and follows the persisted boolean', () => {
+  const ui = mount()
+  ui.init({ stations: SAVED0 })
+  assert.equal(ui.alwaysDisplay.checked, false)
+  ui.state({ stations: SAVED0, always_display: true, revision: 2 })
+  assert.equal(ui.alwaysDisplay.checked, true)
+  ui.state({ stations: SAVED0, always_display: false, revision: 3 })
+  assert.equal(ui.alwaysDisplay.checked, false)
+})
+
+test('always display persists independently of an unsaved station draft', () => {
+  const ui = mount()
+  ui.init({ stations: SAVED0 })
+  ui.type(A_TEXT)
+  assert.equal(ui.stations.value, A_TEXT)
+
+  ui.toggleAlwaysDisplay(true)
+  const toggle = ui.patches().at(-1)
+  assert.deepEqual(toggle.changes, [{ key: 'always_display', valueJson: 'true' }])
+
+  // The toggle's correlated result and the authoritative snapshot must not
+  // submit, discard or overwrite the station-list draft.
+  ui.ack(toggle.requestId, { stations: SAVED0, always_display: true }, 2)
+  assert.equal(ui.stations.value, A_TEXT)
+  assert.equal(ui.alwaysDisplay.checked, true)
+
+  // Turning it back off is another independent setting write; the draft and
+  // the other controls are untouched.
+  ui.toggleAlwaysDisplay(false)
+  const off = ui.patches().at(-1)
+  assert.deepEqual(off.changes, [{ key: 'always_display', valueJson: 'false' }])
+  ui.ack(off.requestId, { stations: SAVED0, always_display: false }, 3)
+  assert.equal(ui.stations.value, A_TEXT)
+  assert.equal(ui.alwaysDisplay.checked, false)
+  assert.equal(ui.patches().length, 2)
+})
+
+test('a station save in flight does not swallow a new display preference', () => {
+  const ui = mount()
+  ui.init({ stations: SAVED0 })
+  ui.type(A_TEXT)
+  ui.clickSave()
+  const save = ui.patches().at(-1)
+
+  ui.toggleAlwaysDisplay(true)
+  const toggle = ui.patches().at(-1)
+  assert.deepEqual(toggle.changes, [{ key: 'always_display', valueJson: 'true' }])
+
+  // Save A commits first, with the old display value. Its correlated result
+  // clears the draft acknowledgement, and its snapshot is authoritative for
+  // the station list; the display patch is still queued.
+  ui.ack(save.requestId, { stations: A_TEXT, always_display: false }, 2)
+  assert.equal(ui.stations.value, A_TEXT)
+
+  // The display patch then commits: its value is applied without rewriting the
+  // textarea draft.
+  ui.ack(toggle.requestId, { stations: A_TEXT, always_display: true }, 3)
+  assert.equal(ui.stations.value, A_TEXT)
+  assert.equal(ui.alwaysDisplay.checked, true)
+  assert.deepEqual(
+    ui.patches().map((patch) => patch.changes),
+    [stationsPatch(A_TEXT), [{ key: 'always_display', valueJson: 'true' }]]
+  )
 })

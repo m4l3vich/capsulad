@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Injected into every application settings document as `#capsulad-ui-kit`.
+ * Tailwind base normalizes the document; daisyUI 4 supplies the components.
+ * The two theme blocks are emitted by the build from theme.config.js.
+ */
+
+@layer base {
+  :root,
+  [data-theme='capsulad'] {
+    color-scheme: light;
+  }
+
+  [data-theme='capsulad-dark'] {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    margin: 0;
+    background: var(--fallback-b1, oklch(var(--b1) / 1));
+    color: var(--fallback-bc, oklch(var(--bc) / 1));
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .capsulad-ui {
+    display: block;
+    max-width: 100%;
+  }
+
+  /* daisyUI components set display (alert is a grid, card a flex), which
+     would otherwise override the user agent's [hidden] rule. The documents use
+     `hidden` to keep an empty notice or the inactive palette editor out of
+     layout; keep that semantic stronger than a component display. */
+  [hidden] {
+    display: none !important;
+  }
+
+  /*
+   * Compatibility aliases for documents written against the first UI kit.
+   * They are token aliases only — no component styles — so a document that
+   * used `var(--accent)` keeps working while the palette follows the active
+   * daisyUI theme. New documents should use daisyUI classes and its variables.
+   */
+  :root {
+    --sans: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --bg: transparent;
+    --surface: oklch(var(--b1));
+    --surface-2: oklch(var(--b2));
+    --surface-3: oklch(var(--b3));
+    --line: oklch(var(--b3));
+    --line-soft: oklch(var(--b3));
+    --fg: oklch(var(--bc));
+    --muted: oklch(var(--bc) / 0.7);
+    --faint: oklch(var(--bc) / 0.55);
+    --accent: oklch(var(--p));
+    --accent-strong: oklch(var(--p));
+    --accent-dim: oklch(var(--p) / 0.15);
+    --ok: oklch(var(--su));
+    --warn: oklch(var(--wa));
+    --err: oklch(var(--er));
+    --radius-lg: var(--rounded-box);
+    --radius: 0.5rem;
+    --radius-sm: var(--rounded-btn);
+  }
+}

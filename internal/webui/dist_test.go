@@ -103,3 +103,35 @@ func TestEmbeddedDistServesFontLicense(t *testing.T) {
 		t.Fatal("served licence differs from the embedded copy")
 	}
 }
+
+// The settings-document kit is generated from Tailwind CSS and daisyUI and
+// redistributed in every settings response. The release must carry their full
+// MIT notices, not just a package-name banner.
+func TestEmbeddedDistServesFrameworkLicenses(t *testing.T) {
+	for _, name := range []string{"LICENSE-tailwindcss.txt", "LICENSE-daisyui.txt"} {
+		text, err := fs.ReadFile(distFS, "dist/"+name)
+		if err != nil {
+			t.Fatalf("embedded dist has no %s: %v", name, err)
+		}
+		for _, want := range []string{"MIT License", "Permission is hereby granted", `THE SOFTWARE IS PROVIDED "AS IS"`} {
+			if !strings.Contains(string(text), want) {
+				t.Errorf("%s does not contain %q", name, want)
+			}
+		}
+		handler := (&Server{}).static()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+name, nil))
+		if recorder.Code != http.StatusOK || recorder.Body.String() != string(text) {
+			t.Fatalf("GET /%s = %d, served copy differs", name, recorder.Code)
+		}
+	}
+	notice, err := fs.ReadFile(distFS, "dist/THIRD-PARTY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Tailwind CSS", "daisyUI", "LICENSE-tailwindcss.txt", "LICENSE-daisyui.txt"} {
+		if !strings.Contains(string(notice), want) {
+			t.Errorf("THIRD-PARTY.md does not mention %q", want)
+		}
+	}
+}

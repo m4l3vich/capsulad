@@ -82,7 +82,10 @@ func TestSettingsUIHandlerServesSandboxedDocument(t *testing.T) {
 		t.Fatalf("cache = %q", headers.Get("Cache-Control"))
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"capsulad-ui-kit", "capsulad-ui-bridge", "id=\"app-marker\"", "default-src 'none'"} {
+	for _, want := range []string{
+		"capsulad-ui-kit", "capsulad-ui-bridge", "id=\"app-marker\"", "default-src 'none'",
+		"[data-theme=capsulad-dark]", "capsulad-theme=",
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q", want)
 		}

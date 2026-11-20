@@ -339,9 +339,10 @@ endif
 devapps:
 	sh apps/devtools/build.sh
 
-# Independently built browser SPA. Output is embedded by internal/webui, so
-# run this before rebuilding capsulad when frontend sources change. The built
-# dist is checked in, so ordinary Go builds do not need Node.
+# Independently built browser SPA and the settings-document kit. Outputs are
+# embedded by internal/webui and internal/appui, so run this before rebuilding
+# capsulad when their sources change. Both outputs are checked in, so ordinary
+# Go builds do not need Node.
 web:
 	cd web && npm ci && npm run build
 

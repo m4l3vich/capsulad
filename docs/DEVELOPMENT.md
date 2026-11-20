@@ -28,7 +28,7 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make daemon` | only `capsulad` and `capsulad-cli` (no native SDK, no cgo) |
 | `make sdk` | `make sdk-go` and `make sdk-rust` |
 | `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
-| `make web` | `npm ci && npm run build` into `internal/webui/dist` |
+| `make web` | `npm ci && npm run build` into `internal/webui/dist`, plus the settings-document kit at `internal/appui/assets/kit.css` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
 | `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (the Cadence client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
 | `make simon` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio (one native package), the Home Assistant bridge and the AirPlay 2 receiver (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
@@ -87,14 +87,30 @@ make capsulad   # re-embed the new assets
 `make web` runs `npm ci`, which needs network access on a machine without a populated npm
 cache. With `web/node_modules` already present, `cd web && npm run build` works offline.
 
+`npm run build` also runs `npm run build:kit` (before Vite). It compiles the stylesheet injected
+into application settings documents from `web/src/settings-kit.css` and
+`web/tailwind.settings.config.js` (Tailwind 3.4.17 + daisyUI 4.12.23) into the checked-in
+`internal/appui/assets/kit.css`, which `internal/appui` embeds. The build scans
+`internal/appui/assets/*.html` and `apps/*/ui/settings.html` (class attributes and literal class
+strings in the inline script), verifies every scanned class against the generated CSS, rejects
+remote `url()`/`@import`/font references, and enforces a 160 KiB ceiling. `npm run check:kit`
+fails when the checked-in copy is stale. The `theme.config.js` palette is shared with the SPA, so
+the `capsulad` (light) and `capsulad-dark` themes are byte-for-byte the same tokens in both
+outputs; add a class used by a settings document to the config's safelist when the checked-in
+build must keep emitting it.
+
 The checked-in `internal/webui/dist` is embedded with `go:embed`, so an ordinary Go build
 needs no Node toolchain. For frontend work, run Vite against a live simulator daemon; Vite
 serves sources and proxies `/api`, `/healthz` and `/ws` to the daemon's real HTTPS surface.
 The served tree also carries `LICENSE-material-symbols.txt` and `THIRD-PARTY.md`, copied
 verbatim from `web/public` by the Vite build and reachable at `/LICENSE-material-symbols.txt`
 and `/THIRD-PARTY.md`, so a released binary ships the Apache-2.0 notice for the font it
-serves. `web/src/assets/LICENSE-material-symbols.txt` stays the source-tree copy next to the
-font; the web tests keep the two licence copies byte-identical.
+serves. The generated settings-document kit adds `LICENSE-tailwindcss.txt` and
+`LICENSE-daisyui.txt` (full MIT copyright and permission texts for the installed
+`tailwindcss` and `daisyui` versions) and lists both in `THIRD-PARTY.md`; the generated
+`internal/appui/assets/kit.css` banner repeats those notices so the embedded stylesheet is
+self-describing. `web/src/assets/LICENSE-material-symbols.txt` stays the source-tree copy next
+to the font; the web tests keep the two licence copies byte-identical.
 
 The icon font is a checked-in derived asset, not a post-build edit. `web/src/assets` holds a
 40,336-byte subset of Material Symbols Rounded (90 glyphs: 30 icon ligatures, their 20

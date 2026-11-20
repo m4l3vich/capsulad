@@ -4,116 +4,108 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ring settings</title>
-<style>
-  .palette-grid { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr); gap: 14px; }
-  @media (max-width: 620px) { .palette-grid { grid-template-columns: 1fr; } }
-  .stop-list { display: flex; flex-direction: column; gap: 6px; }
-  .stop-row input[type="number"] { width: 100%; }
-  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
-  .presets button { font-weight: 500; }
-  .gradient-preview { min-height: 42px; }
-  .range-value { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-</style>
 </head>
-<body>
-<main class="capsulad-ui" id="app">
-  <div class="spread">
-    <div>
-      <h2>Ring appearance</h2>
-      <small>Effect, palette, brightness and speed are the ring app’s own settings; changes apply to its normal ring presentation.</small>
+<body class="bg-base-100 text-base-content">
+<main class="capsulad-ui flex flex-col gap-4 p-3" id="app">
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="flex flex-col gap-1">
+      <h2 class="text-lg font-semibold">Ring appearance</h2>
+      <small class="text-xs leading-relaxed text-base-content/60">Effect, palette, brightness and speed are the ring app’s own settings; changes apply to its normal ring presentation.</small>
     </div>
-    <span class="pill" id="connection">waiting for host…</span>
+    <span class="badge badge-ghost" id="connection">waiting for host…</span>
   </div>
 
-  <div id="notice" class="notice err" hidden></div>
+  <div id="notice" class="alert alert-error" hidden></div>
 
-  <section class="card" style="margin-top: 12px">
-    <div class="stack">
-      <div class="row">
-        <div class="field">
-          <label for="effect">Effect</label>
-          <select id="effect" data-immediate="effect"></select>
+  <section class="card border border-base-300 bg-base-100">
+    <div class="card-body gap-3 p-3">
+      <div class="flex flex-wrap items-end gap-2.5">
+        <div class="flex min-w-36 flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="effect">Effect</label>
+          <select class="select select-bordered select-sm" id="effect" data-immediate="effect"></select>
         </div>
-        <div class="field grow">
-          <label for="brightness">Effect brightness <span class="range-value" id="brightness-value">100%</span></label>
-          <input id="brightness" type="range" min="0" max="100" step="1" data-immediate="brightness">
+        <div class="flex grow flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="brightness">Effect brightness <span class="font-mono text-xs text-base-content/60" id="brightness-value">100%</span></label>
+          <input class="range range-primary range-sm w-full" id="brightness" type="range" min="0" max="100" step="1" data-immediate="brightness">
         </div>
-        <div class="field grow">
-          <label for="speed">Speed <span class="range-value" id="speed-value">1.0×</span></label>
-          <input id="speed" type="range" min="0.1" max="4" step="0.1" data-immediate="speed">
+        <div class="flex grow flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="speed">Speed <span class="font-mono text-xs text-base-content/60" id="speed-value">1.0×</span></label>
+          <input class="range range-primary range-sm w-full" id="speed" type="range" min="0.1" max="4" step="0.1" data-immediate="speed">
         </div>
       </div>
-      <small id="effect-hint">A static effect shows one solid colour; other effects sample the palette while animating.</small>
+      <small class="text-xs text-base-content/60" id="effect-hint">A static effect shows one solid colour; other effects sample the palette while animating.</small>
     </div>
   </section>
 
-  <section class="card">
-    <div class="spread">
-      <div>
-        <h3>Palette</h3>
-        <small id="palette-mode">Canonical gradient or solid colour.</small>
+  <section class="card border border-base-300 bg-base-100">
+    <div class="card-body gap-3 p-3">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="flex flex-col gap-1">
+          <h3 class="text-sm font-semibold">Palette</h3>
+          <small class="text-xs text-base-content/60" id="palette-mode">Canonical gradient or solid colour.</small>
+        </div>
+        <span class="w-full max-w-full rounded-lg border border-base-300 bg-base-200 px-2 py-1 font-mono text-xs leading-snug break-all" id="palette-current"></span>
       </div>
-      <span class="pill mono wrap" id="palette-current"></span>
-    </div>
 
-    <div id="solid-editor" class="row" style="margin-top: 12px" hidden>
-      <div class="field">
-        <label for="solid-color">Solid colour</label>
-        <input id="solid-color" type="color" value="#FFFFFF">
+      <div id="solid-editor" class="mt-1 flex flex-wrap items-end gap-2.5" hidden>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="solid-color">Solid colour</label>
+          <input class="input input-bordered input-sm w-16" id="solid-color" type="color" value="#FFFFFF">
+        </div>
+        <button class="btn btn-primary btn-sm" type="button" id="save-solid">Save solid colour</button>
+        <small class="grow text-xs text-base-content/60">Saving replaces the palette with this single colour; it stays valid if you switch back to an animated effect.</small>
       </div>
-      <button type="button" id="save-solid">Save solid colour</button>
-      <small class="grow">Saving replaces the palette with this single colour; it stays valid if you switch back to an animated effect.</small>
-    </div>
 
-    <div id="gradient-editor" class="palette-grid" style="margin-top: 12px">
-      <div class="stack">
-        <div class="gradient-preview" id="gradient-preview" aria-hidden="true"></div>
-        <div class="field">
-          <label for="angle">Angle <span class="range-value" id="angle-value">90°</span></label>
-          <input id="angle" type="range" min="0" max="360" step="1">
+      <div id="gradient-editor" class="mt-1 grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+        <div class="flex flex-col gap-2.5">
+          <div class="h-11 rounded-lg border border-base-300" id="gradient-preview" aria-hidden="true"></div>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs text-base-content/70" for="angle">Angle <span class="font-mono text-xs text-base-content/60" id="angle-value">90°</span></label>
+            <input class="range range-primary range-sm w-full" id="angle" type="range" min="0" max="360" step="1">
+          </div>
+          <div class="flex flex-col gap-1.5" id="stops"></div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button class="btn btn-sm" type="button" id="add-stop">Add stop</button>
+            <button class="btn btn-primary btn-sm" type="button" id="save-gradient">Save gradient</button>
+          </div>
         </div>
-        <div class="stop-list" id="stops"></div>
-        <div class="actions">
-          <button type="button" class="secondary" id="add-stop">Add stop</button>
-          <button type="button" id="save-gradient">Save gradient</button>
-        </div>
-      </div>
-      <div class="stack">
-        <h3>Presets</h3>
-        <div class="presets" id="presets">
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)">Aurora</button>
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)">Ocean</button>
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF7828 0%, #FF3C96 100%)">Sunset</button>
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF2814 0%, #FFAA14 100%)">Ember</button>
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FFFFFF 0%, #969696 100%)">Mono</button>
-          <button type="button" class="secondary" data-preset="linear-gradient(90deg, #FF46D2 0%, #46C8FF 100%)">Spectrum</button>
-        </div>
-        <small>Presets serialize to the same canonical gradient as a custom edit; they are not stored by name. A preset applies immediately.</small>
-        <div class="field">
-          <label for="palette-raw">Raw palette value</label>
-          <textarea id="palette-raw" spellcheck="false" aria-describedby="raw-hint"></textarea>
-          <small id="raw-hint">Advanced editing for a canonical value. Invalid values are rejected by the app.</small>
-          <button type="button" class="secondary" id="save-raw">Save raw palette</button>
+        <div class="flex flex-col gap-2.5">
+          <h3 class="text-sm font-semibold">Presets</h3>
+          <div class="flex flex-wrap gap-1.5" id="presets">
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #00DCB4 0%, #5082FF 100%)">Aurora</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #00B4FF 0%, #0046D2 100%)">Ocean</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #FF7828 0%, #FF3C96 100%)">Sunset</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #FF2814 0%, #FFAA14 100%)">Ember</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #FFFFFF 0%, #969696 100%)">Mono</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-preset="linear-gradient(90deg, #FF46D2 0%, #46C8FF 100%)">Spectrum</button>
+          </div>
+          <small class="text-xs text-base-content/60">Presets serialize to the same canonical gradient as a custom edit; they are not stored by name. A preset applies immediately.</small>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs text-base-content/70" for="palette-raw">Raw palette value</label>
+            <textarea class="textarea textarea-bordered textarea-sm w-full font-mono" id="palette-raw" spellcheck="false" aria-describedby="raw-hint"></textarea>
+            <small class="text-xs text-base-content/60" id="raw-hint">Advanced editing for a canonical value. Invalid values are rejected by the app.</small>
+            <div><button class="btn btn-sm" type="button" id="save-raw">Save raw palette</button></div>
+          </div>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="card">
-    <div class="stack">
-      <label class="check"><input type="checkbox" id="schedule-enabled"> <span>Light the ring only during an active window</span></label>
-      <div class="row">
-        <div class="field">
-          <label for="schedule-start">Active from</label>
-          <input id="schedule-start" type="time" step="60">
+  <section class="card border border-base-300 bg-base-100">
+    <div class="card-body gap-3 p-3">
+      <label class="flex cursor-pointer items-center gap-2 text-sm"><input class="checkbox checkbox-sm" type="checkbox" id="schedule-enabled"> <span>Light the ring only during an active window</span></label>
+      <div class="flex flex-wrap items-end gap-2.5">
+        <div class="flex flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="schedule-start">Active from</label>
+          <input class="input input-bordered input-sm w-28" id="schedule-start" type="time" step="60">
         </div>
-        <div class="field">
-          <label for="schedule-end">Active until</label>
-          <input id="schedule-end" type="time" step="60">
+        <div class="flex flex-col gap-1">
+          <label class="text-xs text-base-content/70" for="schedule-end">Active until</label>
+          <input class="input input-bordered input-sm w-28" id="schedule-end" type="time" step="60">
         </div>
-        <button type="button" id="save-schedule">Save window</button>
+        <button class="btn btn-sm" type="button" id="save-schedule">Save window</button>
       </div>
-      <small>HH:MM in the device timezone. The window may cross midnight; equal start and end mean all day. Outside the window the app presents a blank frame; volume, mute and alert indications still use the ring.</small>
+      <small class="text-xs text-base-content/60">HH:MM in the device timezone. The window may cross midnight; equal start and end mean all day. Outside the window the app presents a blank frame; volume, mute and alert indications still use the ring.</small>
     </div>
   </section>
 </main>
@@ -136,7 +128,7 @@
   function showNotice(text, kind) {
     notice.hidden = !text;
     notice.textContent = text || '';
-    notice.className = 'notice ' + (kind || 'err');
+    notice.className = kind === 'ok' ? 'alert alert-success' : 'alert alert-error';
   }
 
   function schemaDef(key) {
@@ -177,7 +169,7 @@
     }
     if (state && state.schema && Array.isArray(state.schema.settings)) api.schema = state.schema;
     connection.textContent = 'connected';
-    connection.className = 'pill ok';
+    connection.className = 'badge badge-success';
     applyState();
   }
 
@@ -319,9 +311,10 @@
     list.textContent = '';
     gradient.stops.forEach((stop, index) => {
       const row = document.createElement('div');
-      row.className = 'stop-row';
+      row.className = 'flex flex-wrap items-center gap-2';
       const color = document.createElement('input');
       color.type = 'color';
+      color.className = 'input input-bordered input-sm w-16';
       color.value = stop.color;
       color.setAttribute('aria-label', 'Stop ' + (index + 1) + ' colour');
       color.addEventListener('input', () => {
@@ -331,6 +324,7 @@
       });
       const pos = document.createElement('input');
       pos.type = 'number';
+      pos.className = 'input input-bordered input-sm w-full';
       pos.min = '0';
       pos.max = '100';
       pos.step = '1';
@@ -343,7 +337,7 @@
       });
       const remove = document.createElement('button');
       remove.type = 'button';
-      remove.className = 'danger';
+      remove.className = 'btn btn-ghost btn-xs text-error';
       remove.textContent = 'Remove';
       remove.disabled = gradient.stops.length <= 2;
       remove.addEventListener('click', () => {

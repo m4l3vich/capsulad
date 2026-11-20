@@ -3,8 +3,16 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
+  /* daisyUI themes also set color-scheme, but the custom pair is not derived
+     from its light/dark presets, so state it explicitly for form controls and
+     scrollbars. */
+  :root,
+  [data-theme='capsulad'] {
     color-scheme: light;
+  }
+
+  [data-theme='capsulad-dark'] {
+    color-scheme: dark;
   }
 
   html,
@@ -22,7 +30,7 @@
   }
 
   dialog::backdrop {
-    @apply bg-neutral/40;
+    @apply bg-black/50;
   }
 }
 

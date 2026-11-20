@@ -6,6 +6,7 @@ import { liveState } from './lib/live.js'
 import { socket } from './lib/ws.js'
 import { dismissToast, notify } from './lib/toast.js'
 import ToastHost from './components/ToastHost.vue'
+import ThemeSwitch from './components/ThemeSwitch.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
 import AppsView from './views/AppsView.vue'
@@ -178,17 +179,18 @@ async function signOut() {
               v-for="item in nav"
               :key="item.path"
               v-bind="link(item.path)"
-              class="btn btn-sm btn-ghost btn-primary shrink-0"
-              :class="{ 'btn-soft bg-base-200': isActive(item.path) }"
+              class="btn btn-sm btn-ghost shrink-0"
+              :class="{ 'btn-active bg-base-200 text-primary': isActive(item.path) }"
               :aria-current="isActive(item.path) ? 'page' : undefined"
             >{{ item.label }}</a>
           </nav>
 
-          <div class="ml-auto flex items-center gap-3">
+          <div class="ml-auto flex items-center gap-2 sm:gap-3">
             <span class="inline-flex items-center gap-1.5 text-xs text-base-content/70" role="status" :aria-label="connection.label">
               <span class="inline-block h-2 w-2 rounded-full" :class="connection.dot"></span>
               <span class="hidden sm:inline">{{ connection.label }}</span>
             </span>
+            <ThemeSwitch />
             <button type="button" class="btn btn-sm btn-outline" @click="signOut">Sign out</button>
           </div>
         </div>

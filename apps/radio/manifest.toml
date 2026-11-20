@@ -50,6 +50,13 @@ description = "Start the selected station as soon as the app is ready. Off by de
 type = "boolean"
 default = false
 
+[[settings]]
+key = "always_display"
+label = "Always display station number"
+description = "Keep the selected station number on the segment display while the radio is active. Off by default: the number appears while tuning and playing, then the display releases to the selected baseline 10 seconds after tuning without changing audio or the LED ring."
+type = "boolean"
+default = false
+
 [[actions]]
 id = "play"
 label = "Play"

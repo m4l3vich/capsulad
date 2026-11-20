@@ -6,6 +6,8 @@
  *    per-frame channel token;
  *  - exposes window.CapsuladUI with state/result listeners and a patch method
  *    that can only request setting-value changes;
+ *  - applies the host's resolved light/dark palette as a data-theme attribute,
+ *    which repaints the kit without reloading the document or its drafts;
  *  - reports its content height for embedding.
  *
  * It has no network, storage, cookie or parent-DOM access, and performs no
@@ -15,10 +17,39 @@
   'use strict';
 
   const PREFIX = 'capsulad.settings-ui/1:';
+  const LIGHT_THEME = 'capsulad';
+  const DARK_THEME = 'capsulad-dark';
   const stateListeners = new Set();
   const resultListeners = new Set();
   let channel = null;
   let seq = 0;
+
+  function applyTheme(name) {
+    const next = name === DARK_THEME || name === 'dark' ? DARK_THEME : LIGHT_THEME;
+    api.theme = next === DARK_THEME ? 'dark' : 'light';
+    // The theme switch is an attribute swap, never a document reload: drafts,
+    // scroll position, focus and pending patch listeners stay intact.
+    try {
+      const root = document.documentElement;
+      if (root && typeof root.setAttribute === 'function') root.setAttribute('data-theme', next);
+    } catch (_) {
+      // A host without a styled document (the Node bridge test) still gets the
+      // correct API state; there is simply nothing to paint.
+    }
+  }
+
+  function initialTheme() {
+    // The host mounts the frame with the resolved theme in the fragment so the
+    // first paint already matches; messages keep it in step afterwards.
+    try {
+      const match = /(?:^|&)capsulad-theme=(dark|light)(?:&|$)/.exec(String(location.hash || '').slice(1));
+      if (match) return match[1];
+    } catch (_) { /* no location in a non-browser host */ }
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+    } catch (_) { /* matchMedia unavailable: light is the kit default */ }
+    return 'light';
+  }
 
   function post(body) {
     // Never post before init locks the channel. DOMContentLoaded/ResizeObserver
@@ -42,6 +73,7 @@
     appId: '',
     schema: { settings: [] },
     revision: 0,
+    theme: 'light',
     onState(fn) {
       if (typeof fn === 'function') stateListeners.add(fn);
       return () => stateListeners.delete(fn);
@@ -77,6 +109,7 @@
       api.appId = typeof data.appId === 'string' ? data.appId : '';
       api.schema = data.schema && typeof data.schema === 'object' ? data.schema : { settings: [] };
       api.revision = Number(data.revision) || 0;
+      applyTheme(typeof data.theme === 'string' ? data.theme : api.theme);
       dispatch(stateListeners, data);
       post({ type: 'ready' });
       api.resize();
@@ -84,7 +117,9 @@
     }
 
     if (channel === null || data.channel !== channel) return;
-    if (data.type === PREFIX + 'state') {
+    if (data.type === PREFIX + 'theme') {
+      applyTheme(typeof data.theme === 'string' ? data.theme : api.theme);
+    } else if (data.type === PREFIX + 'state') {
       api.revision = Number(data.revision) || api.revision;
       dispatch(stateListeners, data);
       api.resize();
@@ -103,5 +138,8 @@
     new ResizeObserver(() => api.resize()).observe(document.documentElement);
   }
 
+  // Paint the first frame in the host's resolved theme before the app script
+  // runs; init/messages refine it without touching the document later.
+  applyTheme(initialTheme());
   window.CapsuladUI = api;
 })();

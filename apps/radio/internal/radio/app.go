@@ -21,7 +21,7 @@ import (
 
 // Framework and contract names used by the app.
 const (
-	mediaService = "capsulad.contracts.media.v1.MediaPlayerService"
+	mediaService  = "capsulad.contracts.media.v1.MediaPlayerService"
 	configService = "capsulad.framework.v1.ApplicationConfigurationService"
 
 	segmentResource = "display.segment.front"
@@ -91,12 +91,19 @@ type App struct {
 	env    capsulad.Env
 	logf   func(string, ...any)
 
+	// display is the presentation/capture seam used by displayLoop.
+	display displayHost
+
 	mu               sync.Mutex
 	phase            Phase
 	detail           string
 	stations         []Station
 	stationNumber    int
 	autoplay         bool
+	alwaysDisplay    bool
+	displayUntil     time.Time
+	displayWindow    time.Duration
+	now              func() time.Time
 	settingsRevision uint64
 	persistedStation int
 	pendingStations  map[int]int
@@ -112,7 +119,7 @@ type App struct {
 	revision         uint64
 	speakerAvailable bool
 
-	watchers map[uint64]chan struct{}
+	watchers  map[uint64]chan struct{}
 	nextWatch uint64
 
 	drawCh      chan struct{}
@@ -133,6 +140,7 @@ func New(ctx context.Context, client *capsulad.Client, env capsulad.Env, logf fu
 		client:           client,
 		env:              env,
 		logf:             logf,
+		display:          clientDisplayHost{client: client},
 		phase:            PhaseStopped,
 		stations:         ParseStations(DefaultStations, logf),
 		stationNumber:    1,
@@ -175,6 +183,7 @@ func (a *App) HandleSettings(event *capsulad.SettingsChanged) {
 	var stationsText *string
 	var station *int
 	var autoplay *bool
+	var alwaysDisplay *bool
 
 	a.mu.Lock()
 	if event.Revision != 0 && event.Revision < a.settingsRevision {
@@ -200,6 +209,10 @@ func (a *App) HandleSettings(event *capsulad.SettingsChanged) {
 			if enabled, ok := decodeBool(value.ValueJSON); ok {
 				autoplay = &enabled
 			}
+		case "always_display":
+			if enabled, ok := decodeBool(value.ValueJSON); ok {
+				alwaysDisplay = &enabled
+			}
 		}
 	}
 	if stationsText != nil {
@@ -219,6 +232,11 @@ func (a *App) HandleSettings(event *capsulad.SettingsChanged) {
 	}
 	if autoplay != nil {
 		a.autoplay = *autoplay
+	}
+	displayChanged := false
+	if alwaysDisplay != nil && a.alwaysDisplay != *alwaysDisplay {
+		a.alwaysDisplay = *alwaysDisplay
+		displayChanged = true
 	}
 	active := a.phase == PhasePlaying || a.phase == PhaseBuffering || a.phase == PhasePaused
 	retune := false
@@ -246,7 +264,7 @@ func (a *App) HandleSettings(event *capsulad.SettingsChanged) {
 	}
 	if retune {
 		go a.retune("settings")
-	} else if phase == PhaseStopped {
+	} else if phase == PhaseStopped || displayChanged {
 		a.requestDraw()
 	}
 }
@@ -299,6 +317,7 @@ func (a *App) play(why string) (bool, string) {
 	a.mu.Lock()
 	selected, ok := a.currentStationLocked()
 	if !ok {
+		a.beginDisplayRunLocked()
 		reason := a.missingStationReasonLocked()
 		old := a.failLocked(reason)
 		a.mu.Unlock()
@@ -309,6 +328,7 @@ func (a *App) play(why string) (bool, string) {
 		return false, reason
 	}
 	if !a.speakerAvailable {
+		a.beginDisplayRunLocked()
 		old := a.failLocked("no speaker endpoint on this device")
 		a.mu.Unlock()
 		if old != nil {
@@ -360,6 +380,7 @@ func (a *App) stop(why string) (bool, string) {
 	a.session = nil
 	a.sessionURL = ""
 	a.phase = PhaseStopped
+	a.displayUntil = time.Time{}
 	a.detail = reasonText(why)
 	detail := a.detail
 	a.nowTitle = ""
@@ -406,6 +427,7 @@ func (a *App) retune(why string) (bool, string) {
 	a.mu.Lock()
 	selected, ok := a.currentStationLocked()
 	if !ok {
+		a.beginDisplayRunLocked()
 		reason := a.missingStationReasonLocked()
 		old := a.failLocked(reason)
 		a.mu.Unlock()
@@ -416,6 +438,7 @@ func (a *App) retune(why string) (bool, string) {
 		return false, reason
 	}
 	if !a.speakerAvailable {
+		a.beginDisplayRunLocked()
 		old := a.failLocked("no speaker endpoint on this device")
 		a.mu.Unlock()
 		if old != nil {
@@ -438,6 +461,7 @@ func (a *App) retune(why string) (bool, string) {
 // startSessionLocked replaces the session pointer and enters buffering. The
 // caller owns the returned session and must run/stop it outside the lock.
 func (a *App) startSessionLocked(station Station, why string) *session {
+	a.beginDisplayRunLocked()
 	a.sessionSeq++
 	s := newSession(a, a.sessionSeq, station)
 	a.session = s

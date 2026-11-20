@@ -18,8 +18,8 @@ retired.
 | `README.md` | this guide |
 
 The package is a regular `<id>-<version>.tar.gz`; settings and preferences live
-outside it, so replacing the package keeps the station list, selected station
-and autoplay choice under the same app ID.
+outside it, so replacing the package keeps the station list, selected station,
+autoplay choice and display preference under the same app ID.
 
 ## Build, install, run
 
@@ -53,7 +53,7 @@ does not start audio by itself.
 
 The previous release was two packages: the MicroPython front end and the native
 `org.capsulad.radio.tuner` companion. The single app replaces both. Settings for
-`org.capsulad.radio` itself (`stations`, `station`, `autoplay`) survive package
+`org.capsulad.radio` itself (`stations`, `station`, `autoplay`, `always_display`) survive package
 replacement because they share the app ID.
 
 Nothing is uninstalled automatically. On a device that still has the companion,
@@ -110,16 +110,22 @@ the saved list no longer contains the selected slot, the picker keeps the
 configured number and shows `Selected station N is not in the list. Pick one
 above.`; choosing a station is the explicit recovery. A live stream whose
 station was removed stops into the error state (four dashes) instead of
-continuing a station that is no longer configured. It stays there until Stop or
-Dismiss restores the baseline, Next/Previous re-selects and plays, or an
-explicit pick chooses a valid slot that Play then starts. Unsubmitted textarea
+continuing a station that is no longer configured. With `always_display` on it
+stays there until Stop or Dismiss restores the baseline, Next/Previous
+re-selects and plays, or an explicit pick chooses a valid slot that Play then
+starts. With the default off, the error uses the same 10-second tuning window
+and then releases the display to the baseline. Unsubmitted textarea
 edits are a draft: an incoming settings update from the picker, the autoplay
 checkbox or another writer never overwrites them. The picker correlates each
 save with the `requestId` returned by `CapsuladUI.patch`: only `result.ok` for
 the newest save, while the textarea still holds that submitted text, clears the
 draft. A predecessor's late result, a failure, or a newer edit leaves it intact.
+The display-preference checkbox follows the same rule: it writes only
+`always_display` through its own correlated patch, so it can be changed while
+the station text is an unsaved draft, and an incoming snapshot for a save never
+rewrites that draft.
 
-### Selected station (`station`) and autoplay (`autoplay`)
+### Selected station (`station`), autoplay (`autoplay`) and display (`always_display`)
 
 `station` is the 1-based stored selection. Changing it switches an active
 station; `next`/`previous`, a media `SkipNext`/`SkipPrevious`, and a launch
@@ -130,6 +136,20 @@ deliberate selection.
 `autoplay` plays the selected station once, when the first settings snapshot
 arrives after startup. It never restarts a radio the user stopped, and changing
 it later does not start playback.
+
+`always_display` is off by default. When off, a tuning attempt shows the station
+number immediately and owns the segment display for 10 seconds; the radio then
+closes the presentation so the selected baseline returns. It never writes a
+blank or black frame, and releasing the display leaves audio and the LED ring
+untouched. A new play/tune starts a new 10-second window. Stopping releases the
+display immediately. An error that occurs inside the window shows four dashes
+until the window ends; an error that occurs after the display was released does
+not reacquire it. Pausing does not extend the window. When `always_display` is
+on, the radio keeps the station number (or the error dashes) while it is active,
+exactly as before; turning it on during a run shows the number immediately, and
+turning it off uses the deadline of the last tuning attempt rather than a fresh
+10 seconds. The station number and the error pattern never light the colon: the
+colon belongs to the clock/volume presentations.
 
 ### Controls
 
@@ -147,15 +167,22 @@ it later does not start playback.
 | State | Segment display |
 |---|---|
 | buffering / reconnecting | station number, colon dark |
-| playing (audio queued) | station number, colon lit |
-| paused | station number, last decimal point lit |
-| error | four dashes, colon dark, until `stop`/`dismiss` or a new `play` |
+| playing (audio queued) | station number, colon dark |
+| paused | station number, last decimal point lit, colon dark |
+| error | four dashes, colon dark |
 | stopped | no presentation: the configured baseline is restored |
+
+With `always_display` off (the default), the three active rows above own the
+display for 10 seconds from the last tuning attempt; afterwards the presentation
+is closed and the baseline returns. With it on, the active rows persist until
+stop. The radio never lights the colon; that segment belongs to the
+clock/volume presentations.
 
 If the device advertises no `display.segment.front`, the radio plays without a
 display and retries the presentation on the next state change. When it does
 present, it holds a display capture so the station wins over the configured
-default app; stopping closes the presentation and releases the capture. If the
+default app; releasing the display closes the presentation and its capture,
+which restores the selected baseline rather than forcing black. If the
 device advertises no `audio.output.speaker`, play fails with
 `no speaker endpoint on this device`.
 
@@ -217,7 +244,14 @@ cd apps/radio && CGO_ENABLED=1 go test ./...
 They cover the station grammar and selection, settings application and
 out-of-range handling, media snapshots, chunk sizing, idle accounting and the
 session-ownership rule that a stale failure/completion cannot clear a newer
-session. The stream package tests cover chunked framing, ICY stripping,
+session. Display tests use a controlled clock and a recording presentation host
+to prove the 10-second release drops the dependent capture before closing the
+presentation without sending a blank frame, that the future deadline alone wakes
+the wait with no draw available, that retuning replaces the deadline instead of
+letting the old one release the new display, that turning `always_display`
+on/off during a run uses the tuning deadline, and that the station/error frames
+never light the colon.
+The stream package tests cover chunked framing, ICY stripping,
 redirects/playlists, malformed response heads, ID3 bounds and codec detection.
 
 For an end-to-end run, build a simulator stack and install the package:

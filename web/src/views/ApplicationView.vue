@@ -3,11 +3,13 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
+import { theme as appearance } from '../lib/theme.js'
 import { readGuide } from '../lib/apps.js'
 import { guideBlocks } from '../lib/guide.js'
 import { logLine, safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
+import ThemeSwitch from '../components/ThemeSwitch.vue'
 
 const props = defineProps({
   appId: { type: String, required: true }
@@ -385,6 +387,7 @@ async function maybeMountSettingsUI() {
     schema: data.value.schema,
     revision: configRevision,
     values: data.value.values,
+    theme: appearance.resolved,
     applyChanges: (changes, expectedRevision) => applyAppChanges(changes, expectedRevision, app),
     onStatus: (next) => {
       if (next?.error) {
@@ -423,6 +426,16 @@ function updateFrameHost() {
   if (!frameHost || !data.value) return
   frameHost.updateState({ revision: configRevision, values: data.value.values })
 }
+
+// A Light/Dark/System change reaches an already-open settings document as one
+// attribute update. It deliberately does not remount the frame or resend
+// init/state, so in-progress drafts, pending patches, focus and scroll stay.
+watch(
+  () => appearance.resolved,
+  (value) => {
+    frameHost?.setTheme(value)
+  }
+)
 
 // --- lifecycle, launch and actions ----------------------------------------
 
@@ -504,6 +517,12 @@ function uptime(ns) {
 
 <template>
   <ModalDialog :title="title" :before-close="requestClose" @close="emit('close')">
+    <!-- A dialog is in the top layer, so the shell's header switch cannot be
+         reached while an app detail is open. Keep appearance available beside
+         the live settings frame; System still follows the OS. -->
+    <template #actions>
+      <ThemeSwitch />
+    </template>
     <div v-if="!data && !loadError" class="flex flex-col gap-3" aria-busy="true">
       <div class="skeleton h-4 w-2/3"></div>
       <div class="skeleton h-4 w-1/3"></div>

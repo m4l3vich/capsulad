@@ -6,37 +6,44 @@
 <title>Internet Radio</title>
 </head>
 <body>
-<main class="capsulad-ui">
-  <div class="card stack">
-    <div class="spread">
-      <div>
-        <h2>Internet Radio</h2>
-        <p class="muted">Pick a station to make it the selected station. Play, Pause, Next and Previous are on the device, the Web UI and the media contract.</p>
+<main class="capsulad-ui p-3">
+  <div class="card bg-base-100 border border-base-300">
+    <div class="card-body gap-4">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h2 class="card-title">Internet Radio</h2>
+          <p class="text-sm text-base-content/60">Pick a station to make it the selected station. Play, Pause, Next and Previous are on the device, the Web UI and the media contract.</p>
+        </div>
+        <span class="badge badge-ghost shrink-0" id="state-pill">Loading</span>
       </div>
-      <span class="pill" id="state-pill">Loading</span>
-    </div>
 
-    <div class="field">
-      <label>Selected station</label>
-      <div id="picker" class="stack" role="listbox" aria-label="Selected station"></div>
-      <p class="notice" id="selection-note"></p>
-    </div>
+      <div class="form-control">
+        <label class="label"><span class="label-text">Selected station</span></label>
+        <div id="picker" class="flex flex-col gap-2" role="listbox" aria-label="Selected station"></div>
+        <p class="text-sm text-base-content/60 mt-2" id="selection-note"></p>
+      </div>
 
-    <div class="field">
-      <label for="stations">Stations</label>
-      <textarea id="stations" rows="8" spellcheck="false" placeholder="Name | https://example.com/stream.mp3"></textarea>
-      <p class="muted">One station per line as <span class="mono">Name | URL</span>. Blank lines and lines starting with <span class="mono">#</span> are ignored. Only http:// and https:// streams are accepted; at most 99 stations. MP3 streams are supported.</p>
-    </div>
+      <div class="form-control">
+        <label class="label" for="stations"><span class="label-text">Stations</span></label>
+        <textarea id="stations" class="textarea textarea-bordered w-full font-mono" rows="8" spellcheck="false" placeholder="Name | https://example.com/stream.mp3"></textarea>
+        <label class="label"><span class="label-text-alt">One station per line as Name | URL. Blank lines and lines starting with # are ignored. Only http:// and https:// streams are accepted; at most 99 stations. MP3 streams are supported.</span></label>
+      </div>
 
-    <div class="check">
-      <input id="autoplay" type="checkbox">
-      <label for="autoplay">Play the selected station when the app starts</label>
-    </div>
+      <label class="label cursor-pointer justify-start gap-3" for="autoplay">
+        <input id="autoplay" type="checkbox" class="checkbox">
+        <span class="label-text">Play the selected station when the app starts</span>
+      </label>
 
-    <div class="actions">
-      <button id="save" type="button">Save station list</button>
+      <label class="label cursor-pointer justify-start gap-3" for="always-display">
+        <input id="always-display" type="checkbox" class="checkbox">
+        <span class="label-text">Always display station number</span>
+      </label>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <button id="save" type="button" class="btn btn-primary">Save station list</button>
+      </div>
+      <div class="alert" id="status" role="status" aria-live="polite" hidden></div>
     </div>
-    <div class="notice" id="status" role="status" aria-live="polite"></div>
   </div>
 </main>
 <script>
@@ -50,6 +57,7 @@
   var picker = document.getElementById('picker');
   var stations = document.getElementById('stations');
   var autoplay = document.getElementById('autoplay');
+  var alwaysDisplay = document.getElementById('always-display');
   var save = document.getElementById('save');
   var status = document.getElementById('status');
   var pill = document.getElementById('state-pill');
@@ -71,9 +79,20 @@
     return id;
   }
 
+  function setPill(text, kind) {
+    pill.textContent = text;
+    if (kind === 'ok') pill.className = 'badge badge-success';
+    else if (kind === 'warn') pill.className = 'badge badge-warning';
+    else if (kind === 'err') pill.className = 'badge badge-error';
+    else pill.className = 'badge badge-ghost';
+  }
+
   function setStatus(text, kind) {
     status.textContent = text || '';
-    status.className = 'notice' + (kind ? ' ' + kind : '');
+    status.hidden = !text;
+    if (kind === 'ok') status.className = 'alert alert-success';
+    else if (kind === 'err') status.className = 'alert alert-error';
+    else status.className = 'alert';
   }
 
   function settingValue(key, fallback) {
@@ -115,7 +134,7 @@
     picker.replaceChildren();
     if (!list.length) {
       var empty = document.createElement('p');
-      empty.className = 'muted';
+      empty.className = 'text-sm text-base-content/60';
       empty.textContent = 'No stations yet. Add one below and save.';
       picker.appendChild(empty);
       selectionNote.textContent = '';
@@ -125,22 +144,20 @@
       var number = index + 1;
       var button = document.createElement('button');
       button.type = 'button';
-      button.className = 'row';
+      button.className = 'btn btn-ghost h-auto justify-start normal-case text-left';
       button.setAttribute('role', 'option');
       button.setAttribute('aria-selected', String(number === selected));
-      if (number === selected) button.classList.add('selected');
-      button.style.textAlign = 'left';
-      button.style.justifyContent = 'flex-start';
+      if (number === selected) button.classList.add('btn-active');
 
       var badge = document.createElement('span');
-      badge.className = 'pill';
+      badge.className = 'badge badge-ghost shrink-0';
       badge.textContent = String(number);
       var text = document.createElement('span');
-      text.className = 'grow';
+      text.className = 'w-full';
       var title = document.createElement('strong');
       title.textContent = station.name;
       var url = document.createElement('span');
-      url.className = 'mono muted';
+      url.className = 'font-mono text-base-content/60';
       url.textContent = station.url;
       text.appendChild(title);
       text.appendChild(document.createElement('br'));
@@ -153,10 +170,11 @@
       });
       picker.appendChild(button);
     });
-    selectionNote.textContent = selected >= 1 && selected <= list.length
+    var valid = selected >= 1 && selected <= list.length;
+    selectionNote.textContent = valid
       ? 'Selected: ' + selected + ' — ' + list[selected - 1].name
       : 'Selected station ' + selected + ' is not in the list. Pick one above.';
-    selectionNote.className = 'notice' + (selected >= 1 && selected <= list.length ? '' : ' err');
+    selectionNote.className = valid ? 'text-sm text-base-content/60 mt-2' : 'text-sm text-error mt-2';
   }
 
   function applyState(state) {
@@ -168,13 +186,14 @@
     current.values = values;
     // A snapshot is not an acknowledgement for a specific patch. While a draft
     // exists it is never overwritten; pendingSave's own result is the only
-    // thing that clears it.
+    // thing that clears it. The independent switches always follow the
+    // authoritative snapshot, so a station-list draft cannot block them.
     if (!draftDirty) {
       stations.value = settingValue('stations', '');
     }
     autoplay.checked = Boolean(settingValue('autoplay', false));
-    pill.textContent = 'Ready';
-    pill.className = 'pill ok';
+    alwaysDisplay.checked = Boolean(settingValue('always_display', false));
+    setPill('Ready', 'ok');
     renderPicker();
     CapsuladUI.resize();
   }
@@ -183,6 +202,13 @@
 
   autoplay.addEventListener('change', function () {
     sendPatch([{ key: 'autoplay', valueJson: autoplay.checked ? 'true' : 'false' }]);
+  });
+
+  // The display preference is its own setting. A change writes only this key
+  // through the bridge's compare-and-swap patch, so an unsaved station-list
+  // draft is neither submitted nor discarded.
+  alwaysDisplay.addEventListener('change', function () {
+    sendPatch([{ key: 'always_display', valueJson: alwaysDisplay.checked ? 'true' : 'false' }]);
   });
 
   save.addEventListener('click', function () {
@@ -207,17 +233,15 @@
         if (stations.value === acknowledged.text) {
           draftDirty = false;
           setStatus('Saved.', 'ok');
-          pill.textContent = 'Saved';
-          pill.className = 'pill ok';
+          setPill('Saved', 'ok');
         } else {
           setStatus('Saved; newer edits are still unsaved.', '');
-          pill.textContent = 'Unsaved draft';
-          pill.className = 'pill warn';
+          setPill('Unsaved draft', 'warn');
         }
       } else {
-        setStatus(result.error || result.message || 'The change was rejected.', 'err');
-        pill.textContent = 'Needs attention';
-        pill.className = 'pill err';
+        setStatus(result.error || result.message || 'The change was rejected.',
+          'err');
+        setPill('Needs attention', 'err');
       }
     } else if (!pendingSave && result.requestId === lastPatchId) {
       // Only the latest patch's result may speak for an unrelated control. A

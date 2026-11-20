@@ -250,11 +250,34 @@ The response also sends `Cache-Control: no-store`, `X-Content-Type-Options: nosn
 cookie. The wrapper injects the local UI kit CSS and the bridge bootstrap **before** the app's
 markup. The app supplies no external script or stylesheet URL.
 
-UI kit: wrap the content in `<main class="capsulad-ui">` and use `card`, `stack`, `row`, `spread`,
-`actions`, `field`, `check`, `pill` (`ok|warn|err`), `notice`, `mono`, `grow`, `wrap` and
-`sr-only`, plus the CSS variables (`--bg`, `--surface`, `--fg`, `--muted`, `--accent`, `--ok`,
-`--warn`, `--err`, `--radius`, `--sans`, `--mono`). Native `input`, `select`, `textarea`, `table`
-and the kit's form classes are styled automatically.
+UI kit: the wrapper injects a locally built Tailwind + daisyUI 4 stylesheet (compiled into the
+daemon; no CDN and no external font or image request). Wrap the content in
+`<main class="capsulad-ui">` and compose the document from daisyUI classes with explicit
+Tailwind layout: `card` + `card-body` + `card-title`, `btn` (`btn-primary`, `btn-ghost`,
+`btn-sm`, `btn-active`), `input input-bordered`, `select select-bordered`,
+`textarea textarea-bordered`, `checkbox`, `toggle`, `range`, `alert alert-error` /
+`alert-success`, `badge` (`badge-ghost`, `badge-success`, …), `label` + `label-text` /
+`label-text-alt`, and the layout utilities (`flex`, `grid`, `flex-col`, `flex-wrap`,
+`items-{start,center,end}`, `justify-{start,between}`, `gap-*`, `p-*`, `mt-*`, `w-*`,
+`text-{xs,sm,lg}`, `font-mono`). The supported set is fixed when the daemon is built;
+`web/tailwind.settings.config.js` is the authoritative safelist. Do not add a stylesheet link,
+a style import, or a second component kit.
+
+The kit carries two themes, `capsulad` (light) and `capsulad-dark`, with the system colour
+scheme on each. The bridge sets `data-theme` on the document element from the administrator's
+Light/Dark/System choice and updates it live through the `theme` message below. A theme change
+is an attribute swap: drafts, focus, scroll position and pending patches are preserved; nothing
+is reloaded or replayed. Style with daisyUI variables (`--p`, `--b1`, `--bc`, …) or its classes,
+not fixed page colours. On mount the host opens the document with a reserved
+`#capsulad-theme=light|dark` fragment so the first paint already matches; the bootstrap consumes
+it before the app script runs.
+
+The first-kit CSS variables (`--surface`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`,
+`--err`, `--radius`, `--sans`, `--mono`) remain as aliases of the active daisyUI theme, but the
+first-kit component classes (`stack`, `row`, `spread`, `field`, `check`, `pill`, `notice`,
+`actions`, `mono`, `empty`) are no longer emitted. A packaged document that used them keeps
+working through the bridge but must be migrated to the daisyUI set above to be styled. The
+protocol, patches, CSP and response headers are unchanged.
 
 ### `capsulad.settings-ui/1:` protocol
 
@@ -265,6 +288,7 @@ CapsuladUI.apiVersion   // 1
 CapsuladUI.appId
 CapsuladUI.schema       // { settings: [...] } from the manifest
 CapsuladUI.revision     // current app-settings revision
+CapsuladUI.theme        // 'light' or 'dark' (the resolved palette)
 CapsuladUI.onState(fn)  // snapshot/state events
 CapsuladUI.onResult(fn) // patch results, each carrying requestId
 CapsuladUI.patch(changes) // [{key, valueJson}] or [{key, clear:true}];
@@ -277,12 +301,18 @@ token.
 
 | Direction | Type | Payload |
 |---|---|---|
-| parent → frame | `init` | `{channel, appId, apiVersion:1, schema, revision, values}`. Exactly one. |
+| parent → frame | `init` | `{channel, appId, apiVersion:1, schema, revision, values, theme}`. Exactly one. |
+| parent → frame | `theme` | `{channel, appId, theme: 'light'\|'dark'}`. Live palette change; no reload. |
 | frame → parent | `ready` | The bootstrap accepted init. |
 | frame → parent | `patch` | `{requestId, changes:[{key, valueJson}|{key, clear}]}` |
 | frame → parent | `resize` | `{height}` (20–4000 px). |
 | parent → frame | `state` | `{revision, schema, values}` after an update. |
 | parent → frame | `result` | `{requestId, ok, revision, message?, error?}`. |
+
+`theme` is one-way: the frame applies it by setting `data-theme` on `<html>`. It is accepted
+only with this frame's channel, is never answered, and has no effect on drafts, patches,
+`revision` or the persisted settings. A frame cannot request or dictate a palette; a child
+message of type `theme` is rejected as unknown.
 
 `patch` returns a per-frame, monotonically increasing request ID, starting at 1. It returns 0
 when the call is ignored locally (empty or non-array `changes`). The matching `result` echoes
@@ -338,12 +368,22 @@ host detects it instead.
 ```html
 <!doctype html>
 <html><body>
-<main class="capsulad-ui"><div class="card stack">
-  <div class="field"><label for="units">Units</label><select id="units"></select></div>
-  <div class="field"><label for="refresh">Refresh interval (minutes)</label>
-    <input id="refresh" type="number" min="1" max="240" step="1"></div>
-  <div class="notice" id="status"></div>
-</div></main>
+<main class="capsulad-ui p-3">
+  <div class="card bg-base-100 border border-base-300">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Units</h2>
+      <label class="form-control">
+        <span class="label-text">Units</span>
+        <select id="units" class="select select-bordered select-sm"></select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Refresh interval (minutes)</span>
+        <input id="refresh" class="input input-bordered input-sm w-32" type="number" min="1" max="240" step="1">
+      </label>
+      <div class="alert" id="status" role="status"></div>
+    </div>
+  </div>
+</main>
 <script>
   const units = document.getElementById('units');
   const refresh = document.getElementById('refresh');
@@ -364,12 +404,16 @@ host detects it instead.
 
   CapsuladUI.onResult((result) => {
     status.textContent = result.ok ? 'Saved.' : result.error;
-    status.className = 'notice ' + (result.ok ? 'ok' : 'err');
+    status.className = result.ok ? 'alert alert-success' : 'alert alert-error';
   });
   CapsuladUI.resize();
 </script>
 </body></html>
 ```
+
+Keep variant classes as complete literal strings (`'alert alert-success'`, not
+`'alert alert-' + kind`): the kit is built from the checked-in documents and the safelist, and
+a concatenated suffix is not a scanned candidate.
 
 The document is trusted only for its own rendering. It cannot read a masked secret, call another
 app, open the app bus or escape the frame; its only write is a validated patch for its own

@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   BRIDGE_PREFIX,
+  FRAME_THEMES,
+  normalizeTheme,
   validateChildMessage,
   createChannelToken,
   isBridgeProtocolMessage
@@ -62,4 +64,15 @@ test('resize is bounded and cannot inject DOM access', () => {
   assert.match(validateChildMessage(msg(4001), base).error, /height/)
   assert.match(validateChildMessage(msg(-1), base).error, /height/)
   assert.match(validateChildMessage({ ...msg(300), appId: 'org.example.other' }, base).error, /application/)
+})
+
+test('theme is host-to-frame only and resolves to one palette', () => {
+  assert.deepEqual([...FRAME_THEMES], ['light', 'dark'])
+  assert.equal(normalizeTheme('dark'), 'dark')
+  assert.equal(normalizeTheme('light'), 'light')
+  assert.equal(normalizeTheme('capsulad-dark'), 'light')
+  assert.equal(normalizeTheme(undefined), 'light')
+  // A child cannot drive the host palette, even with the correct channel.
+  const fromChild = { type: BRIDGE_PREFIX + 'theme', channel: TOKEN, appId: 'org.example.app', theme: 'dark' }
+  assert.match(validateChildMessage(fromChild, base).error, /unknown message type/)
 })
