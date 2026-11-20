@@ -2,13 +2,12 @@ id = "org.capsulad.radio"
 name = "Internet Radio"
 version = "0.2.0"
 description = "Internet radio player: keeps a station list, fetches and decodes one MP3 stream in-process through the shared capsulad network stack, plays it through the framework speaker and serves the standard media contract. See README.md."
-# A media provider must already be running to answer the standard contract and
-# the play/pause/next/previous actions. It stays idle until a station is
-# selected and played, and autoplay is off by default.
-background = true
-start_on_boot = true
-restart_on_failure = true
-single_instance = true
+# A launch starts a run when none is live; the app exits itself when idle, after
+# a held pause and after a terminal error is shown, so it is not started at boot
+# and a clean exit is not relaunched. Autoplay is off by default.
+background = false
+start_on_boot = false
+restart_on_failure = false
 provides = ["media_player"]
 
 [entrypoint]
@@ -53,39 +52,39 @@ default = false
 [[settings]]
 key = "always_display"
 label = "Always display station number"
-description = "Keep the selected station number on the segment display while the radio is active. Off by default: the number appears while tuning and playing, then the display releases to the selected baseline 10 seconds after tuning without changing audio or the LED ring."
+description = "Keep the selected station number on the segment display while a station is playing. Off by default: the number appears while tuning and playing, then the display releases to the selected baseline 10 seconds after tuning without changing audio or the LED ring. A pause shows the pause sign for one minute instead, and a terminal error holds its dashes for its display window."
 type = "boolean"
 default = false
 
 [[actions]]
 id = "play"
 label = "Play"
-description = "Play the selected station. While paused this re-dials the station, because pausing ends the network stream."
+description = "Play the selected station. While paused this re-dials the station and cancels the pause expiry, because pausing ends the network stream."
 
 [[actions]]
 id = "pause"
 label = "Pause"
-description = "Pause playback. The station stream is closed; play re-dials it."
+description = "Pause playback. The station stream is closed, the pause sign is held for one minute, and the radio then exits unless play resumes it."
 
 [[actions]]
 id = "stop"
 label = "Stop"
-description = "Stop playback, close the station stream and release the display."
+description = "Stop playback. The station stream closes, the pause sign is held for one minute, and the run then exits unless Play resumes it. Dismiss or stopping the run from Run status remains immediate."
 
 [[actions]]
 id = "next"
 label = "Next station"
-description = "Select the next station in the list and play it."
+description = "Select the next station in the list and play it. On an idle radio it only selects and refreshes the idle minute."
 
 [[actions]]
 id = "previous"
 label = "Previous station"
-description = "Select the previous station in the list and play it."
+description = "Select the previous station in the list and play it. On an idle radio it only selects and refreshes the idle minute."
 
 [[actions]]
 id = "dismiss"
 label = "Dismiss"
-description = "Stop playback and return to the idle baseline. This is the action the device's circle key uses to dismiss the radio."
+description = "Stop playback, return to the idle baseline and end the run. This is the action the device's circle key uses to dismiss the radio."
 
 [[arguments]]
 name = "station"

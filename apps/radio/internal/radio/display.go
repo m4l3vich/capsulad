@@ -25,10 +25,18 @@ var segmentDigits = [10]uint16{0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0
 
 const segmentDash = 0x40
 
-// segmentCell mirrors capsulad.framework.v1.SegmentCell. The SDK's convenience
-// Segment helper omits the decimal point, which is a physically relevant field
-// for the paused state, so this app speaks the same public PresentationService
-// JSON contract directly.
+// A paused radio shows a pause sign in the middle two cells: the right
+// vertical pair of the left cell next to the left vertical pair of the right
+// cell. The inter-digit gap separates two full-height bars, so the frame reads
+// as `||` without lighting the colon or a decimal point.
+const (
+	segmentPauseLeft  = 0x06 // segments b and c
+	segmentPauseRight = 0x30 // segments e and f
+)
+
+// segmentCell mirrors capsulad.framework.v1.SegmentCell. The app speaks the
+// same public PresentationService JSON contract directly so the display frame
+// stays independent of SDK convenience helpers.
 type segmentCell struct {
 	Mask         uint16 `json:"mask,omitempty"`
 	DecimalPoint bool   `json:"decimalPoint,omitempty"`
@@ -188,6 +196,10 @@ type displayState struct {
 	station       int
 	alwaysDisplay bool
 	displayUntil  time.Time
+	// exitAt is the armed run-exit deadline. A terminal error with "Always
+	// display" on may hold its dashes only until then; a paused state uses
+	// displayUntil, which is the same pause deadline.
+	exitAt time.Time
 }
 
 type displayOutput struct {
@@ -214,6 +226,7 @@ func (a *App) displayState() displayState {
 		station:       a.stationNumber,
 		alwaysDisplay: a.alwaysDisplay,
 		displayUntil:  a.displayUntil,
+		exitAt:        a.exitAt,
 	}
 }
 
@@ -231,14 +244,22 @@ func (a *App) beginDisplayRunLocked() {
 
 // displayFrame builds the segment frame for a visible radio state. The colon
 // belongs to the clock/volume presentations and is never lit by the station
-// number or the error pattern.
+// number, the pause sign or the error pattern.
 func displayFrame(state displayState) []segmentCell {
-	if state.phase == PhaseError {
+	switch state.phase {
+	case PhaseError:
 		cells := make([]segmentCell, 4)
 		for i := range cells {
 			cells[i] = segmentCell{Mask: segmentDash}
 		}
 		return cells
+	case PhasePaused:
+		return []segmentCell{
+			{},
+			{Mask: segmentPauseLeft},
+			{Mask: segmentPauseRight},
+			{},
+		}
 	}
 	number := state.station
 	if number < 1 {
@@ -252,23 +273,51 @@ func displayFrame(state displayState) []segmentCell {
 		{},
 		{},
 		{Mask: segmentDigits[tens]},
-		{Mask: segmentDigits[ones], DecimalPoint: state.phase == PhasePaused},
+		{Mask: segmentDigits[ones]},
+	}
+}
+
+// displayDeadline is when the current indication must stop owning the display.
+// Playing and buffering use the tuning window unless "Always display station
+// number" keeps them; paused always ends at the pause hold, even with the
+// setting on; a terminal error uses its tuning window, or the armed run exit
+// while "Always display" is on. The second result is false when the indication
+// is not time-bounded by this state alone.
+func displayDeadline(state displayState) (time.Time, bool) {
+	switch state.phase {
+	case PhasePaused:
+		return state.displayUntil, true
+	case PhaseError:
+		deadline := state.displayUntil
+		if state.alwaysDisplay {
+			deadline = state.exitAt
+		} else if !state.exitAt.IsZero() && state.exitAt.Before(deadline) {
+			deadline = state.exitAt
+		}
+		return deadline, true
+	case PhasePlaying, PhaseBuffering:
+		if state.alwaysDisplay {
+			return time.Time{}, false
+		}
+		return state.displayUntil, true
+	default:
+		return time.Time{}, false
 	}
 }
 
 // displayOutputFor decides whether the radio currently owns the segment
-// display. With "Always display station number" on, an active state owns it
+// display. With "Always display station number" on, a playing state owns it
 // until stop. With it off, ownership ends at the deadline set by the last
 // tuning attempt; the loop then closes the presentation, restoring whatever
-// baseline the user selected instead of forcing a frame.
+// baseline the user selected instead of forcing a frame. A paused radio shows
+// the pause sign for its whole hold even with the setting off, and a terminal
+// error never holds past the run it is already ending.
 func displayOutputFor(state displayState, now time.Time) displayOutput {
 	if state.phase == PhaseStopped {
 		return displayOutput{}
 	}
-	if !state.alwaysDisplay {
-		if state.displayUntil.IsZero() || !now.Before(state.displayUntil) {
-			return displayOutput{}
-		}
+	if deadline, timed := displayDeadline(state); timed && !now.Before(deadline) {
+		return displayOutput{}
 	}
 	return displayOutput{cells: displayFrame(state), colon: false, hold: true}
 }
@@ -282,14 +331,15 @@ func (a *App) waitForDraw() bool {
 	}
 }
 
-// waitForDisplayChange blocks until a state change or the transient display
-// deadline. With the setting on, or before any tuning attempt, only a state
-// change can end the wait.
+// waitForDisplayChange blocks until a state change or the current indication's
+// deadline. Paused and terminal-error states wait for their own deadline even
+// with "Always display station number" on, because the run itself ends then.
 func (a *App) waitForDisplayChange(state displayState) bool {
-	if state.alwaysDisplay || state.displayUntil.IsZero() {
+	deadline, timed := displayDeadline(state)
+	if !timed {
 		return a.waitForDraw()
 	}
-	remaining := state.displayUntil.Sub(a.clockNow())
+	remaining := deadline.Sub(a.clockNow())
 	if remaining <= 0 {
 		return true
 	}

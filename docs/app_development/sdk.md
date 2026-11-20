@@ -433,7 +433,7 @@ err = client.Start(ctx)                    // opens the bus, sends hello + ready
 | Field | Called when | Notes |
 |---|---|---|
 | `Ready` | hello and ready were flushed | output can be opened here |
-| `Invocation` | a launch or singleton invocation arrived | report with `NotifyInvocationResult` |
+| `Invocation` | a launch invocation arrived for the running app | report with `NotifyInvocationResult` |
 | `Settings` | own settings changed, or the initial snapshot after ready | masked values are in clear here |
 | `Action` | a declared action was triggered | report with `NotifyActionResult` |
 | `Activation` | the selected assistant received a turn | assistant apps only |
@@ -504,7 +504,7 @@ if !authorized {
 | `OpenMic(ctx, activationID, conversationID)` → `*Mic` | `Chunks()`, `Close`; PCM arrives as bytes |
 | `BeginConversation(ctx, activationID)` → `*Conversation` | assistant turn lifetime |
 | `AudioState`, `ListAudioEndpoints`, `UserSettings` | read-only state helpers |
-| `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master level; local administrators, and only the installed AirPlay receiver's authenticated READY run |
+| `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master position (0–1, mapped by the mixer's logarithmic taper — not a linear amplitude); local administrators, and only the installed AirPlay receiver's authenticated READY run |
 | `BluetoothMediaState`, `WatchBluetoothMedia`, `BluetoothMediaCommand` | Bluetooth media bridge |
 | `Call`, `CallJSON`, `Stream`, `OpenStream`, `OpenBidi` | routed calls and framework streams |
 | `RegisterDescriptors(set)` | enable the JSON path for your own messages |
@@ -516,9 +516,11 @@ values. Both take a trailing `time.Duration` call timeout; `0` means no deadline
 context. `Stream`/`OpenStream`/`OpenBidi` return a `*Stream` with `Send`, `SendJSON`,
 `HalfClose`, `Recv`, `RecvJSON`, `Close`. `Recv` returns `io.EOF` at the end of a stream.
 
-`SetMasterVolume` is an ordinary JSON unary call, not a PCM path. It returns the applied
-`AudioState`; a level outside the finite `[0,1]` range is `INVALID_ARGUMENT`, and an app other
-than the installed AirPlay receiver's authenticated READY run is `PERMISSION_DENIED`. The daemon
+`SetMasterVolume` is an ordinary JSON unary call, not a PCM path. The value is the same 0–1
+control position the keys and Web UI use; the mixer converts it once to a 60 dB logarithmic gain,
+so an app must not pre-scale PCM by `master_volume` as if it were a linear factor. It returns the
+applied `AudioState`; a level outside the finite `[0,1]` range is `INVALID_ARGUMENT`, and an app
+other than the installed AirPlay receiver's authenticated READY run is `PERMISSION_DENIED`. The daemon
 re-checks the request context and the caller's live identity at the settings commit boundary,
 after any wait for another settings writer: a request that expired while queued returns
 `CANCELLED`/`DEADLINE_EXCEEDED`, and a receiver run that stopped while the request waited returns
@@ -610,7 +612,6 @@ id = "org.example.thermostat"
 name = "Thermostat"
 version = "1.0.0"
 description = "Shows a target temperature and serves a small status interface."
-single_instance = true
 restart_on_failure = true
 start_on_boot = true
 
@@ -1118,7 +1119,6 @@ id = "org.example.ringpaint"
 name = "Ring Paint"
 version = "1.0.0"
 description = "Paints the LED ring and echoes a string over the app bus."
-single_instance = true
 restart_on_failure = true
 
 [entrypoint]

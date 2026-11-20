@@ -11,7 +11,7 @@ normal panel controls return.
 | | |
 |---|---|
 | App ID | `org.capsulad.simon` |
-| Runtime | `quickjs` (single instance, foreground, no settings or actions) |
+| Runtime | `quickjs` (foreground, no settings or actions) |
 | Needs | an RGB LED ring with at least 4 pixels, a full-panel touch capture, a speaker; an optional four-digit segment display |
 | Package | `manifest.toml`, `main.js`, this `README.md` |
 

@@ -49,7 +49,7 @@ Rules:
 | `AppHello` | `run_id` (string) | First message; verified against the supervised process. |
 | `AppReady` | — | Second message; marks the run ready. |
 | `AppCallReply` | `call_id` (string) + one of `response_message` (bytes) or `end` (`AppCallEnd`) | One reply, or the terminal frame, for an inbound custom call. |
-| `AppInvocationResult` | `invocation_id` (string), `accepted` (bool), `detail` (string) | Optional outcome of a launch/singleton invocation. |
+| `AppInvocationResult` | `invocation_id` (string), `accepted` (bool), `detail` (string) | Optional outcome of a launch invocation. |
 | `AppActionResult` | `action_invocation_id` (string), `succeeded` (bool), `detail` (string) | Optional outcome of a triggered action. |
 
 `AppCallEnd` carries `grpc_status_code` (int32, `0` = OK, otherwise the canonical gRPC code)
@@ -64,7 +64,7 @@ one `end`.
 | `IncomingCallData` | `call_id`, `request_message` (bytes) | One serialized protobuf request message; repeats for client streaming. |
 | `IncomingCallHalfClose` | `call_id` | No more request data. |
 | `IncomingCallCancel` | `call_id` | Caller cancelled, its deadline expired, or the caller stream closed. |
-| `AppLaunchInvocation` | `invocation_id`, `arguments` (`[{name, value}]`) | Launch or singleton invocation with typed arguments. |
+| `AppLaunchInvocation` | `invocation_id`, `arguments` (`[{name, value}]`) | Launch invocation with typed arguments; a launch of a running app arrives on its existing run. |
 | `AppSettingsChanged` | `revision` (uint64), `values` (`[{key, value_json}]`) | Own settings only; carries unmasked `text_masked` values. |
 | `AppActionInvoked` | `action_invocation_id`, `action_id` | A declared action was triggered. |
 | `AssistantActivation` | `activation_id`, `origin` (enum), `matched_model_id`, `monotonic_time_ns`, `expires_monotonic_ns`, `hold_to_talk` (bool) | One assistant turn for the selected assistant. A manual (touch/key) activation is `ACTIVATION_TOUCH` with an empty `matched_model_id`; only `ACTIVATION_WAKEWORD` is keyword evidence. |

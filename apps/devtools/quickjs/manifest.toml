@@ -5,7 +5,6 @@ description = "Development-only QuickJS probe: environment identity, framework c
 background = false
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "quickjs"

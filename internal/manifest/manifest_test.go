@@ -136,6 +136,32 @@ unexpected = true
 	}
 }
 
+// The daemon and its packages deploy as one stack. A package installed by an
+// older stack still carries single_instance; it is not silently accepted,
+// because every app is now a singleton and the key has no meaning to honor.
+// The registry skips the package and logs it until the stack is replaced.
+func TestRemovedSingleInstanceKeyIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	source := `id = "org.example.singleton"
+name = "Singleton"
+version = "0.1.0"
+single_instance = true
+
+[entrypoint]
+runtime = "native"
+path = "demo"
+architecture = "aarch64"
+abi = "linux-musl"
+`
+	file := filepath.Join(dir, "manifest.toml")
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir, file); err == nil || !strings.Contains(err.Error(), "unknown manifest keys: single_instance") {
+		t.Fatalf("removed single_instance key error = %v", err)
+	}
+}
+
 func TestAppsWithoutNativeSDKStillValidate(t *testing.T) {
 	if err := nativeBase().Validate(); err != nil {
 		t.Fatalf("manifest without native_sdk: %v", err)

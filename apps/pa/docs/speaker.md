@@ -17,7 +17,7 @@ resource.
 | Property | Value |
 |---|---|
 | App ID | `org.capsulad.pa` |
-| Runtime | `micropython`, single instance, background, start on boot |
+| Runtime | `micropython`, background, start on boot |
 | Interface | `org.capsulad.pa.v1.SpeakerService`, version `v1` |
 | Descriptor | `proto/pa.protoset` (published for JSON callers and the Web UI) |
 | Endpoint | framework `audio.output.speaker` |

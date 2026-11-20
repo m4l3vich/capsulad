@@ -71,15 +71,21 @@ func TestBuiltinRunLifecycle(t *testing.T) {
 // testSpawner starts a host process for supervisor tests, so the restart
 // contract is exercised against real child lifecycles instead of a mock.
 type testSpawner struct {
-	mu     sync.Mutex
-	starts []time.Time
-	args   []string
+	mu      sync.Mutex
+	starts  []time.Time
+	args    []string
+	command func(n int) *exec.Cmd
 }
 
 func (s *testSpawner) Command(_ *manifest.Manifest, _, _, _ string) (*exec.Cmd, error) {
 	s.mu.Lock()
 	s.starts = append(s.starts, time.Now())
+	n := len(s.starts)
+	command := s.command
 	s.mu.Unlock()
+	if command != nil {
+		return command(n), nil
+	}
 	return exec.Command(s.args[0], s.args[1:]...), nil
 }
 
@@ -116,6 +122,21 @@ func newSupervisorWithClock(t *testing.T, spawner Spawner, clock Clock) *Supervi
 	return sup
 }
 
+// startFirstRun starts an app from a cold table and requires the spawn. Every
+// start goes through the singleton entry point, so a test cannot create the
+// duplicate live run the lifecycle contract forbids.
+func startFirstRun(t *testing.T, sup *Supervisor, m *manifest.Manifest, invocationID string) *Run {
+	t.Helper()
+	run, spawned, err := sup.StartIfAbsent(m, invocationID)
+	if err != nil {
+		t.Fatalf("start %s: %v", m.ID, err)
+	}
+	if !spawned {
+		t.Fatalf("start %s returned an existing run %s instead of spawning", m.ID, run.RunID)
+	}
+	return run
+}
+
 func testManifest(restartOnFailure bool) *manifest.Manifest {
 	return &manifest.Manifest{
 		ID: "test.supervisor", Name: "Supervisor test", Version: "1.0.0",
@@ -137,14 +158,39 @@ func waitStarts(t *testing.T, spawner *testSpawner, want int, timeout time.Durat
 	return nil
 }
 
+// StartIfAbsent is the only start entry point, so a second start of a live app
+// returns that run and spawns nothing. There is no supervisor-level way to put
+// a second process beside an app's singleton run.
+func TestStartIfAbsentReusesLiveRun(t *testing.T) {
+	spawner := &testSpawner{args: []string{"/bin/sleep", "30"}}
+	sup := newSupervisor(t, spawner)
+	m := testManifest(false)
+
+	first := startFirstRun(t, sup, m, "inv-1")
+	again, spawned, err := sup.StartIfAbsent(m, "inv-2")
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if spawned {
+		t.Fatal("second start spawned a second process for a live app")
+	}
+	if again.RunID != first.RunID {
+		t.Fatalf("second start returned run %s, want the live run %s", again.RunID, first.RunID)
+	}
+	if got := len(spawner.startTimes()); got != 1 {
+		t.Fatalf("command attempts = %d, want 1", got)
+	}
+	if runs := sup.List(m.ID); len(runs) != 1 || runs[0].RunID != first.RunID {
+		t.Fatalf("runs = %+v, want only %s", runs, first.RunID)
+	}
+}
+
 // A crash loop starts the first replacement at once, then backs off so a
 // broken app cannot spin the process table, and shutdown stops the loop.
 func TestCrashRestartsImmediatelyThenBacksOff(t *testing.T) {
 	spawner := &testSpawner{args: []string{"/bin/sh", "-c", "exit 1"}}
 	sup := newSupervisor(t, spawner)
-	if _, err := sup.Start(testManifest(true), "inv-1"); err != nil {
-		t.Fatal(err)
-	}
+	startFirstRun(t, sup, testManifest(true), "inv-1")
 
 	times := waitStarts(t, spawner, 2, 2*time.Second)
 	if gap := times[1].Sub(times[0]); gap > 500*time.Millisecond {
@@ -164,6 +210,154 @@ func TestCrashRestartsImmediatelyThenBacksOff(t *testing.T) {
 	}
 }
 
+// A launch that wins the backoff race is the recovery: the scheduled restart
+// must not add a second live run.
+func TestPendingRestartDoesNotDuplicateALiveRun(t *testing.T) {
+	spawner := &testSpawner{command: func(n int) *exec.Cmd {
+		switch n {
+		case 1:
+			return exec.Command("/bin/sh", "-c", "exit 1")
+		case 2:
+			// Stay live long enough for the test to observe the replacement;
+			// its 1 s backoff must be pending before the manual launch.
+			return exec.Command("/bin/sh", "-c", "sleep 0.2; exit 1")
+		default:
+			return exec.Command("/bin/sleep", "30")
+		}
+	}}
+	sup := newSupervisor(t, spawner)
+	m := testManifest(true)
+	first := startFirstRun(t, sup, m, "inv-1")
+	waitStarts(t, spawner, 2, 3*time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	sawReplacement := false
+	for time.Now().Before(deadline) {
+		runs := sup.List(m.ID)
+		if len(runs) == 1 && runs[0].RunID != first.RunID {
+			sawReplacement = true
+		}
+		if sawReplacement && len(runs) == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sawReplacement {
+		t.Fatal("replacement run never became live")
+	}
+	if runs := sup.List(m.ID); len(runs) != 0 {
+		t.Fatalf("crashed replacement did not clear: %+v", runs)
+	}
+
+	// The second failure's 1 s backoff is now pending. A manual launch wins it.
+	run, spawned, err := sup.StartIfAbsent(m, "inv-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spawned {
+		t.Fatal("manual launch did not spawn on an idle app")
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if got := len(spawner.startTimes()); got != 3 {
+		t.Fatalf("starts = %d, want 3: the pending restart duplicated a live run", got)
+	}
+	runs := sup.List(m.ID)
+	if len(runs) != 1 || runs[0].RunID != run.RunID {
+		t.Fatalf("runs after the backoff fired = %+v, want the launched run only", runs)
+	}
+}
+
+// barrierSpawner parks one chosen Command call until the test releases it, so
+// a start can be held between its no-live-run decision and the kernel spawn.
+type barrierSpawner struct {
+	mu       sync.Mutex
+	attempts int
+	blockOn  int
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (s *barrierSpawner) Command(*manifest.Manifest, string, string, string) (*exec.Cmd, error) {
+	s.mu.Lock()
+	s.attempts++
+	n := s.attempts
+	s.mu.Unlock()
+	if n == s.blockOn {
+		close(s.entered)
+		<-s.release
+	}
+	return exec.Command("/bin/sleep", "30"), nil
+}
+
+func (s *barrierSpawner) Mode() string { return "test" }
+
+func (s *barrierSpawner) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
+}
+
+// A recovery and a manual launch must share one atomic decision. The recovery
+// is parked while holding the app's start reservation; a manual StartIfAbsent
+// arriving in that window must wait and attach to the recovery's published
+// run. Before the reservation existed the manual path saw an empty byApp and
+// spawned a second process, leaving two live runs for a singleton app.
+func TestRecoveryAndManualStartShareAtomicReservation(t *testing.T) {
+	spawner := &barrierSpawner{
+		blockOn: 2, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(spawner.release) })
+	sup := newSupervisor(t, spawner)
+	m := testManifest(true)
+
+	first := startFirstRun(t, sup, m, "inv-first")
+	// The crash schedules an immediate replacement; its Command call is the
+	// second attempt and blocks while the recovery owns the reservation.
+	sup.StopCrashed(first.RunID)
+	select {
+	case <-spawner.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery did not reach the spawn barrier")
+	}
+
+	type result struct {
+		run     *Run
+		spawned bool
+		err     error
+	}
+	manual := make(chan result, 1)
+	go func() {
+		run, spawned, err := sup.StartIfAbsent(m, "inv-manual")
+		manual <- result{run: run, spawned: spawned, err: err}
+	}()
+
+	// The manual launch must not spawn while the recovery is in flight.
+	select {
+	case res := <-manual:
+		t.Fatalf("manual start returned before the recovery published: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := spawner.count(); got != 2 {
+		t.Fatalf("command attempts while the recovery owned the reservation = %d, want 2", got)
+	}
+
+	releaseOnce.Do(func() { close(spawner.release) })
+	res := <-manual
+	if res.err != nil {
+		t.Fatalf("manual start: %v", res.err)
+	}
+	if res.spawned {
+		t.Fatal("manual start spawned a second process instead of attaching to the recovery run")
+	}
+	runs := sup.List(m.ID)
+	if len(runs) != 1 || runs[0].RunID != res.run.RunID {
+		t.Fatalf("runs after the race = %+v, want only the recovery run %s", runs, res.run.RunID)
+	}
+	if got := spawner.count(); got != 2 {
+		t.Fatalf("command attempts after the race = %d, want 2", got)
+	}
+}
+
 // StopForRestart is the selected-provider recovery path: it starts the app
 // again even when the manifest does not ask for restart_on_failure. A plain
 // Stop still leaves the app stopped.
@@ -172,10 +366,7 @@ func TestStopForRestartRelaunchesProvider(t *testing.T) {
 	sup := newSupervisor(t, spawner)
 	sup.SetRestartPolicy(func(string) bool { return true })
 	m := testManifest(false)
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := startFirstRun(t, sup, m, "inv-1")
 	if !sup.StopForRestart(first.RunID) {
 		t.Fatal("recovery stop refused")
 	}
@@ -217,9 +408,7 @@ func TestRestartPolicyRecoversSelectedProviderRegardlessOfManifest(t *testing.T)
 	selected.Store(true)
 	sup.SetRestartPolicy(func(string) bool { return selected.Load() })
 
-	if _, err := sup.Start(testManifest(false), "inv-1"); err != nil {
-		t.Fatal(err)
-	}
+	startFirstRun(t, sup, testManifest(false), "inv-1")
 	waitStarts(t, spawner, 2, 2*time.Second)
 
 	// The second run crashes on its own; its replacement is now behind the 1 s
@@ -255,10 +444,7 @@ func TestReadyThenCrashKeepsBackoffAndStableRunResets(t *testing.T) {
 	sup := newSupervisorWithClock(t, spawner, clock)
 	m := testManifest(true)
 
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := startFirstRun(t, sup, m, "inv-1")
 	if !sup.MarkReady(first.RunID) {
 		t.Fatal("first run was not marked ready")
 	}
@@ -302,10 +488,7 @@ func TestSelectedManifestRestartRechecksSelection(t *testing.T) {
 	sup.SetRestartPolicy(func(string) bool { return selected.Load() })
 	m := testManifest(true)
 
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := startFirstRun(t, sup, m, "inv-1")
 	// Both stops are processed while the provider is still selected, so the
 	// restarts are selected-origin even though the manifest also asks for one.
 	sup.StopCrashed(first.RunID)
@@ -336,10 +519,7 @@ func TestStopForRestartRechecksSelection(t *testing.T) {
 	var selected atomic.Bool // already deselected when the recovery stop runs
 	sup.SetRestartPolicy(func(string) bool { return selected.Load() })
 	m := testManifest(true)
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := startFirstRun(t, sup, m, "inv-1")
 	if !sup.StopForRestart(first.RunID) {
 		t.Fatal("recovery stop refused")
 	}
@@ -369,10 +549,7 @@ func TestDeselectDuringBlockedTerminationSuppressesManifestRestart(t *testing.T)
 	sup.SetRestartPolicy(func(string) bool { return selected.Load() })
 	m := testManifest(true)
 
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := startFirstRun(t, sup, m, "inv-1")
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(ready); err == nil {

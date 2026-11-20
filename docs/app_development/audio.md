@@ -156,11 +156,15 @@ for ev := range mic.Chunks() {
 app sends chunks or control commands. The server streams started, progress and notice events.
 
 The master volume is applied **after** the per-app mix: each app's concurrent streams are summed,
-clamped to full scale, added to the master mix, and only then multiplied by `master_volume`. One
-app therefore cannot exceed the configured level by sending hot samples or opening more streams.
-A soft limiter follows the master gain (threshold 0.95, 5 ms attack window, 150 ms release) so
-overlapping apps or a framework cue stay below full scale instead of clipping. At most **4**
-concurrent playback streams may be open per app; the fifth open fails with
+clamped to full scale, added to the master mix, and only then multiplied by the tapered master
+gain. `master_volume` is a 0–1 **control position**, not an amplitude: the mixer converts it once
+per volume change to an exponential gain with a 60 dB range that is linear in dB. The gain is about
+**-57 dBFS at 5%**, **-30 dBFS at 50%** and unity at 100%; 0 is exact silence and 1 is exact
+unity. The conversion is cached on the volume update, so the per-sample path never computes a
+power. One app therefore cannot exceed the configured level by sending hot samples or opening more
+streams. A soft limiter follows the master gain (threshold 0.95, 5 ms attack window, 150 ms
+release) so overlapping apps or a framework cue stay below full scale instead of clipping. At most
+**4** concurrent playback streams may be open per app; the fifth open fails with
 `RESOURCE_EXHAUSTED` before any audio is accepted.
 
 | Request | Fields | Rules |
@@ -240,14 +244,17 @@ longer than the actual turn.
 
 | Operation | App access |
 |---|---|
-| `GetAudioState` | Readable. Returns `master_volume` (0–1), `microphone_muted`, `microphone_mute_is_hardware`. |
+| `GetAudioState` | Readable. Returns `master_volume` (0–1 control position), `microphone_muted`, `microphone_mute_is_hardware`. |
 | `SetMasterVolume` | Administrator, plus the installed AirPlay receiver's authenticated READY run. Every other supervised app gets `PERMISSION_DENIED`. |
 | `SetMicrophoneMuted` | Administrator only; a supervised app gets `PERMISSION_DENIED`. |
 
 `master_volume` is a **ceiling per app**, not a post-sum gain shared by everyone. The mixer
-starts at `0.6` and follows the persisted device setting; physical volume keys and the microphone
-key use the same persisted settings as the administrator surfaces, so an app must tolerate volume
-and mute changing at any time.
+starts at the `0.6` position and follows the persisted device setting; physical volume keys and the
+microphone key use the same persisted settings as the administrator surfaces, so an app must
+tolerate volume and mute changing at any time. The Web UI, the physical keys and the Bluetooth and
+AirPlay mirrors all exchange the same 0–1 position and display it as a percentage; the framework
+converts the position to gain once per volume change. Scaling PCM by `master_volume` inside an app
+therefore applies a second, linear factor and is not equivalent to the device level.
 
 The AirPlay exception is fixed daemon policy, not a manifest feature. A phone or Mac changing
 the sender volume is controlling the speaker's physical level, so the installed AirPlay receiver
@@ -261,8 +268,9 @@ Unix-socket peer PID matches the supervised process. A host that cannot report p
 installing the package; the run identity is not a request field.
 
 The receiver does not fold the sender level into its PCM. The master gain is applied once by
-the framework mixer after app streams are summed, and the soft limiter follows it, so a sender
-slider moves the same level as the volume keys instead of stacking a second gain stage.
+the framework mixer — using the same 0–1 position and logarithmic taper as the volume keys —
+after app streams are summed, and the soft limiter follows it, so a sender slider moves the same
+device level instead of stacking a second gain stage.
 
 The gain stages, in order:
 
@@ -270,7 +278,7 @@ The gain stages, in order:
 |---|---|---|
 | Per-stream trim | `Playback.SetTrim`, daemon-internal; framework cues use a fixed `0.4` authored-level trim | No: not exposed by the app API or the SDK |
 | Conversation ducking | `0.25` with a 150 ms fade while a conversation is active | Indirectly, through `conversation_id` |
-| Master volume | `master_volume` (0–1, linear), applied once after each app's streams are summed and clamped | Read from `GetAudioState`; administrator, plus the installed AirPlay receiver's authenticated READY run |
+| Master volume | `master_volume` (0–1 control position), converted once to the 60 dB logarithmic taper and applied after each app's streams are summed and clamped | Read from `GetAudioState`; administrator, plus the installed AirPlay receiver's authenticated READY run |
 | Soft limiter | threshold 0.95, 5 ms peak-hold attack window, 150 ms release, after the master gain | No |
 
 - Volume 0 or global mute denies a new microphone capture.

@@ -270,7 +270,9 @@ message AppView {
   string display_name = 2;
   string version = 3;
   bool start_on_boot = 4;
-  bool single_instance = 5;
+  // Every app has at most one live run; there is no per-app instance policy.
+  reserved 5;
+  reserved "single_instance";
   repeated LaunchArgumentView launch_arguments = 6;
   repeated string provides = 7;
   bool background = 8;

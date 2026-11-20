@@ -5,7 +5,6 @@ description = "Runnable MicroPython app: registers AppBus handlers, calls a fram
 background = true
 start_on_boot = false
 restart_on_failure = true
-single_instance = true
 provides = ["script_demo"]
 
 [entrypoint]

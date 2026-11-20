@@ -115,7 +115,6 @@ type Manifest struct {
 	Background        bool               `toml:"background"`
 	StartOnBoot       bool               `toml:"start_on_boot"`
 	RestartOnFailure  bool               `toml:"restart_on_failure"`
-	SingleInstance    bool               `toml:"single_instance"`
 	Provides          []string           `toml:"provides"`
 	Entrypoint        Entrypoint         `toml:"entrypoint"`
 	Settings          []Setting          `toml:"settings"`

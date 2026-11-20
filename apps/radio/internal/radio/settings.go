@@ -9,29 +9,112 @@ import (
 
 func formatInt(value int) string { return strconv.Itoa(value) }
 
-const settingsCallTimeout = 5 * time.Second
+const (
+	settingsCallTimeout = 5 * time.Second
+	// selectionFlushTimeout bounds the final write after audio and display are
+	// released. A self-exit must not depend on the bus context staying alive,
+	// but shutdown must not wait on an unresponsive configuration service
+	// either.
+	selectionFlushTimeout = 2 * time.Second
+)
+
+// acquirePersist serializes settings writes. The gate is a one-token channel
+// rather than a mutex so shutdown can stop waiting at its bounded deadline.
+func (a *App) acquirePersist(ctx context.Context) bool {
+	a.persistGateOnce.Do(func() {
+		a.persistGate = make(chan struct{}, 1)
+		a.persistGate <- struct{}{}
+	})
+	select {
+	case <-a.persistGate:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (a *App) releasePersist() {
+	a.persistGate <- struct{}{}
+}
 
 // persistSelection writes the current 1-based selection through the public
 // compare-and-swap configuration API. Multiple rapid next/previous presses are
 // serialized and the last selection wins; a stale revision is refreshed and
-// retried instead of overwriting a concurrent administrator change.
+// retried instead of overwriting a concurrent administrator change. A write
+// only happens for an explicit, not-yet-durable selection and only after a
+// settings snapshot has supplied a nonzero revision.
 func (a *App) persistSelection() {
-	a.persistMu.Lock()
-	defer a.persistMu.Unlock()
+	if !a.acquirePersist(a.ctx) {
+		return
+	}
+	defer a.releasePersist()
+	a.persistSelectionLocked(a.ctx)
+}
 
+// flushSelection is the shutdown path for an accepted selection. Close calls
+// it after stopping audio and releasing the display, with a fresh bounded
+// context: the app context has already been cancelled, and the public launch
+// API must restore the newest selected station on the next run.
+func (a *App) flushSelection(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = selectionFlushTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if !a.acquirePersist(ctx) {
+		return
+	}
+	defer a.releasePersist()
+	a.persistSelectionLocked(ctx)
+}
+
+func (a *App) persistSelectionLocked(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		a.mu.Lock()
 		target := a.stationNumber
 		revision := a.settingsRevision
 		already := a.persistedStation
-		a.mu.Unlock()
-		if target < 1 || target == already {
+		if a.persistSampledFn != nil {
+			// Tests use this while a.mu is held to prove the writer never
+			// exposes a gap between sampling the selection and arming the
+			// uncertain write, where a step or a same-revision echo could
+			// clear selectionDirty behind an obsolete CAS.
+			a.persistSampledFn()
+		}
+		if !a.selectionDirty || target < 1 {
+			a.mu.Unlock()
 			return
 		}
-		a.mu.Lock()
+		if target == already && a.unsettledRevision == 0 {
+			// The stored value already matches the accepted selection; a
+			// snapshot (or an earlier acknowledged write) made it durable.
+			a.selectionDirty = false
+			a.mu.Unlock()
+			return
+		}
+		if revision == 0 {
+			// The daemon treats expected revision zero as an unconditional
+			// write. Before the first snapshot initializes a revision, that
+			// could overwrite a saved station the app has not seen yet.
+			a.mu.Unlock()
+			return
+		}
 		a.pendingStations[target]++
+		// The write can still commit after its RPC is cancelled or times out.
+		// Until an acknowledged response or a snapshot past its expected
+		// revision settles the outcome, no cached station may justify
+		// skipping the shutdown flush: an older write may have stored another
+		// station without the app seeing the response. a.mu stays held from
+		// the samples above through this registration: a step or an echo in
+		// between could otherwise clear selectionDirty while this obsolete
+		// CAS is still about to be sent.
+		a.unsettledRevision = revision
+		a.persistedStation = 0
 		a.mu.Unlock()
-		writtenRevision, err := a.updateStation(target, revision)
+		writtenRevision, err := a.updateStation(ctx, target, revision)
 		a.mu.Lock()
 		if a.pendingStations[target] > 1 {
 			a.pendingStations[target]--
@@ -39,17 +122,32 @@ func (a *App) persistSelection() {
 			delete(a.pendingStations, target)
 		}
 		if err == nil {
+			// The response acknowledges this write, so no older attempt can
+			// still commit behind it.
+			a.unsettledRevision = 0
 			a.recordWriteLocked(writtenRevision, target)
-			if a.persistedStation == already {
+			// A snapshot applied while the write was in flight may be newer
+			// than the write response. Only claim durability when no newer
+			// settings state superseded this selection; otherwise the dirty
+			// flag must survive for the next write attempt.
+			if writtenRevision > 0 && writtenRevision >= a.settingsRevision {
 				a.persistedStation = target
+				if a.stationNumber == target {
+					a.selectionDirty = false
+				}
 			}
 		}
 		a.mu.Unlock()
 		if err == nil {
 			return
 		}
+		if ctx.Err() != nil {
+			// The run is leaving; Close's bounded flush owns the final write
+			// and must not log a cancellation caused by its own shutdown.
+			return
+		}
 		if isStaleRevision(err) {
-			a.refreshRevision()
+			a.refreshRevision(ctx)
 			continue
 		}
 		a.logf("station setting not persisted: %v", err)
@@ -58,7 +156,13 @@ func (a *App) persistSelection() {
 	a.logf("station setting not persisted: settings revision kept changing")
 }
 
-func (a *App) updateStation(station int, revision uint64) (uint64, error) {
+func (a *App) updateStation(ctx context.Context, station int, revision uint64) (uint64, error) {
+	if a.updateStationFn != nil {
+		return a.updateStationFn(ctx, station, revision)
+	}
+	if a.client == nil {
+		return 0, nil
+	}
 	request := map[string]any{
 		"appId":            a.env.AppID,
 		"expectedRevision": formatUint(revision),
@@ -68,9 +172,9 @@ func (a *App) updateStation(station int, revision uint64) (uint64, error) {
 		}},
 	}
 	var response map[string]any
-	ctx, cancel := context.WithTimeout(a.ctx, settingsCallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, settingsCallTimeout)
 	defer cancel()
-	if err := a.client.CallJSON(ctx, "", configService, "Update", request, &response, settingsCallTimeout); err != nil {
+	if err := a.client.CallJSON(callCtx, "", configService, "Update", request, &response, settingsCallTimeout); err != nil {
 		return 0, err
 	}
 	updated, ok := revisionValue(response["revision"])
@@ -114,22 +218,38 @@ func (a *App) stationEchoLocked(station int, revision uint64) bool {
 	return ok && written == station
 }
 
-func (a *App) refreshRevision() {
+func (a *App) refreshRevision(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, settingsCallTimeout)
+	defer cancel()
+	if a.readRevisionFn != nil {
+		if updated, ok := a.readRevisionFn(ctx); ok {
+			a.bumpSettingsRevision(updated)
+		}
+		return
+	}
+	if a.client == nil {
+		return
+	}
 	request := map[string]any{"appId": a.env.AppID}
 	var response map[string]any
-	ctx, cancel := context.WithTimeout(a.ctx, settingsCallTimeout)
-	defer cancel()
 	if err := a.client.CallJSON(ctx, "", configService, "Get", request, &response, settingsCallTimeout); err != nil {
-		a.logf("settings revision refresh failed: %v", err)
+		if parent.Err() == nil {
+			a.logf("settings revision refresh failed: %v", err)
+		}
 		return
 	}
 	if updated, ok := revisionValue(response["revision"]); ok {
-		a.mu.Lock()
-		if updated > a.settingsRevision {
-			a.settingsRevision = updated
-		}
-		a.mu.Unlock()
+		a.bumpSettingsRevision(updated)
 	}
+}
+
+// bumpSettingsRevision advances the compare-and-swap revision never backwards.
+func (a *App) bumpSettingsRevision(updated uint64) {
+	a.mu.Lock()
+	if updated > a.settingsRevision {
+		a.settingsRevision = updated
+	}
+	a.mu.Unlock()
 }
 
 func isStaleRevision(err error) bool {

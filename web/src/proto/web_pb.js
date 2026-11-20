@@ -143,7 +143,6 @@ export const SCHEMA = Object.freeze({
     { no: 2, name: "displayName", kind: "string" },
     { no: 3, name: "version", kind: "string" },
     { no: 4, name: "startOnBoot", kind: "bool" },
-    { no: 5, name: "singleInstance", kind: "bool" },
     { no: 6, name: "launchArguments", kind: "message", repeated: true, type: "capsulad.web.v1.LaunchArgumentView" },
     { no: 7, name: "provides", kind: "string", repeated: true },
     { no: 8, name: "background", kind: "bool" },

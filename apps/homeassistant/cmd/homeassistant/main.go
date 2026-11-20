@@ -10,8 +10,8 @@
 // # Interaction contract
 //
 // Trigger: the app is installed, started and configured with a broker. It is a
-// single-instance background-capable app, so a launch while it is running is
-// delivered as an invocation and forces a discovery/state republish.
+// background-capable app that runs as one instance, so a launch while it is
+// running is delivered as an invocation and forces a discovery/state republish.
 //
 // Feedback: availability is a retained "online"/"offline" topic with a broker
 // last will for the crash path, a diagnostic "Bridge status" sensor with JSON
@@ -564,9 +564,9 @@ func (a *app) republish(reason string) (int, error) {
 	return count, nil
 }
 
-// invocation reports the bridge state and refreshes Home Assistant. A launch of
-// a running singleton is a request to make sure Home Assistant is current, not a
-// request to start a second bridge.
+// invocation reports the bridge state and refreshes Home Assistant. A launch
+// while the bridge is running is a request to make sure Home Assistant is
+// current, not a request to start a second bridge.
 func (a *app) invocation(invocation *capsulad.LaunchInvocation) {
 	if invocation == nil {
 		return

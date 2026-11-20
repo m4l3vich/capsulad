@@ -1,12 +1,14 @@
 // Package supervisor starts, tracks and stops supervised application
-// processes. It deliberately has no policy for singletons or activation; the
-// daemon owns those decisions, while the supervisor owns process mechanics,
-// graceful stop, restart backoff and streamed log collection.
+// processes. It enforces at most one live run per application at spawn time;
+// the daemon owns activation and restart policy, while the supervisor owns
+// process mechanics, graceful stop, restart backoff and streamed log
+// collection.
 package supervisor
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -120,6 +122,20 @@ type Spawner interface {
 	Mode() string
 }
 
+// ErrApplicationStopping is returned by StartIfAbsent when the application's
+// only live run is already stopping. Spawning a second run would break the
+// caller's singleton contract, and returning the stopping run would promise a
+// run that is about to disappear.
+var ErrApplicationStopping = errors.New("application is stopping")
+
+// startReservation is the per-application right to spawn. It covers the whole
+// decide-and-publish sequence, so a competing start either waits for the run
+// to be published or sees it in byApp; it can never observe a decided start
+// that has not published yet.
+type startReservation struct {
+	done chan struct{}
+}
+
 type Supervisor struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -132,6 +148,10 @@ type Supervisor struct {
 	runs    map[string]*Run
 	byApp   map[string][]string
 	virtual map[string]func()
+	// starts holds the in-flight spawn reservation for each application. It is
+	// distinct from byApp: the run appears in byApp only after the process has
+	// started, so byApp alone cannot make "no live run, spawn" atomic.
+	starts  map[string]*startReservation
 	onState func(Run)
 	onExit  func(Run)
 	// restartPolicy can require a restart the manifest did not ask for. The
@@ -160,7 +180,7 @@ func New(parent context.Context, logs *logbus.Bus, clock Clock, sock string, spa
 	return &Supervisor{
 		ctx: ctx, cancel: cancel, logs: logs, clock: clock, sock: sock, spawner: spawner,
 		runs: map[string]*Run{}, byApp: map[string][]string{}, backoff: map[string]int{},
-		virtual: map[string]func(){},
+		virtual: map[string]func(){}, starts: map[string]*startReservation{},
 	}
 }
 
@@ -213,21 +233,55 @@ func (s *Supervisor) notifyState(r Run) {
 	}
 }
 
-// Start spawns an app process. invocationID is recorded so the daemon can
-// deliver the initial AppLaunchInvocation after the app reports READY.
-func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, error) {
+// StartIfAbsent spawns an app process only when the application has no live
+// run, and records invocationID so the daemon can deliver the initial
+// AppLaunchInvocation after the app reports READY. It is the only start entry
+// point: the no-live-run decision, the spawn and the publication of the run
+// are one atomic step with respect to every other start of the same
+// application, so a supervisor cannot be used to put a second live process
+// beside an app's singleton run. A competing start waits on the reservation
+// and then attaches to the run this one published; a stopping run yields
+// ErrApplicationStopping rather than a new process.
+func (s *Supervisor) StartIfAbsent(m *manifest.Manifest, invocationID string) (*Run, bool, error) {
+	return s.start(m, invocationID)
+}
+
+func (s *Supervisor) start(m *manifest.Manifest, invocationID string) (*Run, bool, error) {
 	s.startMu.Lock()
 	if s.stopping || s.ctx.Err() != nil {
 		s.startMu.Unlock()
-		return nil, fmt.Errorf("supervisor is shutting down")
+		return nil, false, fmt.Errorf("supervisor is shutting down")
 	}
 	s.startWG.Add(1)
 	s.startMu.Unlock()
 	defer s.startWG.Done()
+
+	reservation, existing, err := s.reserveStart(m.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		return existing, false, nil
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		s.mu.Lock()
+		s.releaseStartLocked(m.ID, reservation)
+		s.mu.Unlock()
+	}
+	defer release()
+	if s.ctx.Err() != nil {
+		return nil, false, fmt.Errorf("supervisor is shutting down")
+	}
+
 	runID := ids.New("run")
 	cmd, err := s.spawner.Command(m, m.Dir, runID, m.ID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	cmd.Env = append(cmd.Env,
 		"CAPSULAD_SOCKET="+s.sock,
@@ -237,11 +291,11 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// The control socket is inherited as ExtraFiles[0] == fd 3. If it cannot be
 	// created the app simply has no channel and listener_open reports
@@ -269,7 +323,7 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 		if controlAbort != nil {
 			controlAbort()
 		}
-		return nil, fmt.Errorf("start %s: %w", m.ID, err)
+		return nil, false, fmt.Errorf("start %s: %w", m.ID, err)
 	}
 	// The child inherited the descriptor; the daemon copy is no longer needed.
 	if controlChild != nil {
@@ -286,6 +340,10 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 	s.runs[runID] = run
 	s.byApp[m.ID] = append(s.byApp[m.ID], runID)
 	snapshot := run.clone()
+	// Publish before releasing: a competing start that wakes up must see the
+	// run it lost the race to, not an empty table.
+	s.releaseStartLocked(m.ID, reservation)
+	released = true
 	s.mu.Unlock()
 
 	s.logs.Infof("supervisor", m.ID, "started %s run=%s pid=%d runtime=%s sandbox=%s",
@@ -297,7 +355,65 @@ func (s *Supervisor) Start(m *manifest.Manifest, invocationID string) (*Run, err
 	go s.pump(run, stderr, "stderr")
 	s.wg.Add(1)
 	go s.wait(run, m)
-	return &snapshot, nil
+	return &snapshot, true, nil
+}
+
+// reserveStart returns the existing live run when one exists. Otherwise it
+// takes the app's start reservation; when another start is already in flight,
+// it waits for that start to publish or fail and retries the decision against
+// the resulting run table.
+func (s *Supervisor) reserveStart(appID string) (*startReservation, *Run, error) {
+	for {
+		s.mu.Lock()
+		if inFlight := s.starts[appID]; inFlight != nil {
+			done := inFlight.done
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-s.ctx.Done():
+				return nil, nil, fmt.Errorf("supervisor is shutting down")
+			}
+		}
+		if live := s.liveRunLocked(appID); live != nil {
+			if live.State == Stopping {
+				s.mu.Unlock()
+				return nil, nil, ErrApplicationStopping
+			}
+			snapshot := live.clone()
+			s.mu.Unlock()
+			return nil, &snapshot, nil
+		}
+		reservation := &startReservation{done: make(chan struct{})}
+		s.starts[appID] = reservation
+		s.mu.Unlock()
+		return reservation, nil, nil
+	}
+}
+
+// liveRunLocked returns a run of appID, preferring one that is not stopping.
+func (s *Supervisor) liveRunLocked(appID string) *Run {
+	var stopping *Run
+	for _, id := range s.byApp[appID] {
+		run, ok := s.runs[id]
+		if !ok {
+			continue
+		}
+		if run.State != Stopping {
+			return run
+		}
+		if stopping == nil {
+			stopping = run
+		}
+	}
+	return stopping
+}
+
+func (s *Supervisor) releaseStartLocked(appID string, reservation *startReservation) {
+	if s.starts[appID] == reservation {
+		delete(s.starts, appID)
+	}
+	close(reservation.done)
 }
 
 func (s *Supervisor) pump(run *Run, r io.Reader, stream string) {
@@ -430,8 +546,18 @@ func (s *Supervisor) restart(m *manifest.Manifest, requireSelection bool) {
 	} else {
 		s.logs.Infof("supervisor", m.ID, "restarting after failure in %s", delay)
 	}
-	if _, err := s.Start(m, ids.New("inv")); err != nil {
+	// The no-live-run decision and the spawn are one atomic step shared with
+	// manual launches. If a launch reserved the app first, StartIfAbsent waits
+	// for its run and reports it instead of spawning a duplicate; if this
+	// recovery wins, the launch attaches its invocation to this run.
+	_, spawned, err := s.StartIfAbsent(m, ids.New("inv"))
+	switch {
+	case errors.Is(err, ErrApplicationStopping):
+		s.logs.Infof("supervisor", m.ID, "restart skipped: the application is stopping")
+	case err != nil:
 		s.logs.Errorf("supervisor", m.ID, "restart failed: %v", err)
+	case !spawned:
+		s.logs.Infof("supervisor", m.ID, "restart skipped: a run is already live")
 	}
 }
 

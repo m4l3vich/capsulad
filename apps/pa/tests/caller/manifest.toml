@@ -5,7 +5,6 @@ description = "Test-only MicroPython caller for the PA speaker end-to-end check.
 background = false
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "micropython"

@@ -5,7 +5,6 @@ description = "Development-only hardware and framework self-test: device info, s
 background = false
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "native"

@@ -59,6 +59,10 @@ func main() {
 		app.Close()
 		_ = client.Close()
 		return
+	case <-app.Done():
+		app.Close()
+		_ = client.Close()
+		return
 	case err := <-startErr:
 		if err != nil {
 			log.Printf("app bus ended: %v", err)
@@ -82,6 +86,12 @@ func main() {
 		if err := client.Err(); err != nil {
 			log.Printf("app bus ended: %v", err)
 		}
+	case <-app.Done():
+		// The radio exits itself when it has no audio and no live indication:
+		// a bare launch that never played, a pause held for its minute, or a
+		// terminal error whose display window ended. Close releases the
+		// display and audio before the process leaves.
+		log.Printf("idle run ended; exiting")
 	}
 
 	app.Close()

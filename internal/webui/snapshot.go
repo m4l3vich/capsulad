@@ -481,7 +481,7 @@ func appView(a *frameworkv1.InstalledApplication) *webv1.AppView {
 	}
 	v := &webv1.AppView{
 		AppId: a.GetAppId(), DisplayName: a.GetDisplayName(), Version: a.GetVersion(),
-		StartOnBoot: a.GetStartOnBoot(), SingleInstance: a.GetSingleInstance(), Provides: a.GetProvides(),
+		StartOnBoot: a.GetStartOnBoot(), Provides: a.GetProvides(),
 		Background: a.GetBackground(), RestartOnFailure: a.GetRestartOnFailure(),
 		SystemApp: a.GetSystemApp(), CanStop: a.GetCanStop(), CanUninstall: a.GetCanUninstall(),
 	}

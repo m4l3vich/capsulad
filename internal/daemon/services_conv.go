@@ -99,8 +99,8 @@ func (d *Daemon) appProto(app *registry.App) *frameworkv1.InstalledApplication {
 	system := m.Entrypoint.Runtime == manifest.RuntimeBuiltin
 	out := &frameworkv1.InstalledApplication{
 		AppId: m.ID, DisplayName: m.Name, Version: m.Version,
-		StartOnBoot: m.StartOnBoot, SingleInstance: m.SingleInstance,
-		Provides: append([]string(nil), m.Provides...), Background: m.Background,
+		StartOnBoot: m.StartOnBoot, Provides: append([]string(nil), m.Provides...),
+		Background:       m.Background,
 		RestartOnFailure: m.RestartOnFailure,
 		SystemApp:        system,
 		CanStop:          true,

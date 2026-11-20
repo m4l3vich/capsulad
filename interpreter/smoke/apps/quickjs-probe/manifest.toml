@@ -5,7 +5,6 @@ description = "Smoke probe for the QuickJS runtime: makes routed unary and cance
 background = true
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "quickjs"

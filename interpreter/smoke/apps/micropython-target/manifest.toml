@@ -5,7 +5,6 @@ description = "Smoke target for the MicroPython runtime: answers routed unary/st
 background = true
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "micropython"

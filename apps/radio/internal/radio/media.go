@@ -119,11 +119,17 @@ func (a *App) watchPlayers(ctx context.Context, call *capsulad.ServerCall) {
 // strings are omitted and 64-bit integers are strings.
 func (a *App) mediaStatus() map[string]any {
 	a.mu.Lock()
-	phase, revision := a.phase, a.revision
+	phase, halted, revision := a.phase, a.halted, a.revision
 	title, artist := a.nowTitle, a.nowArtist
 	station, hasStation := a.currentStationLocked()
 	a.mu.Unlock()
 
+	state := phase.mediaState()
+	if halted {
+		// A playback Stop holds the pause sign so Play can resume, but it is
+		// still a stopped player: do not report PLAYBACK_PAUSED.
+		state = "PLAYBACK_STOPPED"
+	}
 	source := ""
 	if hasStation {
 		source = station.Name
@@ -136,7 +142,7 @@ func (a *App) mediaStatus() map[string]any {
 	}
 	status := map[string]any{
 		"playerId":         playerID,
-		"playbackState":    phase.mediaState(),
+		"playbackState":    state,
 		"supportedActions": actions,
 		"appName":          appName,
 		"sourceName":       source,

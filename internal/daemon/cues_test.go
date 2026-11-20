@@ -528,7 +528,6 @@ name = "Slow boot fixture"
 version = "0.1.0"
 background = true
 start_on_boot = true
-single_instance = true
 
 [entrypoint]
 runtime = "native"

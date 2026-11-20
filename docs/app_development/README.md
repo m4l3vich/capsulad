@@ -108,7 +108,6 @@ id = "com.example.hello"
 name = "Hello Segment"
 version = "0.1.0"
 description = "Shows digits on the segment display."
-single_instance = true
 
 [entrypoint]
 runtime = "native"

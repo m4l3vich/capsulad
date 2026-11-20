@@ -28,7 +28,6 @@ description = "Purpose-built media contract fixture."
 background = true
 start_on_boot = true
 restart_on_failure = true
-single_instance = true
 
 [entrypoint]
 runtime = "native"

@@ -431,7 +431,6 @@ version = "0.1.0"
 background = true
 start_on_boot = true
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "native"

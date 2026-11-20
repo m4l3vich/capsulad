@@ -124,7 +124,7 @@ activation carries what a turn needs).
 | `wakewords` | `WakewordBinding[]` | Per-word configuration: `{model_id, app_id, enabled}`. Absent means the legacy state (every installed word is live under `wakeword_enabled` and targets the selected assistant); present means authoritative, one entry per installed word, and a word without an entry is disabled. `app_id` empty targets the selected assistant. |
 | `wakeword_enabled` | bool | Global framework wakeword detection switch. A word activates only when this switch, its own `enabled` and its availability all hold. |
 | `display_brightness` | map<string,float> | Per resource, `[0,1]`. |
-| `master_volume` | float | `[0,1]`. |
+| `master_volume` | float | `[0,1]` control position on the device's logarithmic master taper. 0 is exact silence, 1 is unity, 0.05 is about -57 dBFS and 0.5 is about -30 dBFS. The mixer applies the gain; apps must not treat the value as a linear amplitude. |
 | `microphone_muted` | bool | Global mute. |
 | `touch_hold_mode` | enum | `TOUCH_HOLD_SUMMON` or `TOUCH_HOLD_TO_TALK`. |
 | `muted_microphone_indicator` | `{mode, delay_ms}` | Indicator policy; `mode` is `MUTED_INDICATOR_IMMEDIATE`, `MUTED_INDICATOR_DELAY` or `MUTED_INDICATOR_UNTIL_UNMUTED` (`MUTED_INDICATOR_MODE_UNSPECIFIED` behaves as delay). `delay_ms` applies to the delay mode; `0` means 30000 ms. |
@@ -209,7 +209,7 @@ has_valid_frame}` or `visibility{visible, reason}`.
 | `Capture` | request then server stream `CaptureAudioEvent` | app identity, indication required | Microphone PCM. |
 | `Playback` | bidi `PlaybackRequest` → `PlaybackEvent` | app identity | Speaker PCM. |
 | `GetAudioState` | unary `AudioState` | any local caller | Mixer and mute state. |
-| `SetMasterVolume` | unary `AudioState` | administrator; also the installed AirPlay receiver's authenticated READY run | Persisted device volume. |
+| `SetMasterVolume` | unary `AudioState` | administrator; also the installed AirPlay receiver's authenticated READY run | Persisted device volume position; the mixer applies the tapered gain. |
 | `SetMicrophoneMuted` | unary `AudioState` | administrator | Persisted mute. |
 
 `AudioEndpointInfo` = `{endpoint_id, direction, supported_formats[], processing_tap}`.
@@ -342,7 +342,7 @@ the app bus; see [lifecycle.md](lifecycle.md#assistant-activations).
 | Field | Type |
 |---|---|
 | `app_id`, `display_name`, `version` | string |
-| `start_on_boot`, `single_instance`, `background`, `restart_on_failure` | bool |
+| `start_on_boot`, `background`, `restart_on_failure` | bool |
 | `launch_arguments` | `AppArgumentInfo[]` = `{name, description, value_type, required}` |
 | `provides` | string[] (UI hints) |
 | `interfaces` | `DeclaredAppInterface[]` = `{grpc_service, interface_version, summary}` |
@@ -403,8 +403,8 @@ Semantics an app author can rely on:
 app is `NOT_FOUND`.
 
 `LaunchRequest` = `{app_id, arguments[]}` with `LaunchArgument{name, value}`. `LaunchResult` =
-`{run_id, spawned_new_process, invocation_id}`; `invocation_id` is also set when a singleton app
-received an invocation instead of spawning.
+`{run_id, spawned_new_process, invocation_id}`; `spawned_new_process` is false when an existing
+run received the launch as an invocation, and `invocation_id` identifies that invocation.
 
 `AppRun` = `{run_id, app_id, pid, state, started_monotonic_ns, exit_code, status_detail,
 runtime}`; `state` is `APP_STARTING`, `APP_READY`, `APP_STOPPING`, `APP_EXITED` or

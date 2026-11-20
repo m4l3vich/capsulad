@@ -5,7 +5,6 @@ description = "Publishes the speaker's hardware and state to Home Assistant thro
 background = true
 start_on_boot = true
 restart_on_failure = true
-single_instance = true
 
 [entrypoint]
 runtime = "native"

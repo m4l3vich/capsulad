@@ -276,6 +276,14 @@ card. This filtering does not change discovery or control: `ListPlayers`, `Watch
 still report and address idle or paused providers, and the physical circle key falls back to
 `BluetoothMediaService` exactly as before.
 
+A provider is not required to be resident. An installed media app may end its run when it has
+nothing left to play — the Internet Radio app does after a bare-launch idle window, a one-minute
+pause hold, or a terminal-error display window — and while no run is ready its player is
+undiscoverable and cannot be called. The framework does not launch an installed provider from
+`Play`, the circle key or a swipe; with no playing or paused provider those controls use the
+Bluetooth source, and launching the app again is the recovery. A provider that stays alive across
+an idle or paused state remains addressable exactly as described above.
+
 | RPC | Request | Response | Behaviour |
 |---|---|---|---|
 | `ListPlayers` | `ListPlayersRequest{}` | `ListPlayersResponse{players[]}` | All players the provider exposes. |

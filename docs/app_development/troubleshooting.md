@@ -103,8 +103,9 @@ The Web UI shows which runtimes are available and their detail line; a client ca
 | It crashes before ready | Check the captured stdout/stderr in `logs -app`. |
 | A library load fails at startup | Fix the ABI or install the runtime. |
 
-`app start` reports `run=… invocation=… spawned=…`. If `spawned=false` for a
-`single_instance` app, an existing run received an invocation instead; inspect that run.
+`app start` reports `run=… invocation=… spawned=…`. If `spawned=false`, an existing run received
+an invocation instead of a second process; inspect that run. If the launch fails with
+`FAILED_PRECONDITION`, the existing run is stopping — launch again after it exits.
 
 ## Presentation never visible
 
@@ -204,12 +205,18 @@ plateaus at 8 seconds. A run that stays ready for 30 seconds resets the sequence
 reports ready and dies immediately keeps accumulating, so the loop becomes visible rather than
 spinning.
 
+`restart_on_failure` also covers a clean self-exit (status 0): the supervisor cannot distinguish
+an intentional idle exit from an early clean failure, so it relaunches the app. An app that exits
+itself when idle must leave the flag false; otherwise it comes back on its own and the loop looks
+like a crash.
+
 | Cause | Fix |
 |---|---|
-| The app exits nonzero after a successful handshake | Fix the bug; any exit the supervisor did not request as a stop is a failure. |
+| The app exits nonzero after a successful handshake | Fix the bug; an unclean exit is treated as a failure. |
+| The app exits 0 on its own and comes back | It declares `restart_on_failure = true`. Set it false for an idle-exit app; the flag governs clean self-exits too. |
 | `AppHello` rejected or the bus stream dropped | See "App ID mismatch" and "App never ready". |
 | Missing runtime or library discovered only at startup | Fix the runtime; consider declaring `[native_sdk]` so install fails early. |
-| The app deliberately stops itself without closing the bus | Close the client and exit cleanly, or stay running; a deliberate stop comes from `app stop`. |
+| The app deliberately stops itself without closing the bus | Close the client and exit cleanly, or stay running; a deliberate framework stop comes from `app stop`, and a clean self-exit is still relaunched when `restart_on_failure` is true. |
 
 To break a loop: `app stop <run-id>` (a deliberate stop stays stopped), then fix and restart it.
 If the app is the selected default, deselect it or select another provider before expecting it to

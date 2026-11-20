@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -281,7 +282,6 @@ version = "0.1.0"
 background = false
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 provides = ["voice_assistant"]
 
 [entrypoint]
@@ -435,5 +435,125 @@ func TestBuiltinStopDoesNotResurrectAfterDeselectionDuringTeardown(t *testing.T)
 	time.Sleep(300 * time.Millisecond)
 	if run, ok := d.sup.Get(runID); ok {
 		t.Fatalf("deselected built-in was resurrected during Stop: %+v", run)
+	}
+}
+
+// A manual launch that races a crash recovery must attach its invocation to
+// the recovered run instead of spawning a second process. The recovery is
+// parked inside the supervisor's start reservation (via the control-channel
+// factory), so the manual Launch arrives after the recovery decided to start
+// but before it published a run — the exact window where two starts used to
+// both spawn. The launch must report spawned=false for the recovery run and
+// still deliver its invocation once that run is ready.
+func TestManualLaunchRacingRecoveryRoutesToRecoveredRun(t *testing.T) {
+	const appID = "test.recoveryrace"
+	var (
+		mu       sync.Mutex
+		controls int
+	)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	d, cancel, _ := newTestDaemonPrepared(t, func(d *Daemon) {
+		channel := d.appControl.Channel
+		d.sup.SetControlChannel(func(runID, id string) (*os.File, func(), error) {
+			if id == appID {
+				mu.Lock()
+				controls++
+				n := controls
+				mu.Unlock()
+				if n == 2 {
+					close(entered)
+					<-release
+				}
+			}
+			return channel(runID, id)
+		})
+	}, appInstall{
+		id: appID, binaryName: "probe", binaryPath: buildProbe(t),
+		manifest: []byte(`
+id = "test.recoveryrace"
+name = "Recovery race"
+version = "0.1.0"
+restart_on_failure = true
+
+[entrypoint]
+runtime = "native"
+path = "probe"
+architecture = "aarch64"
+abi = "linux-musl"
+
+[[arguments]]
+name = "note"
+type = "text"
+`),
+	})
+	defer cancel()
+
+	first, _, spawned, err := d.Launch(appID, nil)
+	if err != nil {
+		t.Fatalf("first launch: %v", err)
+	}
+	if !spawned {
+		t.Fatal("first launch did not spawn")
+	}
+	waitFor(t, 5*time.Second, "recovery race app ready", func() bool {
+		_, ok := d.sup.ReadyRun(appID)
+		return ok
+	})
+	firstRun, ok := d.sup.Get(first)
+	if !ok {
+		t.Fatalf("first run %s disappeared before the crash", first)
+	}
+	if err := syscall.Kill(firstRun.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill first run: %v", err)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery did not reach the start reservation")
+	}
+
+	type launchResult struct {
+		runID, invocationID string
+		spawned             bool
+		err                 error
+	}
+	manual := make(chan launchResult, 1)
+	go func() {
+		runID, invocationID, spawned, err := d.Launch(appID, map[string]string{"note": "manual"})
+		manual <- launchResult{runID: runID, invocationID: invocationID, spawned: spawned, err: err}
+	}()
+	select {
+	case res := <-manual:
+		t.Fatalf("manual launch returned while the recovery held the reservation: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	var res launchResult
+	select {
+	case res = <-manual:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual launch did not finish after the recovery published")
+	}
+	if res.err != nil {
+		t.Fatalf("manual launch: %v", res.err)
+	}
+	if res.spawned {
+		t.Fatal("manual launch spawned a second process instead of routing to the recovery")
+	}
+	runs := d.sup.List(appID)
+	if len(runs) != 1 || runs[0].RunID != res.runID || res.runID == first {
+		t.Fatalf("runs after the race = %+v, manual result run=%s first=%s", runs, res.runID, first)
+	}
+	waitFor(t, 5*time.Second, "manual invocation delivered to the recovery run", func() bool {
+		return strings.Contains(logText(d), "invocation="+res.invocationID+" delivered to run="+res.runID)
+	})
+	if runs := d.sup.List(appID); len(runs) != 1 || runs[0].RunID != res.runID {
+		t.Fatalf("runs after invocation delivery = %+v, want only %s", runs, res.runID)
 	}
 }

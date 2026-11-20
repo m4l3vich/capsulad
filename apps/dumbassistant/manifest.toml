@@ -5,7 +5,6 @@ description = "Optional first-party assistant that listens to real microphone PC
 background = false
 start_on_boot = false
 restart_on_failure = true
-single_instance = true
 provides = ["voice_assistant"]
 
 [entrypoint]

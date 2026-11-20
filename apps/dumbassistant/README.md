@@ -52,9 +52,8 @@ The manifest declares:
 - `[native_sdk] abi_major = 1` and the capability groups the app uses: audio
   capture/playback and the PCM fast path, presentations, routing, assistant,
   settings, and AppBus connect/events/notifications;
-- `provides = ["voice_assistant"]`, `single_instance = true`,
-  `restart_on_failure = true`, and no `start_on_boot`: the daemon starts it only
-  while it is the selected assistant.
+- `provides = ["voice_assistant"]`, `restart_on_failure = true`, and no
+  `start_on_boot`: the daemon starts it only while it is the selected assistant.
 
 A missing or incompatible native runtime rejects the package at install and
 launch. The app also needs a ring presentation, ring capture and the processed

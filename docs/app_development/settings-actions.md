@@ -204,6 +204,17 @@ Rules:
   `application <id> declares no action "<action-id>"`.
 - The app must be installed and **ready**. Triggering an action for a stopped or starting app is
   `FAILED_PRECONDITION` with `application <id> is not ready`. Actions are not queued.
+- The Web UI respects that rule. The shipped Internet Radio package is the one explicit
+  exception: on its application page and in the overview actions menu, a stopped `play` action
+  becomes a launch shortcut. The UI calls the public `ApplicationService.Launch` with the radio's
+  declared `station` launch argument seeded from the saved `station` setting (or that setting's
+  schema default). The separate Launch form is not an input: a value typed there belongs only to
+  that form's own launch. The launch is ordinary: it starts the app for that request and does not
+  make a non-resident app resident. Other actions stay disabled until a run reports `APP_READY`,
+  with that explanation shown; the UI never sends an action it cannot route.
+- The overview listing carries no per-app settings values, so its cold Play requests the same
+  application snapshot the detail page uses before launching. If no saved selection can be
+  resolved, the UI reports the reason instead of sending a launch without it.
 - `confirm_before_run` is a UI hint. The Web UI asks for confirmation before sending the trigger.
   The framework does not enforce it for other callers, so a destructive action must verify its
   own preconditions and may refuse by reporting `succeeded=false` with a detail.

@@ -221,7 +221,6 @@ export interface AppView {
   displayName?: string;
   version?: string;
   startOnBoot?: boolean;
-  singleInstance?: boolean;
   launchArguments?: LaunchArgumentView[];
   provides?: string[];
   background?: boolean;

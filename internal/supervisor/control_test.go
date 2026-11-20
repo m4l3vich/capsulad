@@ -30,9 +30,7 @@ func TestControlChannelPassesFDAndEnv(t *testing.T) {
 	sup.SetControlChannel(func(string, string) (*os.File, func(), error) {
 		return child, func() { aborts.Add(1) }, nil
 	})
-	if _, err := sup.Start(testManifest(false), "inv-control"); err != nil {
-		t.Fatal(err)
-	}
+	startFirstRun(t, sup, testManifest(false), "inv-control")
 
 	buf := make([]byte, 8)
 	n, _, _, _, err := unix.Recvmsg(fds[0], buf, nil, 0)
@@ -64,7 +62,7 @@ func TestControlChannelAbortOnFailedSpawn(t *testing.T) {
 	sup.SetControlChannel(func(string, string) (*os.File, func(), error) {
 		return child, func() { aborted <- struct{}{} }, nil
 	})
-	if _, err := sup.Start(testManifest(false), "inv-control"); err == nil {
+	if _, _, err := sup.StartIfAbsent(testManifest(false), "inv-control"); err == nil {
 		t.Fatal("start unexpectedly succeeded")
 	}
 	select {

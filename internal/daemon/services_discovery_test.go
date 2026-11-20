@@ -96,6 +96,13 @@ func (sleepSpawner) Command(*manifest.Manifest, string, string, string) (*exec.C
 }
 func (sleepSpawner) Mode() string { return "test" }
 
+// discoveryFixture returns the daemon, its supervisor, and the contexts of the
+// app's current live run and the run it replaced. A supervised app is a
+// singleton, so two runs of test.mdns are never live together; the stale
+// context is the previous generation's run ID, which is what a publication
+// recorded while that run was exiting (the responder call was in flight when
+// cleanup ran) still carries. That stale owner is the identity a current run
+// must never be able to unpublish.
 func discoveryFixture(t *testing.T) (*Daemon, *supervisor.Supervisor, context.Context, context.Context) {
 	t.Helper()
 	logs, err := logbus.New(ids.NewClock(), 32, "")
@@ -112,28 +119,36 @@ func discoveryFixture(t *testing.T) (*Daemon, *supervisor.Supervisor, context.Co
 		ID: "test.mdns", Name: "mDNS test", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeNative},
 	}
-	first, err := sup.Start(m, "inv-1")
-	if err != nil {
-		t.Fatal(err)
+	stale, spawned, err := sup.StartIfAbsent(m, "inv-1")
+	if err != nil || !spawned {
+		t.Fatalf("start stale fixture: spawned=%v err=%v", spawned, err)
 	}
-	second, err := sup.Start(m, "inv-2")
-	if err != nil {
-		t.Fatal(err)
+	if !sup.Stop(stale.RunID) {
+		t.Fatal("stop stale fixture")
+	}
+	waitFor(t, 5*time.Second, "stale fixture removed", func() bool {
+		_, live := sup.Get(stale.RunID)
+		return !live
+	})
+
+	live, spawned, err := sup.StartIfAbsent(m, "inv-2")
+	if err != nil || !spawned {
+		t.Fatalf("start live fixture: spawned=%v err=%v", spawned, err)
 	}
 	d := &Daemon{logs: logs, sup: sup, mdnsPubs: map[string]mdnsPublication{}}
 	runCtx := func(runID string) context.Context {
 		return metadata.NewIncomingContext(context.Background(), metadata.Pairs("capsulad-run-id", runID))
 	}
-	return d, sup, runCtx(first.RunID), runCtx(second.RunID)
+	return d, sup, runCtx(live.RunID), runCtx(stale.RunID)
 }
 
 func TestDiscoveryPublishIsScopedToRun(t *testing.T) {
-	d, _, firstCtx, secondCtx := discoveryFixture(t)
+	d, _, liveCtx, staleCtx := discoveryFixture(t)
 	fake := &fakeMDNS{}
 	d.mdns = fake
 	svc := &discoveryService{d: d}
 
-	resp, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{
+	resp, err := svc.Publish(liveCtx, &frameworkv1.PublishServiceRequest{
 		ServiceType: "_snapcast._tcp", InstanceName: "Kitchen", Port: 1704,
 		Txt: map[string]string{"v": "1"},
 	})
@@ -144,27 +159,41 @@ func TestDiscoveryPublishIsScopedToRun(t *testing.T) {
 		t.Fatalf("publish response = %+v", resp)
 	}
 
-	if _, err := svc.Unpublish(secondCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: resp.GetPublicationId()}); status.Code(err) != codes.NotFound {
-		t.Fatalf("foreign unpublish = %v, want NotFound", err)
+	// A registration recorded for the app's previous run (the responder call
+	// completed after that run's cleanup) still belongs to that run. The
+	// current live run has the same app ID but must not remove it, and the
+	// responder must not be asked to.
+	_, staleRunID := callerRunID(t, staleCtx)
+	d.mdnsMu.Lock()
+	d.mdnsPubs["pub_stale"] = mdnsPublication{appID: "test.mdns", runID: staleRunID, pub: discovery.Publication{ID: "pub_stale"}}
+	d.mdnsMu.Unlock()
+	if _, err := svc.Unpublish(liveCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: "pub_stale"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("foreign unpublish of a stale run's registration = %v, want NotFound", err)
 	}
 	if len(fake.unpubs) != 0 {
 		t.Fatalf("foreign unpublish reached the responder: %v", fake.unpubs)
 	}
+	d.mdnsMu.Lock()
+	_, staleKept := d.mdnsPubs["pub_stale"]
+	d.mdnsMu.Unlock()
+	if !staleKept {
+		t.Fatal("foreign unpublish removed the stale run's registration")
+	}
 
-	out, err := svc.Unpublish(firstCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: resp.GetPublicationId()})
+	out, err := svc.Unpublish(liveCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: resp.GetPublicationId()})
 	if err != nil || !out.GetRemoved() {
 		t.Fatalf("owner unpublish = %+v, %v", out, err)
 	}
 	if len(fake.unpubs) != 1 || fake.unpubs[0] != "pub_1" {
 		t.Fatalf("unpublish calls = %v", fake.unpubs)
 	}
-	if _, err := svc.Unpublish(firstCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: resp.GetPublicationId()}); status.Code(err) != codes.NotFound {
+	if _, err := svc.Unpublish(liveCtx, &frameworkv1.UnpublishServiceRequest{PublicationId: resp.GetPublicationId()}); status.Code(err) != codes.NotFound {
 		t.Fatalf("second unpublish = %v, want NotFound", err)
 	}
 }
 
 func TestDiscoveryAuthAndFailureMapping(t *testing.T) {
-	d, _, firstCtx, _ := discoveryFixture(t)
+	d, _, liveCtx, _ := discoveryFixture(t)
 	fake := &fakeMDNS{}
 	d.mdns = fake
 	svc := &discoveryService{d: d}
@@ -177,26 +206,26 @@ func TestDiscoveryAuthAndFailureMapping(t *testing.T) {
 	}
 
 	fake.err = fmt.Errorf("%w: no responder", discovery.ErrUnsupported)
-	if _, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", InstanceName: "x", Port: 1}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := svc.Publish(liveCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", InstanceName: "x", Port: 1}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("unsupported publish = %v, want FailedPrecondition", err)
 	}
-	if err := svc.Browse(&frameworkv1.BrowseServicesRequest{ServiceType: "_x._tcp"}, &fakeBrowseStream{ctx: firstCtx}); status.Code(err) != codes.FailedPrecondition {
+	if err := svc.Browse(&frameworkv1.BrowseServicesRequest{ServiceType: "_x._tcp"}, &fakeBrowseStream{ctx: liveCtx}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("unsupported browse = %v, want FailedPrecondition", err)
 	}
 
 	fake.err = fmt.Errorf("%w: instance name is required", discovery.ErrInvalidRequest)
-	if _, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", Port: 1}); status.Code(err) != codes.InvalidArgument {
+	if _, err := svc.Publish(liveCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", Port: 1}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid publish = %v, want InvalidArgument", err)
 	}
 
 	fake.err = fmt.Errorf("%w: speaker", discovery.ErrNameInUse)
-	if _, err := svc.Publish(firstCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", InstanceName: "x", Port: 1}); status.Code(err) != codes.AlreadyExists {
+	if _, err := svc.Publish(liveCtx, &frameworkv1.PublishServiceRequest{ServiceType: "_x._tcp", InstanceName: "x", Port: 1}); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("colliding publish = %v, want AlreadyExists", err)
 	}
 }
 
 func TestDiscoveryBrowseStreamsEvents(t *testing.T) {
-	d, _, firstCtx, _ := discoveryFixture(t)
+	d, _, liveCtx, _ := discoveryFixture(t)
 	browser := &fakeGenericBrowser{events: make(chan discovery.Event, 2)}
 	browser.events <- discovery.Event{
 		Kind: discovery.EventAdded, Name: "tv", Type: "_googlecast._tcp", Domain: "local",
@@ -206,7 +235,7 @@ func TestDiscoveryBrowseStreamsEvents(t *testing.T) {
 	close(browser.events)
 	fake := &fakeMDNS{browser: browser}
 	d.mdns = fake
-	stream := &fakeBrowseStream{ctx: firstCtx}
+	stream := &fakeBrowseStream{ctx: liveCtx}
 	err := (&discoveryService{d: d}).Browse(&frameworkv1.BrowseServicesRequest{ServiceType: "_googlecast._tcp"}, stream)
 	if err != nil {
 		t.Fatal(err)
@@ -230,27 +259,47 @@ func TestDiscoveryBrowseStreamsEvents(t *testing.T) {
 }
 
 func TestRemoveRunPublicationsOnlyRunOwned(t *testing.T) {
-	d, _, firstCtx, secondCtx := discoveryFixture(t)
+	d, _, liveCtx, staleCtx := discoveryFixture(t)
 	fake := &fakeMDNS{}
 	d.mdns = fake
 	svc := &discoveryService{d: d}
-	for _, ctx := range []context.Context{firstCtx, secondCtx} {
-		if _, err := svc.Publish(ctx, &frameworkv1.PublishServiceRequest{
-			ServiceType: "_airplay._tcp", InstanceName: "box", Port: 7000,
-		}); err != nil {
-			t.Fatal(err)
-		}
+
+	livePub, err := svc.Publish(liveCtx, &frameworkv1.PublishServiceRequest{
+		ServiceType: "_airplay._tcp", InstanceName: "box", Port: 7000,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, firstRun := callerRunID(t, firstCtx)
-	d.removeRunPublications(firstRun)
-	if len(fake.unpubs) != 1 {
-		t.Fatalf("unpublish calls = %v, want one", fake.unpubs)
+	// A registration from the app's previous run survives that run's cleanup
+	// when the responder call was still in flight. Its cleanup path must
+	// release exactly that registration and leave the current run's alone.
+	_, staleRunID := callerRunID(t, staleCtx)
+	d.mdnsMu.Lock()
+	d.mdnsPubs["pub_stale"] = mdnsPublication{appID: "test.mdns", runID: staleRunID, pub: discovery.Publication{ID: "pub_stale"}}
+	d.mdnsMu.Unlock()
+
+	d.removeRunPublications(staleRunID)
+	if len(fake.unpubs) != 1 || fake.unpubs[0] != "pub_stale" {
+		t.Fatalf("unpublish calls = %v, want the stale registration only", fake.unpubs)
 	}
 	d.mdnsMu.Lock()
+	_, liveKept := d.mdnsPubs[livePub.GetPublicationId()]
 	remaining := len(d.mdnsPubs)
 	d.mdnsMu.Unlock()
-	if remaining != 1 {
-		t.Fatalf("remaining publications = %d, want 1", remaining)
+	if !liveKept || remaining != 1 {
+		t.Fatalf("remaining publications = %d, live registration kept=%v, want only the live one", remaining, liveKept)
+	}
+
+	_, liveRunID := callerRunID(t, liveCtx)
+	d.removeRunPublications(liveRunID)
+	if len(fake.unpubs) != 2 || fake.unpubs[1] != livePub.GetPublicationId() {
+		t.Fatalf("unpublish calls after the live run exited = %v", fake.unpubs)
+	}
+	d.mdnsMu.Lock()
+	remaining = len(d.mdnsPubs)
+	d.mdnsMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("remaining publications = %d, want none", remaining)
 	}
 }
 

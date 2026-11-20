@@ -14,7 +14,10 @@ connection's identity, and a listener or publication is requested at runtime fro
 declared here.
 
 Validation runs at packaging (`capsulad-cli app package`), at install and at launch. Unknown
-keys are rejected, so a typo cannot silently disable a feature.
+keys are rejected, so a typo cannot silently disable a feature. There is no per-app instance
+policy field: every installed app has at most one live run, and a launch while it is running is
+delivered as an invocation (see [lifecycle.md](lifecycle.md#invocations)). A manifest that still
+declares the removed `single_instance` key is rejected as unknown.
 
 ## Top-level fields
 
@@ -26,8 +29,7 @@ keys are rejected, so a typo cannot silently disable a feature.
 | `description` | string | `""` | Shown in listings. |
 | `background` | bool | `false` | The app is started at boot and is not stopped when it is deselected as a provider. |
 | `start_on_boot` | bool | `false` | Start a run when the daemon starts; deselecting the app does not stop it. |
-| `restart_on_failure` | bool | `false` | Restart after an abnormal exit or a lost framework connection. |
-| `single_instance` | bool | `false` | At most one run per app; a launch delivers an invocation to the existing run instead of spawning a second process. |
+| `restart_on_failure` | bool | `false` | Restart after an exit the framework did not request — including a clean self-exit — or after a lost framework connection. An app that exits itself when idle must leave this false. |
 | `provides` | array of string | `[]` | Nonexclusive UI hints. Every entry must be non-empty after trimming. |
 | `entrypoint` | table | — | Required. See below. |
 | `settings` | array of table | `[]` | Typed app settings. See below. |
@@ -281,7 +283,6 @@ description = "Shows the time on the segment display and serves one custom metho
 background = true
 start_on_boot = true
 restart_on_failure = true
-single_instance = true
 provides = ["segment_display_provider"]
 
 [entrypoint]
@@ -367,7 +368,6 @@ id = "org.example.counter"
 name = "Counter"
 version = "0.3.1"
 description = "Counts invocations and shows the count on the ring."
-single_instance = true
 restart_on_failure = true
 
 [entrypoint]

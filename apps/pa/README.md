@@ -40,7 +40,7 @@ resource and needs no launch — it is ready from boot.
 | | |
 |---|---|
 | App ID | `org.capsulad.pa` |
-| Runtime | `micropython` (single instance, background, start on boot, restart on failure) |
+| Runtime | `micropython` (background, start on boot, restart on failure) |
 | Interface | `org.capsulad.pa.v1.SpeakerService` / `Play` (`proto/pa.proto`, `proto/pa.protoset`) |
 | Setting | `max_seconds` (1–60, default 30) |
 | Contract | [docs/speaker.md](docs/speaker.md) |

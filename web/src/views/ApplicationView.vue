@@ -5,6 +5,12 @@ import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
 import { theme as appearance } from '../lib/theme.js'
 import { readGuide } from '../lib/apps.js'
+import {
+  coldPlayLaunch,
+  hasLiveRun as runsLive,
+  hasReadyRun as runsReady,
+  isReadyRun as runReady
+} from '../lib/appActions.js'
 import { guideBlocks } from '../lib/guide.js'
 import { logLine, safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
@@ -115,6 +121,8 @@ const provenance = computed(() => data.value?.provenance || null)
 const interfaces = computed(() => data.value?.interfaces || [])
 const logs = computed(() => data.value?.logs || [])
 const runs = computed(() => data.value?.runs || [])
+const readyRun = computed(() => runsReady(runs.value))
+const liveRun = computed(() => runsLive(runs.value))
 const hasSettingsDocument = computed(() => !!data.value?.schema?.settingsUi?.available)
 const connected = computed(() => liveState.value === 'open')
 
@@ -500,12 +508,62 @@ async function stop(runItem) {
 }
 
 async function trigger(action) {
+  if (!actionCanRun(action)) {
+    notify.info(actionHint(action))
+    return
+  }
   if (action.confirmBeforeRun && !window.confirm(`${action.label}?`)) return
+  if (!readyRun.value) {
+    // Actions only reach a ready run. The shipped radio's stopped Play is the
+    // public launch path with its saved station, so it still starts without
+    // restoring a resident process; every other stopped action stays disabled.
+    const plan = coldPlayPlan(action)
+    if (!plan || plan.error) return
+    const app = data.value?.app
+    if (!app) return
+    const result = await act(
+      `action:${action.actionId}`,
+      { launch: { appId: app.appId, arguments: plan.arguments } },
+      `${action.label || 'Play'} requested`
+    )
+    if (result?.launch) {
+      // The Launch form draft is a separate input and is deliberately left
+      // untouched: this cold Play used the saved setting, not that draft.
+      await refresh()
+    }
+    return
+  }
   const result = await act(
     `action:${action.actionId}`,
     { action: { appId: props.appId, actionId: action.actionId } }
   )
   if (result?.action) notify.info('Action sent')
+}
+
+function coldPlayPlan(action) {
+  return coldPlayLaunch(
+    action,
+    data.value?.app,
+    runs.value,
+    schemaSettings.value,
+    data.value?.values
+  )
+}
+
+function actionCanRun(action) {
+  if (readyRun.value) return true
+  if (liveRun.value) return false
+  const plan = coldPlayPlan(action)
+  return !!plan && !plan.error
+}
+
+function actionHint(action) {
+  if (readyRun.value) return ''
+  if (liveRun.value) return 'The application is starting or stopping; try again when it is ready.'
+  const plan = coldPlayPlan(action)
+  if (plan?.error) return plan.error
+  if (plan) return 'Not running: Play launches the radio with its saved station; it still exits when idle.'
+  return 'Launch the application before using this action.'
 }
 
 function uptime(ns) {
@@ -768,11 +826,12 @@ function uptime(ns) {
             <div class="min-w-0">
               <p class="text-sm font-medium">{{ action.label }}</p>
               <p v-if="action.description" class="text-xs text-base-content/60">{{ action.description }}</p>
+              <p v-if="actionHint(action)" class="text-xs text-base-content/60">{{ actionHint(action) }}</p>
             </div>
             <button
               type="button"
               class="btn btn-sm btn-outline"
-              :disabled="!!busy || !connected"
+              :disabled="!!busy || !connected || !actionCanRun(action)"
               :aria-label="`${action.label || 'Run action'} for ${data.app.displayName}`"
               @click="trigger(action)"
             >{{ action.label || 'Run action' }}</button>
@@ -805,7 +864,7 @@ function uptime(ns) {
               <tbody>
                 <tr v-for="runItem in runs" :key="runItem.runId">
                   <td class="data-value" :title="runItem.runId">{{ shortId(runItem.runId) }}</td>
-                  <td><span class="badge badge-sm" :class="status(runItem.state) === 'ready' ? 'badge-success' : 'badge-ghost'">{{ status(runItem.state) || 'run' }}</span></td>
+                  <td><span class="badge badge-sm" :class="runReady(runItem) ? 'badge-success' : 'badge-ghost'">{{ status(runItem.state) || 'run' }}</span></td>
                   <td class="hidden sm:table-cell tabular-nums">{{ runItem.pid || '—' }}</td>
                   <td class="hidden md:table-cell text-xs text-base-content/60">{{ runItem.statusDetail || uptime(runItem.startedMonotonicNs) }}</td>
                   <td>
@@ -859,7 +918,6 @@ function uptime(ns) {
               <dt class="text-xs uppercase tracking-wide text-base-content/60">Lifecycle</dt>
               <dd class="text-sm">
                 {{ data.app.background ? 'background' : 'on demand' }} ·
-                {{ data.app.singleInstance ? 'single instance' : 'multi instance' }} ·
                 {{ data.app.startOnBoot ? 'starts at boot' : 'manual start' }} ·
                 {{ data.app.restartOnFailure ? 'restart on failure' : 'no manifest restart' }}
               </dd>

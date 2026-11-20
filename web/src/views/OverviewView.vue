@@ -1,7 +1,8 @@
 <script setup>
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { MediaAction } from '../proto/web_pb.js'
+import { MediaAction, Topic } from '../proto/web_pb.js'
 import { liveState, useTopic } from '../lib/live.js'
+import { coldPlayLaunch, hasLiveRun, hasReadyRun, isColdPlay } from '../lib/appActions.js'
 import { socket } from '../lib/ws.js'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
@@ -59,6 +60,18 @@ const runsByApp = computed(() => {
   }
   return map
 })
+
+function appRuns(appId) {
+  return runsByApp.value.get(appId) || []
+}
+
+function appReady(appId) {
+  return hasReadyRun(appRuns(appId))
+}
+
+function appLive(appId) {
+  return hasLiveRun(appRuns(appId))
+}
 
 function syncBluetoothPolicy() {
   if (busy.value.startsWith('bt:')) return
@@ -161,15 +174,88 @@ function actionsOf(app) {
   return app.actions || []
 }
 
+function canRunAction(app, action) {
+  if (appReady(app.appId)) return true
+  // The shipped radio's Play is a public launch while no run exists. Every
+  // other action needs a ready run; sending one earlier is rejected.
+  return isColdPlay(action, app, appRuns(app.appId))
+}
+
+function actionHint(app, action) {
+  if (appReady(app.appId)) return ''
+  if (appLive(app.appId)) return 'The application is starting or stopping; try again when it is ready.'
+  if (isColdPlay(action, app, appRuns(app.appId))) {
+    return 'Not running: Play launches the radio with its saved station; it still exits when idle.'
+  }
+  return 'Launch the application before using this action.'
+}
+
 async function runAction(app, action) {
   closeMenu()
   const label = action.label || action.actionId
+  if (!canRunAction(app, action)) {
+    notify.info(actionHint(app, action))
+    return
+  }
   if (action.confirmBeforeRun && !window.confirm(`${label}?`)) return
-  await run(
-    `action:${app.appId}:${action.actionId}`,
-    { action: { appId: app.appId, actionId: action.actionId } },
-    `${label} sent to ${app.displayName}`
-  )
+  if (appReady(app.appId)) {
+    await run(
+      `action:${app.appId}:${action.actionId}`,
+      { action: { appId: app.appId, actionId: action.actionId } },
+      `${label} sent to ${app.displayName}`
+    )
+    return
+  }
+  await coldPlay(app, action, label)
+}
+
+// The overview listing has no app settings values, so a cold Play fetches the
+// same application snapshot the detail page uses and seeds the radio's
+// `station` launch argument from the saved setting only.
+async function coldPlay(app, action, label) {
+  if (busy.value) return
+  if (liveState.value !== 'open') {
+    notify.error('The speaker is not connected.')
+    return
+  }
+  const key = `action:${app.appId}:${action.actionId}`
+  busy.value = key
+  try {
+    const snapshot = await socket.requestSnapshot(Topic.TOPIC_APPLICATION, app.appId)
+    const view = snapshot?.application
+    if (appReady(app.appId)) {
+      await socket.request({ action: { appId: app.appId, actionId: action.actionId } })
+      notify.info(`${label} sent to ${app.displayName}`)
+      await refresh()
+      return
+    }
+    if (appLive(app.appId)) {
+      notify.info(actionHint(app, action))
+      return
+    }
+    const plan = coldPlayLaunch(
+      action,
+      app,
+      appRuns(app.appId),
+      view?.schema?.settings || [],
+      view?.values || []
+    )
+    if (!plan) {
+      notify.info('Launch the application before using this action.')
+      return
+    }
+    if (plan.error) {
+      notify.error(plan.error)
+      return
+    }
+    await socket.request({ launch: { appId: app.appId, arguments: plan.arguments } })
+    notify.success(`${label} requested`)
+    await refresh()
+  } catch (err) {
+    notify.error(err?.message || 'The device rejected the request.')
+  } finally {
+    if (busy.value === key) busy.value = ''
+  }
 }
 
 // A provider is either an application (addressed by app_id) or the framework's
@@ -562,12 +648,16 @@ function trackTime(ms) {
                           type="button"
                           role="menuitem"
                           class="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50"
-                          :disabled="!!busy || liveState !== 'open'"
+                          :disabled="!!busy || liveState !== 'open' || !canRunAction(app, action)"
+                          :title="actionHint(app, action)"
                           @click="runAction(app, action)"
                         >
                           <span class="font-medium">{{ action.label || action.actionId }}</span>
                           <span v-if="action.description" class="text-[11px] font-normal text-base-content/60">
                             {{ action.description }}
+                          </span>
+                          <span v-if="actionHint(app, action)" class="text-[11px] font-normal text-base-content/60">
+                            {{ actionHint(app, action) }}
                           </span>
                         </button>
                       </li>

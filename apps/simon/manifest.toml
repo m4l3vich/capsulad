@@ -5,7 +5,6 @@ description = "Colour-and-tone memory game on the Capsula Mini: repeat the growi
 background = false
 start_on_boot = false
 restart_on_failure = false
-single_instance = true
 
 [entrypoint]
 runtime = "quickjs"

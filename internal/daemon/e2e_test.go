@@ -90,7 +90,6 @@ version = "0.1.0"
 background = true
 start_on_boot = true
 restart_on_failure = true
-single_instance = true
 provides = ["segment_display_provider"]
 
 [entrypoint]
@@ -116,7 +115,6 @@ version = "0.1.0"
 background = true
 start_on_boot = true
 restart_on_failure = true
-single_instance = true
 provides = ["voice_assistant"]
 
 [entrypoint]
@@ -132,7 +130,6 @@ name = "Test probe"
 version = "0.1.0"
 background = false
 restart_on_failure = false
-single_instance = false
 
 [entrypoint]
 runtime = "native"
@@ -370,28 +367,57 @@ func TestSimulatorVerticalSlice(t *testing.T) {
 		return sel.SelectedAppID == "test.clock" && sel.Reason == "default_baseline"
 	})
 
-	// Singleton launch delivers an in-place invocation and does not spawn again.
+	// A launch of a running app delivers an in-place invocation and does not
+	// spawn again. Every app follows this contract; there is no manifest flag.
 	run1, _, spawned1, err := d.Launch("test.clock", map[string]string{"note": "first"})
 	if err != nil || spawned1 {
-		t.Fatalf("first singleton launch: spawned=%v err=%v", spawned1, err)
+		t.Fatalf("first running-app launch: spawned=%v err=%v", spawned1, err)
 	}
 	run2, inv2, spawned2, err := d.Launch("test.clock", map[string]string{"note": "second"})
 	if err != nil || spawned2 || run1 != run2 {
-		t.Fatalf("singleton reused process incorrectly: %s %s spawned=%v err=%v", run1, run2, spawned2, err)
+		t.Fatalf("running app reused process incorrectly: %s %s spawned=%v err=%v", run1, run2, spawned2, err)
 	}
 	if inv2 == "" {
-		t.Fatal("no invocation id for running singleton")
+		t.Fatal("no invocation id for a running app")
 	}
 	if n := len(d.sup.List("test.clock")); n != 1 {
-		t.Fatalf("singleton produced %d runs", n)
+		t.Fatalf("running app produced %d runs", n)
+	}
+
+	// Concurrent launches of an app with no live run serialize on the launch
+	// lock: exactly one process spawns and the other launch is delivered as an
+	// invocation to that run.
+	type launchResult struct {
+		runID, invocationID string
+		spawned             bool
+		err                 error
+	}
+	results := make(chan launchResult, 2)
+	for range 2 {
+		go func() {
+			runID, invocationID, spawned, err := d.Launch("test.probe", map[string]string{"mode": "serve"})
+			results <- launchResult{runID, invocationID, spawned, err}
+		}()
+	}
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent probe launches: %v, %v", first.err, second.err)
+	}
+	if first.runID != second.runID {
+		t.Fatalf("concurrent launches produced runs %s and %s", first.runID, second.runID)
+	}
+	if first.spawned == second.spawned {
+		t.Fatalf("concurrent launches spawned=%v and spawned=%v; want exactly one process", first.spawned, second.spawned)
+	}
+	if first.invocationID == "" || second.invocationID == "" {
+		t.Fatalf("concurrent launches returned invocation ids %q and %q", first.invocationID, second.invocationID)
+	}
+	_ = waitReady(t, d, "test.probe", 5*time.Second)
+	if n := len(d.sup.List("test.probe")); n != 1 {
+		t.Fatalf("concurrent launches produced %d probe runs", n)
 	}
 
 	// Routed unary and streaming calls through the app bus.
-	_, _, spawned, err := d.Launch("test.probe", map[string]string{"mode": "serve"})
-	if err != nil || !spawned {
-		t.Fatalf("launch probe: spawned=%v err=%v", spawned, err)
-	}
-	_ = waitReady(t, d, "test.probe", 5*time.Second)
 	unary := routedCall(t, conn, "test.probe", "test.probe.v1.ProbeService", "Echo", [][]byte{[]byte("one")})
 	if len(unary) != 1 || string(unary[0]) != "echo:one" {
 		t.Fatalf("unary routed call: %q", unary)

@@ -101,7 +101,7 @@ func clockManifest() *manifest.Manifest {
 	return &manifest.Manifest{
 		ID: clockAppID, Name: "Clock", Version: "1.0.0",
 		Description: "Built-in segment clock with stopwatch, timers and alarms.",
-		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
+		Background:  true, StartOnBoot: true, RestartOnFailure: true,
 		Provides:   []string{"segment_display_provider"},
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 		SettingsUI: &manifest.SettingsUI{HTML: "clock.html"},
@@ -146,7 +146,7 @@ func ringManifest() *manifest.Manifest {
 	return &manifest.Manifest{
 		ID: ringAppID, Name: "Ring", Version: "1.0.0",
 		Description: "Built-in LED ring baseline with palette-driven effects.",
-		Background:  true, StartOnBoot: true, SingleInstance: true, RestartOnFailure: true,
+		Background:  true, StartOnBoot: true, RestartOnFailure: true,
 		Provides:   []string{"led_ring_controller"},
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
 		SettingsUI: &manifest.SettingsUI{HTML: "ring.html"},

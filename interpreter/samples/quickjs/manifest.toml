@@ -5,7 +5,6 @@ description = "Runnable QuickJS app: registers AppBus handlers, calls a framewor
 background = true
 start_on_boot = false
 restart_on_failure = true
-single_instance = true
 provides = ["script_demo"]
 
 [entrypoint]

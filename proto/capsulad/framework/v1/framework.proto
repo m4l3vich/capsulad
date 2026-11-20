@@ -896,7 +896,9 @@ message InstalledApplication {
   string display_name = 2;
   string version = 3;
   bool start_on_boot = 4;
-  bool single_instance = 5;
+  // Every app has at most one live run; there is no per-app instance policy.
+  reserved 5;
+  reserved "single_instance";
   repeated AppArgumentInfo launch_arguments = 6;
   // Nonexclusive UI hints: segment_display_provider, media_player,
   // led_ring_controller, voice_assistant, or arbitrary app-defined tags.
@@ -937,7 +939,7 @@ message LaunchRequest {
 message LaunchResult {
   string run_id = 1;
   bool spawned_new_process = 2;
-  string invocation_id = 3; // Also set for already-running singleton.
+  string invocation_id = 3; // Also set when an existing run receives the launch.
 }
 message StopRequest { string run_id = 1; }
 message StopResponse { bool requested = 1; }

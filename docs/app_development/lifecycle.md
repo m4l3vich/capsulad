@@ -97,8 +97,8 @@ APP_STARTING ──AppReady──► APP_READY ──stop or failure──► AP
 | `APP_STARTING` | A process exists; no `AppReady` yet. |
 | `APP_READY` | The bus handshake completed. Interfaces are available and events are delivered. |
 | `APP_STOPPING` | A stop was requested; the process is expected to exit. |
-| `APP_EXITED` | The process ended after a deliberate stop. |
-| `APP_FAILED` | The process ended without a deliberate stop, or its framework connection was lost. |
+| `APP_EXITED` | The process ended cleanly: a framework-requested stop, or the app exited on its own with status 0. |
+| `APP_FAILED` | The process ended with a non-zero status or a signal, or its framework connection was lost. |
 
 `AppRun` carries `run_id`, `app_id`, `pid`, `state`, `started_monotonic_ns`, `exit_code`,
 `status_detail` and `runtime`. An app can watch its own runs through
@@ -110,12 +110,13 @@ detail `stopped`.
 
 ## Invocations
 
-A launch is one of two things:
+Every app is a singleton: at most one live run exists per installed application. A launch
+therefore does one of two things:
 
-- **Spawn** — a new supervised run is created. The app receives `AppLaunchInvocation` after it
-  reports ready.
-- **Invocation** — a `single_instance` app that is already running receives the launch on its
-  existing run instead of a second process.
+- **Spawn** — the app has no live run; a new supervised run is created. The app receives
+  `AppLaunchInvocation` after it reports ready.
+- **Invocation** — the app already has a live run; the launch is delivered to that run as
+  `AppLaunchInvocation` instead of starting a second process.
 
 `AppLaunchInvocation` = `{invocation_id, arguments:[{name, value}]}`. Arguments are validated
 against the manifest before anything is spawned: undeclared names, wrong types and missing
@@ -123,11 +124,15 @@ required arguments fail the launch with `INVALID_ARGUMENT`. Values are never she
 
 Delivery rules:
 
-- A ready singleton receives the invocation immediately.
-- A starting singleton holds it in a per-run queue bounded at **8**; a ninth returns an error
-  and the launch fails. The invocation expires after **30 s** if the app never becomes ready,
-  with a logged warning.
-- A non-singleton launch always spawns, even if a run is already alive.
+- A ready run receives the invocation immediately.
+- A starting run holds it in a per-run queue bounded at **8**; a ninth returns an error and the
+  launch fails. The invocation expires after **30 s** if the app never becomes ready, with a
+  logged warning.
+- A run that is stopping refuses the launch with `FAILED_PRECONDITION`; launch again after it
+  exits to start a fresh run.
+- Concurrent launches are serialised by the launcher. A burst against an app with no live run
+  starts one process; further launches are delivered to it as invocations, subject to the queue
+  bound above.
 - `invocation_id` is also returned to the caller (`LaunchResult.invocation_id`), so it can
   correlate the outcome.
 
@@ -242,6 +247,14 @@ A failed run is `APP_FAILED` and its restart depends on three things:
 | the app is the selected default provider or assistant | yes, even with `restart_on_failure = false` |
 | neither | no; the run stays failed |
 
+A process that exits by itself with status **0** is a normal exit, not a failure: it reports
+`APP_EXITED` with exit code 0 and an empty detail. The `stopped` detail is reserved for a stop the
+framework requested. `restart_on_failure` still governs a self-exit, because the supervisor
+cannot distinguish an intentional idle exit from an early clean failure: with the flag **true**
+the app is relaunched (subject to the backoff below), so an app designed to leave when it has
+nothing to do must declare `restart_on_failure = false`. A selected default provider is relaunched
+regardless, so an idle-exit design does not suit that role.
+
 ### Backoff
 
 Repeated failures back off so a crash loop cannot spin the process table:
@@ -255,7 +268,9 @@ Repeated failures back off so a crash loop cannot spin the process table:
 | 5th and later | 8 s |
 
 A run that stays READY for **30 s** resets the counter, so an app that ran well and then crashed
-restarts immediately. A run that reports ready and dies at once keeps accumulating.
+restarts immediately. A run that reports ready and dies at once keeps accumulating. A scheduled
+restart re-checks the app at fire time: if a launch started a run while the backoff was pending,
+that run is the recovery and the scheduled start is skipped, so one app never has two live runs.
 
 ### Boot
 

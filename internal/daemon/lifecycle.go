@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
@@ -22,14 +26,38 @@ const (
 	maxInvocationRecords = 512
 )
 
-// Launch implements the single-instance invocation contract: a ready
-// singleton receives AppLaunchInvocation in place; a starting singleton holds
-// a bounded, expiring invocation; ordinary apps spawn a new supervised run.
+// runDelivery is the invocation-routing state of one run. The zero value is
+// absent from the map, which means STARTING: launches queue until the run
+// reports APP_READY. The ready flag flips under invMu before the pending drain,
+// and the routing decision checks it under the same lock, so a launch either
+// appends before the flip (and the drain carries it) or sees ready and is sent
+// in place. There is no interval where a launch observes "not ready" and then
+// appends after the drain.
+type runDelivery uint8
+
+const (
+	// deliveryReady means the run completed APP_READY and receives launches in
+	// place. An invocation is sent immediately instead of queued.
+	deliveryReady runDelivery = iota + 1
+	// deliveryEnded means the run is gone. A launch that still resolved the
+	// stale run record is refused instead of queued, because no flush is
+	// coming and the invocation would sit until its TTL and be dropped.
+	deliveryEnded
+)
+
+// Launch enforces the lifecycle contract shared by every app: at most one
+// live run per installed application. A launch for a live run is delivered as
+// AppLaunchInvocation in place — immediately when the run is ready, queued and
+// bounded while it is still starting — and only an app with no live run spawns
+// a supervised process. A run that is stopping refuses the launch instead of
+// promising a run that is about to disappear.
 //
 // It holds the package mutex so a process is never started from a package tree
 // that InstallPackageStream or UninstallPackage is replacing or removing: the
 // launch either completes first (and the mutation then refuses because the app
-// is running) or starts from the already-swapped tree.
+// is running) or starts from the already-swapped tree. The mutex also
+// serialises concurrent launches of the same app, so a burst of launches with
+// no live run yields one process and queued invocations, never a second one.
 func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocationID string, spawned bool, err error) {
 	d.pkgMu.Lock()
 	defer d.pkgMu.Unlock()
@@ -50,45 +78,50 @@ func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocation
 	if err := d.compatible(app.Manifest); err != nil {
 		return "", "", false, err
 	}
-	if app.Manifest.SingleInstance {
-		if run, ok := d.sup.ReadyRun(appID); ok {
+	if run, ok := d.sup.ReadyRun(appID); ok {
+		rec := d.newInvocation(appID, run.RunID, args)
+		if err := d.deliverOrQueue(rec); err != nil {
+			return "", "", false, err
+		}
+		return run.RunID, rec.ID, false, nil
+	}
+	if runs := d.sup.List(appID); len(runs) > 0 {
+		for _, run := range runs {
+			if run.State == supervisor.Stopping {
+				continue
+			}
 			rec := d.newInvocation(appID, run.RunID, args)
 			if err := d.deliverOrQueue(rec); err != nil {
 				return "", "", false, err
 			}
 			return run.RunID, rec.ID, false, nil
 		}
-		if runs := d.sup.List(appID); len(runs) > 0 {
-			rec := d.newInvocation(appID, runs[0].RunID, args)
-			if err := d.deliverOrQueue(rec); err != nil {
-				return "", "", false, err
-			}
-			return runs[0].RunID, rec.ID, false, nil
-		}
+		return "", "", false, status.Errorf(codes.FailedPrecondition, "application %s is stopping", appID)
 	}
 	rec := &invocationRecord{
 		ID: ids.New("inv"), AppID: appID, Arguments: cloneArgs(args),
 		QueuedAtNS: d.clock.NowNS(),
 	}
-	run, err := d.sup.Start(app.Manifest, rec.ID)
+	run, spawned, err := d.sup.StartIfAbsent(app.Manifest, rec.ID)
+	if errors.Is(err, supervisor.ErrApplicationStopping) {
+		return "", "", false, status.Errorf(codes.FailedPrecondition, "application %s is stopping", appID)
+	}
 	if err != nil {
 		return "", "", false, err
 	}
 	rec.RunID = run.RunID
 	d.invMu.Lock()
-	d.invocations[rec.ID] = rec
-	if len(d.invocations) > maxInvocationRecords {
-		for id := range d.invocations {
-			if id != rec.ID {
-				delete(d.invocations, id)
-				break
-			}
-		}
-	}
-	d.pending[run.RunID] = append(d.pending[run.RunID], rec)
+	d.rememberInvocationLocked(rec)
 	d.invMu.Unlock()
-	d.scheduleExpiry(rec)
-	return run.RunID, rec.ID, true, nil
+	// Both the recovery winner path (!spawned) and the fresh spawn use the
+	// same decision: APP_READY may already have raced the start, in which case
+	// this invocation must be sent rather than queued, and a run that is still
+	// starting must receive it from the flush. Appending here without that
+	// decision is what used to strand a fresh run's initial invocation.
+	if err := d.deliverOrQueue(rec); err != nil {
+		return "", "", false, err
+	}
+	return run.RunID, rec.ID, spawned, nil
 }
 
 // compatible rejects binaries that the target CPU/ABI cannot execute before
@@ -138,9 +171,36 @@ func (d *Daemon) newInvocation(appID, runID string, args map[string]string) *inv
 		Arguments: cloneArgs(args), QueuedAtNS: d.clock.NowNS(),
 	}
 	d.invMu.Lock()
-	d.invocations[rec.ID] = rec
+	d.rememberInvocationLocked(rec)
 	d.invMu.Unlock()
 	return rec
+}
+
+// rememberInvocationLocked stores rec in the bounded invocation history. Every
+// launch inserts here, including repeated launches that reuse a live or
+// starting run, so the retention bound cannot live on the spawn path alone: a
+// long-lived app would otherwise grow the map once per launch until reboot.
+// The oldest record is evicted first and the record being inserted is never a
+// candidate, so a burst of launches preserves the newest results even while
+// an older invocation is still queued for delivery. Callers hold invMu.
+func (d *Daemon) rememberInvocationLocked(rec *invocationRecord) {
+	d.invocations[rec.ID] = rec
+	for len(d.invocations) > maxInvocationRecords {
+		var oldestID string
+		var oldestNS uint64
+		for id, candidate := range d.invocations {
+			if id == rec.ID {
+				continue
+			}
+			if oldestID == "" || candidate.QueuedAtNS < oldestNS {
+				oldestID, oldestNS = id, candidate.QueuedAtNS
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(d.invocations, oldestID)
+	}
 }
 
 func (d *Daemon) scheduleExpiry(rec *invocationRecord) {
@@ -164,15 +224,33 @@ func (d *Daemon) scheduleExpiry(rec *invocationRecord) {
 	})
 }
 
+// deliverOrQueue routes one invocation to a run. The routing decision and the
+// queue append are made under the same lock that marks the run ready and drains
+// the queue, so the two orders are equivalent:
+//
+//   - launch first: the invocation is in pending when the flush takes it and
+//     is sent by that flush;
+//   - APP_READY first: the run is already marked ready and the invocation is
+//     sent in place.
+//
+// The previous code asked the bus whether the run was ready and only then took
+// the queue lock. An APP_READY flush landing in that gap drained an empty
+// queue, the append happened afterwards, and the invocation had no later
+// flush to carry it: it expired after invocationTTL. The daemon's ready marker
+// is therefore the authority here, not a separate bus observation.
 func (d *Daemon) deliverOrQueue(rec *invocationRecord) error {
-	if _, ok := d.bus.ReadyApp(rec.AppID); ok && rec.RunID != "" {
-		if d.bus.ReadyRun(rec.RunID) {
-			if err := d.sendInvocation(rec.RunID, rec); err == nil {
-				return nil
-			}
-		}
-	}
 	d.invMu.Lock()
+	switch d.delivery[rec.RunID] {
+	case deliveryReady:
+		d.invMu.Unlock()
+		if err := d.sendInvocation(rec.RunID, rec); err != nil {
+			return fmt.Errorf("deliver invocation %s to run %s: %w", rec.ID, rec.RunID, err)
+		}
+		return nil
+	case deliveryEnded:
+		d.invMu.Unlock()
+		return fmt.Errorf("run %s ended before invocation %s could be delivered", rec.RunID, rec.ID)
+	}
 	if len(d.pending[rec.RunID]) >= maxPendingPerRun {
 		d.invMu.Unlock()
 		return fmt.Errorf("invocation queue for %s is full", rec.AppID)
@@ -198,6 +276,23 @@ func (d *Daemon) sendInvocation(runID string, rec *invocationRecord) error {
 	return nil
 }
 
+// markDeliveryReady flips the run to in-place delivery. It runs before the
+// settings push and the pending drain, so a launch arriving at any point after
+// APP_READY is sent instead of queued; the drain below still owns everything
+// that was queued before the flip. The launch decision and the append share
+// invMu, so once this flag is set no invocation can be appended after the
+// drain.
+func (d *Daemon) markDeliveryReady(runID string) {
+	d.invMu.Lock()
+	if d.delivery[runID] != deliveryEnded {
+		d.delivery[runID] = deliveryReady
+	}
+	d.invMu.Unlock()
+}
+
+// flushPending delivers everything queued while the run was starting. The
+// ready flag was already set by markDeliveryReady, so this drain only has to
+// take the queue atomically; no launch can slip an append in afterwards.
 func (d *Daemon) flushPending(runID string) {
 	d.invMu.Lock()
 	pending := d.pending[runID]
@@ -210,20 +305,36 @@ func (d *Daemon) flushPending(runID string) {
 	}
 }
 
+// dropPending ends the run's delivery state before releasing its queue. A
+// launch that still resolves the run record after cleanup is refused by the
+// ended marker instead of appending an invocation that no flush will carry.
+// The marker is removed after the invocation TTL, by which point the
+// supervisor has long since stopped routing launches to the run.
 func (d *Daemon) dropPending(runID string) {
 	d.invMu.Lock()
+	d.delivery[runID] = deliveryEnded
 	pending := d.pending[runID]
 	delete(d.pending, runID)
 	d.invMu.Unlock()
 	for _, rec := range pending {
 		d.logs.Warnf("daemon", rec.AppID, "invocation=%s dropped: run %s ended before delivery", rec.ID, runID)
 	}
+	time.AfterFunc(invocationTTL, func() {
+		d.invMu.Lock()
+		if d.delivery[runID] == deliveryEnded {
+			delete(d.delivery, runID)
+		}
+		d.invMu.Unlock()
+	})
 }
 
 // onAppReady runs after AppReady: mark the run ready, send private settings,
-// flush queued invocations.
+// flush queued invocations. The delivery flag flips before the settings push so
+// an APP_READY run is never treated as still starting while the settings
+// lookup runs; the queued set cannot grow after that flip.
 func (d *Daemon) onAppReady(runID, appID string) {
 	d.sup.MarkReady(runID)
+	d.markDeliveryReady(runID)
 	d.sendAppSettings(appID)
 	d.flushPending(runID)
 }
