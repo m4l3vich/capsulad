@@ -133,17 +133,88 @@ def reply_result(call, reply):
     return (0, detail, fields.get(2, 0))
 
 
+def event_credit(event):
+    """PlayEvent.credit.frames, or 0 for a non-credit event."""
+    fields = decode_result(event)
+    credit = fields.get(1)
+    if credit is None:
+        return 0
+    return decode_result(credit).get(1, 0) or 0
+
+
+def event_result(event):
+    """PlayEvent.result payload, or None."""
+    return decode_result(event).get(2)
+
+
+def await_result(call, timeout):
+    """Drain credits and return (status, detail, frames) for the result."""
+    while True:
+        try:
+            event = call.recv_bytes(timeout)
+        except OSError as err:
+            code, detail = call_status(call, err)
+            return (code, detail, 0)
+        if event is None:
+            return reply_result(call, None)
+        result = event_result(event)
+        if result is not None:
+            return reply_result(call, result)
+        # A credit event; keep reading until the result or terminal status.
+
+
+def wait_credit(call, timeout):
+    """Read events until the app grants a frame credit. Returns a result tuple
+    if the app ended first, else None."""
+    while True:
+        try:
+            event = call.recv_bytes(timeout)
+        except OSError as err:
+            code, detail = call_status(call, err)
+            return (code, detail, 0)
+        if event is None:
+            return reply_result(call, None)
+        result = event_result(event)
+        if result is not None:
+            return reply_result(call, result)
+        if event_credit(event) > 0:
+            return None
+
+
+def send_frames(call, frames, timeout):
+    """Send PlayRequest frames within the app's credit window. Returns a result
+    tuple only when the app ended before all frames were sent."""
+    credit = 0
+    index = 0
+    while index < len(frames):
+        while credit > 0 and index < len(frames):
+            call.send_bytes(frames[index])
+            index += 1
+            credit -= 1
+        if index >= len(frames):
+            break
+        ended = wait_credit(call, timeout)
+        if ended is not None:
+            return ended
+        credit += 1
+    return None
+
+
 def play(data, split=0, cancel=False, timeout=90000):
     """Play one WAV. Returns (status, detail, frames)."""
     call = capsulad.open_routed(PA_APP, SERVICE, "Play", timeout)
     try:
         if split > 0:
+            frames = []
             offset = 0
             while offset < len(data):
-                call.send_bytes(frame(data[offset:offset + split]))
+                frames.append(frame(data[offset:offset + split]))
                 offset += split
         else:
-            call.send_bytes(frame(data))
+            frames = [frame(data)]
+        ended = send_frames(call, frames, timeout)
+        if ended is not None:
+            return ended
         if cancel:
             # Give the app time to start playing: the reply only arrives after
             # the drain, so this bounded read times out while the clip plays.
@@ -154,11 +225,7 @@ def play(data, split=0, cancel=False, timeout=90000):
             call.cancel()
             return (0, "cancelled", 0)
         call.half_close()
-        try:
-            return reply_result(call, call.recv_bytes(timeout))
-        except OSError as err:
-            code, detail = call_status(call, err)
-            return (code, detail, 0)
+        return await_result(call, timeout)
     finally:
         try:
             call.cancel()
@@ -170,14 +237,15 @@ def play_raw(frames, timeout=30000):
     """Send raw PlayRequest frames; used for frames that carry no WAV bytes."""
     call = capsulad.open_routed(PA_APP, SERVICE, "Play", timeout)
     try:
-        for raw in frames:
-            call.send_bytes(raw)
-        call.half_close()
         try:
-            return reply_result(call, call.recv_bytes(timeout))
+            ended = send_frames(call, frames, timeout)
         except OSError as err:
             code, detail = call_status(call, err)
             return (code, detail, 0)
+        if ended is not None:
+            return ended
+        call.half_close()
+        return await_result(call, timeout)
     finally:
         try:
             call.cancel()
@@ -190,13 +258,15 @@ def play_stalled(data, timeout=STALL_TIMEOUT):
     the call with DEADLINE_EXCEEDED instead of hanging or playing the tail."""
     call = capsulad.open_routed(PA_APP, SERVICE, "Play", timeout)
     try:
-        call.send_bytes(frame(data))
-        # No half-close: the request stream stays open with nothing pending.
         try:
-            return reply_result(call, call.recv_bytes(timeout))
+            ended = send_frames(call, [frame(data)], timeout)
         except OSError as err:
             code, detail = call_status(call, err)
             return (code, detail, 0)
+        if ended is not None:
+            return ended
+        # No half-close: the request stream stays open with nothing pending.
+        return await_result(call, timeout)
     finally:
         try:
             call.cancel()
@@ -212,18 +282,29 @@ def play_queued(first, second, timeout=60000):
         for data in (first, second):
             call = capsulad.open_routed(PA_APP, SERVICE, "Play", timeout)
             calls.append(call)
-            call.send_bytes(frame(data))
-            call.half_close()
-        results = []
-        for call in calls:
+            # The second call's initial credit waits until the app finishes the
+            # first clip; opening it here still proves the queue.
             try:
-                results.append(reply_result(call, call.recv_bytes(timeout)))
+                ended = send_frames(call, [frame(data)], timeout)
             except OSError as err:
                 code, detail = call_status(call, err)
-                results.append((code, detail, 0))
+                calls[-1] = (call, (code, detail, 0))
+                continue
+            if ended is not None:
+                calls[-1] = (call, ended)
+                continue
+            call.half_close()
+        results = []
+        for entry in calls:
+            if isinstance(entry, tuple):
+                results.append(entry[1])
+                continue
+            call = entry
+            results.append(await_result(call, timeout))
         return results
     finally:
-        for call in calls:
+        for entry in calls:
+            call = entry[0] if isinstance(entry, tuple) else entry
             try:
                 call.cancel()
             except Exception:

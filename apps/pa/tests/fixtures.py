@@ -96,3 +96,31 @@ def field(data, number, default=None):
 def play_request(payload):
     """org.capsulad.pa.v1.PlayRequest{bytes data = 1}."""
     return b"\x0a" + varint_bytes(len(payload)) + payload
+
+
+def play_credit(frames):
+    """org.capsulad.pa.v1.PlayEvent{credit: PlayCredit{frames}}."""
+    credit = b"\x08" + varint_bytes(frames)  # PlayCredit.frames = 1
+    return b"\x0a" + varint_bytes(len(credit)) + credit  # PlayEvent.credit = 1
+
+
+def event_credit(event):
+    """Credit frames in one PlayEvent, or None when it carries no credit."""
+    credit = field(event, 1)
+    if credit is None:
+        return None
+    return field(credit, 1, 0)
+
+
+def event_result(event):
+    """PlayResult payload in one PlayEvent, or None."""
+    return field(event, 2)
+
+
+def last_result(events):
+    """The last PlayResult payload among sent PlayEvent messages, or None."""
+    for event in reversed(events):
+        result = event_result(event)
+        if result is not None:
+            return result
+    return None

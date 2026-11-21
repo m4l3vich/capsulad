@@ -392,7 +392,10 @@ use, permission) is `TRANSPORT`. Neither is ever downgraded to a best-effort bin
   Sending a raw datagram to a multicast address is not filtered, but it reaches no responder and
   is not a publication.
 - **No HTTP server, WebSocket server or framework proxy.** The Web UI is administrator-only and
-  has no generic proxy to an app.
+  has no generic proxy to an app. The sole app-specific HTTP operation is the administrator-facing
+  PA Speaker play relay described in
+  [apps/pa/docs/speaker.md](../../apps/pa/docs/speaker.md#http-api); it is not a proxy an app can
+  extend.
 - **No raw sockets, packet capture, multicast group membership, broadcast enable or arbitrary
   bind.** Listener binds are restricted to local unicast addresses.
 - **No network access from the script hosts** beyond framework calls; mDNS is the only network

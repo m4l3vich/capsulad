@@ -2,9 +2,10 @@
 
 Trigger      the ``Play`` RPC of ``org.capsulad.pa.v1.SpeakerService``, reached
              by another app through ``AppBusService.Call``.
-Feedback     one ``PlayResult`` reply on success; a non-OK gRPC status carrying
-             the reason when the file is rejected, truncated or cancelled; and
-             one ``pa:`` log line per call.
+Feedback     one ``PlayResult`` event on success; ``PlayCredit`` events that
+             bound in-flight request frames; a non-OK gRPC status carrying the
+             reason when the file is rejected, truncated or cancelled; and one
+             ``pa:`` log line per call.
 Ownership    the app opens exactly one ``AudioService.Playback`` stream per
              ``Play`` call and releases it on every terminal path. It holds no
              resource between calls and does not claim the microphone, the ring
@@ -18,6 +19,11 @@ Dismissal    ``ApplicationService.Stop`` (``capsulad-cli app stop``) ends the
              dismiss.
 Final state  no playback stream, no buffered file, no pending call and no
              playback error state: the app is ready for the next ``Play``.
+
+Play is bidirectional and credit-based. The app grants an initial two request
+frames, then one more after it has fully consumed each frame. The caller must
+not send ahead of its credits; this keeps the native SDK's 32-frame inbound
+queue from overflowing when the app is slow or another call is playing.
 
 Interaction limits, all enforced here and documented in docs/speaker.md: the
 request stream is a client stream of WAV slices, each at most 128 KiB; the WAV
@@ -53,6 +59,7 @@ POLL_MS = 50
 BUSY_RETRIES = 20
 DEFAULT_MAX_SECONDS = 30
 MAX_SECONDS_LIMIT = 60
+INITIAL_CREDITS = 2  # request frames granted before the first read
 
 # PLAY_CHUNK also bounds the number of Playback writes. The largest accepted
 # audio is MAX_SECONDS_LIMIT s at MAX_RATE Hz, MAX_CHANNELS channels and 32-bit
@@ -276,6 +283,16 @@ def play_result(played, frames, rate, channels, detail):
     out += varint_field(4, channels)
     out += length_field(5, detail.encode())
     return out
+
+
+def play_event_credit(frames):
+    # PlayEvent.credit = 1; PlayCredit.frames = 1.
+    return length_field(1, varint_field(1, frames))
+
+
+def play_event_result(result):
+    # PlayEvent.result = 2.
+    return length_field(2, result)
 
 
 # --- small helpers ---------------------------------------------------------
@@ -648,6 +665,22 @@ def end_call(call, code, detail):
         log("end failed: %s" % err)
 
 
+def send_credit(call, frames):
+    """Grant request-frame credit to the caller.
+
+    A caller that will not read the credit cannot safely be given more audio:
+    the native SDK's inbound queue would fill and end the call with
+    RESOURCE_EXHAUSTED. Ending it explicitly with UNAVAILABLE is the honest
+    terminal state.
+    """
+    try:
+        call.send_bytes(play_event_credit(frames))
+    except OSError as err:
+        if status_of(err) == STATUS_BUSY:
+            raise WaveError(UNAVAILABLE, "caller is not reading playback credits")
+        raise
+
+
 def serve_play(call, call_id, max_seconds):
     """Serve one Play call. Always ends the call; never leaks the stream."""
     reader = WaveReader(max_seconds)
@@ -655,6 +688,9 @@ def serve_play(call, call_id, max_seconds):
     # Request messages received; distinct from the PCM frame count below.
     requests = 0
     try:
+        # The caller starts with no credit. Grant the bounded initial window
+        # before reading; each processed frame grants one more.
+        send_credit(call, INITIAL_CREDITS)
         while True:
             frame = call.recv_bytes(READ_TIMEOUT_MS)
             if frame is None:
@@ -676,6 +712,10 @@ def serve_play(call, call_id, max_seconds):
                 speaker.write(pcm)
             elif speaker is not None:
                 speaker.drain()
+            # The frame is fully consumed here: its bytes are parsed, and any
+            # PCM is handed to the playback stream. Only now may the caller
+            # replace it.
+            send_credit(call, 1)
         if not reader.has_audio():
             raise WaveError(INVALID_ARGUMENT, "no WAV audio data in the request stream")
         if not reader.finish():
@@ -691,7 +731,8 @@ def serve_play(call, call_id, max_seconds):
             mixer = " mixer=%d Hz/%d ch" % speaker.started
         log("played call=%s %d frames wav=%d Hz/%d ch%s%s" % (call_id, frames, reader.rate, reader.channels, mixer, speaker.notice))
         try:
-            call.send_bytes(play_result(True, frames, reader.rate, reader.channels, detail))
+            call.send_bytes(play_event_result(
+                play_result(True, frames, reader.rate, reader.channels, detail)))
         except OSError as err:
             code, detail = call_failure(call, err)
             end_call(call, code, "reply failed: %s" % detail)

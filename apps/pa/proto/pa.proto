@@ -4,6 +4,12 @@
 // RIFF/WAVE file over this interface and plays it on the framework speaker
 // through AudioService.Playback. The wire form is raw protobuf; the packaged
 // pa.protoset publishes the same schema for JSON callers and the Web UI.
+//
+// Play is bidirectional and credit-based. The app consumes one request frame
+// at a time on a single-threaded host, so it grants frame credits as it
+// consumes them. A caller may have at most the credits it has received in
+// flight; it must not pre-send a whole clip. This is what keeps a slow app or a
+// queued call from overflowing the native SDK's inbound request queue.
 syntax = "proto3";
 
 package org.capsulad.pa.v1;
@@ -19,6 +25,13 @@ message PlayRequest {
   bytes data = 1;
 }
 
+message PlayCredit {
+  // Number of additional request frames the caller may send. The app starts
+  // every call with an initial grant of two frames (see docs/speaker.md) and
+  // grants one more frame after it has fully consumed each request frame.
+  uint32 frames = 1;
+}
+
 message PlayResult {
   // True only when the whole declared audio reached the speaker and the
   // framework drained it. A rejected or truncated file ends the call with a
@@ -31,12 +44,20 @@ message PlayResult {
   string detail = 5;
 }
 
+message PlayEvent {
+  oneof event {
+    // Flow-control grant. Credits arrive before the first request frame and
+    // after each consumed frame; a caller must honor them.
+    PlayCredit credit = 1;
+    // Terminal success payload, sent before the app's OK end frame.
+    PlayResult result = 2;
+  }
+}
+
 service SpeakerService {
-  // Play streams one WAV file to the device speaker and replies once it has
-  // played out, been rejected, or been cancelled.
-  //
-  // The request side is a client stream: send the file as one or more
-  // PlayRequest frames and half-close to mark the end. Deleting the call
-  // (cancelling it) before the reply discards queued audio immediately.
-  rpc Play(stream PlayRequest) returns (PlayResult);
+  // Play streams one WAV file to the device speaker. The request side is a
+  // client stream; the response side carries consumer credits followed by one
+  // PlayResult. Half-close marks the end of the file. Deleting the call
+  // (cancelling it) before the result discards queued audio immediately.
+  rpc Play(stream PlayRequest) returns (stream PlayEvent);
 }

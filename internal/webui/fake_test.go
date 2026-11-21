@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	clockv1 "capsulad/gen/go/capsulad/contracts/clock/v1"
@@ -89,6 +90,30 @@ type fakeBackend struct {
 	installErr       error
 	uninstallCalls   []string
 	uninstallErr     error
+
+	// paCalls records the routed Play calls the PA Speaker HTTP route made.
+	// paCode/paDetail choose the app's terminal status, paResult overrides the
+	// PlayResult payload, paHold blocks the reply until closed, paEndAfterFirst
+	// ends the call after one request frame, and paContextDone closes when the
+	// routed call's context is cancelled (the client-disconnect path).
+	paCalls         []*fakePACall
+	paCode          codes.Code
+	paDetail        string
+	paResult        []byte
+	paHold          chan struct{}
+	paEndAfterFirst bool
+	paContextDone   chan struct{}
+	paContextOnce   sync.Once
+}
+
+// fakePACall is one routed Play call as the fake app received it.
+type fakePACall struct {
+	TargetAppID string
+	Service     string
+	RPC         string
+	TimeoutMs   uint32
+	Frames      int
+	Data        []byte
 }
 
 func newFakeBackend() *fakeBackend {
@@ -544,6 +569,11 @@ func (f *fakeBus) Call(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallReq
 			return err
 		}
 		if s := req.GetStart(); s != nil {
+			// The PA route is client-streaming: dispatch as soon as Start
+			// arrives so the fake app can reject while the upload is running.
+			if s.GetTargetAppId() == paAppID && s.GetGrpcService() == paSpeakerService && s.GetRpcName() == paPlayRPC {
+				return f.servePA(stream, s)
+			}
 			start = s
 		}
 		if body := req.GetRequestMessage(); body != nil {
@@ -569,6 +599,152 @@ func (f *fakeBus) Call(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallReq
 	return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
 		End: &frameworkv1.AppCallEnd{GrpcStatusCode: 0},
 	}})
+}
+
+// servePA models org.capsulad.pa.v1.SpeakerService/Play: it collects the data
+// field of every PlayRequest frame, then sends one PlayResult and a terminal
+// End. A test can make the app end after the first frame, fail with a chosen
+// status, hold the reply, or observe cancellation.
+func (f *fakeBus) servePA(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallRequest, frameworkv1.RoutedCallResponse], start *frameworkv1.RoutedCallStart) error {
+	call := &fakePACall{
+		TargetAppID: start.GetTargetAppId(), Service: start.GetGrpcService(),
+		RPC: start.GetRpcName(), TimeoutMs: start.GetTimeoutMs(),
+	}
+	f.b.mu.Lock()
+	f.b.paCalls = append(f.b.paCalls, call)
+	code := f.b.paCode
+	detail := f.b.paDetail
+	result := f.b.paResult
+	hold := f.b.paHold
+	endAfterFirst := f.b.paEndAfterFirst
+	contextDone := f.b.paContextDone
+	f.b.mu.Unlock()
+	if contextDone != nil {
+		go func() {
+			<-stream.Context().Done()
+			f.b.paContextOnce.Do(func() { close(contextDone) })
+		}()
+	}
+	// The app grants its initial window before reading.
+	if err := fakePACreditSend(stream, 2); err != nil {
+		return err
+	}
+
+	var data []byte
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if body := req.GetRequestMessage(); body != nil {
+			part, err := fakePARequestData(body)
+			if err != nil {
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
+			data = append(data, part...)
+			f.b.mu.Lock()
+			call.Frames++
+			call.Data = append([]byte(nil), data...)
+			f.b.mu.Unlock()
+			if endAfterFirst {
+				break
+			}
+			if err := fakePACreditSend(stream, 1); err != nil {
+				return err
+			}
+		}
+		if req.GetHalfClose() != nil {
+			break
+		}
+	}
+
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-stream.Context().Done():
+			return nil
+		}
+	}
+	if code != codes.OK {
+		return fakePAEnd(stream, code, detail)
+	}
+	if result == nil {
+		result = fakePAResult(uint32(len(data)), 16000, 1, "played")
+	}
+	if err := stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+		ResponseMessage: fakePAEventResult(result),
+	}}); err != nil {
+		return err
+	}
+	return fakePAEnd(stream, codes.OK, "")
+}
+
+func fakePACreditSend(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallRequest, frameworkv1.RoutedCallResponse], frames uint32) error {
+	return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_ResponseMessage{
+		ResponseMessage: fakePACredit(frames),
+	}})
+}
+
+func fakePAEnd(stream grpc.BidiStreamingServer[frameworkv1.RoutedCallRequest, frameworkv1.RoutedCallResponse], code codes.Code, detail string) error {
+	return stream.Send(&frameworkv1.RoutedCallResponse{Message: &frameworkv1.RoutedCallResponse_End{
+		End: &frameworkv1.AppCallEnd{GrpcStatusCode: int32(code), Detail: detail},
+	}})
+}
+
+// fakePARequestData decodes PlayRequest{bytes data = 1} with its own reader.
+func fakePARequestData(frame []byte) ([]byte, error) {
+	for len(frame) > 0 {
+		number, typ, n := protowire.ConsumeTag(frame)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		frame = frame[n:]
+		if number == 1 && typ == protowire.BytesType {
+			data, n := protowire.ConsumeBytes(frame)
+			if n < 0 {
+				return nil, protowire.ParseError(n)
+			}
+			return data, nil
+		}
+		n = protowire.ConsumeFieldValue(number, typ, frame)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		frame = frame[n:]
+	}
+	return nil, status.Error(codes.InvalidArgument, "PlayRequest carries no data")
+}
+
+// fakePACredit builds PlayEvent.credit{frames}.
+func fakePACredit(frames uint32) []byte {
+	credit := protowire.AppendTag(nil, 1, protowire.VarintType)
+	credit = protowire.AppendVarint(credit, uint64(frames))
+	out := protowire.AppendTag(nil, 1, protowire.BytesType)
+	return protowire.AppendBytes(out, credit)
+}
+
+// fakePAEventResult wraps a PlayResult payload in PlayEvent.result.
+func fakePAEventResult(result []byte) []byte {
+	out := protowire.AppendTag(nil, 2, protowire.BytesType)
+	return protowire.AppendBytes(out, result)
+}
+
+// fakePAResult builds a PlayResult with the five documented fields.
+func fakePAResult(frames, rate, channels uint32, detail string) []byte {
+	out := protowire.AppendTag(nil, 1, protowire.VarintType)
+	out = protowire.AppendVarint(out, 1)
+	for _, field := range []struct {
+		number protowire.Number
+		value  uint32
+	}{{2, frames}, {3, rate}, {4, channels}} {
+		out = protowire.AppendTag(out, field.number, protowire.VarintType)
+		out = protowire.AppendVarint(out, uint64(field.value))
+	}
+	out = protowire.AppendTag(out, 5, protowire.BytesType)
+	return protowire.AppendBytes(out, []byte(detail))
 }
 
 func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) ([]byte, error) {

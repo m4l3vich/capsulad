@@ -164,12 +164,26 @@ class ServePlayTest(AppTestCase):
         self.assertTrue(playback.half_closed)
         self.assertTrue(playback.cancelled)  # released after the drain
         self.assertEqual(call.ended[0], 0)
-        reply = call.sent_bytes[0]
+        reply = fixtures.last_result(call.sent_bytes)
+        self.assertIsNotNone(reply)
         self.assertEqual(fixtures.field(reply, 1), 1)
         self.assertEqual(fixtures.field(reply, 2), 400)
         self.assertEqual(fixtures.field(reply, 3), 16000)
         self.assertEqual(fixtures.field(reply, 4), 1)
         self.assertIn(b"played 400 frames", fixtures.field(reply, 5))
+
+    def test_grants_initial_and_per_frame_credits(self):
+        data, _ = fixtures.wav(pcm=fixtures.square(400))
+        playback = fake_capsulad.ScriptedCall(byte_in=[None])
+        self.host.outbound.append(playback)
+        call = inbound([fixtures.play_request(data), None])
+
+        self.app.on_call(call)
+
+        credits = [fixtures.event_credit(message) for message in call.sent_bytes]
+        credits = [c for c in credits if c is not None]
+        self.assertEqual(credits, [self.app.INITIAL_CREDITS, 1])
+        self.assertIsNotNone(fixtures.last_result(call.sent_bytes))
 
     def test_plays_a_wav_split_across_request_frames(self):
         pcm = fixtures.square(300)
@@ -296,7 +310,9 @@ class ServePlayTest(AppTestCase):
         # discarded rather than drained.
         self.assertTrue(playback.half_closed)
         self.assertTrue(playback.cancelled)
-        self.assertEqual(call.sent_bytes, [])  # no reply: the audio was cut off
+        # Credits may have been granted, but no PlayResult was sent: the audio
+        # was cut off before the terminal success event.
+        self.assertIsNone(fixtures.last_result(call.sent_bytes))
         self.assertIn("cancelled call=call_test", self.host.texts())
 
     def test_drain_that_never_ends_is_a_deadline(self):

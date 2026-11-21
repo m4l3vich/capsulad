@@ -92,6 +92,11 @@ func (s *Simulator) RingSnapshot() RingFrame { return s.ring.Snapshot() }
 // InjectPCM feeds the virtual microphone for wakeword/mic tests.
 func (s *Simulator) InjectPCM(pcm []byte) { s.audio.InjectPCM(pcm) }
 
+// LastOutput returns the tail of PCM written to the virtual playback sink.
+// It is the simulator's digital-output evidence: it proves the mixer delivered
+// samples, not that a physical speaker emitted sound.
+func (s *Simulator) LastOutput() []byte { return s.audio.LastOutput() }
+
 // --- segment ---------------------------------------------------------------
 
 type simSegment struct {

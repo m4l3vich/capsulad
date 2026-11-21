@@ -4,7 +4,9 @@
 // admin password with server-side sessions, or a static opaque API key for
 // automation. The SPA and its realtime socket are a thin client of the daemon's
 // local gRPC API over the Unix socket; there is no second control plane and no
-// network gRPC listener.
+// network gRPC listener. The same listener hosts the MCP automation endpoint
+// and the PA Speaker's one app-specific play route; both drive the daemon's
+// existing services rather than a private transport.
 package webui
 
 import (
@@ -82,6 +84,13 @@ type Server struct {
 	Wakeword wakewordSource
 	limiter  *loginLimiter
 
+	// paGate serializes the one PA HTTP relay. The PA app serves one Play call
+	// at a time and its script host has a small inbound frame budget, so a
+	// second upload must wait at this gate instead of being forwarded into a
+	// busy app. paGateOnce makes a directly constructed test Server safe.
+	paGateOnce sync.Once
+	paGate     chan struct{}
+
 	connMu sync.Mutex
 	conns  map[string]map[*wsConn]struct{}
 
@@ -107,6 +116,9 @@ type authInfo struct {
 	ViaSession bool
 	ViaAPIKey  bool
 	Token      string
+	// Scopes is the grant of the presented API key. A browser session is the
+	// administrator and does not need a scope list.
+	Scopes []string
 }
 
 type authContextKey struct{}
@@ -138,6 +150,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
 	mux.HandleFunc("GET /api/apps/{appID}/guide", s.sessionOnly(s.appGuide))
+	// The PA Speaker route is the one app-specific HTTP operation. It is not a
+	// generic proxy: the handler names org.capsulad.pa and relays its Play RPC.
+	// The methodless registration answers 405 for anything but POST instead of
+	// letting the SPA fallback serve index.html.
+	mux.HandleFunc("POST /api/apps/org.capsulad.pa/play", s.operatorOnly(s.playPASpeaker))
+	mux.HandleFunc("/api/apps/org.capsulad.pa/play", s.paMethodNotAllowed)
 	mux.HandleFunc("POST /api/apps", s.sessionOnly(s.installApp))
 	mux.HandleFunc("DELETE /api/apps/{appID}", s.sessionOnly(s.removeApp))
 	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
@@ -199,8 +217,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 }
 
 // sessionOnly wraps a handler that requires a browser session. API keys are
-// deliberately not accepted: they are automation read credentials, not a
-// browser-admin authority.
+// deliberately not accepted: a browser mutation proves the session's CSRF and
+// origin, and an operator key uses operatorOnly for the one machine-facing
+// mutation route.
 func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := s.authenticate(r)
@@ -227,6 +246,47 @@ func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 				writeJSONError(w, http.StatusForbidden, "invalid CSRF token")
 				return
 			}
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth)))
+	}
+}
+
+// operatorOnly authorizes one machine-facing mutation: an operator-scoped API
+// key (the automation credential the MCP frontend uses) or an administrator
+// browser session with the usual same-origin and CSRF proof. It is deliberately
+// narrower than anyAuth, which accepts a status key, and unlike sessionOnly it
+// accepts API keys so a headless caller can drive the one app-specific route.
+func (s *Server) operatorOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := s.authenticate(r)
+		switch {
+		case auth.ViaAPIKey:
+			if !websecurity.ScopesAllow(auth.Scopes, websecurity.ScopeOperator) {
+				writeJSONError(w, http.StatusForbidden, "an operator-scoped API key is required")
+				return
+			}
+			// An API key is an explicit credential, not an ambient browser
+			// cookie, so there is no CSRF token. Do not hand an automation
+			// client the CSRF cookie the middleware minted for the SPA.
+			w.Header().Del("Set-Cookie")
+			// A concrete cross-origin request is still refused, matching the
+			// MCP endpoint.
+			if !s.checkOrigin(r) {
+				writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
+		case auth.ViaSession:
+			if !s.checkOrigin(r) {
+				writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
+			if !s.checkCSRF(r) {
+				writeJSONError(w, http.StatusForbidden, "invalid CSRF token")
+				return
+			}
+		default:
+			writeUnauthorized(w, r)
+			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth)))
 	}
@@ -273,8 +333,9 @@ func mediaTypeOf(r *http.Request) string {
 
 func (s *Server) authenticate(r *http.Request) authInfo {
 	if token := apiKeyFromRequest(r); token != "" {
-		if s.Auth.VerifyAPIKey(token) {
-			return authInfo{OK: true, ViaAPIKey: true}
+		_, scopes, ok := s.Auth.APIKeyScopes(token)
+		if ok {
+			return authInfo{OK: true, ViaAPIKey: true, Scopes: scopes}
 		}
 		return authInfo{}
 	}

@@ -12,7 +12,8 @@ device has finished playing it.
 Nothing else is exposed: there is no volume control (master volume is
 administrator-only), no recording, no playlist and no persistent state. The app
 declares no provider role and holds no presentation, microphone or touch
-resource.
+resource. The daemon separately exposes one authenticated HTTP relay for the
+same `Play` operation; it is described under [HTTP API](#http-api).
 
 | Property | Value |
 |---|---|
@@ -21,11 +22,13 @@ resource.
 | Interface | `org.capsulad.pa.v1.SpeakerService`, version `v1` |
 | Descriptor | `proto/pa.protoset` (published for JSON callers and the Web UI) |
 | Endpoint | framework `audio.output.speaker` |
+| HTTP route | `POST /api/apps/org.capsulad.pa/play` (authenticated relay to `Play`; see [HTTP API](#http-api)) |
 | Settings | `max_seconds` (1–60, default 30) |
 
 ## Play
 
-`rpc Play(stream PlayRequest) returns (PlayResult)` — client-streaming.
+`rpc Play(stream PlayRequest) returns (stream PlayEvent)` — bidirectional and
+credit-based.
 
 The caller sends the file as **one or more** `PlayRequest` messages and
 half-closes to mark the end of the file. Every message must carry **at least
@@ -36,12 +39,19 @@ order yields exactly one RIFF/WAVE file; the split points are arbitrary,
 including inside the RIFF header. PCM is never base64 on the wire: `data`
 carries raw file bytes.
 
+`PlayEvent` carries either a **credit** or the final **result**. The app grants
+an initial credit of **two request frames** before it reads, then one more
+frame after it has fully consumed each frame. A caller must not have more
+frames in flight than its credits. This is the flow-control contract for both
+app-bus and HTTP callers; it is what keeps the native SDK's 32-message inbound
+queue from filling when the app is slow or another call is playing.
+
 The app parses the stream incrementally and starts playback as soon as the
 `fmt ` and `data` chunk headers are complete, so a long file is never held in
 memory. `frame_bytes` alignment is preserved across request frames.
 
-A successful call returns one `PlayResult` after the daemon drains the queued
-audio:
+A successful call ends with one `PlayEvent.result` after the daemon drains the
+queued audio:
 
 ```json
 {"played":true,"frames":48000,"sampleRateHz":16000,"channels":1,
@@ -57,14 +67,18 @@ line (`played call=… wav=16000 Hz/1 ch mixer=48000 Hz/2 ch`).
 
 - Each `PlayRequest` must be at most **128 KiB**; a larger frame is rejected
   with `RESOURCE_EXHAUSTED`.
-- The shared engine buffers at most **32** inbound request messages per call
-  and its app-bus connection another 128. Send the file in reasonably sized
-  frames (a handful, or slices of at least several KiB): a caller that bursts
-  hundreds of tiny frames faster than the app reads them can have the call
-  ended by the engine with `RESOURCE_EXHAUSTED`.
+- Honor the credits. The app starts at **2** and grants **1** after each fully
+  consumed frame. The shared engine buffers 32 inbound request messages per
+  call; sending ahead of credits can end the call with `RESOURCE_EXHAUSTED`.
+  Both native/script callers and the daemon's HTTP relay use this window, so a
+  direct caller playing a clip and an HTTP caller share the app's single-thread
+  consumer fairly and cannot overflow it.
+- A caller that ignores credits and fills the app's outbound credit queue can
+  end the call with `UNAVAILABLE` (`caller is not reading playback credits`).
 - The app writes PCM to the playback stream in 128 KiB chunks and holds no
-  more than one chunk of its own, so it consumes request frames promptly and
-  the call does not stall behind the mixer.
+  more than one chunk of its own. Credits are granted only after a frame has
+  been parsed and any PCM handed to playback, so a slow mixer naturally slows
+  the producer instead of filling a queue.
 - The tail of a clip smaller than one chunk is written when the request stream
   ends. A stream that is rejected or truncated before that therefore plays
   nothing that was still buffered; chunks already handed to the mixer are
@@ -78,8 +92,10 @@ The routed call's deadline belongs to the caller:
   Size it to the clip **plus its drain** (the app waits for the framework to
   finish draining before replying).
 - The app itself waits at most 15 s for the next request frame; after that it
-  ends the call with `DEADLINE_EXCEEDED` and discards the queued audio. Because
-  every frame must carry at least one byte, a call cannot idle without making
+  ends the call with `DEADLINE_EXCEEDED` and discards the queued audio. A frame
+  may be any size up to the limit, so a steady slow producer is not mistaken
+  for a stall: each completed read is forwarded as its own frame. Because every
+  frame must carry at least one byte, a call cannot idle without making
   progress; the total bytes are bounded (1 MiB of chunks before `data`, the
   audio bound, 64 KiB after it).
 - A call is therefore held for at most the caller's own routed deadline (30 s
@@ -95,7 +111,7 @@ The routed call's deadline belongs to the caller:
 ### Rejections
 
 Failures end the call with a gRPC status and a detail string; nothing is
-replied, so a `PlayResult` always means the audio played.
+replied, so a `PlayEvent.result` always means the audio played.
 
 | Status | Cause |
 |---|---|
@@ -125,7 +141,10 @@ rejected with an explicit message instead of being played as noise.
 
 ## Calling it
 
-Raw protobuf (works without a descriptor) from a native app:
+Raw protobuf (works without a descriptor) from a native app. `PlayEvent.credit`
+is field 1 (`PlayCredit.frames` field 1); `PlayEvent.result` is field 2. Read
+the initial credit before sending, and keep at most the granted frames in
+flight:
 
 ```go
 call, err := client.Stream(ctx, "org.capsulad.pa",
@@ -134,19 +153,41 @@ if err != nil {
     return err
 }
 defer call.Close()
+credit := 0
+for credit == 0 {
+    event, err := call.Recv() // PlayEvent
+    if err != nil {
+        return err
+    }
+    credit += eventCreditFrames(event) // PlayEvent.credit.frames
+}
 for off := 0; off < len(wav); off += 64 << 10 {
+    for credit == 0 {
+        event, err := call.Recv()
+        if err != nil {
+            return err
+        }
+        credit += eventCreditFrames(event)
+    }
     end := min(off+64<<10, len(wav))
-    // PlayRequest{data}: field 1, length-delimited. varint is protobuf's
-    // base-128 encoding; Send carries raw protobuf, no descriptor needed.
+    // PlayRequest{data}: field 1, length-delimited. Send raw protobuf.
     frame := append([]byte{0x0a}, varintBytes(len(wav[off:end]))...)
     if err := call.Send(append(frame, wav[off:end]...)); err != nil {
         return err
     }
+    credit--
 }
 if err := call.HalfClose(); err != nil {
     return err
 }
-reply, err := call.Recv() // one PlayResult, or the rejection status
+var result []byte
+for result == nil {
+    event, err := call.Recv() // credits continue, then PlayEvent.result
+    if err != nil {
+        return err
+    }
+    result = eventResultPayload(event) // field 2, or nil for a credit
+}
 ```
 
 A script app reaches it the same way over the app bus:
@@ -156,26 +197,148 @@ import capsulad
 
 call = capsulad.open_routed("org.capsulad.pa",
     "org.capsulad.pa.v1.SpeakerService", "Play", 90000)
-call.send_bytes(frame)  # PlayRequest{data} for each slice of the WAV
+credit = 0
+while credit == 0:
+    credit += event_credit(call.recv_bytes(90000))  # waits for initial grant
+for frame in frames:
+    while credit == 0:
+        credit += event_credit(call.recv_bytes(90000))
+    call.send_bytes(frame)  # PlayRequest{data}
+    credit -= 1
 call.half_close()
-reply = call.recv_bytes(90000)  # None only if the app ended without a reply
+while True:
+    event = call.recv_bytes(90000)
+    result = event_result(event)
+    if result is not None:
+        break
 call.cancel()
 ```
 
-JSON callers register the packaged descriptor first
-(`DescribeAppInterface` returns it as `fileDescriptorSet`) and then use the
-canonical protobuf JSON form: `{"data":"<base64 WAV slice>"}` per request
-message, `{"played":true,...}` for the reply.
+`eventCreditFrames`/`eventResultPayload` (and the Python `event_credit`/
+`event_result`) are the two small field readers for `PlayEvent.credit.frames`
+and `PlayEvent.result`; [../tests/caller/main.py](../tests/caller/main.py) is a
+complete credit-aware caller. JSON callers register the packaged descriptor
+first (`DescribeAppInterface` returns it as `fileDescriptorSet`) and then use
+the canonical protobuf JSON form: `{"data":"<base64 WAV slice>"}` per request
+message, `{"credit":{"frames":1}}` per credit event and `{"result":{...}}` for
+the terminal success payload. A credit event is part of flow control, not a
+completion reply.
+
+## HTTP API
+
+The daemon exposes one authenticated HTTP route for automation that has no
+app-bus client. It is an app-specific relay, not a second audio path and not a
+generic AppBus, audio or asset proxy: the daemon streams the request body to
+this app over `AppBusService.Call`, and the app remains the sole owner of the
+`AudioService.Playback` stream.
+
+```
+POST /api/apps/org.capsulad.pa/play
+```
+
+Only `POST` is registered; any other method returns `405 Method Not Allowed`.
+
+The request body is exactly one raw RIFF/WAVE file, streamed. It is never
+base64 and `Content-Type` is not interpreted. `Content-Length` may be omitted
+(chunked uploads work). The route splits the body into request frames of up to
+127 KiB (the app's 128 KiB message limit minus protobuf framing) and
+half-closes when the body ends. On HTTP/1.1 each response carries `Connection: close`: a
+clip is a one-shot request, and not reusing the connection is what lets the
+daemon flush an early rejection without draining a stalled upload.
+
+### Authentication
+
+The route accepts either credential the daemon already supports:
+
+- **Operator API key** (automation). Present it as
+  `Authorization: Bearer <key>` or `X-API-Key: <key>`. A `status` key is
+  refused; create the key with the explicit operator scope:
+  `capsulad-cli -data-dir /data/capsdemo auth key create pa-operator --scope operator`.
+- **Administrator browser session**. Send the session cookie plus the
+  `X-Capsulad-CSRF` header from `GET /api/session`, with a same-origin request.
+
+An unauthenticated request is `401`. A valid status key is `403`, as is a
+browser request without the CSRF proof or with a mismatched concrete `Origin`.
+
+```sh
+# -k is the self-signed first-run bootstrap; trust the fingerprint from
+# `capsulad-cli cert status` instead when the certificate is installed.
+curl -k -sS \
+  -H "Authorization: Bearer $CAPSULAD_OPERATOR_KEY" \
+  -H "Content-Type: audio/wav" \
+  --data-binary @announcement.wav \
+  https://capsula.local:8443/api/apps/org.capsulad.pa/play
+```
+
+A successful call returns `200` with the same fields as `PlayResult`:
+
+```json
+{"played":true,"frames":48000,"sampleRateHz":16000,"channels":1,
+ "detail":"played 48000 frames at 16000 Hz/1 ch"}
+```
+
+`frames` counts interleaved PCM frames; `sampleRateHz`, `channels` and `detail`
+describe the WAV's own format. The device's mixer format appears only in the
+app's log line, as for a routed call.
+
+### Failures
+
+The app's terminal gRPC status maps to one HTTP status. The `error` string is
+the app's own detail, so it names the rejected WAV field or limit.
+
+| HTTP | Cause |
+|---|---|
+| `400` | The body is not a supported WAV, is truncated, or is not `RIFF/WAVE`; a frame carries no data; the request body ended early. |
+| `401` | No credential, or an unknown/revoked API key. |
+| `403` | A `status` API key, a missing/invalid CSRF token, or a mismatched concrete `Origin`. |
+| `404` | The app reported `NOT_FOUND` (not expected for this route). |
+| `409` | The playback call was cancelled while the HTTP client was still connected. |
+| `413` | The body exceeds the route's 32 MiB HTTP cap, or the app rejected the clip as longer than `max_seconds` (`RESOURCE_EXHAUSTED`). |
+| `500` | The app reported an internal failure. |
+| `501` | The app does not implement `Play`. |
+| `502` | The app bus failed or the app returned a malformed result. |
+| `503` | The PA app is not ready, has no output endpoint, or the app bus is unavailable. |
+| `504` | The 5 minute route deadline expired; a start/send/recv app-bus call reported `DEADLINE_EXCEEDED`; or the app reported a drain timeout. |
+
+The route does not launch the app. If `org.capsulad.pa` is stopped, a request
+returns `503`; start it again (`capsulad-cli app start org.capsulad.pa`) or let
+the next boot start it. A retry plays the clip again: `POST` is not idempotent.
+
+### Ownership and interruption
+
+- The app opens exactly one playback stream per HTTP request and releases it
+  on every terminal path. The daemon never opens, drains or abandons a
+  `Playback` stream on the route's behalf, so the route cannot become a second
+  owner of the clip.
+- Disconnecting the HTTP request cancels the routed call. The app discards
+  queued audio and frees the speaker, including during the drain; this is the
+  same stop path as cancelling an app-bus `Play` call.
+- One HTTP request is admitted at a time. A second request waits at the
+  relay's admission gate; it does not open its routed call or forward its body
+  until the active clip has finished. Its wait is bounded by its own 5 minute
+  routed deadline. There is no separate HTTP stop endpoint: close the request
+  connection to stop the clip that request owns.
+- The relay honors the app's frame credits. It reads one HTTP chunk, waits for
+  a credit, sends that frame, and repeats; it starts with no credit and never
+  sends a frame ahead of the app's grants. A direct caller playing a clip and
+  an HTTP relay therefore share the single-threaded consumer without filling
+  the SDK's 32-frame queue. Partial reads are forwarded as their own frames,
+  so a steady slow producer is not mistaken for a stalled one.
+- The route sets a 5 minute routed deadline (the daemon's maximum) and raises
+  this request's HTTP read/write budget by 30 s. A slow upload is bounded by
+  that deadline and by the app's 15 s wait between request frames. Size the
+  HTTP client's own timeout to the clip plus its drain; the response arrives
+  only after the app has played and released the audio.
 
 ## Interaction contract
 
 | Facet | Behaviour |
 |---|---|
-| Trigger | The `Play` routed call. The app is already running (background, start on boot); no launch is needed. |
-| Feedback | One `PlayResult` reply per accepted clip, one `pa:` log line per call (`played …` / `rejected …` / `stalled …` / `cancelled …`), and the daemon's own `playback stream=… opened/closed` records. |
-| Ownership | The app owns one `AudioService.Playback` stream for the duration of a call and releases it on every terminal path. |
-| Interruption | Cancelling the call discards queued audio and frees the speaker, including during the drain: the app keeps polling the call while it waits, so a cancel cuts the clip off instead of letting it play out. Stopping the run (`ApplicationService.Stop`, `capsulad-cli app stop`) or losing the bus tears the stream down through framework cleanup. |
-| Dismissal | There is no separate stop RPC: the script host serves one call at a time, so only the caller that owns the call can stop it, by cancelling. A second caller waits until the current call ends - the clip plus, at most, the owner's remaining routed deadline. |
+| Trigger | The `Play` routed call, or `POST /api/apps/org.capsulad.pa/play` with an operator API key or an administrator session. The app is already running (background, start on boot); no launch is needed. |
+| Feedback | One `PlayEvent.result` per accepted clip plus flow-control `PlayEvent.credit` events, one `pa:` log line per call (`played …` / `rejected …` / `stalled …` / `cancelled …`), and the daemon's own `playback stream=… opened/closed` records. The HTTP route relays that same `PlayResult` as JSON. |
+| Ownership | The app owns one `AudioService.Playback` stream for the duration of a call and releases it on every terminal path. The HTTP route only relays a routed call; it never owns or writes the playback stream. |
+| Interruption | Cancelling the call discards queued audio and frees the speaker, including during the drain: the app keeps polling the call while it waits, so a cancel cuts the clip off instead of letting it play out. Closing an HTTP request cancels its routed call, so the same path applies. Stopping the run (`ApplicationService.Stop`, `capsulad-cli app stop`) or losing the bus tears the stream down through framework cleanup. |
+| Dismissal | There is no separate stop RPC: the script host serves one call at a time, so only the caller that owns the call can stop it, by cancelling. An HTTP client stops its clip by closing the request connection; another client's request cannot stop it. A second caller waits until the current call ends - the clip plus, at most, the owner's remaining routed deadline. |
 | Final state | No playback stream, no buffered audio, no pending reply: the app is ready for the next `Play`. |
 
 ## Limits
@@ -189,6 +352,11 @@ message, `{"played":true,...}` for the reply.
 | Concurrent clips | 1 per app run; a second `Play` is served after the first (the app never holds two playback streams) |
 | WAV bytes per request frame | At least 1; a frame without WAV bytes ends the call with `INVALID_ARGUMENT` |
 | RIFF chunk bytes before `data` | 1 MiB of declared sizes |
+| HTTP body | 32 MiB transport cap; the clip bound remains `max_seconds` |
+| HTTP request slice | Up to 127 KiB per `PlayRequest` frame |
+| HTTP admission | One request at a time; a second waits up to its routed deadline |
+| Request-frame credits | Initial 2; one more after each fully consumed frame |
+| HTTP deadline | 5 minutes for the routed call; 30 s extra HTTP read/write budget for the response |
 | Playback stream deadline | None in the app; the caller's routed deadline, the 15 s frame wait, the bounded drain and cancellation end it |
 | Concurrent script calls | 1 (single-threaded host); further calls queue in the host and bus budgets |
 | Filesystem / asset access | None: the MicroPython host has no filesystem, so a caller must supply the bytes (a native caller can read `/assets` and stream them here) |
