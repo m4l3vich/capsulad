@@ -234,12 +234,18 @@ restarts immediately. A run that reports ready and dies at once keeps accumulati
 
 ### Boot
 
-On daemon start, in order: compiled-in system apps, then every installed app with
-`start_on_boot = true` or `background = true`, then the configured default provider for each
-resource and the selected assistant. An app that is already running is not started twice.
+On daemon start, in order: compiled-in system apps, then installed background apps and apps
+whose effective start-at-boot preference is enabled, then the configured default provider for
+each resource and the selected assistant. An app that is already running is not started twice.
 
-`background = true` therefore has two effects: the app is started at boot, and deselecting it
-does not stop it. `start_on_boot = true` gives the same protection from deselection.
+For a non-background app the manifest's `start_on_boot` is the default; the administrator may
+persistently override it. Changing the preference does not immediately start or stop a run.
+Selected providers still start at boot even when their preference is disabled. Background apps
+and compiled-in apps always start; their boot preference cannot be changed. Launches that need
+required arguments without defaults may still fail at boot.
+
+`background = true` also protects an app from stopping on deselection. An enabled effective
+start-at-boot preference gives the same protection.
 
 ## Graceful shutdown: what an app must do
 
@@ -287,7 +293,7 @@ administrator-only. Administrators read the same stream with
 - A provider is selected by app ID in device settings, never by a port or a stable output
   identifier.
 - Selecting a provider starts it if it is installed and not running.
-- Deselecting a provider stops it, unless it declares `start_on_boot` or `background`.
+- Deselecting a provider stops it, unless its effective boot preference is enabled or it is background.
 - Uninstalling a provider requires it to be stopped first, and removing the selection is the
   durable way to keep it off.
 - A presentation is owned by one run; when that run ends, its presentations and captures are

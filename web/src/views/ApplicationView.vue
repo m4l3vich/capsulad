@@ -3,7 +3,8 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
-import { logLine, safeJson, shortId, status } from '../lib/format.js'
+import { getAppBoot, setAppBoot } from '../lib/appBoot.js'
+import { safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
 
@@ -18,6 +19,16 @@ const { data, error: loadError, refresh } = useTopic('application', props.appId,
 const busy = ref('')
 const settingBusy = ref('')
 const discardPrompt = ref(false)
+const launchDialog = ref(false)
+const guideDialog = ref(false)
+const interfaceDialog = ref(null)
+const defaultInfo = ref(false)
+const boot = ref(null)
+const bootBusy = ref(false)
+const bootError = ref('')
+
+// Launch drafts stay local until submitted; closing the form preserves them.
+// Running default providers restart on stop and retain their selected role.
 const launchDirty = ref(false)
 
 const configDraft = reactive({})
@@ -51,10 +62,39 @@ const schemaSettings = computed(() => data.value?.schema?.settings || [])
 const schemaActions = computed(() => data.value?.schema?.actions || [])
 const provenance = computed(() => data.value?.provenance || null)
 const interfaces = computed(() => data.value?.interfaces || [])
-const logs = computed(() => data.value?.logs || [])
 const runs = computed(() => data.value?.runs || [])
+const defaultRoles = computed(() => (data.value?.selectedDefaultRoles || []).map((role) => ({
+  'light.ring.main': 'LED ring controller',
+  'display.segment.front': 'display controller',
+  assistant: 'voice assistant'
+}[role] || role)))
 const hasSettingsDocument = computed(() => !!data.value?.schema?.settingsUi?.available)
 const connected = computed(() => liveState.value === 'open')
+
+async function loadBoot() {
+  try {
+    boot.value = await getAppBoot(props.appId)
+    bootError.value = ''
+  } catch (err) {
+    bootError.value = err?.message || 'Could not load the boot setting.'
+  }
+}
+
+async function changeBoot(event) {
+  bootBusy.value = true
+  try {
+    boot.value = await setAppBoot(props.appId, event.target.checked, boot.value.revision)
+    bootError.value = ''
+    notify.success('Boot setting saved')
+  } catch (err) {
+    notify.error(err?.message || 'Could not save the boot setting.')
+    await loadBoot()
+  } finally {
+    bootBusy.value = false
+  }
+}
+
+loadBoot()
 
 function syncSettingsState() {
   const view = data.value
@@ -383,11 +423,11 @@ async function act(key, command, message) {
   }
 }
 
-async function launch() {
+async function launch(withArguments = true) {
   const app = data.value?.app
   if (!app) return
   const args = []
-  for (const arg of app.launchArguments || []) {
+  for (const arg of withArguments ? (app.launchArguments || []) : []) {
     const value = String(launchArgs[arg.name] || '').trim()
     if (!value) {
       if (arg.required) {
@@ -400,6 +440,7 @@ async function launch() {
   }
   const result = await act('launch', { launch: { appId: app.appId, arguments: args } }, 'Launch requested')
   if (result?.launch) {
+    launchDialog.value = false
     launchDirty.value = false
     if (!hasUnsavedInputs()) discardPrompt.value = false
     await refresh()
@@ -424,10 +465,12 @@ async function trigger(action) {
   if (result?.action) notify.info('Action sent')
 }
 
-function uptime(ns) {
-  const seconds = Number(ns) / 1e9
-  if (!Number.isFinite(seconds) || seconds <= 0) return '—'
-  return `${seconds.toFixed(1)} s after boot`
+function documentationLines(text) {
+  return (text || '').split('\n').map((line) => {
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    const list = line.match(/^\s*[-*]\s+(.+)$/)
+    return { text: heading?.[2] || list?.[1] || line, heading: !!heading, list: !!list }
+  })
 }
 </script>
 
@@ -451,8 +494,11 @@ function uptime(ns) {
       <div class="flex flex-wrap items-center gap-1.5">
         <span class="badge badge-ghost badge-sm">v{{ data.app.version || '—' }}</span>
         <span v-if="data.app.systemApp" class="badge badge-outline badge-sm">built-in</span>
-        <span v-if="data.selectedDefault" class="badge badge-primary badge-sm">default app</span>
-        <span v-if="data.app.background" class="badge badge-ghost badge-sm">runs in background</span>
+        <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">default {{ role }}</span>
+        <span v-if="data.app.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
+        <button v-if="data.userGuide" type="button" class="btn btn-ghost btn-sm ml-auto" @click="guideDialog = true">
+          <span class="material-symbols-outlined" aria-hidden="true">menu_book</span> User guide
+        </button>
       </div>
 
       <div v-if="discardPrompt" class="alert alert-warning py-2" role="alert">
@@ -463,63 +509,70 @@ function uptime(ns) {
         </div>
       </div>
 
-      <!-- Launch: required arguments are explicit, not guessed. -->
-      <section class="rounded-lg border border-base-300 p-3">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">Launch</h3>
-        <form class="mt-2 flex flex-col gap-2" @submit.prevent="launch">
-          <div v-if="(data.app.launchArguments || []).length" class="grid gap-2 sm:grid-cols-2">
-            <label v-for="arg in data.app.launchArguments" :key="arg.name" class="form-control">
-              <span class="label-text pb-1 text-sm">
-                {{ arg.name }}
-                <span v-if="arg.required" class="ml-1 text-error" title="Required">*</span>
-              </span>
-              <input
-                v-model="launchArgs[arg.name]"
-                class="input input-bordered input-sm w-full"
-                :type="arg.valueType?.includes('INT') ? 'number' : 'text'"
-                :placeholder="arg.valueType || 'value'"
-                :required="arg.required"
-                @input="launchDirty = true"
-              />
-              <span v-if="arg.description" class="mt-1 text-xs text-base-content/60">{{ arg.description }}</span>
-            </label>
+      <div class="flex flex-wrap items-center gap-2">
+        <template v-if="runs.length">
+          <span class="badge badge-success">Running</span>
+          <template v-for="runItem in runs" :key="runItem.runId">
+            <button v-if="data.app.canStop" type="button" class="btn btn-sm btn-outline"
+              :class="data.selectedDefault ? '' : 'btn-error'" :disabled="!!busy || !connected"
+              @click="stop(runItem)">{{ data.selectedDefault ? 'Restart' : 'Stop' }}<span v-if="runs.length > 1"> {{ shortId(runItem.runId) }}</span></button>
+          </template>
+          <span v-if="!data.app.canStop" class="text-sm text-base-content/60">Managed by the speaker</span>
+          <button v-if="data.selectedDefault" type="button" class="btn btn-ghost btn-square btn-sm"
+            aria-label="Why default apps cannot be stopped" @click="defaultInfo = true">
+            <span class="material-symbols-outlined" aria-hidden="true">info</span>
+          </button>
+        </template>
+        <template v-else>
+          <button type="button" class="btn btn-primary btn-sm" :disabled="!!busy || !connected"
+            @click="(data.app.launchArguments || []).some(arg => arg.required) ? launchDialog = true : launch(false)">
+            <span v-if="busy === 'launch'" class="loading loading-spinner loading-xs"></span>
+            {{ (data.app.launchArguments || []).some(arg => arg.required) ? 'Launch…' : 'Launch' }}
+          </button>
+          <button v-if="(data.app.launchArguments || []).length && !(data.app.launchArguments || []).some(arg => arg.required)"
+            type="button" class="btn btn-primary btn-square btn-sm" aria-label="Launch with arguments"
+            :disabled="!!busy || !connected" @click="launchDialog = true">
+            <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+          </button>
+        </template>
+      </div>
+      <div>
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+            :checked="data.selectedDefault || !!boot?.enabled"
+            :disabled="data.selectedDefault || !boot?.editable || bootBusy || !connected"
+            @change="changeBoot" />
+          Start at boot
+        </label>
+        <p v-if="bootError" class="mt-1 text-xs text-error">{{ bootError }} <button type="button" class="link" @click="loadBoot">Retry</button></p>
+        <p v-else-if="data.selectedDefault" class="mt-1 text-xs text-base-content/60">Selected default apps start automatically.</p>
+        <p v-else-if="boot && !boot.editable" class="mt-1 text-xs text-base-content/60">Managed by the speaker.</p>
+      </div>
+
+      <details v-if="schemaActions.length" class="border-y border-base-300 py-2">
+        <summary class="cursor-pointer text-sm font-semibold">Actions</summary>
+        <div class="mt-3 flex flex-col gap-3">
+          <div v-for="action in schemaActions" :key="action.actionId" class="flex flex-wrap items-center justify-between gap-2">
+            <div><p class="text-sm font-medium">{{ action.label }}</p><p v-if="action.description" class="text-xs text-base-content/60">{{ action.description }}</p></div>
+            <button type="button" class="btn btn-sm btn-outline" :disabled="!!busy || !connected" @click="trigger(action)">{{ action.label || 'Run action' }}</button>
           </div>
-          <p v-else class="text-xs text-base-content/60">This application declares no launch arguments.</p>
-          <div class="flex flex-wrap items-center gap-2">
-            <button type="submit" class="btn btn-primary btn-sm" :disabled="!!busy || !connected">
-              <span v-if="busy === 'launch'" class="loading loading-spinner loading-xs"></span>
-              Launch
-            </button>
-            <span v-if="data.app.startOnBoot" class="badge badge-ghost badge-sm">starts at boot</span>
-          </div>
-        </form>
-      </section>
+        </div>
+      </details>
 
       <!-- Settings: the app's own document when declared, else its schema. -->
-      <section v-if="hasSettingsDocument || schemaSettings.length" class="rounded-lg border border-base-300 p-3">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">Settings</h3>
-          <span v-if="hasSettingsDocument" class="badge badge-ghost badge-sm">provided by this app</span>
-        </div>
+      <section v-if="hasSettingsDocument || schemaSettings.length">
+        <h3 v-if="!hasSettingsDocument" class="text-sm font-semibold">Settings</h3>
 
         <div v-if="hasSettingsDocument" class="mt-2 flex flex-col gap-2">
           <iframe
             v-show="!frameError"
             ref="settingsFrame"
-            class="h-[360px] min-h-[240px] w-full rounded-lg border border-base-300 bg-base-100"
+            class="h-[360px] min-h-[240px] w-full"
             sandbox="allow-scripts"
             referrerpolicy="no-referrer"
             allow="camera 'none'; microphone 'none'; geolocation 'none'"
             :title="`${data.app.displayName} settings`"
           ></iframe>
-          <details class="text-xs text-base-content/60">
-            <summary class="cursor-pointer">Technical details</summary>
-            <p class="mt-1 leading-relaxed">
-              This document runs in an isolated frame with no network, host session or
-              cross-application access. The console accepts only declared setting values that
-              carry this frame’s token and checks them against the latest revision.
-            </p>
-          </details>
         </div>
 
         <form v-else class="mt-2 flex flex-col gap-3" @submit.prevent="saveConfig">
@@ -593,78 +646,10 @@ function uptime(ns) {
         </form>
       </section>
 
-      <!-- Declared actions stay separate from settings. -->
-      <section v-if="schemaActions.length" class="rounded-lg border border-base-300 p-3">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">Actions</h3>
-        <div class="mt-2 flex flex-col gap-2">
-          <div v-for="action in schemaActions" :key="action.actionId" class="flex flex-wrap items-center justify-between gap-2">
-            <div class="min-w-0">
-              <p class="text-sm font-medium">{{ action.label }}</p>
-              <p v-if="action.description" class="text-xs text-base-content/60">{{ action.description }}</p>
-            </div>
-            <button
-              type="button"
-              class="btn btn-sm btn-outline"
-              :disabled="!!busy || !connected"
-              :aria-label="`${action.label || 'Run action'} for ${data.app.displayName}`"
-              @click="trigger(action)"
-            >{{ action.label || 'Run action' }}</button>
-          </div>
-        </div>
-      </section>
 
-      <!-- Progressive detail: run state first, then metadata, contracts,
-           verification and logs. -->
-      <details class="rounded-lg border border-base-300">
-        <summary class="cursor-pointer px-3 py-2 text-sm font-medium">
-          Run status <span class="badge badge-ghost badge-sm ml-1">{{ runs.length }}</span>
-        </summary>
-        <div class="border-t border-base-300 p-3">
-          <p v-if="data.app.canStop && data.selectedDefault" class="text-xs text-base-content/60">
-            This app is the default for its role. Stopping it restarts it; choose another app or none in
-            Settings to turn it off for good.
-          </p>
-          <div v-if="runs.length" class="mt-2 overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th scope="col">Run</th>
-                  <th scope="col">State</th>
-                  <th scope="col" class="hidden sm:table-cell">PID</th>
-                  <th scope="col" class="hidden md:table-cell">Detail</th>
-                  <th scope="col" class="text-right"></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="runItem in runs" :key="runItem.runId">
-                  <td class="data-value" :title="runItem.runId">{{ shortId(runItem.runId) }}</td>
-                  <td><span class="badge badge-sm" :class="status(runItem.state) === 'ready' ? 'badge-success' : 'badge-ghost'">{{ status(runItem.state) || 'run' }}</span></td>
-                  <td class="hidden sm:table-cell tabular-nums">{{ runItem.pid || '—' }}</td>
-                  <td class="hidden md:table-cell text-xs text-base-content/60">{{ runItem.statusDetail || uptime(runItem.startedMonotonicNs) }}</td>
-                  <td>
-                    <div class="flex justify-end">
-                      <button
-                        v-if="data.app.canStop"
-                        type="button"
-                        class="btn btn-xs"
-                        :class="data.selectedDefault ? 'btn-outline' : 'btn-error btn-outline'"
-                        :disabled="busy === `stop:${runItem.runId}` || !connected"
-                        @click="stop(runItem)"
-                      >{{ data.selectedDefault ? 'Restart' : 'Stop' }}</button>
-                      <span v-else class="text-xs text-base-content/60">managed by the speaker</span>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p v-else class="mt-2 text-sm text-base-content/60">Not running.</p>
-        </div>
-      </details>
-
-      <details class="rounded-lg border border-base-300">
-        <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Application details</summary>
-        <div class="border-t border-base-300 p-3">
+      <section class="border-t border-base-300 pt-4">
+        <h3 class="text-sm font-semibold">Application details</h3>
+        <div class="pt-3">
           <dl class="grid gap-2 text-sm sm:grid-cols-2">
             <div>
               <dt class="text-xs uppercase tracking-wide text-base-content/60">Application ID</dt>
@@ -693,7 +678,7 @@ function uptime(ns) {
               <dd class="text-sm">
                 {{ data.app.background ? 'background' : 'on demand' }} ·
                 {{ data.app.singleInstance ? 'single instance' : 'multi instance' }} ·
-                {{ data.app.startOnBoot ? 'starts at boot' : 'manual start' }} ·
+                {{ data.app.startOnBoot ? 'manifest starts at boot' : 'manifest manual start' }} ·
                 {{ data.app.restartOnFailure ? 'restart on failure' : 'no manifest restart' }}
               </dd>
             </div>
@@ -705,13 +690,11 @@ function uptime(ns) {
             </div>
           </dl>
         </div>
-      </details>
+      </section>
 
-      <details v-if="interfaces.length" class="rounded-lg border border-base-300">
-        <summary class="cursor-pointer px-3 py-2 text-sm font-medium">
-          App interfaces <span class="badge badge-ghost badge-sm ml-1">{{ interfaces.length }}</span>
-        </summary>
-        <div class="flex flex-col gap-3 border-t border-base-300 p-3">
+      <section v-if="interfaces.length">
+        <h4 class="text-sm font-semibold">Interfaces</h4>
+        <div class="mt-2 flex flex-col gap-3">
           <div v-for="iface in interfaces" :key="iface.grpcService">
             <div class="flex flex-wrap items-center gap-2">
               <span class="data-value font-medium">{{ iface.grpcService }}</span>
@@ -719,48 +702,18 @@ function uptime(ns) {
               <span class="badge badge-sm" :class="iface.available ? 'badge-success' : 'badge-ghost'">
                 {{ iface.available ? 'available' : 'unavailable' }}
               </span>
+              <button type="button" class="btn btn-ghost btn-square btn-sm" :aria-label="`View ${iface.grpcService} description`" @click="interfaceDialog = iface">
+                <span class="material-symbols-outlined" aria-hidden="true">info</span>
+              </button>
             </div>
             <p v-if="iface.summary" class="mt-1 text-sm text-base-content/70">{{ iface.summary }}</p>
-            <template v-if="descriptions[iface.grpcService]">
-              <p v-if="descriptions[iface.grpcService].documentationMarkdown" class="mt-2 whitespace-pre-wrap text-xs text-base-content/60">
-                {{ descriptions[iface.grpcService].documentationMarkdown }}
-              </p>
-              <div v-if="(descriptions[iface.grpcService].methods || []).length" class="mt-2 overflow-x-auto">
-                <table class="table table-xs">
-                  <thead>
-                    <tr>
-                      <th scope="col">Method</th>
-                      <th scope="col">Summary</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="method in descriptions[iface.grpcService].methods" :key="method.rpcName">
-                      <td class="data-value">{{ method.rpcName }}</td>
-                      <td class="text-xs">{{ method.summary }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-                <details
-                  v-for="method in descriptions[iface.grpcService].methods"
-                  :key="`${method.rpcName}-detail`"
-                  class="mt-1 text-xs"
-                >
-                  <summary class="cursor-pointer text-base-content/60">{{ method.rpcName }} examples</summary>
-                  <pre class="mt-1 overflow-x-auto rounded bg-base-200 p-2">{{ method.requestExampleJson || '—' }}</pre>
-                  <pre class="mt-1 overflow-x-auto rounded bg-base-200 p-2">{{ method.responseExampleJson || '—' }}</pre>
-                </details>
-              </div>
-            </template>
           </div>
         </div>
-      </details>
+      </section>
 
-      <details
-        v-if="provenance && (provenance.status || provenance.detail || provenance.subjectSha256Hex || provenance.verifiedRepository)"
-        class="rounded-lg border border-base-300"
-      >
-        <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Build verification</summary>
-        <div class="border-t border-base-300 p-3">
+      <section v-if="provenance && (provenance.status || provenance.detail || provenance.subjectSha256Hex || provenance.verifiedRepository)">
+        <h4 class="text-sm font-semibold">Build verification</h4>
+        <div class="pt-2">
           <div class="flex flex-wrap items-center gap-2">
             <span class="badge badge-sm" :class="status(provenance.status) === 'verified' ? 'badge-success' : 'badge-warning'">
               {{ status(provenance.status) || 'unreported' }}
@@ -778,21 +731,47 @@ function uptime(ns) {
             it is not a promise that the software is safe.
           </p>
         </div>
-      </details>
-
-      <details class="rounded-lg border border-base-300">
-        <summary class="cursor-pointer px-3 py-2 text-sm font-medium">
-          Logs <span class="badge badge-ghost badge-sm ml-1">{{ logs.length }}</span>
-        </summary>
-        <div class="border-t border-base-300 p-3">
-          <div v-if="logs.length" class="max-h-72 overflow-y-auto rounded bg-base-200 p-2 font-mono text-[11px] leading-relaxed">
-            <p v-for="(entry, index) in logs" :key="index" class="whitespace-pre-wrap break-words">
-              {{ logLine(entry) }}
-            </p>
-          </div>
-          <p v-else class="text-sm text-base-content/60">No log records yet.</p>
-        </div>
-      </details>
+      </section>
     </div>
+    <ModalDialog v-if="launchDialog" title="Launch with arguments" max-width="max-w-xl" @close="launchDialog = false">
+      <form class="flex flex-col gap-3" @submit.prevent="launch(true)">
+        <label v-for="arg in data.app.launchArguments" :key="arg.name" class="form-control">
+          <span class="label-text pb-1">{{ arg.name }} <span v-if="arg.required" class="text-error">*</span></span>
+          <input v-model="launchArgs[arg.name]" class="input input-bordered input-sm w-full"
+            :type="arg.valueType?.includes('INT') ? 'number' : 'text'" :required="arg.required"
+            @input="launchDirty = true" />
+          <span v-if="arg.description" class="mt-1 text-xs text-base-content/60">{{ arg.description }}</span>
+        </label>
+        <button class="btn btn-primary btn-sm self-start" type="submit" :disabled="!!busy || !connected">Launch</button>
+      </form>
+    </ModalDialog>
+    <ModalDialog v-if="defaultInfo" title="Default application" max-width="max-w-lg" @close="defaultInfo = false">
+      <p class="text-sm">The speaker automatically restarts its selected default apps. Choose another app or none in Settings to stop this app permanently.</p>
+    </ModalDialog>
+    <ModalDialog v-if="guideDialog" title="User guide" @close="guideDialog = false">
+      <p class="whitespace-pre-wrap text-sm">{{ data.userGuide }}</p>
+    </ModalDialog>
+    <ModalDialog v-if="interfaceDialog" :title="interfaceDialog.grpcService" @close="interfaceDialog = null">
+      <p v-if="interfaceDialog.summary" class="text-sm">{{ interfaceDialog.summary }}</p>
+      <div v-if="descriptions[interfaceDialog.grpcService]?.documentationMarkdown" class="mt-3 text-sm">
+        <p v-for="(line, index) in documentationLines(descriptions[interfaceDialog.grpcService].documentationMarkdown)" :key="index"
+          :class="{ 'mt-3 font-semibold': line.heading, 'ml-4': line.list, 'min-h-3': !line.text }">
+          <span v-if="line.list" aria-hidden="true">• </span>{{ line.text }}
+        </p>
+      </div>
+      <div v-for="method in descriptions[interfaceDialog.grpcService]?.methods || []" :key="method.rpcName" class="mt-4">
+        <h4 class="font-semibold">{{ method.rpcName }}</h4>
+        <p class="text-sm">{{ method.summary }}</p>
+        <div v-if="method.semanticsMarkdown" class="mt-2 text-sm">
+          <p v-for="(line, index) in documentationLines(method.semanticsMarkdown)" :key="index"
+            :class="{ 'mt-3 font-semibold': line.heading, 'ml-4': line.list, 'min-h-3': !line.text }">
+            <span v-if="line.list" aria-hidden="true">• </span>{{ line.text }}
+          </p>
+        </div>
+        <pre v-if="method.requestExampleJson" class="mt-2 overflow-x-auto rounded bg-base-200 p-2 text-xs">{{ method.requestExampleJson }}</pre>
+        <pre v-if="method.responseExampleJson" class="mt-2 overflow-x-auto rounded bg-base-200 p-2 text-xs">{{ method.responseExampleJson }}</pre>
+      </div>
+      <p v-if="!interfaceDialog.summary && !descriptions[interfaceDialog.grpcService]" class="text-sm text-base-content/60">No description available.</p>
+    </ModalDialog>
   </ModalDialog>
 </template>

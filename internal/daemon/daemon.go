@@ -648,6 +648,7 @@ func (d *Daemon) Run() error {
 			d.logs.Errorf("webui", "", "init failed: %v", err)
 		} else {
 			web.Apps = d.reg
+			web.UserSettings = d.user
 			web.Assets = d.assets
 			web.Wifi = d.wifiMgr
 			web.Wakeword = d.wake

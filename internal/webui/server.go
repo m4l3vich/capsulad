@@ -35,6 +35,7 @@ import (
 	"capsulad/internal/logbus"
 	"capsulad/internal/registry"
 	"capsulad/internal/uichanges"
+	"capsulad/internal/settings"
 	"capsulad/internal/version"
 	"capsulad/internal/wakeword"
 	"capsulad/internal/websecurity"
@@ -65,6 +66,8 @@ type Server struct {
 	// Apps resolves application package assets. Optional: without it the
 	// settings-UI endpoint and declaration are unavailable.
 	Apps *registry.Registry
+	// UserSettings stores administrator boot preferences.
+	UserSettings *settings.UserStore
 	// Assets is the shared read-only asset store. Optional: without it the
 	// browser asset-management routes report unavailability.
 	Assets *assets.Catalog
@@ -125,6 +128,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.anyAuth(s.apiStatus))
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
+	mux.HandleFunc("GET /api/apps/{appID}/boot", s.sessionOnly(s.appBoot))
+	mux.HandleFunc("PUT /api/apps/{appID}/boot", s.sessionOnly(s.appBoot))
 	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
 	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))
 	mux.HandleFunc("DELETE /api/assets", s.sessionOnly(s.deleteAsset))

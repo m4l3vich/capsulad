@@ -38,6 +38,8 @@ const (
 type UserSettings struct {
 	DefaultAppByResource  map[string]string  `json:"default_app_by_resource"`
 	DefaultAssistantAppID string             `json:"default_assistant_app_id"`
+	// StartOnBootOverrides stores explicit per-app choices; absence uses the manifest.
+	StartOnBootOverrides map[string]bool `json:"start_on_boot_overrides,omitempty"`
 	WakewordModelID       string             `json:"wakeword_model_id"`
 	WakewordEnabled       bool               `json:"wakeword_enabled"`
 	DisplayBrightness     map[string]float64 `json:"display_brightness"`
@@ -193,6 +195,7 @@ func cloneUser(v UserSettings) UserSettings {
 	for k, val := range v.DefaultAppByResource {
 		out.DefaultAppByResource[k] = val
 	}
+	out.StartOnBootOverrides = cloneMap(v.StartOnBootOverrides)
 	out.DisplayBrightness = make(map[string]float64, len(v.DisplayBrightness))
 	for k, val := range v.DisplayBrightness {
 		out.DisplayBrightness[k] = val
@@ -213,9 +216,13 @@ func (s *UserStore) Update(expected uint64, patch UserSettings, fields []string)
 	next := cloneUser(s.values)
 	if len(fields) == 0 {
 		next = normalize(patch)
+		// This browser-owned field is not part of the framework settings message.
+		next.StartOnBootOverrides = cloneMap(s.values.StartOnBootOverrides)
 	} else {
 		for _, f := range fields {
 			switch f {
+			case "start_on_boot_overrides":
+				next.StartOnBootOverrides = cloneMap(patch.StartOnBootOverrides)
 			case "default_app_by_resource":
 				next.DefaultAppByResource = cloneMap(patch.DefaultAppByResource)
 			case "default_assistant_app_id":

@@ -269,7 +269,7 @@ func (s *Server) applicationView(ctx context.Context, appID string) (*webv1.Appl
 		}
 	}
 	if runs, err := appsvc.ListRuns(ctx, &frameworkv1.ListRunsRequest{AppId: appID}); err == nil {
-		view.Runs = runViews(runs.GetRuns(), map[string]bool{appID: selected})
+		view.Runs = runViews(runs.GetRuns(), map[string]bool{appID: view.SelectedDefault})
 	}
 	if prov, err := appsvc.GetBinaryProvenance(ctx, &frameworkv1.GetBinaryProvenanceRequest{AppId: appID}); err == nil {
 		view.Provenance = &webv1.ProvenanceView{
