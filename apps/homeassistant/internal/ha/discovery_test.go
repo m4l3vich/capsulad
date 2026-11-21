@@ -246,6 +246,9 @@ func TestDiscoveryPayloads(t *testing.T) {
 	}
 
 	status := bySlug[SlugBridgeStatus]
+	if status["name"] != "Integration status" {
+		t.Fatalf("integration status display name = %v", status["name"])
+	}
 	if status["json_attributes_topic"] != "capsulad/capsula/bridge_status/attributes" {
 		t.Fatalf("bridge status payload %v", status)
 	}

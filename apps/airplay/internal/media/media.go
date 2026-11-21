@@ -1,4 +1,4 @@
-// Package media holds the AirPlay receiver's player state.
+// Package media holds the AirPlay 2 receiver's player state.
 //
 // The app exposes exactly one player to the framework's
 // capsulad.contracts.media.v1.MediaPlayerService contract: the live AirPlay
@@ -35,7 +35,7 @@ const (
 const PlayerID = "airplay"
 
 // AppName is the display-friendly source application for every status.
-const AppName = "AirPlay"
+const AppName = "AirPlay 2 receiver"
 
 // Status is one player snapshot in canonical protobuf JSON form.
 type Status struct {

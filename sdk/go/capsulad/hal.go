@@ -561,7 +561,7 @@ func (c *Client) AudioState(ctx context.Context) (AudioState, error) {
 
 // SetMasterVolume persists the device master volume, in [0,1], and returns the
 // updated mixer state. Local administrators may always call it. A supervised
-// app may call it only from the installed AirPlay receiver's authenticated
+// app may call it only from the installed AirPlay 2 receiver's authenticated
 // READY run; every other app receives PERMISSION_DENIED. A host without
 // process peer credentials (the simulator) refuses the app path.
 //

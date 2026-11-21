@@ -30,8 +30,8 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
 | `make web` | `npm ci && npm run build` into `internal/webui/dist`, plus the settings-document kit at `internal/appui/assets/kit.css` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
-| `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (the Cadence client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
-| `make simon` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio (one native package), the Home Assistant bridge and the AirPlay 2 receiver (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
+| `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (Cadence Client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
+| `make simon` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio (one native package), the Home Assistant integration and the AirPlay 2 receiver (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
 | `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps`, `BUNDLE_CLI=0` omits the CLI |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
@@ -612,12 +612,13 @@ selection case and no backend for them, so any other `-platform` value fails wit
 
 ```sh
 make test              # every Go module: root, sdk/go, the three assistants, the native Internet
-                       # Radio, the bridge and the AirPlay receiver, the Rust binding, the native
-                       # crate and the C++ header compile
+                       # Radio, the Home Assistant integration and the AirPlay 2
+                       # receiver, the Rust binding, the native crate and the C++
+                       # header compile
 make test-race         # root Go module with -race
 make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia      # the apps/marusia module's tests from the repository root
-make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine
+make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine, announcements, enrollment, settings
 make test-radio        # the nested apps/radio Go module (stations, media, streaming)
 make test-homeassistant # the nested apps/homeassistant Go module
 make test-airplay      # the nested apps/airplay Go module (protocol, codecs, session)
@@ -625,9 +626,10 @@ make test-airplay      # the nested apps/airplay Go module (protocol, codecs, se
 
 `make test-cadence` needs no daemon, device or Cadence server: it decodes the upstream
 `cadence.v2` golden frames as interoperability vectors, runs an in-process websocket peer and a
-fake-codec turn state machine, and performs one real libopus encode/decode round trip. The Opus
-test skips with a clear message when the host has no libopus; the device loads `libopus.so.0`
-at run time, so the app has no link-time codec dependency.
+fake-codec turn and announcement state machine, exercises the enrollment exchange and its
+compare-and-swap token write against fakes, and performs one real libopus encode/decode round
+trip. The Opus test skips with a clear message when the host has no libopus; the device loads
+`libopus.so.0` at run time, so the app has no link-time codec dependency.
 
 `make test-airplay` needs neither a daemon nor a device: the protocol layers are pure Go and the
 one end-to-end session test drives the receiver over in-memory transports. Its ALAC fixtures were
@@ -650,8 +652,10 @@ covers timer registration, the 16-callback cap, cancellation during a pass, cloc
 exception isolation, the poll bound and stop-on-return.
 
 `test-simon` loads the shipped `main.js` into a fake QuickJS host and asserts the app's
-observable requests, ring/segment frames, per-colour tone PCM, input ordering and terminal
-cleanup. `test-pa` exercises the shipped script's WAV
+observable requests, ring/segment frames, exact packaged per-colour tone PCM, RIFF
+boundary/padding regressions, input ordering and terminal cleanup; a packaging test runs
+`build.sh` with `PACKAGE=0` and checks the staged `audio/` tree byte-for-byte. `test-pa`
+exercises the shipped script's WAV
 parser and protobuf helpers under CPython. `test-radio` is the app's own Go suite: station
 grammar and selection, settings application, media snapshots, chunk sizing, idle accounting,
 session ownership and the stream package's framing, ICY stripping, redirects, playlists and
@@ -675,7 +679,7 @@ go test -run 'TestDumbAssistant|TestSupervisor' ./internal/daemon
 (cd sdk/go && CGO_ENABLED=1 go test ./...)
 (cd apps/dumbassistant && CGO_ENABLED=1 go test ./...)
 (cd apps/marusia && go test ./...)        # no test reaches the network; TLS listeners are loopback
-(cd apps/cadence && go test ./...)        # upstream golden frames, in-process peers, fake-codec state machine
+(cd apps/cadence && go test ./...)        # upstream golden frames, in-process peers, fake-codec turn/announcement state machine, enrollment
 cargo test --manifest-path sdk/native/Cargo.toml
 sdk/go/regenerate-abi.sh --check
 ```
@@ -741,10 +745,10 @@ staged directory under `build/apps`. None of them is part of `all`, `release` or
 
 | Target | Package | What it is |
 |---|---|---|
-| `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS colour-and-tone memory game: the LED ring replays a growing four-colour sequence (north red, east yellow, south green, west blue) with one distinct tone per colour, the four side keys repeat it, an optional four-digit segment display keeps the score, and holding the unmarked centre leaves the game. The package is `manifest.toml`, `main.js` and the app guide `README.md`; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
+| `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS colour-and-tone memory game: the LED ring replays a growing four-colour sequence (north red, east yellow, south green, west blue) with one packaged tone per colour, the four side keys repeat it, an optional four-digit segment display keeps the score, and holding the unmarked centre leaves the game. The package is `manifest.toml`, `main.js`, the app guide `README.md` and the pre-rendered `audio/*.wav` cues; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv` and `capsulad.readPackageFile`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
 | `make pa` | `org.capsulad.pa` | PA Speaker, a background MicroPython service: another app routes one `SpeakerService/Play` (a streamed WAV) and the app plays it through the framework speaker, replying after the queued audio drains. |
 | `make radio` | `org.capsulad.radio` | Internet Radio, a single native app: it keeps the station list, fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and writes paced PCM to the framework speaker in the same process, and serves the standard media contract. Its package carries the binary, the manifest, the `ui/settings.html` station picker, the media descriptor and the app guide. There is no companion package. |
-| `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant bridge, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
+| `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant integration, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
 | `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the legacy RAOP setup, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`, whose records carry the 32-byte ed25519 HomeKit key as `pk` inside a 63-byte instance label. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor, `docs/media.md`, the app guide `README.md` and `NOTICE`. |
 
 ```sh
@@ -755,10 +759,10 @@ sh apps/radio/build.sh                                 # radio alone; OUT=/PACKA
 capsulad-cli app install build/apps/org.capsulad.radio-<version>.tar.gz
 ```
 
-The Simon package needs a QuickJS host with `Call.tryRecv`, so run `make interpreter-quickjs`
-before `make deploy-bundle` when Simon ships in the bundle: the bundle's `lib/` is what reaches
-the device, and an older host makes the app log `unavailable: this QuickJS host has no
-Call.tryRecv; rebuild the interpreter host` and stop rather than play.
+The Simon package needs a QuickJS host with `Call.tryRecv` and `capsulad.readPackageFile`, so
+run `make interpreter-quickjs` before `make deploy-bundle` when Simon ships in the bundle: the
+bundle's `lib/` is what reaches the device, and an older host makes the app log that it has no
+`readPackageFile` (or no `Call.tryRecv`) and stop rather than play.
 
 `make airplay` additionally requires FFmpeg's `libavcodec`/`libavutil` development files. Its
 `PACKAGE` default is `auto`: a Linux target packages, and a host build stages the directory only

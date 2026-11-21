@@ -504,7 +504,7 @@ if !authorized {
 | `OpenMic(ctx, activationID, conversationID)` → `*Mic` | `Chunks()`, `Close`; PCM arrives as bytes |
 | `BeginConversation(ctx, activationID)` → `*Conversation` | assistant turn lifetime |
 | `AudioState`, `ListAudioEndpoints`, `UserSettings` | read-only state helpers |
-| `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master position (0–1, mapped by the mixer's logarithmic taper — not a linear amplitude); local administrators, and only the installed AirPlay receiver's authenticated READY run |
+| `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master position (0–1, mapped by the mixer's logarithmic taper — not a linear amplitude); local administrators, and only the installed AirPlay 2 receiver's authenticated READY run |
 | `BluetoothMediaState`, `WatchBluetoothMedia`, `BluetoothMediaCommand` | Bluetooth media bridge |
 | `Call`, `CallJSON`, `Stream`, `OpenStream`, `OpenBidi` | routed calls and framework streams |
 | `RegisterDescriptors(set)` | enable the JSON path for your own messages |
@@ -520,7 +520,7 @@ context. `Stream`/`OpenStream`/`OpenBidi` return a `*Stream` with `Send`, `SendJ
 control position the keys and Web UI use; the mixer converts it once to a 60 dB logarithmic gain,
 so an app must not pre-scale PCM by `master_volume` as if it were a linear factor. It returns the
 applied `AudioState`; a level outside the finite `[0,1]` range is `INVALID_ARGUMENT`, and an app
-other than the installed AirPlay receiver's authenticated READY run is `PERMISSION_DENIED`. The daemon
+other than the installed AirPlay 2 receiver's authenticated READY run is `PERMISSION_DENIED`. The daemon
 re-checks the request context and the caller's live identity at the settings commit boundary,
 after any wait for another settings writer: a request that expired while queued returns
 `CANCELLED`/`DEADLINE_EXCEEDED`, and a receiver run that stopped while the request waited returns
@@ -1017,7 +1017,11 @@ process. Never throw across a callback: catch inside the callback body.
 Limits and environment:
 
 - 64 MiB JS heap, 1 MiB stack, script file at most 8 MiB.
-- No timers (`setTimeout`/`setInterval`), no threads, no filesystem access, no `require`.
+- No timers (`setTimeout`/`setInterval`), no threads, no `require`, and no general filesystem
+  API. The only file access is `capsulad.readPackageFile(path)`: it reads one regular file
+  below `capsulad.env.appDir`, using a slash-relative path with no empty, `.` or `..`
+  components, up to 8 MiB. It returns a `Uint8Array` and throws a catchable `Error` for a bad
+  path, a missing file or a non-regular file. There is no directory listing and no write.
   `Date.now()` and plain computation work. A script that has to animate spins on `Date.now()`
   and can poll a stream with `Call.tryRecv`, which waits for a bounded slice and reports "no
   message yet" as `undefined`; that keeps the panel responsive while the animation runs. A
@@ -1034,6 +1038,12 @@ capsulad.run();          // pump events until the bus ends
 ```
 
 If the script returns without calling `capsulad.start()`, the host exits with an error.
+
+A package file is read by slash-relative path, for example a pre-rendered WAV:
+
+```js
+var wav = capsulad.readPackageFile("audio/ding.wav");
+```
 
 ### Module surface
 
@@ -1053,6 +1063,7 @@ If the script returns without calling `capsulad.start()`, the host exits with an
 | `capsulad.notifyInvocation(id, accepted, detail?)` | — | Reports an invocation outcome. |
 | `capsulad.notifyAction(id, succeeded, detail?)` | — | Reports an action outcome. |
 | `capsulad.registerDescriptors(bytes)` | — | Enables the JSON path for your own messages. |
+| `capsulad.readPackageFile(path)` | → `Uint8Array` | Reads one regular file below `capsulad.env.appDir`; slash-relative path, no `..`, at most 8 MiB. Throws a catchable `Error` on failure. |
 | `capsulad.info()`, `capsulad.handleInfo(handle)` | → object | Diagnostics. |
 | `capsulad.state()`, `.ready()`, `.connected()`, `.disconnected()` | — | Bus state. |
 | `capsulad.env` | object | `{socket, runId, appId, sdk, library, appDir}`. |

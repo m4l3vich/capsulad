@@ -37,7 +37,7 @@ controlling the speaker's physical level. It is not a manifest permission; see
 | `SettingsService` (device settings) | administrator only |
 | `RoutingService` | full for own captures; `ForceRelease` administrator only |
 | `PresentationService` | full, app identity required |
-| `AudioService` | full for streams and state reads; `SetMasterVolume` administrator or the installed AirPlay receiver's authenticated READY run; `SetMicrophoneMuted` administrator only |
+| `AudioService` | full for streams and state reads; `SetMasterVolume` administrator or the installed AirPlay 2 receiver's authenticated READY run; `SetMicrophoneMuted` administrator only |
 | `InputService` | own selected touch capture only |
 | `AssistantService` | `ListWakewordModels`, `BeginConversation`; wakeword sample/training RPCs administrator only |
 | `ApplicationService` | `ListApplications`, `ListRuntimes`, `GetBinaryProvenance`, own runs; `Launch`/`Stop`/`InstallApplication`/`UninstallApplication` administrator only |
@@ -209,7 +209,7 @@ has_valid_frame}` or `visibility{visible, reason}`.
 | `Capture` | request then server stream `CaptureAudioEvent` | app identity, indication required | Microphone PCM. |
 | `Playback` | bidi `PlaybackRequest` → `PlaybackEvent` | app identity | Speaker PCM. |
 | `GetAudioState` | unary `AudioState` | any local caller | Mixer and mute state. |
-| `SetMasterVolume` | unary `AudioState` | administrator; also the installed AirPlay receiver's authenticated READY run | Persisted device volume position; the mixer applies the tapered gain. |
+| `SetMasterVolume` | unary `AudioState` | administrator; also the installed AirPlay 2 receiver's authenticated READY run | Persisted device volume position; the mixer applies the tapered gain. |
 | `SetMicrophoneMuted` | unary `AudioState` | administrator | Persisted mute. |
 
 `AudioEndpointInfo` = `{endpoint_id, direction, supported_formats[], processing_tap}`.
@@ -577,7 +577,7 @@ slider drag moves the speaker immediately rather than when the drag ends. The me
 the last four writes and is cleared on connect and disconnect. A source without a writable register
 changes nothing for the speaker: the refused write is logged once per session and the level stays
 local. An app that needs the current level reads `AudioService.GetAudioState`; setting it is
-administrator-only except for the installed AirPlay receiver's authenticated READY run.
+administrator-only except for the installed AirPlay 2 receiver's authenticated READY run.
 
 The daemon also publishes this source in the browser protocol (`capsulad.web.v1`) as a media
 provider, and that provider is framework-owned rather than an app: `MediaProviderView.kind` is

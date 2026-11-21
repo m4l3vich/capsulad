@@ -313,7 +313,7 @@ func (m *Manager) Start() error {
 	}
 	m.acceptWG.Add(1)
 	go m.acceptLoop()
-	m.logf("AirPlay receiver %q listening on RTSP port %d (device id %s)", m.cfg.Name, port, m.cfg.DeviceID)
+	m.logf("AirPlay 2 receiver %q listening on RTSP port %d (device id %s)", m.cfg.Name, port, m.cfg.DeviceID)
 	return nil
 }
 

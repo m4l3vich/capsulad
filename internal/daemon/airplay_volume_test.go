@@ -27,7 +27,7 @@ import (
 // path needs; the sender/session policy is the app's responsibility.
 const airPlayTestManifest = `
 id = "org.capsulad.airplay"
-name = "AirPlay receiver fixture"
+name = "AirPlay 2 receiver fixture"
 version = "0.1.0"
 background = false
 restart_on_failure = false

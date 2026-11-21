@@ -768,7 +768,7 @@ const airPlayReceiverAppID = "org.capsulad.airplay"
 const masterVolumeDenied = "master volume is a local administrator operation"
 
 // requireMasterVolumeCaller is the local-administrator gate plus one narrow
-// device-owner exception: the installed AirPlay receiver's authenticated READY
+// device-owner exception: the installed AirPlay 2 receiver's authenticated READY
 // run may follow the sender's volume on the same persisted master the device
 // keys control. Every other supervised app stays denied. The receiver itself
 // decides which authenticated sender session owns the media; this gate only
@@ -790,7 +790,7 @@ func (d *Daemon) requireMasterVolumeCaller(ctx context.Context) error {
 }
 
 // isReadyAirPlayRun reports whether ctx belongs to the live supervised process
-// of the installed AirPlay receiver's current READY run. A Starting, stopping
+// of the installed AirPlay 2 receiver's current READY run. A Starting, stopping
 // or virtual run never qualifies, and neither does a connection that merely
 // claims an AirPlay run ID without matching peer credentials.
 func (d *Daemon) isReadyAirPlayRun(ctx context.Context) bool {

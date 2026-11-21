@@ -16,7 +16,9 @@ root is an asset.
 How it relates to the package:
 
 - Files inside your package are immutable app data at `/app` (`CAPSULAD_APP_DIR`). Use them for
-  defaults, templates, icons and fallback audio.
+  defaults, templates, icons and fallback audio. A QuickJS app reads one with
+  `capsulad.readPackageFile("<slash-relative path>")`; native apps open them relative to their
+  executable path.
 - The asset store is user-managed media shared by all apps. Use it for recordings, imported
   audio, images and other files a user adds at runtime.
 - An app cannot write the store. To change it, an administrator uploads through the Web UI.
@@ -111,7 +113,7 @@ extension.
 
 These routes exist only on the HTTPS Web UI. They require an authenticated administrator
 **browser session** plus a CSRF token and a same-origin request. A static API key is not accepted
-for any asset route — API keys are limited to `GET /api/status` and the public certificate.
+for any asset route — a `status` key is limited to `GET /api/status` and the public certificate.
 
 | Method | Route | Behavior |
 |---|---|---|

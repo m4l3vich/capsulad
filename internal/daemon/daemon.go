@@ -284,7 +284,7 @@ type Daemon struct {
 	lastMuted      bool
 	lastApplied    *settings.UserSettings
 	// volumeMu serializes the canonical master-volume path. Physical keys,
-	// Bluetooth sync, the Web UI's audio control and the AirPlay receiver's
+	// Bluetooth sync, the Web UI's audio control and the AirPlay 2 receiver's
 	// sender volume can arrive together; the durable write and the mixer apply
 	// must settle in the same order for all of them.
 	volumeMu sync.Mutex

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build and package the Home Assistant bridge app.
+# Build and package the Home Assistant integration app.
 #
 #   sh apps/homeassistant/build.sh              # build + package
 #   OUT=/tmp/apps sh apps/homeassistant/build.sh

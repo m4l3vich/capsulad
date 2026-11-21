@@ -141,8 +141,8 @@ or equate extra animation with polish.
 - Run the narrowest relevant checks after changes; use `-race` for touched shared
   lifecycle/state paths. Root Go tests do not cover nested modules. `make test` runs the root
   module, `sdk/go`, the nested app Go modules (the three assistants, the native Internet Radio,
-  the Home Assistant bridge and the AirPlay receiver), the Rust binding, the native crate and the
-  C++ example;
+  the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the native crate
+  and the C++ example;
   `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, the MicroPython
   host prelude) and repeats the radio and bridge Go modules; `make test-race` adds the race
   detector to the root module.

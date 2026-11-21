@@ -194,27 +194,28 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   plays distinct mute and unmute cues; a Bluetooth source that connects while the speaker accepts
   inbound links (speaker mode) plays the embedded connection cue (`question.wav`) once. The startup
   jingle plays once on installation, then only when `startup_sound_enabled` is on (off by default).
-  The same installation/`startup_sound_enabled` decision shows the **startup ring introduction**: a
-  short blue-teal (the aurora palette midpoint) run on the top of the ring that fades in from dark,
-  holds, fades back down in steps and releases. It is a temporary framework capture on the ring,
-  like the muted-microphone indication: the run length derives from the advertised pixel count
-  (pixel 0 is the top, indices advance clockwise; the run is clamped to the preset's 12-pixel
-  maximum on a larger ring), a newer system indication or app capture takes selection priority,
-  and the selected ring baseline — including an explicit blank for a closed active window — is
-  selected again on release instead of a forced black frame. An explicit no-ring-provider choice
-  still permits this transient framework indication on the ring (as volume, mute and alert
-  indications already do); its release returns the explicit blank frame, so the durable choice is
-  a dark baseline, not a ban on framework feedback.
-  The timeline is a 0.6 s fade-in inside a 1.5 s hold, then six 70 ms taper steps: about 1.9 s
-  total, deliberately not the ten-second jingle. The physical writer starts before that lifetime
-  begins, so a cold boot with slow boot-app spawning cannot consume the fade-in. The
-  introduction mirrors the cue's own decision rather than a second rule: the installation marker is
-  written only after the cue reaches the mixer, so a boot whose audio path cannot open does not
-  consume the one-shot cue and retries both the jingle and the introduction on the next boot; once
-  the marker exists, a boot with the startup sound off shows neither. Shutdown, cancellation and a
-  superseded introduction invalidate the fade generation, so a late fade step cannot blank or
-  release a newer owner (a newer indication merely wins selection while the introduction remains
-  privately owned and is destroyed by its own release).
+  The same installation/`startup_sound_enabled` decision shows the **startup ring introduction**:
+  the whole ring lights in the aurora palette midpoint blue-teal, filling clockwise from the top
+  pixel behind a soft leading edge, holding fully lit, then fading every pixel out together and
+  releasing. It is a temporary framework capture on the ring, like the muted-microphone indication:
+  the fill covers every advertised pixel (pixel 0 is the top, indices advance clockwise; nothing is
+  keyed to a board name or a fixed 12-pixel run), a newer system indication or app capture takes
+  selection priority, and the selected ring baseline — including an explicit blank for a closed
+  active window — is selected again on release instead of a forced black frame. An explicit
+  no-ring-provider choice still permits this transient framework indication on the ring (as volume,
+  mute and alert indications already do); its release returns the explicit blank frame, so the
+  durable choice is a dark baseline, not a ban on framework feedback.
+  The timeline is a 0.7 s clockwise fill, a 0.7 s full-ring hold and a 0.5 s smooth fade: about
+  1.9 s total, deliberately not the ten-second jingle. Content updates run every 30 ms under the
+  output loop's 33 ms writer tick, so the transition is bounded by the physical writer. The writer
+  starts before that lifetime begins, so a cold boot with slow boot-app spawning cannot consume the
+  fill. The introduction mirrors the cue's own decision rather than a second rule: the installation
+  marker is written only after the cue reaches the mixer, so a boot whose audio path cannot open
+  does not consume the one-shot cue and retries both the jingle and the introduction on the next
+  boot; once the marker exists, a boot with the startup sound off shows neither. Shutdown,
+  cancellation and a superseded introduction invalidate the frame generation, so a late frame
+  cannot blank or release a newer owner (a newer indication merely wins selection while the
+  introduction remains privately owned and is destroyed by its own release).
   Cues are framework playback streams under the master gain: they never block boot or input
   handling, and each toggle or step produces exactly one cue. The persisted 0–1 master position
   is mapped once to an exponential 60 dB taper (linear in dB, so 5% is about -57 dBFS) and is the
@@ -382,8 +383,13 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   run — including the ring's emitted colours and the tones' acoustic output — is still a gate,
   since frame and PCM submission is not physical output.
 - **PA announcement (`org.capsulad.pa`).** A background service that is already running; the
-  trigger is a routed `Play` call carrying one streamed RIFF/WAVE file. Feedback is one
-  `PlayResult` per accepted clip — its `detail` names the WAV's own format (`played 3200 frames at
+  trigger is a routed `Play` call carrying one streamed RIFF/WAVE file. The daemon's
+  authenticated `POST /api/apps/org.capsulad.pa/play` route is a relay to that same call: an
+  operator-scoped API key or an administrator session streams the raw WAV body, the route opens
+  no playback stream of its own, and closing the request cancels its call. The route admits one
+  request at a time and honors the app's frame credits, so a second request waits for the active
+  clip without filling the script host's queue; a direct app-bus caller uses the same credits.
+  Feedback is one `PlayResult` per accepted clip — its `detail` names the WAV's own format (`played 3200 frames at
   16000 Hz/1 ch`) — plus one `pa:` log line per call (`played`/`rejected`/`stalled`/`cancelled`,
   carrying both the WAV and mixer formats) and the daemon's own playback open/close records; there
   is no presentation, no microphone and no permission to change the speaker's master volume.
@@ -477,7 +483,7 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   `Close`/`SIGTERM` cancels the stream, aborts playback, closes the presentation and waits for its
   loops; a self-exit uses the same release path, and a killed process is covered by the framework,
   which releases the run's presentation, capture and audio stream.
-- **AirPlay receiver (`org.capsulad.airplay`).** The trigger is a sender on the local link: it
+- **AirPlay 2 receiver (`org.capsulad.airplay`).** The trigger is a sender on the local link: it
   finds the receiver through the two mDNS records the daemon publishes and connects to the
   daemon-allocated control port. Opening a TCP connection, querying receiver information, or
   completing HomeKit pair-setup/pair-verify does not take ownership: pairing protects and keys
@@ -543,8 +549,8 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   changes are mirrored to the sender without a second PCM gain stage. Disconnect and takeover
   do not reset the master; the framework mixer and limiter still apply. See
   [VERIFICATION.md](VERIFICATION.md) for host and device evidence and the
-  [AirPlay app guide](../apps/airplay/README.md) for protocol details.
-- **Home Assistant bridge (`org.capsulad.homeassistant`).** The app is installed, started and
+  [AirPlay 2 receiver app guide](../apps/airplay/README.md) for protocol details.
+- **Home Assistant integration (`org.capsulad.homeassistant`).** The app is installed, started and
   configured with an MQTT broker (named, or discovered with mDNS when `broker_discover` is on);
   a launch while it runs is an invocation that forces a discovery/state republish. Feedback is a
   retained `online`/`offline` availability topic with a broker last will for the crash path, a
@@ -581,9 +587,10 @@ from routing to driver submission; acoustics and photons are separate, explicitl
 Supervised applications and authenticated Web UI automation are untrusted for private data even with
 a valid API key or supervised run identity. The daemon has one local gRPC listener on the Unix
 socket; there is no network gRPC listener. The Web UI is a local administrator client of that
-socket, but its authenticated browser/API-key surface is not a second privilege plane: API keys stay
-limited to the read-only status and certificate endpoints and never reach recording, diagnostics or
-credential-mutating routes.
+socket, but its authenticated browser/API-key surface is not a second privilege plane: a status key
+is limited to the read-only status and certificate endpoints, while an operator key is the existing
+administration credential (the MCP tools plus the PA Speaker play relay). Neither scope exposes a
+generic AppBus, capture or audio proxy, and no API key can change the administrator password.
 
 - **Microphone indication, visible and audible.** A supervised app receives microphone audio only
   while both halves hold: a selected, visible, non-blank ring/segment presentation for that app at
@@ -619,7 +626,7 @@ credential-mutating routes.
   stay administrator reads. Per-app configuration, actions and run listings are scoped to the
   calling app; the administrator run table lists each built-in once under its own app ID with
   its real state, so a running clock shows as running and not as a Launch candidate.
-  The AirPlay receiver has a narrowly scoped exception for the master-volume setter only; its
+  The AirPlay 2 receiver has a narrowly scoped exception for the master-volume setter only; its
   authenticated READY run can follow the active AirPlay sender without gaining access to device
   settings or microphone controls.
 - **Foreign data stays foreign.** Apps do not read another app's runs, settings or logs; the

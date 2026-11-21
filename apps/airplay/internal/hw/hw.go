@@ -1,4 +1,4 @@
-// Package hw binds the AirPlay receiver to the capsulad framework: it is the
+// Package hw binds the AirPlay 2 receiver to the capsulad framework: it is the
 // only place in this app that touches the native SDK.
 //
 // Everything here goes through framework services. Sockets come from

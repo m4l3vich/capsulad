@@ -14,7 +14,7 @@
 // running is delivered as an invocation and forces a discovery/state republish.
 //
 // Feedback: availability is a retained "online"/"offline" topic with a broker
-// last will for the crash path, a diagnostic "Bridge status" sensor with JSON
+// last will for the crash path, a diagnostic "Integration status" sensor with JSON
 // attributes, and one state topic per entity. Every applied command republishes
 // the state it changed. A refused command is logged and reflected in the status
 // sensor; the device never changes state because of a message the bridge did not
@@ -336,7 +336,7 @@ func (a *app) runRuntime(ctx context.Context, rt *runtime) {
 			return
 		}
 		rt.setUpError(err.Error())
-		log.Printf("homeassistant: bridge setup failed: %v; retrying in %s", err, setupRetry)
+		log.Printf("homeassistant: integration setup failed: %v; retrying in %s", err, setupRetry)
 		if !sleepCtx(ctx, setupRetry) {
 			return
 		}
@@ -419,7 +419,7 @@ func (a *app) serve(ctx context.Context, rt *runtime) error {
 	watchers := hw.NewWatchers(framework, bridge, cfg, sensors, controller, catalog, log.Printf)
 	rt.set(bridge, session, controller)
 
-	log.Printf("homeassistant: bridge node=%q entities=%d surfaces=ring:%v display:%v sensors:%d bluetooth:%v touch:%v",
+	log.Printf("homeassistant: integration node=%q entities=%d surfaces=ring:%v display:%v sensors:%d bluetooth:%v touch:%v",
 		nodeID, len(catalog.Entities), caps.Ring, caps.SegmentDisplay, len(sensors), caps.Media, touchPublished)
 
 	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
@@ -442,7 +442,7 @@ func (a *app) serve(ctx context.Context, rt *runtime) error {
 	// touch subscription; the shutdown publish already happened inside the
 	// session.
 	controller.ReleaseAll()
-	log.Printf("homeassistant: bridge stopped; hardware released")
+	log.Printf("homeassistant: integration stopped; hardware released")
 	return nil
 }
 
@@ -502,12 +502,12 @@ func (a *app) action(_ context.Context, invoked *capsulad.ActionInvoked) {
 	case actionReconnect:
 		rt := a.currentRuntime()
 		if rt == nil {
-			a.reportAction(invoked, errors.New("the bridge is not running"), "")
+			a.reportAction(invoked, errors.New("the integration is not running"), "")
 			return
 		}
 		_, session, _ := rt.parts()
 		if session == nil {
-			a.reportAction(invoked, errors.New("the bridge is not connected"), "")
+			a.reportAction(invoked, errors.New("the integration is not connected"), "")
 			return
 		}
 		session.Reconnect("app action")
@@ -515,12 +515,12 @@ func (a *app) action(_ context.Context, invoked *capsulad.ActionInvoked) {
 	case actionRelease:
 		rt := a.currentRuntime()
 		if rt == nil {
-			a.reportAction(invoked, errors.New("the bridge is not running"), "")
+			a.reportAction(invoked, errors.New("the integration is not running"), "")
 			return
 		}
 		_, _, controller := rt.parts()
 		if controller == nil {
-			a.reportAction(invoked, errors.New("the bridge owns no hardware"), "")
+			a.reportAction(invoked, errors.New("the integration owns no hardware"), "")
 			return
 		}
 		controller.ReleaseRingAndDisplay()
@@ -545,11 +545,11 @@ func (a *app) reportAction(invoked *capsulad.ActionInvoked, err error, detail st
 func (a *app) republish(reason string) (int, error) {
 	rt := a.currentRuntime()
 	if rt == nil {
-		return 0, errors.New("the bridge is not running yet")
+		return 0, errors.New("the integration is not running yet")
 	}
 	bridge, _, _ := rt.parts()
 	if bridge == nil {
-		return 0, errors.New("the bridge is not running yet")
+		return 0, errors.New("the integration is not running yet")
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, actionTimeout)
 	defer cancel()
@@ -590,9 +590,9 @@ func (a *app) describe() string {
 	rt := a.currentRuntime()
 	if rt == nil {
 		if a.configErrorText() != "" {
-			return "bridge is stopped: " + a.configErrorText()
+			return "integration is stopped: " + a.configErrorText()
 		}
-		return "bridge is stopped"
+		return "integration is stopped"
 	}
 	bridge, session, _ := rt.parts()
 	if bridge == nil || session == nil {
@@ -600,9 +600,9 @@ func (a *app) describe() string {
 		setupError := rt.setupError
 		rt.mu.Unlock()
 		if setupError != "" {
-			return "bridge setup failed: " + setupError
+			return "integration setup failed: " + setupError
 		}
-		return "bridge is starting"
+		return "integration is starting"
 	}
 	snapshot := bridge.Snapshot()
 	state := "disconnected"
@@ -808,11 +808,11 @@ func (a *app) publishEvent(eventType, payloadJSON string) error {
 	}
 	rt := a.currentRuntime()
 	if rt == nil {
-		return failedPrecondition("the bridge is not running")
+		return failedPrecondition("the integration is not running")
 	}
 	bridge, _, _ := rt.parts()
 	if bridge == nil {
-		return failedPrecondition("the bridge is not running")
+		return failedPrecondition("the integration is not running")
 	}
 	if !hasEntity(bridge.Catalog(), "event", ha.SlugTouch) {
 		return failedPrecondition("no event entity is published: enable expose_touch, or the panel does not advertise partial gestures")

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build and package the AirPlay receiver app.
+# Build and package the AirPlay 2 receiver app.
 #
 #   sh apps/airplay/build.sh                    # build + package
 #   OUT=/tmp/apps sh apps/airplay/build.sh

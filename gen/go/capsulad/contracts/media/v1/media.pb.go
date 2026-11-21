@@ -357,7 +357,7 @@ type PlayerStatus struct {
 	PlaybackState    PlaybackState `protobuf:"varint,2,opt,name=playback_state,json=playbackState,proto3,enum=capsulad.contracts.media.v1.PlaybackState" json:"playback_state,omitempty"`
 	SupportedActions []MediaAction `protobuf:"varint,3,rep,packed,name=supported_actions,json=supportedActions,proto3,enum=capsulad.contracts.media.v1.MediaAction" json:"supported_actions,omitempty"`
 	// Display-friendly media indication, with NO title inference required.
-	AppName    string  `protobuf:"bytes,4,opt,name=app_name,json=appName,proto3" json:"app_name,omitempty"`             // "AirPlay"
+	AppName    string  `protobuf:"bytes,4,opt,name=app_name,json=appName,proto3" json:"app_name,omitempty"`             // "AirPlay 2 receiver"
 	SourceName string  `protobuf:"bytes,5,opt,name=source_name,json=sourceName,proto3" json:"source_name,omitempty"`    // "Apple Music — John's iPhone"
 	MediaName  *string `protobuf:"bytes,6,opt,name=media_name,json=mediaName,proto3,oneof" json:"media_name,omitempty"` // "Scarlet Fire — Otis McDonald"
 	// Optional structured metadata for consumers wanting to format a display.

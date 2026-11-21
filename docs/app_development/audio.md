@@ -245,7 +245,7 @@ longer than the actual turn.
 | Operation | App access |
 |---|---|
 | `GetAudioState` | Readable. Returns `master_volume` (0–1 control position), `microphone_muted`, `microphone_mute_is_hardware`. |
-| `SetMasterVolume` | Administrator, plus the installed AirPlay receiver's authenticated READY run. Every other supervised app gets `PERMISSION_DENIED`. |
+| `SetMasterVolume` | Administrator, plus the installed AirPlay 2 receiver's authenticated READY run. Every other supervised app gets `PERMISSION_DENIED`. |
 | `SetMicrophoneMuted` | Administrator only; a supervised app gets `PERMISSION_DENIED`. |
 
 `master_volume` is a **ceiling per app**, not a post-sum gain shared by everyone. The mixer
@@ -257,7 +257,7 @@ converts the position to gain once per volume change. Scaling PCM by `master_vol
 therefore applies a second, linear factor and is not equivalent to the device level.
 
 The AirPlay exception is fixed daemon policy, not a manifest feature. A phone or Mac changing
-the sender volume is controlling the speaker's physical level, so the installed AirPlay receiver
+the sender volume is controlling the speaker's physical level, so the installed AirPlay 2 receiver
 follows an authenticated session that owns the active media on the same persisted `master_volume`
 the keys and the Web UI use. Attaching, a probe request or an event-only connection does not move
 the level, and a retired sender cannot keep writing it. No package can opt in by declaring an
@@ -278,7 +278,7 @@ The gain stages, in order:
 |---|---|---|
 | Per-stream trim | `Playback.SetTrim`, daemon-internal; framework cues use a fixed `0.4` authored-level trim | No: not exposed by the app API or the SDK |
 | Conversation ducking | `0.25` with a 150 ms fade while a conversation is active | Indirectly, through `conversation_id` |
-| Master volume | `master_volume` (0–1 control position), converted once to the 60 dB logarithmic taper and applied after each app's streams are summed and clamped | Read from `GetAudioState`; administrator, plus the installed AirPlay receiver's authenticated READY run |
+| Master volume | `master_volume` (0–1 control position), converted once to the 60 dB logarithmic taper and applied after each app's streams are summed and clamped | Read from `GetAudioState`; administrator, plus the installed AirPlay 2 receiver's authenticated READY run |
 | Soft limiter | threshold 0.95, 5 ms peak-hold attack window, 150 ms release, after the master gain | No |
 
 - Volume 0 or global mute denies a new microphone capture.

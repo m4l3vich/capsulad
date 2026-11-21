@@ -1,4 +1,4 @@
-// Package session implements the AirPlay receiver: the RTSP control channel,
+// Package session implements the AirPlay 2 receiver: the RTSP control channel,
 // HAP pairing, the realtime/buffered audio streams and their lifecycle.
 //
 // This file declares the transport seam. Production code binds it to the

@@ -959,7 +959,7 @@ func TestSessionPairingSetupAudioAndTeardown(t *testing.T) {
 		t.Fatalf("players = %v", status["players"])
 	}
 	player, _ := players[0].(map[string]any)
-	if player["playerId"] != "airplay" || player["appName"] != "AirPlay" {
+	if player["playerId"] != "airplay" || player["appName"] != "AirPlay 2 receiver" {
 		t.Fatalf("player = %v", player)
 	}
 	if player["title"] != title || player["artist"] != artist {

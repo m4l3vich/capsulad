@@ -446,10 +446,11 @@ marusia: $(PACKAGER_TARGET)
 cadence: $(PACKAGER_TARGET)
 	$(MAKE) -C apps/cadence package OUT=$(abspath $(APPDIR)) CLI=$(abspath $(PACKAGER))
 
-# Simon Says is a QuickJS script app: the package is its manifest plus main.js,
-# with the contract test suite deliberately left out. Same conventions as the
-# assistants (staged package directory and <id>-<version>.tar.gz side by side
-# under $(APPDIR)); the script is authoritative for OUT/PACKAGE=0/CAPSULAD_CLI.
+# Simon Says is a QuickJS script app: the package is its manifest, main.js,
+# app guide and pre-rendered audio/ cues, with the contract test suite
+# deliberately left out. Same conventions as the assistants (staged package
+# directory and <id>-<version>.tar.gz side by side under $(APPDIR)); the script
+# is authoritative for OUT/PACKAGE=0/CAPSULAD_CLI.
 simon: $(PACKAGER_TARGET)
 	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/simon/build.sh
 
@@ -466,7 +467,7 @@ pa: $(PACKAGER_TARGET)
 radio: $(PACKAGER_TARGET)
 	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/radio/build.sh
 
-# The Home Assistant bridge is a native app: the build script compiles the Go
+# The Home Assistant integration is a native app: the build script compiles the Go
 # binary and packages it with the manifest, its descriptor and its bridge
 # documentation beside it. It needs the host native runtime (`make native`).
 homeassistant:
@@ -547,7 +548,7 @@ test-interpreter:
 
 # Host-side suites. Simon's contract tests load the shipped main.js into a fake
 # QuickJS host under Node; Internet Radio's unit tests are a nested Go module;
-# the Home Assistant bridge is another nested Go module; and the MicroPython
+# the Home Assistant integration is another nested Go module; and the MicroPython
 # host's pure-Python prelude has its own self-test (timers included).
 test-apps: test-simon test-radio test-homeassistant test-pa test-interpreter
 
@@ -564,7 +565,7 @@ test-radio:
 test-homeassistant:
 	cd apps/homeassistant && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
-# The AirPlay receiver's tests are protocol-, codec- and session-level: no
+# The AirPlay 2 receiver's tests are protocol-, codec- and session-level: no
 # daemon, no device and no network. The hw package compiles against the cgo SDK
 # binding, so this uses the same host link mode as the other native apps. When
 # the host has FFmpeg's development libraries the AAC decoder and its

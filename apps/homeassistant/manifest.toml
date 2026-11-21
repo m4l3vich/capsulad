@@ -1,5 +1,5 @@
 id = "org.capsulad.homeassistant"
-name = "Home Assistant bridge"
+name = "Home Assistant integration"
 version = "0.1.0"
 description = "Publishes the speaker's hardware and state to Home Assistant through MQTT discovery and applies Home Assistant's commands to the ring, the segment display and the Bluetooth source."
 background = true
@@ -30,7 +30,7 @@ docs = "docs/bridge.md"
 [[settings]]
 key = "broker_host"
 label = "Broker host"
-description = "MQTT broker host name or address. Empty means 'discover one with mDNS' when broker_discover is on; with discovery off the bridge reports that it has no broker and publishes nothing."
+description = "MQTT broker host name or address. Empty means 'discover one with mDNS' when broker_discover is on; with discovery off the integration reports that it has no broker and publishes nothing."
 type = "text"
 default = ""
 
@@ -104,7 +104,7 @@ default = true
 [[settings]]
 key = "keep_alive_seconds"
 label = "MQTT keepalive"
-description = "Keepalive interval. The bridge pings after half of it and treats a broker that stays silent beyond one and a half intervals as gone, then reconnects with backoff (1 s doubling to at most 1 min; reset only after a session has been usable for 30 s, so a broker that cannot be used does not make the device flap). At the 5 s minimum the keepalive can end a session before the 10 s subscribe budget does; both paths reconnect the same way. The broker's last will marks the device offline if the app dies without disconnecting."
+description = "Keepalive interval. The integration pings after half of it and treats a broker that stays silent beyond one and a half intervals as gone, then reconnects with backoff (1 s doubling to at most 1 min; reset only after a session has been usable for 30 s, so a broker that cannot be used does not make the device flap). At the 5 s minimum the keepalive can end a session before the 10 s subscribe budget does; both paths reconnect the same way. The broker's last will marks the device offline if the app dies without disconnecting."
 type = "integer"
 default = 30
 min = 5
@@ -200,7 +200,7 @@ default = false
 [[settings]]
 key = "expose_diagnostics"
 label = "Expose diagnostic entities"
-description = "Publish read-only uptime, master volume and microphone-mute entities, the bridge status sensor and the three bridge buttons. Master volume and microphone mute are read-only because the framework reserves both writes for a local administrator."
+description = "Publish read-only uptime, master volume and microphone-mute entities, the integration status sensor and the three diagnostic buttons. Master volume and microphone mute are read-only because the framework reserves both writes for a local administrator."
 type = "boolean"
 default = true
 
@@ -219,5 +219,5 @@ description = "Drop the current MQTT session (publishing offline first) and dial
 [[actions]]
 id = "release_hardware"
 label = "Release hardware"
-description = "Hand the ring and the segment display back to the device's configured default apps without stopping the bridge. Confirm before running: Home Assistant loses control of those two surfaces until the next command."
+description = "Hand the ring and the segment display back to the device's configured default apps without stopping the integration. Confirm before running: Home Assistant loses control of those two surfaces until the next command."
 confirm_before_run = true

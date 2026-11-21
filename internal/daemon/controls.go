@@ -18,7 +18,7 @@ import (
 // applyMasterVolume persists one validated master-volume level and applies it
 // to the local mixer immediately. The settings watcher also applies it, making
 // the call idempotent. volumeMu orders every canonical caller (physical keys,
-// Bluetooth adoption, the Web UI's audio control and the AirPlay receiver), so
+// Bluetooth adoption, the Web UI's audio control and the AirPlay 2 receiver), so
 // two identical requests cannot race into divergent durable or live states.
 func (d *Daemon) applyMasterVolume(v float64) error {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {

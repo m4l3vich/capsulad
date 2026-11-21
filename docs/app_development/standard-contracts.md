@@ -301,7 +301,7 @@ an idle or paused state remains addressable exactly as described above.
 | `player_id` | string | Unique within the provider; stable while the player lives. |
 | `playback_state` | enum | `PLAYBACK_STOPPED`, `PLAYBACK_PLAYING`, `PLAYBACK_PAUSED`, `PLAYBACK_BUFFERING`. |
 | `supported_actions` | enum[] | `MEDIA_PLAY`, `MEDIA_PAUSE`, `MEDIA_SKIP_NEXT`, `MEDIA_SKIP_PREVIOUS`. |
-| `app_name` | string | Display-friendly source application, for example `AirPlay`. |
+| `app_name` | string | Display-friendly source application, for example `AirPlay 2 receiver`. |
 | `source_name` | string | Display-friendly source, for example `Apple Music — John's iPhone`. |
 | `media_name` | optional string | Display-friendly media indication; no title inference required. |
 | `title`, `artist`, `album` | optional string | Structured metadata for consumers that format their own display. |

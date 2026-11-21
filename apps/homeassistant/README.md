@@ -1,8 +1,8 @@
-# Home Assistant bridge (`org.capsulad.homeassistant`)
+# Home Assistant integration (`org.capsulad.homeassistant`)
 
 ## Using this app
 
-The bridge is a background service that publishes the speaker to Home Assistant
+The integration is a background service that publishes the speaker to Home Assistant
 over MQTT and applies Home Assistant's commands through framework services. The
 rest of this page documents the entity set and implementation for maintainers.
 
@@ -11,13 +11,13 @@ rest of this page documents the entity set and implementation for maintainers.
   Avahi. Keep the discovery prefix aligned with Home Assistant's MQTT
   integration (usually `homeassistant`).
 - **Launch:** the package starts at boot and stays ready. Open
-  **Apps → Home Assistant bridge → Details** to launch it manually after a stop;
+  **Apps → Home Assistant integration → Details** to launch it manually after a stop;
   it declares no launch arguments.
 - **Controls:** use the entities Home Assistant discovers. The detail page also
   offers *Republish discovery and state*, *Reconnect the broker* and *Release
   hardware*. *Release hardware* hands the ring and segment display back to the
   device's configured defaults and asks for confirmation.
-- **Teardown:** *Stop* on the detail page ends the bridge until the next boot or
+- **Teardown:** *Stop* on the detail page ends the integration until the next boot or
   manual launch. It is a background app, not a selected provider, so a stop does
   not restart it. Uninstalling keeps its settings; retained discovery messages
   may remain on the broker.
@@ -29,13 +29,13 @@ rest of this page documents the entity set and implementation for maintainers.
     *Extra CA certificates*, and set *TLS server name* when the certificate
     names a different host.
   - **The ring or display stopped responding:** Home Assistant owns those
-    surfaces while the bridge drives them. Use *Release hardware*; the
+    surfaces while the integration drives them. Use *Release hardware*; the
     device's configured defaults resume.
   - **Panel buttons no longer dismiss alerts:** *Expose the panel buttons* uses
     a partial touch capture. Leave it off unless Home Assistant should own those
     controls; volume and microphone gestures stay with the device.
   - **The broker reports the device offline after a crash:** the last will is
-    retained. Reconnect or let the bridge reconnect; *Republish* refreshes the
+    retained. Reconnect or let the integration reconnect; *Republish* refreshes the
     retained state.
 
 Publishes a Capsula Mini to Home Assistant with MQTT discovery, and applies Home
@@ -60,7 +60,7 @@ no listening socket, and never touches a device node.
 | Panel button | `event` | state + control (opt-in) | `play_pause` and `centre` keys and completed swipes, via a partial touch capture. |
 | Framework sensors | `sensor` | state | One entity per `SensorService` sensor, with its unit and (when unambiguous) a device class. |
 | Uptime, master volume, microphone muted | `sensor`, `binary_sensor` | state | Diagnostic. Volume and mute are read-only: the framework reserves both writes for a local administrator. |
-| Bridge status | `sensor` | state | `online`, `connecting`, `stopped` or `error`, with JSON attributes (entity count, counters, last error). |
+| Integration status | `sensor` | state | `online`, `connecting`, `stopped` or `error`, with JSON attributes (entity count, counters, last error). |
 | Republish / Reconnect / Release hardware | `button` | control | Diagnostic recovery actions. |
 
 Availability is one retained topic, `<base_topic>/<node_id>/status`, carrying
@@ -118,7 +118,7 @@ All settings are declared in `manifest.toml` and rendered in the Web UI.
 
 ### Broker behaviour
 
-The bridge refuses to look healthy when it is not:
+The integration refuses to look healthy when it is not:
 
 - If the CONNECT/CONNACK exchange (10 s), the SUBACK wait (10 s) or the initial
   discovery publish fails, the session does not count as usable: it publishes the
@@ -137,7 +137,7 @@ The bridge refuses to look healthy when it is not:
 
 A rejected settings snapshot keeps the previous configuration: the app logs the
 reason and never starts with a half-applied configuration. Applying a changed
-configuration stops the running bridge first (publishing offline and releasing
+configuration stops the running integration first (publishing offline and releasing
 every presentation and capture) and then starts the new one.
 
 ### Topics
@@ -147,7 +147,7 @@ every presentation and capture) and then starts the new one.
 <base_topic>/<node_id>/status                              retained "online" / "offline"
 <base_topic>/<node_id>/<entity>/state                      entity state
 <base_topic>/<node_id>/<entity>/set                        entity command
-<base_topic>/<node_id>/<entity>/attributes                 JSON attributes (media, bridge status)
+<base_topic>/<node_id>/<entity>/attributes                 JSON attributes (media, status)
 ```
 
 The full payload contract is in [docs/bridge.md](docs/bridge.md).
@@ -165,9 +165,9 @@ bus (`proto/homeassistant.proto`):
 
 ## Ownership and safety
 
-- The bridge owns a surface only while it is driving it. A light OFF or a
+- The integration owns a surface only while it is driving it. A light OFF or a
   display switch OFF releases the capture and presentation; the device's
-  configured default app resumes. The bridge never paints a black frame over a
+  configured default app resumes. The integration never paints a black frame over a
   baseline the operator chose.
 - Enabling `expose_touch` takes the panel's `play_pause` and `centre` controls
   from the framework while the capture is held: a sounding framework alert or an
@@ -199,9 +199,9 @@ the SDK shim).
   Bluetooth source is two sensors plus four buttons. Album art, seeking, volume
   and a Home Assistant `media_player.play_media` target are not available; the
   app also has no audio decoder and no way to serve a file to Home Assistant, so
-  TTS or URL playback through this bridge would need a decoder in the app.
+  TTS or URL playback through this integration would need a decoder in the app.
 - **No segment text rendering.** The framework exposes segment cells (raw masks)
-  and built-in faces, no font. The bridge therefore publishes a face selector,
+  and built-in faces, no font. The integration therefore publishes a face selector,
   not a text entity. Arbitrary text would require a font in the app.
 - **No master volume or microphone-mute control.** `AudioService.SetMasterVolume`
   and `SetMicrophoneMuted` are administrator-only, so both are exposed read-only.

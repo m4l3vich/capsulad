@@ -1,4 +1,4 @@
-# `capsulad.contracts.media.v1.MediaPlayerService` in the AirPlay receiver
+# `capsulad.contracts.media.v1.MediaPlayerService` in the AirPlay 2 receiver
 
 `org.capsulad.airplay` provides the standard media contract for the live AirPlay
 session. This is the same contract the Internet Radio front end provides and the
@@ -15,7 +15,7 @@ Event-only and type-130 control-only `SETUP` forms do not.
 | Field | Value |
 |---|---|
 | `player_id` | `airplay` |
-| `app_name` | `AirPlay` |
+| `app_name` | `AirPlay 2 receiver` |
 | `source_name` | the sender's device name when it sent one, else the model parsed from its RTSP `User-Agent`, else the peer address |
 | `playback_state` | `PLAYBACK_BUFFERING` after an accepted `ANNOUNCE` or eligible `SETUP` starts the media session, `PLAYBACK_PLAYING` once `RECORD` or a valid `SETRATEANCHORTI` starts playout (buffered audio becomes playing only after decoded PCM reaches the sink), `PLAYBACK_PAUSED` on a rate-0 command |
 | `supported_actions` | `MEDIA_PLAY`, `MEDIA_PAUSE`, `MEDIA_SKIP_NEXT`, `MEDIA_SKIP_PREVIOUS` |

@@ -1,5 +1,5 @@
 id = "org.capsulad.airplay"
-name = "AirPlay"
+name = "AirPlay 2 receiver"
 version = "0.1.0"
 description = "AirPlay 2 audio receiver: iPhones, iPads and Macs see the speaker in their AirPlay output list, and the daemon's mixer, ring and media contract carry the session. Decodes ALAC, AAC-LC and PCM; AAC uses FFmpeg's libavcodec, linked at build time. See README.md."
 background = true

@@ -1,5 +1,5 @@
 // Package raop implements the legacy RAOP (AirPlay 1) wire pieces used by the
-// AirPlay receiver: the ANNOUNCE SDP body, the receiver RSA key exchange, the
+// AirPlay 2 receiver: the ANNOUNCE SDP body, the receiver RSA key exchange, the
 // RAOP timing packet codec and the playout clock inferred from timing
 // exchanges.
 //

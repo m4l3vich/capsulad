@@ -201,7 +201,7 @@ interface is privileged, and constrain egress destinations inside the handler th
   do not serve.
 - Read or update device settings, change master volume or microphone mute, force another app's
   capture, read diagnostics or retained logs, record or train wakewords, manage paired Bluetooth
-  devices, or launch/stop apps. The installed AirPlay receiver is the single
+  devices, or launch/stop apps. The installed AirPlay 2 receiver is the single
   framework-authorized exception for master volume; no manifest field can request it.
 - Address another app's configuration, runs, logs, assets-by-path assumptions or captures.
   `ApplicationConfigurationService` and run queries are scoped to the caller.
@@ -227,14 +227,14 @@ master-volume exception described below. The full method index is in [services.m
 |---|---|
 | `SettingsService` | `GetSettings`, `UpdateSettings`, `WatchSettings` |
 | `RoutingService` | `ForceRelease` |
-| `AudioService` | `SetMasterVolume` (administrator or the installed AirPlay receiver's authenticated READY run), `SetMicrophoneMuted` (`GetAudioState` is readable) |
+| `AudioService` | `SetMasterVolume` (administrator or the installed AirPlay 2 receiver's authenticated READY run), `SetMicrophoneMuted` (`GetAudioState` is readable) |
 | `AssistantService` | wakeword sample recording/listing/deleting, classifier training |
 | `ApplicationService` | `Launch`, `Stop`, `InstallApplication`, `UninstallApplication` (`ListApplications`, `ListRuntimes`, `GetBinaryProvenance` are readable; run listings are app-scoped) |
 | `SystemService` | `SetBluetoothDiscoverable`, `SetBluetoothIncomingConnections`, `ListPairedDevices`, `UnpairDevice`, `GetWebUiSecurity` |
 | `DiagnosticsService` | `GetSnapshot`, `WatchLogs` |
 
 The `SetMasterVolume` exception is fixed daemon policy, not a permission a package can request.
-The installed AirPlay receiver (`org.capsulad.airplay`) follows an authenticated active sender's
+The installed AirPlay 2 receiver (`org.capsulad.airplay`) follows an authenticated active sender's
 volume on the same persisted master the device keys and the Web UI control. The daemon accepts
 it only from that app's live READY run, and only when the Unix-socket peer PID (`SO_PEERCRED`) is
 the supervised process the daemon launched. A run-id claim, a request field or a manifest
@@ -304,10 +304,15 @@ fallback.
 ## Web UI and API keys
 
 The Web UI is HTTPS with a self-signed server certificate, an Argon2id administrator password and
-static opaque API keys. There is no client-certificate requirement. Static API keys are limited to
-`GET /api/status` and the public certificate; they cannot list apps, change settings, upload assets
-or use the WebSocket. Browser sessions authenticate the administrator and are used by the settings
-UI's document route.
+static opaque API keys. There is no client-certificate requirement. Static API keys carry a
+scope. A `status` key is limited to `GET /api/status` and the public certificate; it cannot list
+apps, change settings, upload assets or use the WebSocket. An `operator` key is full daemon
+administration, including the MCP tools. The one non-MCP mutation route that accepts an API key
+is `POST /api/apps/org.capsulad.pa/play`: an operator key may ask the PA Speaker to play one WAV,
+and the route relays the app's `Play` call. It is not a generic AppBus, audio, capture or asset
+proxy, and a `status` key is refused. An administrator browser session may also call that route,
+with the same `X-Capsulad-CSRF` and same-origin proof as the other browser mutations. Browser
+sessions authenticate the administrator and are used by the settings UI's document route.
 
 The local Unix socket is not protected by an API key. A process that can reach it as an
 un-supervised local caller is an administrator; apps are confined by their verified identity, not

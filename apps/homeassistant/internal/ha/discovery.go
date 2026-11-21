@@ -74,7 +74,7 @@ func BuildCatalog(topics Topics, device Device, caps Capabilities, sensors []Sen
 				},
 			},
 			Entity{
-				Component: "sensor", Slug: SlugBridgeStatus, Name: "Bridge status", Category: "diagnostic",
+				Component: "sensor", Slug: SlugBridgeStatus, Name: "Integration status", Category: "diagnostic",
 				Config: map[string]any{
 					"state_topic":           topics.StateTopic(SlugBridgeStatus),
 					"json_attributes_topic": topics.AttributesTopic(SlugBridgeStatus),

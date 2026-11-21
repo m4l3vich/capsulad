@@ -1,10 +1,10 @@
 // org.capsulad.homeassistant.v1 is the local interface the Home Assistant
-// bridge publishes on the app bus. It is the app-facing contract for other
+// integration publishes on the app bus. It is the app-facing contract for other
 // supervised apps (and for an administrator running capsulad-cli): it reports
-// the bridge's state, asks for a discovery republish, and raises a Home
+// the integration's state, asks for a discovery republish, and raises a Home
 // Assistant event.
 //
-// The MQTT side of the bridge (topics, discovery payloads, entity ids) is
+// The MQTT side of the integration (topics, discovery payloads, entity ids) is
 // documented in docs/bridge.md, which the manifest also publishes as this
 // interface's documentation.
 syntax = "proto3";
@@ -22,7 +22,7 @@ service HomeAssistantService {
   // Assistant's MQTT integration.
   rpc PublishDiscovery(PublishDiscoveryRequest) returns (PublishDiscoveryResponse);
 
-  // PublishEvent raises one event on the bridge's Home Assistant event entity,
+  // PublishEvent raises one event on the integration's Home Assistant event entity,
   // so another app can leave a trace in Home Assistant's automation engine.
   rpc PublishEvent(PublishEventRequest) returns (PublishEventResponse);
 }

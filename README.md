@@ -111,7 +111,8 @@ version.
   though it stays discoverable and controllable through the same service.
 - **HTTPS Web UI.** An embedded Vue SPA served by the daemon, authenticated with an
   Argon2id admin password and server-side sessions; static API keys carry explicit scopes
-  (`status` is read-only; `operator` is full daemon administration, including the MCP tools),
+  (`status` is read-only; `operator` is full daemon administration, including the MCP tools
+  and the PA Speaker's `POST /api/apps/org.capsulad.pa/play` relay),
   and the Access page now shows each key's grant. Browser traffic uses the binary protobuf
   `/ws` protocol.
 - **MCP frontend.** The daemon also serves a Model Context Protocol server at `/mcp` on the
@@ -203,25 +204,28 @@ version.
   like any other package. `org.capsulad.simon` is a QuickJS colour-and-tone memory game that
   owns the LED ring, an optional score display, a full-panel capture and one speaker stream
   while it runs; `org.capsulad.pa` is a background MicroPython
-  service that plays one streamed WAV per routed `Play` call and replies after the queued audio
+  service that plays one streamed WAV per routed `Play` call (or per authenticated
+  `POST /api/apps/org.capsulad.pa/play` relay) and replies after the queued audio
   drains; `org.capsulad.radio` is a single native internet-radio app that keeps the station
   list, fetches and decodes the selected HTTP(S) MP3 stream in-process through the shared
   `libcapsulad` transport, runs only while it has audio or a live indication, shows the station
   number (or the pause sign) and serves the standard media contract —
   there is no companion package and no app-to-app audio hop; and
-  `org.capsulad.homeassistant` is a native MQTT bridge that publishes the speaker to Home
-  Assistant through discovery, publishes its state and applies Home Assistant's commands to the
+  `org.capsulad.homeassistant` is a native Home Assistant integration that publishes the speaker to Home
+  Assistant through MQTT discovery, publishes its state and applies Home Assistant's commands to the
   ring, the display and the Bluetooth source; `org.capsulad.airplay` is a native AirPlay 2 audio
   receiver — the daemon allocates its RTSP, audio and event listeners, Avahi publishes
   `_airplay._tcp` and `_raop._tcp`, sender audio is decoded by the app and mixed by the
   framework, the ring shows the cover-art palette, and the standard media contract carries the
-  household controls back to the sender; and `apps/cadence` — optional voice-assistant client
-  for a self-hosted Cadence server: framework wake-word and talk-key activation only (an
-  API/automation activation is refused rather than fabricating a physical press, because
-  cadence.v2 grants owner privileges only for a heard wake word or a press), ring capture
-  indication, Opus mic uplink, streamed Opus reply playback, follow-up, dismiss/cancel/error
-  cleanup; credentials in masked settings and never logged. None is compiled into the daemon, and none
-  is installed by default.
+  household controls back to the sender; and `apps/cadence` — **Cadence Client**, an optional
+  voice-assistant client for a self-hosted Cadence server: framework wake-word and talk-key
+  activation only (an API/automation activation is refused rather than fabricating a physical
+  press, because cadence.v2 grants owner privileges only for a heard wake word or a press), ring
+  capture indication, Opus mic uplink, streamed Opus reply and announcement playback, follow-up,
+  dismiss/cancel/error cleanup; a one-time dashboard code enrolls the device and its returned
+  token is stored in a masked setting, with the reported board (`vk-capsula-mini` or `sim`)
+  matching the dashboard's model. Credentials in masked settings and never logged. None is
+  compiled into the daemon, and none is installed by default.
 - **Web UI:** six destinations — Overview, Apps, Settings, Assets, Access and Diagnostics. The Apps
   page lists installed packages with their running/system state and installs, updates or removes
   one through the session-authenticated `/api/apps` routes (a raw `.tar.gz` upload, refused while
@@ -391,13 +395,15 @@ before the next turn.
 - **Web UI and MCP boundary.** Sessions use a self-signed HTTPS certificate, an Argon2id
   password and CSRF/origin checks. Static API keys carry explicit scopes: `status` reaches
   only `GET /api/status`, the public certificate and the two matching MCP read tools;
-  `operator` reaches the MCP administration tools. The browser's Access page mints
+  `operator` reaches the MCP administration tools and the PA Speaker play relay
+  (`POST /api/apps/org.capsulad.pa/play`). The browser's Access page mints
   `status` keys, and a key created before scopes existed stays read-only. MCP accepts only an
   API key (never a session cookie) and checks Origin. The Access page lists every key with its
   scope, so a status key and an administration key can be told apart; the page itself mints
   status-only keys, and an `operator` key is created on the device with
   `capsulad-cli auth key create NAME --scope operator`. There is no generic AppBus, capture,
-  audio or asset proxy for either frontend.
+  audio or asset proxy for either frontend; the PA route is the one app-specific relay and the
+  daemon never owns its playback stream.
 - **Asset store.** `<data-dir>/assets` is a plain directory catalog: every regular,
   non-symlink file below the root is an asset, addressed by its slash-relative path and
   visible read-only at `/assets`. Only the session-authenticated admin API writes it.
@@ -424,7 +430,7 @@ before the next turn.
     configured `xtoken_id` (empty when unset) and whose refusal is logged. A turn with no
     recognised text and no command is reported as a no-answer with the terminal error
     indication, never as a completed turn.
-  - `apps/homeassistant`, the bridge. It is an MQTT client for the broker named in its
+  - `apps/homeassistant`, the Home Assistant integration. It is an MQTT client for the broker named in its
     `broker_host`/`broker_port` settings, or for the broker it finds by browsing `_mqtt._tcp`
     when `broker_discover` is on. It publishes its discovery payloads, its availability and one state
     topic per published entity, and applies the commands Home Assistant sends back to the ring,
@@ -525,7 +531,8 @@ before the next turn.
   streaming a connected source, so the next connection cannot land on its Headset endpoint.
 - **The Web UI binds TCP and uses a self-signed certificate.** Set `-web-addr`
   deliberately and trust the fingerprint shown by `capsulad-cli cert status`; browsers
-  warn until then. API keys never reach the console, AppBus, captures or audio; `-web-addr`
+  warn until then. API keys have no generic console, AppBus, capture or audio proxy; an
+  `operator` key may call the one app-specific PA Speaker play relay. `-web-addr`
   also exposes the MCP endpoint, which requires an `operator`-scoped key for anything beyond
   status reads.
 - **Memory and `/data` are the binding constraints.** The board has 240 MiB RAM without
@@ -579,22 +586,22 @@ before the next turn.
   app to its error state with no user activity.
   A station switch while active replaces the owned playback, so a superseded session's late
   open, read or failure cannot clear the newer stream or selection.
-- **The Home Assistant bridge needs a reachable MQTT broker.** A named broker, or an
+- **The Home Assistant integration needs a reachable MQTT broker.** A named broker, or an
   mDNS-discoverable one (`broker_discover` browses `_mqtt._tcp`; on a build whose daemon has no
   responder — the simulator answered `DiscoveryService/Browse` with `unknown service` — a broker
   must be named). Without one it publishes nothing and says so in the status sensor. It exports
   the surfaces the device advertises (ring, segment display, Bluetooth source) plus the sensor,
   touch and diagnostics entities that are switched on; neither master volume nor microphone mute
-  is writable by the bridge, so both are read-only entities, and the display is a face selector
+  is writable by the integration, so both are read-only entities, and the display is a face selector
   rather than text because the framework ships no segment font. The Bluetooth source is enumerated
   (`sensor` with `playing`/`idle`/`off`, a title sensor) with four transport buttons rather than a
   `media_player`, because Home Assistant's MQTT integration has no media-player platform. Sensor
   units are published in Home Assistant's vocabulary (`°C`, `lx`) and anything else verbatim
-  without a device class, and entity ids are Home Assistant's own: the bridge publishes
+  without a device class, and entity ids are Home Assistant's own: the integration publishes
   `unique_id`, not `object_id`. A broker that is plaintext on the LAN, a wrong credential, an
   unauthorised topic or an unknown command is reported, never guessed or retried into a state
   change; a broker that accepts a connection and then stops answering (no CONNACK or SUBACK, or a
-  write that wedges) cannot leave a half-online bridge: both exchanges are bounded at 10 s, writes
+  write that wedges) cannot leave a half-online integration: both exchanges are bounded at 10 s, writes
   are bounded and context-aware (2 s for `DISCONNECT`, 5 s for client control writes), so the
   session fails, publishes `offline` and retries with a paced backoff — 1 s, 2 s, 4 s … capped at
   1 min, reset only after a session became usable and held for 30 s — so even a healthy session
@@ -644,8 +651,8 @@ before the next turn.
 | `sdk/native` | Rust shared engine behind the C ABI: UDS gRPC, HTTP/TLS, remote gRPC, primitives, header and C example |
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
-| `apps/devtools`, `apps/dumbassistant`, `apps/marusia` | development apps and the two optional assistants |
-| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio (native, single package), the Home Assistant bridge, and the AirPlay 2 receiver. Each package root `README.md` is also the app's packaged user guide |
+| `apps/devtools`, `apps/dumbassistant`, `apps/marusia`, `apps/cadence` | development apps and the three optional assistants (Cadence Client included) |
+| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio (native, single package), the Home Assistant integration, and the AirPlay 2 receiver. Each package root `README.md` is also the app's packaged user guide |
 | `deploy/rockchip-stock` | the single boot hook and bring-up scripts |
 | `proto` | framework and standard contract schemas (media, clock, ring, web) |
 | `docs` | application manual, development, verification, hardware, behavior, wakeword and glossary |
@@ -665,7 +672,7 @@ before the next turn.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Capsula Mini rev 4 hardware evidence and firmware findings |
 | [docs/WAKEWORD.md](docs/WAKEWORD.md) | detection, enrollment, training and model evidence |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | project terms as this codebase uses them |
-| [apps/radio/README.md](apps/radio/README.md), [apps/simon/README.md](apps/simon/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md), [apps/airplay/README.md](apps/airplay/README.md), [apps/airplay/docs/media.md](apps/airplay/docs/media.md) | each first-party app's own manual, which is also the guide packaged with it: the internet radio's station list, named picker, controls, display states, streaming limits and the migration off the retired tuner companion; Simon Says' colour/tone mapping, score and exit; the Home Assistant bridge's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, rejections and limits; the AirPlay receiver's supported sender flows, its advertisement records, its explicit AAC/FairPlay/PTP gaps, settings and the unproven device gate; and the media players they provide |
+| [apps/radio/README.md](apps/radio/README.md), [apps/simon/README.md](apps/simon/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md), [apps/airplay/README.md](apps/airplay/README.md), [apps/airplay/docs/media.md](apps/airplay/docs/media.md) | each first-party app's own manual, which is also the guide packaged with it: the internet radio's station list, named picker, controls, display states, streaming limits and the migration off the retired tuner companion; Simon Says' colour/tone mapping, score and exit; the Home Assistant integration's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, HTTP relay, rejections and limits; the AirPlay 2 receiver's supported sender flows, its advertisement records, its explicit AAC/FairPlay/PTP gaps, settings and the unproven device gate; and the media players they provide |
 | [AGENTS.md](AGENTS.md) | repository working rules, lifecycle invariants and verification gates |
 
 ## Attribution
@@ -684,7 +691,7 @@ before the next turn.
 - **Shairport Sync** (https://github.com/mikebrady/shairport-sync) and **NQPTP**
   (https://github.com/mikebrady/nqptp) — the reference for AirPlay wire behaviour (RTSP method
   handling, HAP pairing key derivation, RTP/RTCP and timing packet layouts, PTP message layout).
-  The AirPlay receiver reproduces the fixed FairPlay handshake reply constants from
+  The AirPlay 2 receiver reproduces the fixed FairPlay handshake reply constants from
   `rtsp.c` (`handle_fp_setup`), which is MIT-licensed: "Copyright (c) James Laird 2013;
   modifications copyright (c) Mike Brady 2014–2026. Permission is hereby granted, free of
   charge, to any person obtaining a copy of this software and associated documentation files
@@ -692,7 +699,7 @@ before the next turn.
   and this permission notice shall be included in all copies or substantial portions of the
   Software." No other code from either tree is included; NQPTP is GPLv2 and nothing GPL is
   linked or copied.
-- **FFmpeg** (https://ffmpeg.org) — the AirPlay receiver links `libavcodec`/`libavutil` for AAC
+- **FFmpeg** (https://ffmpeg.org) — the AirPlay 2 receiver links `libavcodec`/`libavutil` for AAC
   decoding, the same decoder the upstream receiver links. FFmpeg is LGPL-2.1-or-later; the app
   uses only the AAC decoder and links the libraries, and the deployment ships them as separate
   shared objects where the platform does not already provide them.
@@ -710,14 +717,18 @@ before the next turn.
   the station wake-word work that the personal wake-word pipeline was developed and validated
   against. No source from that project is vendored here; the detection and training evidence
   is in [docs/WAKEWORD.md](docs/WAKEWORD.md).
-- **Cadence** — the voice-assistant platform the `apps/cadence` client speaks to (device link
-  protocol `cadence/v2`: WebSocket `GET /v2/device`, protobuf `Envelope` frames, bearer device
-  token, Opus 16 kHz mono uplink, Opus reply streams). Source:
-  https://git.shino.boo/devilreef/cadence/ (self-hosted, GitLab). The client implements the
-  wire protocol against that upstream definition; no upstream source code is vendored and no
-  vendor binary is redistributed. Its protobuf files are an independently written subset of
-  cadence.v2 (same field numbers and enums), and its `.binpb` test vectors are upstream-generated
-  data from upstream `main` commit `f9571ad0d89acd7326414adf04a85ea1c9dec131`.
+- **Cadence** — the voice-assistant platform Cadence Client (`apps/cadence`) speaks to (device
+  link protocol `cadence/v2`: WebSocket `GET /v2/device`, protobuf `Envelope` frames, bearer
+  device token, Opus 16 kHz mono uplink, Opus reply and announcement streams; enrollment at
+  `POST /v2/enroll`). Source: https://git.shino.boo/devilreef/cadence/ (self-hosted, GitLab).
+  The client implements the wire protocol against that upstream definition; no upstream source
+  code is vendored and no vendor binary is redistributed. Its protobuf files are an
+  independently written subset of cadence.v2 (same field numbers and enums), and its `.binpb`
+  test vectors are upstream-generated data from upstream `main` commit
+  `f9571ad0d89acd7326414adf04a85ea1c9dec131`. The announcement flow, enrollment
+  `/v2/enroll` contract and board ids were checked against upstream `main` commit
+  `9a6b257fd6e21b8f0e725461af332489fb11e383`; that revision adds the `vk-capsula-mini`
+  speaker model and optional trace fields only.
 
 ## Quick start
 
@@ -730,6 +741,6 @@ mkdir -p build/demo
 ```
 
 `make test` runs the root Go module, `sdk/go`, the nested app Go modules (the three assistants,
-the Internet Radio, the Home Assistant bridge and the AirPlay receiver), the Rust binding, the
+the Internet Radio, the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the
 native crate and the C++ example; `make test-apps` adds the Node/CPython app suites. See
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full build, packaging and deployment workflow.

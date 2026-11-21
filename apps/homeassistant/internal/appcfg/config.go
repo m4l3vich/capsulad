@@ -279,7 +279,7 @@ func Build(values Values) (Config, []string, error) {
 	}
 	if cfg.ExposeTouch {
 		warnings = append(warnings,
-			"expose_touch is on: the bridge holds a partial touch capture, so the panel's play_pause and "+
+			"expose_touch is on: the integration holds a partial touch capture, so the panel's play_pause and "+
 				"centre controls belong to Home Assistant while it is connected; the volume and microphone "+
 				"gestures stay with the device")
 	}

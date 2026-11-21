@@ -57,7 +57,7 @@ message PlayerStatus {
   repeated MediaAction supported_actions = 3;
 
   // Display-friendly media indication, with NO title inference required.
-  string app_name = 4;           // "AirPlay"
+  string app_name = 4;           // "AirPlay 2 receiver"
   string source_name = 5;        // "Apple Music — John's iPhone"
   optional string media_name = 6; // "Scarlet Fire — Otis McDonald"
 
