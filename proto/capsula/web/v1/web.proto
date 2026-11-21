@@ -536,6 +536,10 @@ message ApplicationView {
   RingView ring = 13;
   string ring_error = 14;
   bool selected_default = 15;
+  // Plain text supplied by the app manifest; empty when no guide is declared.
+  string user_guide = 16;
+  // "assistant" and the resource IDs for which this app is selected.
+  repeated string selected_default_roles = 17;
 }
 
 message DiagnosticsView {

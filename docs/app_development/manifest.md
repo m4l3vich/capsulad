@@ -20,6 +20,7 @@ keys are rejected, so a typo cannot silently disable a feature.
 | `name` | string | — | Required, must not be blank. Display name. |
 | `version` | string | — | Required, must not be empty. Free-form; compared for equality only. |
 | `description` | string | `""` | Shown in listings. |
+| `user_guide` | string | `""` | Optional plain-text instructions for users, shown in the application's Web UI guide. An empty string means no guide. |
 | `background` | bool | `false` | The app is started at boot and is not stopped when it is deselected as a provider. |
 | `start_on_boot` | bool | `false` | Start a run when the daemon starts; deselecting the app does not stop it. |
 | `restart_on_failure` | bool | `false` | Restart after an abnormal exit or a lost framework connection. |

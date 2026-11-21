@@ -164,6 +164,8 @@ export const SCHEMA = Object.freeze({
     { no: 13, name: "ring", kind: "message", type: "capsula.web.v1.RingView" },
     { no: 14, name: "ringError", kind: "string" },
     { no: 15, name: "selectedDefault", kind: "bool" },
+    { no: 16, name: "userGuide", kind: "string" },
+    { no: 17, name: "selectedDefaultRoles", kind: "string", repeated: true },
   ] },
   "capsula.web.v1.AssistantSettings": { name: "capsula.web.v1.AssistantSettings", fields: [
     { no: 1, name: "defaultAssistantApp", kind: "string" },
