@@ -51,7 +51,9 @@ func (d *SDKDialer) Dial(ctx context.Context) (Conn, error) {
 	if d.Config != nil {
 		cfg = d.Config()
 	}
-	if cfg.BaseURL == "" {
+	if cfg.BaseURL == "" || cfg.Token == "" {
+		// An enrollment code is not a bearer credential: the link stays down
+		// until the exchange stored a token.
 		return nil, ErrNoServer
 	}
 	u, err := url.Parse(cfg.BaseURL)

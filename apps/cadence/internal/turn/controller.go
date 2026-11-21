@@ -16,14 +16,31 @@ import (
 // Controller runs assistant turns one at a time on its own goroutine. The
 // framework queues activations into it, the link pushes envelopes into it, and
 // nothing it calls blocks the link's reader for long.
+type linkEvent struct {
+	gen uint64
+	up  bool
+	env *cadencev2.Envelope
+}
+
 type Controller struct {
 	d Deps
 
 	triggers chan Trigger
 	releases chan string
-	inbox    chan *cadencev2.Envelope
-	dismiss  chan struct{}
-	linkDown chan struct{}
+	// events carries link lifecycle and envelopes in one order, so a
+	// StreamStart queued before a disconnect is processed before the down
+	// event, and a frame from an old connection cannot be handled after a new
+	// one is up.
+	events       chan linkEvent
+	announceDone chan announceDone
+	dismiss      chan struct{}
+	stopped      chan struct{}
+
+	// linkGen is the generation of the live link and linkUp its state. Both
+	// are Run-goroutine fields.
+	linkGen     uint64
+	linkUp      bool
+	announceSeq atomic.Uint64
 
 	// originRefused logs the unusable-origin refusal once, not per activation.
 	originRefused bool
@@ -37,6 +54,14 @@ type Controller struct {
 	// that lost a frame is degraded: an audibly holed reply must not offer a
 	// follow-up window.
 	dropped atomic.Int64
+
+	// runCtx is the run's lifetime, set by Run before the loop. Announcements
+	// open playback and a conversation on it; shutdown aborts them.
+	runCtx context.Context
+	// announce is the announcement stream playing now, nil for none. It is
+	// independent of a turn: cadence.v2 sends announcements outside a session,
+	// and the upstream device leaves a running session alone when one arrives.
+	announce *announcement
 }
 
 // New builds a controller. Zero tuning uses the documented defaults.
@@ -62,13 +87,14 @@ func New(d Deps) *Controller {
 		d.StreamQueue = DefaultStreamQueue
 	}
 	return &Controller{
-		d:        d,
-		triggers: make(chan Trigger, 8),
-		releases: make(chan string, 8),
-		inbox:    make(chan *cadencev2.Envelope, 128),
-		dismiss:  make(chan struct{}, 1),
-		linkDown: make(chan struct{}, 1),
-		pending:  make(map[string]struct{}),
+		d:            d,
+		triggers:     make(chan Trigger, 8),
+		releases:     make(chan string, 8),
+		events:       make(chan linkEvent, 128),
+		announceDone: make(chan announceDone, 8),
+		dismiss:      make(chan struct{}, 1),
+		stopped:      make(chan struct{}),
+		pending:      make(map[string]struct{}),
 	}
 }
 
@@ -100,43 +126,63 @@ func (c *Controller) Dismiss() {
 	}
 }
 
-// LinkDown tells the controller the link ended; the running turn is cancelled
-// locally because its reply can no longer arrive.
-func (c *Controller) LinkDown() {
+// LinkChanged reports a connection generation going up or down. It is queued
+// on the same channel as envelopes, so ordering is the link reader's order,
+// and it waits for room because losing a down event loses ownership.
+func (c *Controller) LinkChanged(up bool, generation uint64) {
+	ev := linkEvent{gen: generation, up: up}
 	select {
-	case c.linkDown <- struct{}{}:
-	default:
+	case c.events <- ev:
+	case <-c.stopped:
 	}
 }
 
-// Message is the link handler. It hands one envelope to the controller without
-// blocking the reader for long: past a short wait the frame is dropped and
-// logged, because a stalled link would also stop ping replies.
-func (c *Controller) Message(env *cadencev2.Envelope) {
+// Message is the link handler. It hands one envelope and its connection
+// generation to the controller. Advisory frames may be dropped after a short
+// wait and are logged; terminal StreamEnd/SessionClose wait for room so
+// playback and ducking always get their terminal event.
+func (c *Controller) Message(generation uint64, env *cadencev2.Envelope) {
+	ev := linkEvent{gen: generation, env: env}
+	if terminalEnvelope(env) {
+		// Losing a close/end would leave playback and ducking with no
+		// terminal event. Block until the controller takes it.
+		select {
+		case c.events <- ev:
+		case <-c.stopped:
+		}
+		return
+	}
 	select {
-	case c.inbox <- env:
+	case c.events <- ev:
 		return
 	default:
 	}
 	t := time.NewTimer(250 * time.Millisecond)
 	defer t.Stop()
 	select {
-	case c.inbox <- env:
+	case c.events <- ev:
 	case <-t.C:
 		c.dropped.Add(1)
-		c.d.Log.Printf("controller_busy: dropped %s", envelopeName(env))
+		c.d.Log.Printf("controller_busy: dropped %s gen=%d", envelopeName(env), generation)
 	}
+}
+
+func terminalEnvelope(env *cadencev2.Envelope) bool {
+	return env.GetSessionClose() != nil || env.GetStreamEnd() != nil
 }
 
 // Run serves triggers, releases, envelopes and timers until ctx ends. Every
 // terminal path releases the microphone, indication, conversation, playback
 // and encoder.
 func (c *Controller) Run(ctx context.Context) {
+	c.runCtx = ctx
 	var t *turn
 	defer func() {
+		c.abortAnnouncement("shutdown")
 		if t != nil {
 			t.cancel("shutdown")
 		}
+		close(c.stopped)
 	}()
 	for {
 		var (
@@ -176,25 +222,64 @@ func (c *Controller) Run(ctx context.Context) {
 				c.pending[id] = struct{}{}
 			}
 
-		case env := <-c.inbox:
-			if t != nil {
-				t.handle(env)
-			} else {
-				c.refuse(env)
+		case ev := <-c.events:
+			switch {
+			case ev.up:
+				if ev.gen == 0 || ev.gen < c.linkGen {
+					break
+				}
+				if c.linkGen != 0 && ev.gen != c.linkGen {
+					// A new connection superseded any ownership the old one
+					// had, even if its down event was delayed.
+					c.abortAnnouncement("link_down")
+					if t != nil {
+						t.cancel("link_down")
+						t = nil
+					}
+				}
+				c.linkGen, c.linkUp = ev.gen, true
+			case ev.env == nil:
+				if ev.gen != c.linkGen {
+					break
+				}
+				c.linkUp = false
+				c.abortAnnouncement("link_down")
+				if t != nil {
+					t.cancel("link_down")
+					t = nil
+				}
+			case !c.linkUp || ev.gen != c.linkGen:
+				// A frame from a connection that is gone (or older than the
+				// live one) must not open playback or ducking.
+				c.d.Log.Printf("stale_link_frame gen=%d current=%d up=%v", ev.gen, c.linkGen, c.linkUp)
+			default:
+				if c.handleAnnouncement(ev.gen, ev.env) {
+					break
+				}
+				if t != nil {
+					t.handle(ev.env)
+				} else {
+					c.refuse(ev.env)
+				}
+			}
+
+		case done := <-c.announceDone:
+			a := c.announce
+			if a == nil || a.owner != done.owner || a.id != done.id {
+				break
+			}
+			c.announce = nil
+			if !a.ended {
+				a.ended = true
+				c.d.Log.Printf("announce_end stream=%s code=%s packets=%d", a.id, done.code, a.packets)
 			}
 
 		case <-c.dismiss:
 			c.drainTriggers()
 			clear(c.pending)
+			c.abortAnnouncement("dismissed")
 			if t != nil {
 				t.cancel("dismissed")
-				t = nil
-			}
-
-		case <-c.linkDown:
-			// Ignore a stale signal: only a link that is still down cancels.
-			if t != nil && !c.d.Link.Connected() {
-				t.cancel("link_down")
 				t = nil
 			}
 
@@ -249,7 +334,7 @@ func (c *Controller) drainTriggers() {
 }
 
 // refuse answers envelopes that need no turn: a reply stream for a session the
-// server no longer runs, or an announcement this client has no path for.
+// server no longer runs.
 func (c *Controller) refuse(env *cadencev2.Envelope) {
 	if mo := env.GetMicOpen(); mo != nil {
 		// A screen press in the room asks this speaker to open its microphone.
@@ -258,13 +343,8 @@ func (c *Controller) refuse(env *cadencev2.Envelope) {
 		c.d.Log.Printf("mic_open_refused session=%s origin=%s: no local owner signal", mo.GetSessionId(), mo.GetOriginDeviceId())
 		return
 	}
-	if st := env.GetStreamStart(); st != nil {
-		switch st.GetPurpose() {
-		case cadencev2.StreamPurpose_STREAM_PURPOSE_ANNOUNCE:
-			c.d.Log.Printf("announce_refused stream=%s: announcements play outside an activation", st.GetStreamId())
-		case cadencev2.StreamPurpose_STREAM_PURPOSE_REPLY:
-			c.d.Log.Printf("stream_refused stream=%s: no session", st.GetStreamId())
-		}
+	if st := env.GetStreamStart(); st != nil && st.GetPurpose() == cadencev2.StreamPurpose_STREAM_PURPOSE_REPLY {
+		c.d.Log.Printf("stream_refused stream=%s: no session", st.GetStreamId())
 	}
 }
 

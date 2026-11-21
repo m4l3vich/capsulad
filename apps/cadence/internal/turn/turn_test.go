@@ -1,9 +1,9 @@
 package turn_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -66,13 +66,22 @@ func (l *fakeLink) count(pred func(*cadencev2.Envelope) bool) int {
 }
 
 type fakePlayback struct {
-	mu      sync.Mutex
-	writes  [][]byte
-	closed  bool
-	aborted bool
+	mu       sync.Mutex
+	writes   [][]byte
+	closed   bool
+	aborted  bool
+	ctx      context.Context
+	gate     <-chan struct{}
+	writeErr error
 }
 
 func (p *fakePlayback) Write(b []byte) error {
+	if p.gate != nil {
+		<-p.gate
+	}
+	if p.writeErr != nil {
+		return p.writeErr
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.aborted {
@@ -143,6 +152,9 @@ type fakeAudio struct {
 	micErr    error
 	playbacks []*fakePlayback
 	conv      *fakeConv
+	convs     []*fakeConv
+	gate      chan struct{}
+	writeErr  error
 	openOrder *atomic.Int32
 }
 
@@ -156,16 +168,30 @@ func (a *fakeAudio) OpenMic(context.Context, string, string) (turn.MicStream, er
 	return a.mic, nil
 }
 
-func (a *fakeAudio) OpenPlayback(context.Context, string, capsulad.AudioFormat, string) (turn.Playback, error) {
+func (a *fakeAudio) OpenPlayback(ctx context.Context, _ string, _ capsulad.AudioFormat, _ string) (turn.Playback, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	p := &fakePlayback{}
+	p := &fakePlayback{ctx: ctx, gate: a.gate, writeErr: a.writeErr}
 	a.playbacks = append(a.playbacks, p)
 	return p, nil
 }
 
 func (a *fakeAudio) BeginConversation(context.Context, string) (turn.Conversation, error) {
-	return a.conv, nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	conv := &fakeConv{}
+	a.conv = conv
+	a.convs = append(a.convs, conv)
+	return conv, nil
+}
+
+func (a *fakeAudio) conversation(i int) *fakeConv {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if i >= len(a.convs) {
+		return nil
+	}
+	return a.convs[i]
 }
 
 func (a *fakeAudio) playback(i int) *fakePlayback {
@@ -237,6 +263,25 @@ func (r *fakeIndicator) saw(state string) bool {
 	return false
 }
 
+// logBuffer is the test logger sink; controller and monitors write while a
+// test reads.
+type logBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 type passthroughCodec struct{}
 
 func (passthroughCodec) NewEncoder() (turn.Encoder, error)    { return passthroughEnc{}, nil }
@@ -255,13 +300,14 @@ func (passthroughDec) Close()                          {}
 // --- harness ---------------------------------------------------------------
 
 type harness struct {
-	t     *testing.T
-	ctrl  *turn.Controller
-	link  *fakeLink
-	audio *fakeAudio
-	ring  *fakeIndicator
-	order atomic.Int32
-	cfg   settings.Config
+	t      *testing.T
+	ctrl   *turn.Controller
+	link   *fakeLink
+	audio  *fakeAudio
+	ring   *fakeIndicator
+	order  atomic.Int32
+	cfg    settings.Config
+	logBuf *logBuffer
 
 	mu     sync.Mutex
 	nextID int
@@ -274,15 +320,21 @@ func newHarness(t *testing.T) *harness {
 	h.audio.mic = newFakeMic()
 	h.ring.order = &h.order
 	h.audio.openOrder = &h.order
+	h.logBuf = &logBuffer{}
 	h.ctrl = turn.New(turn.Deps{
 		Link: h.link, Audio: h.audio, Ring: h.ring, Codecs: passthroughCodec{},
-		Log:      log.New(io.Discard, "", 0),
+		Log:      log.New(h.logBuf, "", 0),
 		Settings: func() settings.Config { return h.cfg },
 		NewID:    func() (string, error) { return h.id(), nil },
 		Now:      time.Now,
 	})
+	// A real link announces its generation before any envelope. Tests use
+	// generation 1 through message().
+	h.ctrl.LinkChanged(true, 1)
 	return h
 }
+
+func (h *harness) message(env *cadencev2.Envelope) { h.ctrl.Message(1, env) }
 
 func (h *harness) id() string {
 	h.mu.Lock()
@@ -373,16 +425,16 @@ func TestWakeTurnPlaysReplyAndCleansUp(t *testing.T) {
 		t.Fatalf("uplink packet = %d bytes", len(m.GetOpus()))
 	}
 
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
 		StreamId: "reply-1", SessionId: st.GetSessionId(),
 		Purpose: cadencev2.StreamPurpose_STREAM_PURPOSE_REPLY, Codec: cadencev2.Codec_CODEC_OPUS, Channels: 1,
 	}}})
 	waitFor(t, "playback", func() bool { return h.audio.playback(0) != nil })
 	reply := []byte{1, 2, 3, 4}
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_AudioDown{AudioDown: &cadencev2.AudioDown{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_AudioDown{AudioDown: &cadencev2.AudioDown{
 		StreamId: "reply-1", Seq: 0, Opus: reply,
 	}}})
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamEnd{StreamEnd: &cadencev2.StreamEnd{StreamId: "reply-1"}}})
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamEnd{StreamEnd: &cadencev2.StreamEnd{StreamId: "reply-1"}}})
 	waitFor(t, "playback drained", func() bool {
 		_, closed, _ := h.audio.playback(0).state()
 		return closed
@@ -394,7 +446,7 @@ func TestWakeTurnPlaysReplyAndCleansUp(t *testing.T) {
 		t.Fatal("speaking indication missing")
 	}
 
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
 		SessionId: st.GetSessionId(), Code: "ok", FollowUpAllowed: false,
 	}}})
 	waitFor(t, "cleanup", func() bool {
@@ -417,7 +469,7 @@ func TestSpeakingStateSurvivesOpenMicrophone(t *testing.T) {
 	id := sessionStarts(h.link)[0].GetSessionId()
 	waitFor(t, "mic", func() bool { return h.audio.openOrder.Load() == 2 })
 
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
 		StreamId: "r", SessionId: id, Purpose: cadencev2.StreamPurpose_STREAM_PURPOSE_REPLY, Channels: 1,
 	}}})
 	waitFor(t, "speaking", func() bool { return h.ring.lastState() == "speaking" })
@@ -453,7 +505,7 @@ func TestErrorCloseFailsWithoutFollowUp(t *testing.T) {
 	h.ctrl.Offer(turn.Trigger{ActivationID: "a1", Origin: capsulad.ActivationOriginTouch, QueuedAt: time.Now()})
 	waitFor(t, "session start", func() bool { return len(sessionStarts(h.link)) == 1 })
 	id := sessionStarts(h.link)[0].GetSessionId()
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
 		SessionId: id, Code: "stt_failed", FollowUpAllowed: true, FollowUpWindowMs: 3000,
 		Failure: &cadencev2.TurnFailure{Code: "stt_failed", Stage: "stt"},
 	}}})
@@ -473,17 +525,17 @@ func TestFollowUpReusesMicrophone(t *testing.T) {
 	first := sessionStarts(h.link)[0].GetSessionId()
 
 	// A complete reply makes the turn follow-up eligible.
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamStart{StreamStart: &cadencev2.StreamStart{
 		StreamId: "r", SessionId: first, Purpose: cadencev2.StreamPurpose_STREAM_PURPOSE_REPLY, Channels: 1,
 	}}})
 	waitFor(t, "playback", func() bool { return h.audio.playback(0) != nil })
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_AudioDown{AudioDown: &cadencev2.AudioDown{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_AudioDown{AudioDown: &cadencev2.AudioDown{
 		StreamId: "r", Seq: 0, Opus: []byte{1},
 	}}})
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamEnd{StreamEnd: &cadencev2.StreamEnd{StreamId: "r"}}})
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_StreamEnd{StreamEnd: &cadencev2.StreamEnd{StreamId: "r"}}})
 	waitFor(t, "drain", func() bool { _, closed, _ := h.audio.playback(0).state(); return closed })
 
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
 		SessionId: first, Code: "ok", FollowUpAllowed: true, FollowUpWindowMs: 2000,
 	}}})
 	waitFor(t, "follow-up session", func() bool { return len(sessionStarts(h.link)) == 2 })
@@ -502,7 +554,7 @@ func TestFollowUpReusesMicrophone(t *testing.T) {
 	}
 
 	// The follow-up window expiring ends the turn and tells the server.
-	h.ctrl.Message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
+	h.message(&cadencev2.Envelope{Body: &cadencev2.Envelope_SessionClose{SessionClose: &cadencev2.SessionClose{
 		SessionId: second.GetSessionId(), Code: "ok",
 	}}})
 	waitFor(t, "cleanup", func() bool { return h.audio.mic.closed.Load() && h.ring.closeCount() == 1 })
@@ -581,7 +633,7 @@ func TestLinkDownCancelsLocalTurn(t *testing.T) {
 	h.ctrl.Offer(turn.Trigger{ActivationID: "a1", Origin: capsulad.ActivationOriginWakeword, QueuedAt: time.Now()})
 	waitFor(t, "session start", func() bool { return len(sessionStarts(h.link)) == 1 })
 	h.link.setUp(false)
-	h.ctrl.LinkDown()
+	h.ctrl.LinkChanged(false, 1)
 	waitFor(t, "cleanup", func() bool { return h.audio.mic.closed.Load() && h.ring.closeCount() == 1 })
 }
 

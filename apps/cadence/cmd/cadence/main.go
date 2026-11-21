@@ -5,7 +5,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync/atomic"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,16 +41,18 @@ func main() {
 	}
 	defer client.Close()
 
-	var current atomic.Pointer[settings.Config]
-	current.Store(&settings.Config{HoldTail: time.Second, FollowUp: true})
-
-	board := identity(ctx, client, logger)
+	// The framework's model is a human name ("VK Capsula Mini (A113X)"), not
+	// an upstream board id. BoardID maps it to the id the dashboard enrolls
+	// and the link reports; an explicit board setting wins when the operator
+	// enrolled the device under another upstream model.
+	model := deviceModel(ctx, client, logger)
+	board := settings.BoardID(settings.BoardAuto, model)
 
 	// The link's handler needs the controller, and the controller sends on the
 	// link; the holder breaks the cycle. The link is not reading envelopes
 	// before Run, which starts after both are built.
 	holder := &linkHandler{}
-	dialer := &link.SDKDialer{Env: env, Config: func() settings.Config { return *current.Load() }}
+	dialer := &link.SDKDialer{Env: env, Config: func() settings.Config { return currentConfig(holder) }}
 	linkClient, err := link.New(dialer, logger, holder, "capsulad-cadence/"+appVersion, board)
 	if err != nil {
 		logger.Printf("link: %v", err)
@@ -61,15 +64,18 @@ func main() {
 		Ring:     newRingIndicator(sdkRing{client}, logger),
 		Codecs:   opusCodecs{},
 		Log:      logger,
-		Settings: func() settings.Config { return *current.Load() },
+		Settings: func() settings.Config { return currentConfig(holder) },
 		NewID:    capsulad.UUIDv4,
 	})
 	holder.ctrl = controller
 
+	runtime := newRuntime(ctx, client, env, logger, redactor, linkClient, model, assetStoreRoot())
+	holder.runtime = runtime
+
 	client.SetHandlers(capsulad.Handlers{
-		Ready: func() { logger.Printf("ready board=%s", board) },
+		Ready: func() { logger.Printf("ready board=%s", linkClient.Board()) },
 		Settings: func(sc *capsulad.SettingsChanged) {
-			applySettings(sc, &current, redactor, linkClient, logger)
+			runtime.applySettings(sc)
 		},
 		Activation: func(_ context.Context, a *capsulad.Activation) {
 			enqueue(controller, a, logger)
@@ -104,50 +110,30 @@ func main() {
 }
 
 // linkHandler forwards the link's lifecycle and envelopes to the controller.
-type linkHandler struct{ ctrl *turn.Controller }
+type linkHandler struct {
+	ctrl    *turn.Controller
+	runtime *runtime
+}
 
-func (h *linkHandler) LinkChanged(up bool) {
+func (h *linkHandler) LinkChanged(up bool, generation uint64) {
 	if h.ctrl == nil {
 		return
 	}
-	if !up {
-		h.ctrl.LinkDown()
-	}
+	h.ctrl.LinkChanged(up, generation)
 }
 
-func (h *linkHandler) Message(env *cadencev2.Envelope) {
+func (h *linkHandler) Message(generation uint64, env *cadencev2.Envelope) {
 	if h.ctrl == nil {
 		return
 	}
-	h.ctrl.Message(env)
+	h.ctrl.Message(generation, env)
 }
 
-// applySettings validates a settings snapshot and installs it. A malformed
-// value keeps the previous configuration and logs why; the token is never
-// logged, and the redactor scrubs it from anything else.
-func applySettings(sc *capsulad.SettingsChanged, current *atomic.Pointer[settings.Config],
-	redactor *redact.Redactor, linkClient *link.Client, logger *log.Logger) {
-	values := make(settings.Values, len(sc.Values))
-	for _, v := range sc.Values {
-		values[v.Key] = v.ValueJSON
+func currentConfig(h *linkHandler) settings.Config {
+	if h.runtime == nil {
+		return settings.Config{HoldTail: time.Second, FollowUp: true}
 	}
-	next, err := settings.Parse(values, os.ReadFile)
-	if err != nil {
-		logger.Printf("settings rejected: %v (keeping the previous configuration)", err)
-		return
-	}
-	current.Store(&next)
-	redactor.Set(next.Token)
-	for _, warning := range next.Warnings {
-		logger.Printf("%s", warning)
-	}
-	if next.Configured {
-		logger.Printf("settings applied server=%s", redact.URL(next.BaseURL))
-	} else {
-		logger.Printf("settings applied: not configured; set server_url and device_token (or device_token_file)")
-	}
-	// Re-dial so a changed server or credential takes effect now.
-	linkClient.Wake()
+	return h.runtime.config()
 }
 
 // enqueue turns one framework activation into a queued turn. An activation
@@ -176,28 +162,36 @@ func enqueue(controller *turn.Controller, a *capsulad.Activation, logger *log.Lo
 	}
 }
 
-// identity reads the board name from the framework. A failure is not fatal: the
-// client still speaks, and the server only uses the board for display.
-func identity(ctx context.Context, client *capsulad.Client, logger *log.Logger) string {
-	const board = "capsula-mini"
+// deviceModel reads the framework's board model. A failure is not fatal: the
+// link still speaks, and BoardID falls back to vk-capsula-mini rather than
+// inventing a board name.
+func deviceModel(ctx context.Context, client *capsulad.Client, logger *log.Logger) string {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var info struct {
 		Model string `json:"model"`
 	}
 	if err := client.CallJSON(cctx, "", deviceService, "GetInfo", nil, &info, 5*time.Second); err != nil {
-		logger.Printf("identity: %v", err)
-		return board
-	}
-	if info.Model == "" {
-		return board
+		logger.Printf("identity: %v; the board id falls back to vk-capsula-mini (set board to override)", err)
+		return ""
 	}
 	return info.Model
 }
 
+// assetStoreRoot is the framework's shared asset store. The sandbox always
+// exports CAPSULAD_ASSETS; an unsandboxed run gets the canonical mount, like
+// the framework's other assistant.
+func assetStoreRoot() string {
+	root := strings.TrimSpace(os.Getenv("CAPSULAD_ASSETS"))
+	if root == "" || !filepath.IsAbs(root) {
+		return "/assets"
+	}
+	return filepath.Clean(root)
+}
+
 // redactWriter scrubs registered secrets from every log line. The device token
-// is a bearer credential; it never reaches the log even if a library error
-// quotes it.
+// and the one-time enrollment code are bearer credentials; they never reach
+// the log even if a library error quotes them.
 type redactWriter struct{ r *redact.Redactor }
 
 func (w redactWriter) Write(p []byte) (int, error) {

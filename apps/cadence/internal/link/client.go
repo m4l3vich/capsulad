@@ -1,13 +1,12 @@
 // Package link keeps the client's Cadence device link up: it dials through the
-// shared SDK, performs the cadence.v2 hello/welcome handshake, reports that
-// this device advertises no capabilities, then reads envelopes until the link
-// drops and reconnects with jittered backoff.
+// shared SDK, performs the cadence.v2 hello/welcome handshake, reports the one
+// capability this speaker can honour (audio.output) and its state, then reads
+// envelopes until the link drops and reconnects with jittered backoff.
 //
-// The client is deliberately a voice-only device: it declares no capability
-// descriptor, so the server pushes no config and no command, and its voice
-// loop uses the server's default reply output. That is a complete, honest
-// device for a speaker that only listens and speaks; anything else would need a
-// capability implementation this app does not have.
+// The client is deliberately a voice-only speaker: audio.output lets the server
+// choose reply/announcement audio and the dashboard show the speaker, while
+// media.player, cards, screens and tasks would need implementations this app
+// does not have.
 package link
 
 import (
@@ -28,8 +27,8 @@ import (
 // on the link's reader goroutine and must return promptly; a slow handler
 // stalls the link.
 type Handler interface {
-	LinkChanged(up bool)
-	Message(env *cadencev2.Envelope)
+	LinkChanged(up bool, generation uint64)
+	Message(generation uint64, env *cadencev2.Envelope)
 }
 
 // ErrOffline means no link is up; the turn's send fails and the turn ends.
@@ -64,19 +63,24 @@ type Client struct {
 	// attempt cancels a dial or handshake in flight, so a settings change takes
 	// effect immediately instead of after the connect deadline.
 	attempt *linkAttempt
-	// gen grows on every Wake; a link installed after a Wake is discarded.
-	gen atomic.Uint64
+	// configGen grows on every Wake; a link installed after a Wake is discarded.
+	configGen atomic.Uint64
+	// connGen grows on every completed handshake. Every envelope and both
+	// lifecycle events carry it, so the controller can discard a frame from a
+	// connection that has already gone.
+	connGen atomic.Uint64
 }
 
 type linkAttempt struct{ cancel context.CancelFunc }
 
-// New builds the client. It computes the empty capability report and its hash
-// once; both are immutable. version and board are advertised in Hello.
+// New builds the client. It computes the audio.output capability report and
+// its hash once; both are immutable. version and board are advertised in
+// Hello, and state supplies the output level at each handshake.
 func New(d Dialer, logger *log.Logger, h Handler, version, board string) (*Client, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	report := &cadencev2.CapabilityReport{}
+	report := &cadencev2.CapabilityReport{Descriptors: []*cadencev2.Descriptor{audioOutputDescriptor()}}
 	hash, err := wire.ReportHash(report)
 	if err != nil {
 		return nil, err
@@ -116,10 +120,26 @@ func (c *Client) Connected() bool {
 	return c.conn != nil
 }
 
+// SetBoard replaces the board id advertised in Hello. A settings change calls
+// it before Wake, so the next handshake reports the board the device is
+// enrolled as.
+func (c *Client) SetBoard(board string) {
+	c.mu.Lock()
+	c.board = board
+	c.mu.Unlock()
+}
+
+// Board is the board id the next Hello advertises.
+func (c *Client) Board() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.board
+}
+
 // Wake forces the current link down so the next attempt uses the current
 // configuration; it never blocks. A caller that changes settings calls it.
 func (c *Client) Wake() {
-	c.gen.Add(1)
+	c.configGen.Add(1)
 	c.mu.Lock()
 	conn, attempt := c.conn, c.attempt
 	c.mu.Unlock()
@@ -149,7 +169,7 @@ func (c *Client) Run(ctx context.Context) error {
 			if !unconfigured {
 				// One line, not one per attempt: the operator has not set a
 				// server yet, and the retry is silent.
-				c.log.Printf("link_unconfigured: set server_url and device_token")
+				c.log.Printf("link_unconfigured: set server_url and a device_token, device_token_file or enrollment code")
 				unconfigured = true
 			}
 		} else {
@@ -187,7 +207,7 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 // why it ended. refused carries the "token refused" streak so a revoked device
 // logs once, not at every attempt.
 func (c *Client) session(ctx context.Context, refused *bool) (up time.Duration, reason string) {
-	gen := c.gen.Load()
+	gen := c.configGen.Load()
 	actx, cancel := context.WithCancel(ctx)
 	a := &linkAttempt{cancel: cancel}
 	c.mu.Lock()
@@ -223,7 +243,7 @@ func (c *Client) session(ctx context.Context, refused *bool) (up time.Duration, 
 	}
 	// A settings change during the dial/handshake invalidates this link before
 	// it can carry a turn on the old server or token.
-	if c.gen.Load() != gen {
+	if c.configGen.Load() != gen {
 		conn.CloseNow()
 		return 0, "superseded"
 	}
@@ -231,14 +251,15 @@ func (c *Client) session(ctx context.Context, refused *bool) (up time.Duration, 
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
-	c.handler.LinkChanged(true)
+	linkGen := c.connGen.Add(1)
+	c.handler.LinkChanged(true, linkGen)
 	defer func() {
 		c.mu.Lock()
 		if c.conn == conn {
 			c.conn = nil
 		}
 		c.mu.Unlock()
-		c.handler.LinkChanged(false)
+		c.handler.LinkChanged(false, linkGen)
 	}()
 
 	pongs := make(chan struct{}, 1)
@@ -270,7 +291,19 @@ func (c *Client) session(ctx context.Context, refused *bool) (up time.Duration, 
 		case derr != nil:
 			return c.now().Sub(start), "invalid"
 		}
-		c.handler.Message(env)
+		if cs := env.GetConfigSet(); cs != nil {
+			// Answer on this connection, before the controller queue: a
+			// reconnect must not retarget the ack and backpressure must not
+			// drop it.
+			ackCtx, cancel := context.WithTimeout(upCtx, writeWait)
+			err := sendOn(ackCtx, conn, configApplied(cs))
+			cancel()
+			if err != nil {
+				return c.now().Sub(start), "ack_failed"
+			}
+			continue
+		}
+		c.handler.Message(linkGen, env)
 	}
 }
 
@@ -294,7 +327,7 @@ func (c *Client) handshake(ctx context.Context, conn Conn) error {
 	hello := &cadencev2.Envelope{Body: &cadencev2.Envelope_Hello{Hello: &cadencev2.Hello{
 		Protocol:         protocol,
 		DaemonVersion:    c.version,
-		Board:            c.board,
+		Board:            c.Board(),
 		CapabilitiesHash: c.hash,
 	}}}
 	if err := sendOn(hctx, conn, hello); err != nil {
@@ -324,8 +357,18 @@ func (c *Client) handshake(ctx context.Context, conn Conn) error {
 			break
 		}
 	}
-	return sendOn(hctx, conn, &cadencev2.Envelope{
+	if err := sendOn(hctx, conn, &cadencev2.Envelope{
 		Body: &cadencev2.Envelope_CapabilityReport{CapabilityReport: c.report},
+	}); err != nil {
+		return err
+	}
+	// The server stores audio.output's state from this frame; without it the
+	// capability is known but announcements are refused as no_audio.
+	return sendOn(hctx, conn, &cadencev2.Envelope{
+		Body: &cadencev2.Envelope_StateDelta{StateDelta: &cadencev2.StateDelta{
+			Capability: audioOutputCapability,
+			Json:       audioOutputState(),
+		}},
 	})
 }
 

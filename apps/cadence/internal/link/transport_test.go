@@ -144,7 +144,7 @@ func TestTransportOverLoopbackFakeUpstream(t *testing.T) {
 	if hello.GetProtocol() != 2 || hello.GetBoard() != "capsula-mini" {
 		t.Fatalf("hello = %v", hello)
 	}
-	if len(report.GetDescriptors()) != 0 || len(report.GetHash()) != 32 {
+	if len(report.GetDescriptors()) != 1 || report.GetDescriptors()[0].GetId() != "audio.output" || len(report.GetHash()) != 32 {
 		t.Fatalf("report = %v", report)
 	}
 	if string(hello.GetCapabilitiesHash()) != string(report.GetHash()) {

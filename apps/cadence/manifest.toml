@@ -1,7 +1,7 @@
 id = "org.capsulad.cadence"
-name = "Cadence"
+name = "Cadence Client"
 version = "0.1.0"
-description = "Voice-assistant client for a self-hosted Cadence server: streams the microphone as Opus over the cadence.v2 device link and plays the server's streamed reply, with the ring as the capture indication."
+description = "Voice-assistant client for a self-hosted Cadence server: streams the microphone as Opus over the cadence.v2 device link, plays streamed replies and announcements, and shows the ring as the capture indication."
 background = false
 start_on_boot = false
 restart_on_failure = true
@@ -33,9 +33,16 @@ type = "text"
 default = ""
 
 [[settings]]
+key = "enroll_code"
+label = "Enrollment code"
+description = "The one-time code the Cadence dashboard made for this device. The app exchanges it at <server_url>/v2/enroll using the board below, stores the returned device token in Device token and clears this code. It is single-use and expires after 30 minutes. Never logged. Ignored when a device token is already set."
+type = "text_masked"
+default = ""
+
+[[settings]]
 key = "device_token"
 label = "Device token"
-description = "Bearer token of this device as the Cadence server enrolled it. Never logged. device_token_file wins when set."
+description = "Bearer token of this device as the Cadence server enrolled it. Never logged. device_token_file wins when set; an enrollment code obtains a token when this is empty."
 type = "text_masked"
 default = ""
 
@@ -47,9 +54,28 @@ type = "text"
 default = ""
 
 [[settings]]
+key = "board"
+label = "Cadence board"
+description = "Board id this client reports in Hello and uses when exchanging an enrollment code. Automatic reports vk-capsula-mini on the speaker and sim on the simulator. The dashboard's default choice is Simulator, so a real speaker enrolled without changing that choice needs sim here; the recommended dashboard choice is VK Capsula Mini."
+type = "select"
+default = "auto"
+
+[[settings.choices]]
+value = "auto"
+label = "Automatic (VK Capsula Mini on the speaker, Simulator on the simulator)"
+
+[[settings.choices]]
+value = "vk-capsula-mini"
+label = "VK Capsula Mini"
+
+[[settings.choices]]
+value = "sim"
+label = "Simulator"
+
+[[settings]]
 key = "ca_pem"
-label = "Extra CA certificate (PEM)"
-description = "PEM certificate(s) appended to the system trust store for a self-hosted CA. Empty uses the system store only. There is no insecure mode: verification is always required."
+label = "Extra CA certificate (PEM or asset path)"
+description = "PEM certificate(s) appended to the system trust store for a self-hosted CA, either pasted or as a path in the shared Assets store (cadence/ca.pem, or the canonical /assets/cadence/ca.pem shown by the Assets page). Empty uses the system store only. There is no insecure mode: verification is always required."
 type = "text"
 default = ""
 

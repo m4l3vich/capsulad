@@ -13,6 +13,7 @@ import (
 
 	"capsulad/apps/cadence/internal/link"
 	cadencev2 "capsulad/apps/cadence/internal/proto/cadencev2"
+	"capsulad/apps/cadence/internal/settings"
 	"capsulad/apps/cadence/internal/websocket"
 	"capsulad/apps/cadence/internal/wire"
 )
@@ -168,13 +169,13 @@ type fakeHandler struct {
 	ups      []bool
 }
 
-func (h *fakeHandler) LinkChanged(up bool) {
+func (h *fakeHandler) LinkChanged(up bool, generation uint64) {
 	h.mu.Lock()
 	h.ups = append(h.ups, up)
 	h.mu.Unlock()
 }
 
-func (h *fakeHandler) Message(env *cadencev2.Envelope) {
+func (h *fakeHandler) Message(_ uint64, env *cadencev2.Envelope) {
 	h.mu.Lock()
 	h.messages = append(h.messages, envelopeKind(env))
 	h.mu.Unlock()
@@ -232,32 +233,39 @@ func start(t *testing.T, d link.Dialer, h link.Handler) (*link.Client, *syncBuff
 	return client, buf, cancel
 }
 
-func TestHandshakeAndEmptyReport(t *testing.T) {
+func TestHandshakeAdvertisesAudioOutput(t *testing.T) {
 	d := &fakeDialer{auto: true}
 	h := &fakeHandler{}
 	_, _, cancel := start(t, d, h)
 	defer cancel()
 
-	waitFor(t, "handshake", func() bool { return d.last() != nil && len(d.last().sent()) >= 2 })
+	waitFor(t, "handshake", func() bool { return d.last() != nil && len(d.last().sent()) >= 3 })
 	sent := d.last().sent()
 	hello := sent[0].GetHello()
 	if hello.GetProtocol() != 2 || hello.GetBoard() != "capsula-mini" || hello.GetDaemonVersion() != "test/1" {
 		t.Fatalf("hello = %v", hello)
 	}
 	report := sent[1].GetCapabilityReport()
-	if report == nil {
-		t.Fatalf("second frame = %v", sent[1])
+	if report == nil || len(report.GetDescriptors()) != 1 {
+		t.Fatalf("report = %v", report)
 	}
-	if len(report.GetDescriptors()) != 0 {
-		t.Fatalf("a voice-only client advertised %d capabilities", len(report.GetDescriptors()))
+	desc := report.GetDescriptors()[0]
+	if desc.GetId() != "audio.output" || desc.GetVersion() != 1 || len(desc.GetCommands()) != 0 {
+		t.Fatalf("descriptor = %v", desc)
 	}
-	// The empty report hashes to SHA-256 of the empty message.
-	want := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	if got := hex(report.GetHash()); got != want {
-		t.Fatalf("report hash = %s", got)
+	want, err := wire.ReportHash(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex(report.GetHash()); got != hex(want) {
+		t.Fatalf("report hash = %s, want %s", got, hex(want))
 	}
 	if string(hello.GetCapabilitiesHash()) != string(report.GetHash()) {
 		t.Fatal("Hello hash and report hash differ")
+	}
+	state := sent[2].GetStateDelta()
+	if state.GetCapability() != "audio.output" || state.GetJson() != `{"channels":2,"maxBitrate":128000}` {
+		t.Fatalf("state = %v", state)
 	}
 	waitFor(t, "link up event", func() bool {
 		ups := h.upEvents()
@@ -424,4 +432,83 @@ func hex(b []byte) string {
 		out[2*i+1] = digits[v&0xf]
 	}
 	return string(out)
+}
+
+// The board advertised in Hello follows the persisted board setting, so a
+// device enrolled as the dashboard's Simulator reports the same id after a
+// reconnect.
+func TestSetBoardChangesHello(t *testing.T) {
+	d := &fakeDialer{auto: true}
+	h := &fakeHandler{}
+	buf := &syncBuffer{}
+	logger := log.New(buf, "", 0)
+	client, err := link.New(d, logger, h, "test/1", "vk-capsula-mini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBoard("sim")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = client.Run(ctx) }()
+
+	waitFor(t, "hello", func() bool {
+		c := d.last()
+		return c != nil && len(c.sent()) > 0
+	})
+	hello := d.last().sent()[0].GetHello()
+	if hello == nil || hello.GetBoard() != "sim" {
+		t.Fatalf("hello = %v", hello)
+	}
+	if client.Board() != "sim" {
+		t.Fatalf("Board() = %q", client.Board())
+	}
+}
+
+// An enrollment code is not a bearer token: the dialer refuses before any
+// network I/O, and the link stays unconfigured until the exchange succeeds.
+func TestDialerRequiresAToken(t *testing.T) {
+	d := &link.SDKDialer{Config: func() settings.Config {
+		return settings.Config{BaseURL: "https://cadence.example.com", EnrollCode: "K7M4QX"}
+	}}
+	if _, err := d.Dial(context.Background()); !errors.Is(err, link.ErrNoServer) {
+		t.Fatalf("Dial = %v, want ErrNoServer", err)
+	}
+}
+
+func TestConfigSetIsAcknowledgedOnTheSourceConnection(t *testing.T) {
+	d := &fakeDialer{auto: true}
+	h := &fakeHandler{}
+	client, _, cancel := start(t, d, h)
+	defer cancel()
+	waitFor(t, "link up", func() bool { return client.Connected() })
+
+	conn := d.last()
+	conn.push(&cadencev2.Envelope{Body: &cadencev2.Envelope_ConfigSet{ConfigSet: &cadencev2.ConfigSet{
+		Capability: "audio.output", Generation: 3, Json: "{}",
+	}}})
+	waitFor(t, "config applied", func() bool {
+		for _, env := range conn.sent() {
+			a := env.GetConfigApplied()
+			if a != nil && a.GetCapability() == "audio.output" && a.GetGeneration() == 3 && a.GetErrorCode() == "" {
+				return true
+			}
+		}
+		return false
+	})
+	conn.push(&cadencev2.Envelope{Body: &cadencev2.Envelope_ConfigSet{ConfigSet: &cadencev2.ConfigSet{
+		Capability: "audio.output", Generation: 4, Json: `{"delayMs":5}`,
+	}}})
+	waitFor(t, "unsupported config", func() bool {
+		for _, env := range conn.sent() {
+			a := env.GetConfigApplied()
+			if a != nil && a.GetGeneration() == 4 && a.GetErrorCode() == "unsupported" {
+				return true
+			}
+		}
+		return false
+	})
+	// The controller never sees ConfigSet.
+	if h.kinds() != nil && len(h.kinds()) != 0 {
+		t.Fatalf("controller got %v", h.kinds())
+	}
 }
