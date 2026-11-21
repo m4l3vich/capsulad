@@ -6,9 +6,15 @@
 // them back on every terminal path: the LED ring presentation (the game
 // colours), an optional segment presentation (the score), one full-panel touch
 // capture (the four side keys and the unmarked centre), and one speaker
-// playback stream (one distinct tone per colour). Closing the presentations
+// playback stream (one packaged tone per colour). Closing the presentations
 // restores the configured clock/ring baseline and releasing the captures
 // restores the framework panel semantics.
+//
+// The tones are pre-rendered WAV files in the package's audio/ directory. They
+// are loaded once through capsulad.readPackageFile at startup; the game never
+// synthesizes samples. A host without that entry point, or a package with a
+// missing or malformed tone file, stops with an explicit log line before any
+// presentation, capture or playback stream is opened.
 //
 // Geometry and capability come from the device, never from a board name:
 // DeviceService.ListResources advertises the ring pixel count and RGB support,
@@ -64,15 +70,24 @@ var DASH_MASK = 0x40;
 var CELL_COUNT = 4;
 
 // Colours are brand-independent game symbols, one per panel side clockwise
-// from north. Frequencies are a rising major pentatonic figure so every colour
-// has a distinct, recognisable tone; the error tone is a deliberately low,
-// falling buzz outside that set.
+// from north. Each symbol names its two pre-rendered package tones (the replay
+// cue and the shorter press confirmation); the error tone is a deliberately
+// low, falling buzz outside the four colour frequencies.
 var SYMBOLS = [
-  { name: "red", key: "mic_toggle", frequency: 392, red: 255, green: 0, blue: 0 },
-  { name: "yellow", key: "volume_up", frequency: 523, red: 255, green: 180, blue: 0 },
-  { name: "green", key: "play_pause", frequency: 659, red: 0, green: 200, blue: 0 },
-  { name: "blue", key: "volume_down", frequency: 784, red: 0, green: 80, blue: 255 }
+  { name: "red", key: "mic_toggle",
+    longWav: "audio/red-long.wav", shortWav: "audio/red-short.wav",
+    red: 255, green: 0, blue: 0 },
+  { name: "yellow", key: "volume_up",
+    longWav: "audio/yellow-long.wav", shortWav: "audio/yellow-short.wav",
+    red: 255, green: 180, blue: 0 },
+  { name: "green", key: "play_pause",
+    longWav: "audio/green-long.wav", shortWav: "audio/green-short.wav",
+    red: 0, green: 200, blue: 0 },
+  { name: "blue", key: "volume_down",
+    longWav: "audio/blue-long.wav", shortWav: "audio/blue-short.wav",
+    red: 0, green: 80, blue: 255 }
 ];
+var ERROR_TONE_WAV = "audio/error.wav";
 
 var KEY_SYMBOL = {};
 for (var s = 0; s < SYMBOLS.length; s++) KEY_SYMBOL[SYMBOLS[s].key] = s + 1;
@@ -91,12 +106,9 @@ var INPUT_POLL_MS = 20;
 
 // The speaker stream's input format. Playback resamples to the device mixer, so
 // 24 kHz mono S16LE is a documented playback format rather than an assumption
-// about the output device.
+// about the output device. The packaged WAV files carry the same format.
 var AUDIO_RATE = 24000;
 var AUDIO_CHANNELS = 1;
-var TONE_LONG_MS = FLASH_ON_MS;
-var TONE_SHORT_MS = 180;
-var ERROR_TONE_MS = 600;
 
 var STATE_READY = 0;     // before a game and after the start pause
 var STATE_PLAYBACK = 1;  // replaying the full sequence; side keys are ignored
@@ -277,14 +289,11 @@ function restoreOutput() {
 
 // --- output: speaker tones ------------------------------------------------
 
-function writeSample(bytes, offset, value) {
-  if (value > 32767) value = 32767;
-  if (value < -32768) value = -32768;
-  if (value < 0) value += 65536;
-  bytes[offset] = value & 0xff;
-  bytes[offset + 1] = (value >> 8) & 0xff;
-}
-
+// The packaged cues are standard RIFF/WAVE files: 16-bit PCM, mono, 24 kHz.
+// The long cues last FLASH_ON_MS (320 ms), the short cues 180 ms, and the
+// error cue 600 ms. Loading validates the container and hands the data chunk
+// to the decoder exactly as shipped. It does not resample and does not
+// generate samples.
 var BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 function base64FromBytes(bytes) {
@@ -307,43 +316,105 @@ function base64FromBytes(bytes) {
   return out;
 }
 
-// A short attack/release envelope keeps every cue click-free. The optional
-// descending sweep and tremolo make the error cue unmistakable next to the
-// four steady colour tones.
-function toneBase64(startFrequency, endFrequency, durationMs, amplitude, tremoloHz) {
-  var frames = Math.round(AUDIO_RATE * durationMs / 1000);
-  var bytes = new Uint8Array(frames * 2 * AUDIO_CHANNELS);
-  var attack = Math.max(1, Math.round(AUDIO_RATE * 0.010));
-  var release = Math.max(1, Math.round(AUDIO_RATE * 0.035));
-  for (var i = 0; i < frames; i++) {
-    var frequency = startFrequency +
-      (endFrequency - startFrequency) * (frames > 1 ? i / (frames - 1) : 0);
-    var phase = 2 * Math.PI * frequency * i / AUDIO_RATE;
-    var sample = Math.sin(phase) * amplitude;
-    if (tremoloHz > 0) {
-      sample *= 0.65 + 0.35 * Math.sin(2 * Math.PI * tremoloHz * i / AUDIO_RATE);
-    }
-    var envelope = 1;
-    if (i < attack) envelope = i / attack;
-    if (frames - 1 - i < release) envelope = (frames - 1 - i) / release;
-    var value = Math.round(sample * envelope * 32767);
-    for (var channel = 0; channel < AUDIO_CHANNELS; channel++) {
-      writeSample(bytes, (i * AUDIO_CHANNELS + channel) * 2, value);
-    }
-  }
-  return base64FromBytes(bytes);
+function readU16(bytes, offset) {
+  return bytes[offset] | (bytes[offset + 1] << 8);
 }
 
-function buildTones() {
+function readU32(bytes, offset) {
+  return (bytes[offset] | (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+}
+
+function fourcc(bytes, offset) {
+  return String.fromCharCode(bytes[offset], bytes[offset + 1],
+    bytes[offset + 2], bytes[offset + 3]);
+}
+
+function wavPcm(bytes, path) {
+  if (!bytes || typeof bytes.length !== "number" || bytes.length < 12) {
+    throw new Error(path + ": not a RIFF/WAVE file");
+  }
+  if (fourcc(bytes, 0) !== "RIFF" || fourcc(bytes, 8) !== "WAVE") {
+    throw new Error(path + ": not a RIFF/WAVE file");
+  }
+  // RIFF's size field counts everything after those eight bytes. Requiring it
+  // to describe the whole file rejects a corrupt length instead of silently
+  // walking past the declared container.
+  var riffEnd = 8 + readU32(bytes, 4);
+  if (riffEnd < 12 || riffEnd !== bytes.length) {
+    throw new Error(path + ": RIFF length does not match the file");
+  }
+  var format = null;
+  var dataStart = -1;
+  var dataSize = 0;
+  var offset = 12;
+  while (offset < riffEnd) {
+    if (riffEnd - offset < 8) {
+      throw new Error(path + ": truncated chunk header");
+    }
+    var chunkId = fourcc(bytes, offset);
+    var chunkSize = readU32(bytes, offset + 4);
+    offset += 8;
+    if (chunkSize > riffEnd - offset) {
+      throw new Error(path + ": " + chunkId + " chunk exceeds the RIFF boundary");
+    }
+    var paddedEnd = offset + chunkSize + (chunkSize & 1);
+    if (paddedEnd > riffEnd) {
+      throw new Error(path + ": " + chunkId + " chunk is missing its pad byte");
+    }
+    if (chunkId === "fmt ") {
+      if (chunkSize < 16) throw new Error(path + ": short fmt chunk");
+      format = {
+        encoding: readU16(bytes, offset),
+        channels: readU16(bytes, offset + 2),
+        rate: readU32(bytes, offset + 4),
+        byteRate: readU32(bytes, offset + 8),
+        blockAlign: readU16(bytes, offset + 12),
+        bits: readU16(bytes, offset + 14)
+      };
+    } else if (chunkId === "data") {
+      dataStart = offset;
+      dataSize = chunkSize;
+    }
+    offset = paddedEnd;
+  }
+  if (offset !== riffEnd) {
+    throw new Error(path + ": RIFF length does not match the file");
+  }
+  if (format === null) throw new Error(path + ": no fmt chunk");
+  if (dataStart < 0) throw new Error(path + ": no data chunk");
+  if (format.encoding !== 1 || format.channels !== AUDIO_CHANNELS ||
+      format.rate !== AUDIO_RATE || format.bits !== 16 ||
+      format.blockAlign !== AUDIO_CHANNELS * 2 ||
+      format.byteRate !== AUDIO_RATE * AUDIO_CHANNELS * 2) {
+    throw new Error(path + ": expected " + AUDIO_RATE + " Hz mono 16-bit PCM");
+  }
+  if (dataSize === 0 || dataSize % (AUDIO_CHANNELS * 2) !== 0) {
+    throw new Error(path + ": malformed PCM data");
+  }
+  return { start: dataStart, size: dataSize };
+}
+
+function loadTone(path) {
+  var bytes = capsulad.readPackageFile(path);
+  if (!bytes || typeof bytes.length !== "number" ||
+      typeof bytes.subarray !== "function") {
+    throw new Error(path + ": readPackageFile did not return bytes");
+  }
+  var pcm = wavPcm(bytes, path);
+  return base64FromBytes(bytes.subarray(pcm.start, pcm.start + pcm.size));
+}
+
+function loadTones() {
   longTones = [];
   shortTones = [];
   for (var i = 0; i < SYMBOLS.length; i++) {
-    longTones.push(toneBase64(SYMBOLS[i].frequency, SYMBOLS[i].frequency,
-      TONE_LONG_MS, 0.22, 0));
-    shortTones.push(toneBase64(SYMBOLS[i].frequency, SYMBOLS[i].frequency,
-      TONE_SHORT_MS, 0.22, 0));
+    longTones.push(loadTone(SYMBOLS[i].longWav));
+    shortTones.push(loadTone(SYMBOLS[i].shortWav));
   }
-  errorTone = toneBase64(220, 130, ERROR_TONE_MS, 0.28, 8);
+  errorTone = loadTone(ERROR_TONE_WAV);
+  log("tones loaded=" + (SYMBOLS.length * 2 + 1) + " packaged wav " +
+      AUDIO_RATE + "Hz mono 16-bit");
 }
 
 function flushTones() {
@@ -819,6 +890,19 @@ function main() {
   capsulad.start();
   log("ready app=" + capsulad.env.appId + " run=" + capsulad.env.runId);
 
+  if (typeof capsulad.readPackageFile !== "function") {
+    log("unsupported: this QuickJS host has no readPackageFile; rebuild the interpreter host");
+    capsulad.stop();
+    return;
+  }
+  try {
+    loadTones();
+  } catch (err) {
+    log("unsupported: " + (err && err.message ? err.message : String(err)));
+    capsulad.stop();
+    return;
+  }
+
   var unsupported = checkSupport();
   if (unsupported !== null) {
     log("unsupported: " + unsupported);
@@ -875,7 +959,6 @@ function main() {
     shutdown();
     return;
   }
-  buildTones();
 
   subscribeInput();
   log("controls: repeat each colour with its side key; hold the centre to exit");

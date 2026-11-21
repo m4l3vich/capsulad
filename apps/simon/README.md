@@ -1,7 +1,7 @@
 # Simon Says (`org.capsulad.simon`)
 
 A physical Simon Says game for the Capsula Mini. The speaker's LED ring shows a
-growing colour sequence and plays one distinct tone per colour; the player
+growing colour sequence and plays one packaged tone per colour; the player
 repeats it with the four keys around the panel. The four-digit segment display
 keeps the score. The game owns the ring, the score display, the speaker
 playback stream and a full-panel touch capture only while a run is active, and
@@ -13,7 +13,7 @@ normal panel controls return.
 | App ID | `org.capsulad.simon` |
 | Runtime | `quickjs` (foreground, no settings or actions) |
 | Needs | an RGB LED ring with at least 4 pixels, a full-panel touch capture, a speaker; an optional four-digit segment display |
-| Package | `manifest.toml`, `main.js`, this `README.md` |
+| Package | `manifest.toml`, `main.js`, this `README.md`, the pre-rendered `audio/*.wav` cues |
 
 ## Build and install
 
@@ -31,8 +31,32 @@ output directory and `PACKAGE=0` skips the archive. The test suite stays out of
 the installed artifact.
 
 The target needs the QuickJS script host (`make interpreter-quickjs`, installed
-as `lib/capsulad-quickjs`). A host without `Call.tryRecv` is rejected with a
-clear log line; rebuild the host rather than running a blocking game.
+as `lib/capsulad-quickjs`). The host must provide `Call.tryRecv` and
+`capsulad.readPackageFile`; a host without either is rejected with a clear log
+line, so rebuild and ship the interpreter host rather than running without the
+packaged cues.
+
+## Tones
+
+The nine cues are pre-rendered package files, not generated at runtime:
+
+| Files | Use | Length |
+|---|---|---|
+| `audio/red-long.wav`, `audio/yellow-long.wav`, `audio/green-long.wav`, `audio/blue-long.wav` | replay cue for the colour | 320 ms |
+| `audio/red-short.wav`, `audio/yellow-short.wav`, `audio/green-short.wav`, `audio/blue-short.wav` | accepted-press confirmation | 180 ms |
+| `audio/error.wav` | wrong-answer cue (falling sweep) | 600 ms |
+
+Every file is mono 16-bit PCM (`PCM_S16LE`) at 24 kHz in a RIFF/WAVE container.
+The app reads each one once at startup through `capsulad.readPackageFile`,
+validates the container and the format (including the declared RIFF length and
+chunk padding), and sends the data chunk unchanged to the playback stream. It
+does not synthesize samples or resample the cues.
+
+A missing, unreadable or malformed cue is an unsupported package: the app logs
+the offending path and stops before opening any presentation, capture or
+playback stream. On a host without `readPackageFile` it logs that the
+interpreter host must be rebuilt and stops the same way. The installed app
+package must therefore include the entire `audio/` directory.
 
 ## How to play
 
@@ -121,8 +145,12 @@ node --test apps/simon/test/*.test.mjs
 
 The contract suite loads the shipped `main.js` into a fake QuickJS host and
 checks ring geometry at several advertised pixel counts, the colour/tone pair
-for each side, the growing sequence and score, input ordering (including
+for each side, the exact packaged WAV payload sent for replay and accepted
+presses, RIFF boundary and chunk-padding regressions, the growing sequence and
+score, input ordering (including
 playback-period input being ignored), wrong-answer/retry, centre hold and tap,
 no-display degradation, preemption, setup failures and the full release order.
-It is host evidence for requests, frames and PCM, not a physical LED or acoustic
+A packaging test runs `build.sh` with `PACKAGE=0` and checks that the staged
+tree contains every tone byte-for-byte and no test files. The suite is host
+evidence for requests, frames and PCM, not a physical LED or acoustic
 measurement; see `docs/VERIFICATION.md` for the device proof levels.

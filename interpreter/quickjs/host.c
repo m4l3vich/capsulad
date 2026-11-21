@@ -6,15 +6,21 @@
  * before the package script. Scripts never receive raw framework sockets,
  * child processes or a second protocol implementation.
  */
+#if !defined(_XOPEN_SOURCE) && !defined(_GNU_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "capsulad_host.h"
 #include "quickjs.h"
 
 #define MAX_SCRIPT_BYTES (8u * 1024u * 1024u)
+#define MAX_PACKAGE_FILE_BYTES (8u * 1024u * 1024u)
+#define MAX_PACKAGE_PATH_BYTES 4096u
 #define CAPSULAD_STR_INNER(x) #x
 #define CAPSULAD_STR(x) CAPSULAD_STR_INNER(x)
 
@@ -766,6 +772,134 @@ static JSValue js_env(JSContext *ctx, JSValueConst this_val, int argc,
   return env;
 }
 
+/* A package path is slash-relative and names only regular components. The
+ * package format already forbids symlinks, but uid/none runs use a host path;
+ * rejecting dot components and verifying the resolved target below keeps the
+ * read inside CAPSULAD_APP_DIR there too. */
+static int package_path_ok(const char *path, size_t len) {
+  if (len == 0 || len > MAX_PACKAGE_PATH_BYTES || path[0] == '/') {
+    return 0;
+  }
+  size_t start = 0;
+  for (size_t i = 0; i <= len; i++) {
+    if (i == len || path[i] == '/') {
+      size_t component = i - start;
+      if (component == 0) {
+        return 0;
+      }
+      if (component == 1 && path[start] == '.') {
+        return 0;
+      }
+      if (component == 2 && path[start] == '.' && path[start + 1] == '.') {
+        return 0;
+      }
+      start = i + 1;
+    } else if (path[i] == '\0' || path[i] == '\\') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static JSValue js_read_package_file(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+  (void)this_val;
+  JSValue result = JS_EXCEPTION;
+  const char *path = NULL;
+  char *root = NULL;
+  char *full = NULL;
+  char *resolved = NULL;
+  uint8_t *data = NULL;
+  FILE *f = NULL;
+
+  if (argc < 1 || !JS_IsString(argv[0])) {
+    return JS_ThrowTypeError(ctx, "readPackageFile(path)");
+  }
+  size_t path_len = 0;
+  path = arg_string(ctx, argv[0], &path_len);
+  if (path == NULL) {
+    return JS_EXCEPTION;
+  }
+  if (!package_path_ok(path, path_len)) {
+    JS_ThrowTypeError(
+        ctx, "readPackageFile: path must be relative and stay inside the package");
+    goto done;
+  }
+  const char *app_dir = getenv("CAPSULAD_APP_DIR");
+  if (app_dir == NULL || app_dir[0] == '\0') {
+    JS_ThrowPlainError(ctx, "readPackageFile: CAPSULAD_APP_DIR is not set");
+    goto done;
+  }
+  root = realpath(app_dir, NULL);
+  if (root == NULL) {
+    JS_ThrowPlainError(ctx, "readPackageFile: package root: %s",
+                       strerror(errno));
+    goto done;
+  }
+  size_t full_len = strlen(root) + 1 + path_len + 1;
+  full = malloc(full_len);
+  if (full == NULL) {
+    JS_ThrowPlainError(ctx, "readPackageFile: out of memory");
+    goto done;
+  }
+  snprintf(full, full_len, "%s/%s", root, path);
+  resolved = realpath(full, NULL);
+  if (resolved == NULL) {
+    JS_ThrowPlainError(ctx, "readPackageFile %s: %s", path, strerror(errno));
+    goto done;
+  }
+  size_t root_len = strlen(root);
+  if (strncmp(resolved, root, root_len) != 0 ||
+      (resolved[root_len] != '\0' && resolved[root_len] != '/')) {
+    JS_ThrowPlainError(ctx, "readPackageFile %s: path is outside the package",
+                       path);
+    goto done;
+  }
+  struct stat st;
+  if (stat(resolved, &st) != 0 || !S_ISREG(st.st_mode)) {
+    JS_ThrowPlainError(ctx, "readPackageFile %s: not a regular file", path);
+    goto done;
+  }
+  if (st.st_size < 0 ||
+      (uint64_t)st.st_size > (uint64_t)MAX_PACKAGE_FILE_BYTES) {
+    JS_ThrowRangeError(ctx,
+                       "readPackageFile %s: file is larger than %u bytes", path,
+                       (unsigned)MAX_PACKAGE_FILE_BYTES);
+    goto done;
+  }
+  size_t size = (size_t)st.st_size;
+  data = malloc(size == 0 ? 1 : size);
+  if (data == NULL) {
+    JS_ThrowPlainError(ctx, "readPackageFile %s: out of memory", path);
+    goto done;
+  }
+  if (size > 0) {
+    f = fopen(resolved, "rb");
+    if (f == NULL) {
+      JS_ThrowPlainError(ctx, "readPackageFile %s: %s", path, strerror(errno));
+      goto done;
+    }
+    if (fread(data, 1, size, f) != size || ferror(f)) {
+      JS_ThrowPlainError(ctx, "readPackageFile %s: read failed", path);
+      goto done;
+    }
+  }
+  result = JS_NewUint8ArrayCopy(ctx, data, size);
+
+done:
+  if (f != NULL) {
+    fclose(f);
+  }
+  free(data);
+  free(full);
+  free(resolved);
+  free(root);
+  if (path != NULL) {
+    JS_FreeCString(ctx, path);
+  }
+  return result;
+}
+
 static JSValue js_stop(JSContext *ctx, JSValueConst this_val, int argc,
                        JSValueConst *argv) {
   (void)this_val;
@@ -819,6 +953,7 @@ static int install_native(JSContext *ctx) {
   set_fn(ctx, native, "handle_info", js_handle_info, 1);
   set_fn(ctx, native, "register_descriptors", js_register_descriptors, 1);
   set_fn(ctx, native, "env", js_env, 0);
+  set_fn(ctx, native, "read_package_file", js_read_package_file, 1);
   set_fn(ctx, native, "stop", js_stop, 0);
 
   JSValue global = JS_GetGlobalObject(ctx);
@@ -984,6 +1119,7 @@ static const char *prelude =
     "    info: () => JSON.parse(n.client_info()),\n"
     "    handleInfo: (h) => JSON.parse(n.handle_info(h)),\n"
     "    registerDescriptors: (bytes) => n.register_descriptors(bytes),\n"
+    "    readPackageFile: (path) => n.read_package_file(path),\n"
     "    ready: () => n.ready(),\n"
     "    connected: () => n.connected(),\n"
     "    disconnected: () => n.disconnected(),\n"

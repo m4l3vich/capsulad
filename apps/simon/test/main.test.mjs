@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { TONE_FILES, readWav } from "./wav.mjs";
 
 // Every test must reach a terminal path. A 15 s bound keeps a harness mistake
 // (for example an unreachable `when`) from hanging the suite.
@@ -42,7 +43,9 @@ const RED = [255, 0, 0];
 const YELLOW = [255, 180, 0];
 const GREEN = [0, 200, 0];
 const BLUE = [0, 80, 255];
-const FREQUENCIES = [392, 523, 659, 784];
+const FREQUENCIES = TONE_FILES
+  .filter((tone) => tone.frequency !== null && tone.name.endsWith("-long.wav"))
+  .map((tone) => tone.frequency);
 
 function defaultResources(overrides = {}) {
   return [
@@ -129,6 +132,7 @@ function runApp(options = {}) {
   const captures = [];
   const unary = [];
   const order = [];
+  const packageReads = [];
   const inputQueue = [];
   let stopped = 0;
   let runCalls = 0;
@@ -393,6 +397,14 @@ function runApp(options = {}) {
       else if (line.includes("final score")) phase = "retry";
       else if (line.includes("start")) phase = "ready";
     },
+    readPackageFile: options.noPackageReader
+      ? undefined
+      : function (path) {
+          packageReads.push(path);
+          if (options.readPackageFile) return options.readPackageFile(path);
+          const data = readFileSync(join(appDir, path));
+          return new Uint8Array(data);
+        },
     on() {
       throw new Error("the game never registers bus handlers");
     },
@@ -479,6 +491,7 @@ function runApp(options = {}) {
     captures,
     unary,
     order,
+    packageReads,
     stopped,
     runCalls,
     started,
@@ -715,13 +728,13 @@ test("a 10-pixel ring keeps every side non-empty and angularly centred", () => {
 // --- colour and tone pairing ----------------------------------------------
 
 const PAIRS = [
-  [0.01, "mic_toggle", RED, [0, 1, 11], FREQUENCIES[0]],
-  [0.26, "volume_up", YELLOW, [2, 3, 4], FREQUENCIES[1]],
-  [0.51, "play_pause", GREEN, [5, 6, 7], FREQUENCIES[2]],
-  [0.76, "volume_down", BLUE, [8, 9, 10], FREQUENCIES[3]],
+  [0.01, "mic_toggle", "red", RED, [0, 1, 11], FREQUENCIES[0]],
+  [0.26, "volume_up", "yellow", YELLOW, [2, 3, 4], FREQUENCIES[1]],
+  [0.51, "play_pause", "green", GREEN, [5, 6, 7], FREQUENCIES[2]],
+  [0.76, "volume_down", "blue", BLUE, [8, 9, 10], FREQUENCIES[3]],
 ];
 
-for (const [randomValue, key, color, pixels, frequency] of PAIRS) {
+for (const [randomValue, key, colorName, color, pixels, frequency] of PAIRS) {
   test(`the ${key} side maps to ${color.join(",")} and ${frequency} Hz`, () => {
     const h = runApp({
       random: () => randomValue,
@@ -734,7 +747,15 @@ for (const [randomValue, key, color, pixels, frequency] of PAIRS) {
     assertQuadrant(frame, pixels, color);
 
     assert.ok(h.audio, "the playback stream was opened");
-    assert.ok(h.audio.chunks.length > 0, "the sequence tone was written");
+    assert.ok(h.audio.chunks.length >= 2, "the sequence and press tones were written");
+    const longPcm = Buffer.from(
+      readWav(join(appDir, "audio", `${colorName}-long.wav`)).pcm,
+    );
+    const shortPcm = Buffer.from(
+      readWav(join(appDir, "audio", `${colorName}-short.wav`)).pcm,
+    );
+    assert.equal(decodePcm(h.audio.chunks[0]).toString("hex"), longPcm.toString("hex"));
+    assert.equal(decodePcm(h.audio.chunks[1]).toString("hex"), shortPcm.toString("hex"));
     const measured = estimateFrequency(decodePcm(h.audio.chunks[0]));
     assert.ok(
       Math.abs(measured - frequency) < 20,
@@ -758,6 +779,8 @@ test("the four colour tones and the error tone are distinct", () => {
   });
   assert.ok(h.audio.chunks.length >= 2, "expected a colour tone and an error tone");
   const error = h.audio.chunks[h.audio.chunks.length - 1];
+  const errorPcm = Buffer.from(readWav(join(appDir, "audio", "error.wav")).pcm);
+  assert.equal(decodePcm(error).toString("hex"), errorPcm.toString("hex"));
   const errorFrequency = estimateFrequency(decodePcm(error));
   for (const frequency of FREQUENCIES) {
     assert.ok(
@@ -765,6 +788,147 @@ test("the four colour tones and the error tone are distinct", () => {
       `error tone at ${errorFrequency.toFixed(1)} Hz must not be a colour tone`,
     );
   }
+});
+
+test("the app loads every packaged WAV and sends its PCM verbatim", () => {
+  const h = runApp({
+    random: () => 0.01,
+    scenario: [pressKeys(["mic_toggle"], atRound(1))],
+  });
+  assert.deepEqual(
+    h.packageReads,
+    TONE_FILES.map((tone) => tone.path),
+    "startup must load the nine package tones in symbol order",
+  );
+  assert.ok(
+    h.logs.some((line) => line.includes("tones loaded=9 packaged wav 24000Hz mono 16-bit")),
+    "startup must report the packaged tone set",
+  );
+
+  // The replay uses the long red cue; the accepted press answers with the
+  // short red cue. Both chunks must be the WAV payload, not generated samples.
+  assert.ok(h.audio && h.audio.chunks.length >= 2);
+  const longPcm = Buffer.from(readWav(join(appDir, "audio", "red-long.wav")).pcm);
+  const shortPcm = Buffer.from(readWav(join(appDir, "audio", "red-short.wav")).pcm);
+  assert.equal(decodePcm(h.audio.chunks[0]).toString("hex"), longPcm.toString("hex"));
+  assert.equal(decodePcm(h.audio.chunks[1]).toString("hex"), shortPcm.toString("hex"));
+});
+
+test("the packaged tones are documented 24 kHz mono 16-bit WAVs", () => {
+  for (const tone of TONE_FILES) {
+    const wav = readWav(join(appDir, tone.path));
+    assert.equal(wav.frames, tone.frames, `${tone.name} frame count`);
+    if (tone.frequency !== null) {
+      const measured = estimateFrequency(Buffer.from(wav.pcm));
+      assert.ok(
+        Math.abs(measured - tone.frequency) < 30,
+        `${tone.name}: expected about ${tone.frequency} Hz, measured ${measured.toFixed(1)} Hz`,
+      );
+    }
+  }
+});
+
+function withRiffSize(bytes, size) {
+  const copy = Buffer.from(bytes);
+  copy.writeUInt32LE(size, 4);
+  return new Uint8Array(copy);
+}
+
+function appendOddChunk(bytes, withPad) {
+  const chunk = Buffer.alloc(withPad ? 10 : 9);
+  chunk.write("JUNK", 0, "ascii");
+  chunk.writeUInt32LE(1, 4);
+  chunk[8] = 0x7f;
+  if (withPad) chunk[9] = 0;
+  const out = Buffer.concat([Buffer.from(bytes), chunk]);
+  out.writeUInt32LE(out.length - 8, 4);
+  return new Uint8Array(out);
+}
+
+test("a corrupt RIFF length stops before any stream is opened", () => {
+  const source = new Uint8Array(readFileSync(join(appDir, "audio", "red-long.wav")));
+  const declared = source.length - 8;
+  for (const [label, size] of [
+    ["short", declared - 2],
+    ["long", declared + 2],
+  ]) {
+    const corrupted = withRiffSize(source, size);
+    const h = runApp({
+      scenario: [],
+      readPackageFile(path) {
+        if (path === "audio/red-long.wav") return corrupted;
+        return new Uint8Array(readFileSync(join(appDir, path)));
+      },
+    });
+    assert.equal(h.opened.length, 0, `${label} RIFF length opened a stream`);
+    assert.equal(h.stopped, 1, `${label} RIFF length did not stop the app`);
+    assert.ok(
+      h.logs.some((line) => line.includes("unsupported:") && line.includes("RIFF")),
+      `${label} RIFF length must be named in the log`,
+    );
+  }
+});
+
+test("the parser requires padding for an odd final chunk", () => {
+  const source = new Uint8Array(readFileSync(join(appDir, "audio", "red-long.wav")));
+  const valid = appendOddChunk(source, true);
+  const good = runApp({
+    scenario: [pressKeys(["mic_toggle"], atRound(1))],
+    readPackageFile(path) {
+      if (path === "audio/red-long.wav") return valid;
+      return new Uint8Array(readFileSync(join(appDir, path)));
+    },
+  });
+  assert.ok(
+    good.logs.some((line) => line.includes("tones loaded=9 packaged wav")),
+    "a padded odd chunk must be accepted",
+  );
+  assert.ok(good.audio && good.audio.chunks.length > 0);
+  const longPcm = Buffer.from(readWav(join(appDir, "audio", "red-long.wav")).pcm);
+  assert.equal(decodePcm(good.audio.chunks[0]).toString("hex"), longPcm.toString("hex"));
+
+  const broken = appendOddChunk(source, false);
+  const bad = runApp({
+    scenario: [],
+    readPackageFile(path) {
+      if (path === "audio/red-long.wav") return broken;
+      return new Uint8Array(readFileSync(join(appDir, path)));
+    },
+  });
+  assert.equal(bad.opened.length, 0, "a missing pad byte must not open a stream");
+  assert.equal(bad.stopped, 1);
+  assert.ok(
+    bad.logs.some((line) => line.includes("unsupported:") && line.includes("pad byte")),
+    "the missing pad byte must be named in the log",
+  );
+});
+
+test("the app no longer synthesizes samples at runtime", () => {
+  assert.doesNotMatch(source, /Math\.sin/);
+  assert.doesNotMatch(source, /toneBase64|writeSample|buildTones/);
+});
+
+test("a missing packaged tone stops before any stream is opened", () => {
+  const h = runApp({
+    scenario: [],
+    readPackageFile(path) {
+      if (path === "audio/red-long.wav") throw new Error(path + ": no such file");
+      return new Uint8Array(readFileSync(join(appDir, path)));
+    },
+  });
+  assert.equal(h.opened.length, 0, "no presentation, capture or playback stream may open");
+  assert.equal(h.stopped, 1);
+  assert.ok(
+    h.logs.some((line) => line.includes("unsupported:") && line.includes("audio/red-long.wav")),
+    "the missing package file must be named in the log",
+  );
+});
+
+test("a QuickJS host without readPackageFile stops before opening streams", () => {
+  const h = runApp({ noPackageReader: true });
+  assert.equal(h.opened.length, 0);
+  assert.equal(h.stopped, 1);
+  assert.ok(h.logs.some((line) => line.includes("no readPackageFile")));
 });
 
 // --- gameplay --------------------------------------------------------------

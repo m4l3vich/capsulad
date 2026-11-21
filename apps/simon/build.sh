@@ -6,9 +6,10 @@
 #   PACKAGE=0 sh apps/simon/build.sh          # stage the directory, write no archive
 #   CAPSULAD_CLI=build/bin/capsulad-cli sh apps/simon/build.sh
 #
-# The package directory contains manifest.toml, main.js and the app's root
-# README.md; the test suite stays out of the installed artifact. Packaging runs
-# the repository CLI, which validates the manifest and the artifact limits.
+# The package directory contains manifest.toml, main.js, the app's root
+# README.md and its pre-rendered audio/*.wav tones; the test suite stays out of
+# the installed artifact. Packaging runs the repository CLI, which validates
+# the manifest and the artifact limits.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -31,15 +32,29 @@ esac
 [ -f "$HERE/main.js" ] || die "missing $HERE/main.js"
 [ -f "$HERE/README.md" ] || die "missing $HERE/README.md"
 
+# The game's cues are package files, so a missing WAV is a packaging error, not
+# something to synthesize at runtime.
+TONES="red-long red-short yellow-long yellow-short green-long green-short blue-long blue-short error"
+for tone in $TONES; do
+  [ -f "$HERE/audio/$tone.wav" ] || die "missing $HERE/audio/$tone.wav"
+done
+
 if [ "$PACKAGE" = "1" ]; then
+  # The packager runs inside $OUT, so a relative CAPSULAD_CLI is resolved
+  # against the caller's directory before the subshell changes directory.
+  case "$CLI" in
+    /*) ;;
+    *) CLI="$PWD/$CLI" ;;
+  esac
   [ -x "$CLI" ] ||
     die "capsulad-cli not found at $CLI; run 'make capsulad-cli' or set CAPSULAD_CLI"
 fi
 
 rm -rf "$STAGE"
 rm -f "$OUT/$APP_ID"-*.tar.gz
-mkdir -p "$STAGE"
+mkdir -p "$STAGE/audio"
 cp "$HERE/manifest.toml" "$HERE/main.js" "$HERE/README.md" "$STAGE/"
+cp "$HERE"/audio/*.wav "$STAGE/audio/"
 say "simon: staged $STAGE"
 
 if [ "$PACKAGE" = "1" ]; then
