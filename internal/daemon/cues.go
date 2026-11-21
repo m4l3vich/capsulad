@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -9,7 +10,6 @@ import (
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
 	"capsulad/internal/backend"
 	"capsulad/internal/presentations"
-	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/sounds"
 )
@@ -198,24 +198,19 @@ func (d *Daemon) maybePlayStartupCue() {
 // --- startup ring introduction ----------------------------------------------
 
 const (
-	startupRingPreset = "system.ring.indicator"
-
 	// The introduction is a short boot accent, not a second baseline effect:
-	// the jingle is over ten seconds long and does not time the lights. The
-	// preset itself fades the run in from dark over startupRingFadeIn seconds.
-	// The hold is measured from that first frame, so the full-intensity
-	// plateau after the fade-in lasts about 0.9 s and the whole introduction
-	// lasts about 1.92 s. The steps below taper it back before ownership is
-	// released, so the ring never snaps off.
-	startupRingFadeIn  = 0.6
-	startupRingHold    = 1500 * time.Millisecond
-	startupRingFadeOut = 6
-	startupRingStep    = 70 * time.Millisecond
+	// the jingle is over ten seconds long and does not time the lights. It
+	// fills the whole ring clockwise from the top, holds the whole ring lit,
+	// then fades every pixel out. The total stays near two seconds.
+	startupRingSweep   = 700 * time.Millisecond
+	startupRingHold    = 700 * time.Millisecond
+	startupRingFadeOut = 500 * time.Millisecond
+	startupRingTotal   = startupRingSweep + startupRingHold + startupRingFadeOut
 
-	// startupRingMaxRun is the preset's largest countable run (the indicator
-	// count parameter is bounded at 12). A ring larger than 36 pixels keeps a
-	// 12-pixel top arc instead of silently losing the introduction.
-	startupRingMaxRun = 12
+	// startupRingFrameStep paces content updates below the output loop's
+	// 33 ms tick, so the transition is rendered without streaming faster than
+	// the physical writer can show it.
+	startupRingFrameStep = 30 * time.Millisecond
 )
 
 // startupRingColor is the midpoint of the ring app's canonical aurora palette
@@ -223,46 +218,78 @@ const (
 // rather than a new colour.
 var startupRingColor = backend.RGB{R: 40, G: 175, B: 217}
 
-// startupRingParams derives the run from the advertised geometry: pixel 0 is
-// the top of the ring and indices advance clockwise, so a short arc from index
-// 0 is the top of whatever ring the board profile fits.
-func startupRingParams(pixelCount int) (presets.Params, bool) {
-	if pixelCount <= 0 {
-		return nil, false
+// startupRingFrame renders one frame of the boot introduction for the
+// advertised ring geometry. Pixel 0 is the top of the ring and indices advance
+// clockwise, so the first phase fills the ring clockwise from the top behind a
+// soft leading edge, the second holds every pixel lit, and the third fades the
+// whole ring out. The frame length is the advertised pixel count: nothing here
+// is keyed to a particular board or a fixed 12-pixel run.
+func startupRingFrame(pixelCount int, elapsed time.Duration) []backend.RGB {
+	out := make([]backend.RGB, pixelCount)
+	if pixelCount <= 0 || elapsed <= 0 {
+		return out
 	}
-	count := pixelCount / 3
-	if count < 1 {
-		count = 1
+	t := elapsed.Seconds()
+	sweep, hold, fade := startupRingSweep.Seconds(), startupRingHold.Seconds(), startupRingFadeOut.Seconds()
+	level := 1.0
+	if t > sweep+hold {
+		level = 1 - smoothstep((t-sweep-hold)/fade)
 	}
-	if count > startupRingMaxRun {
-		count = startupRingMaxRun
+	if level <= 0 {
+		return out
 	}
-	params, err := presets.ValidateParams(mustPreset(startupRingPreset), presets.Params{
-		"color": startupRingColor, "start": int64(0), "count": int64(count),
-		"intensity": 1.0, "fade_in": startupRingFadeIn,
-	})
-	if err != nil {
-		return nil, false
+	// Easing the head keeps the first and last pixels from snapping on at full
+	// speed; the leading pixel itself is scaled by the fractional edge.
+	head := smoothstep(t/sweep) * float64(pixelCount)
+	for i := range out {
+		edge := head - float64(i)
+		if edge <= 0 {
+			break
+		}
+		if edge > 1 {
+			edge = 1
+		}
+		out[i] = startupRingScale(level * edge)
 	}
-	return params, true
+	return out
 }
 
-// showStartupRing marks the boot with a short blue-teal run that fades in,
-// holds and fades out, then releases its capture so the selected baseline (or
-// the explicit blank of a closed active window / no ring provider) is selected
-// again. It is a temporary system capture like the muted-microphone
-// indication, opened and released through the same facade apps use.
+// smoothstep eases 0..1 with zero slope at both ends.
+func smoothstep(t float64) float64 {
+	switch {
+	case t <= 0:
+		return 0
+	case t >= 1:
+		return 1
+	default:
+		return t * t * (3 - 2*t)
+	}
+}
+
+func startupRingScale(level float64) backend.RGB {
+	return backend.RGB{
+		R: uint8(math.Round(float64(startupRingColor.R) * level)),
+		G: uint8(math.Round(float64(startupRingColor.G) * level)),
+		B: uint8(math.Round(float64(startupRingColor.B) * level)),
+	}
+}
+
+// showStartupRing marks the boot with a blue-teal fill of the whole ring, then
+// releases its capture so the selected baseline (or the explicit blank of a
+// closed active window / no ring provider) is selected again. It is a
+// temporary system capture like the muted-microphone indication, opened and
+// released through the same facade apps use.
 //
 // Trigger: the same installation/startup_sound_enabled decision that plays the
-// startup cue. Feedback: the lit run; the introduction has no audible half of
-// its own. Ownership: one generation plus its own presentation and capture. A
-// newer system indication or app capture simply takes selection priority;
-// this presentation stays privately owned and its release never touches the
-// newer owner. A replacement introduction, cancellation or shutdown bumps the
-// generation, which is what makes a stale fade step inert. Dismissal: the
-// bounded lifetime; it captures no input. Final state: capture released and
-// presentation destroyed, never a forced black frame over a deliberately
-// selected baseline.
+// startup cue. Feedback: the filling ring; the introduction has no audible
+// half of its own. Ownership: one generation plus its own presentation and
+// capture. A newer system indication or app capture simply takes selection
+// priority; this presentation stays privately owned and its release never
+// touches the newer owner. A replacement introduction, cancellation or
+// shutdown bumps the generation, which is what makes a stale frame inert.
+// Dismissal: the bounded lifetime; it captures no input. Final state: capture
+// released and presentation destroyed, never a forced black frame over a
+// deliberately selected baseline.
 func (d *Daemon) showStartupRing() {
 	if d.dev == nil || d.router == nil || d.pres == nil || d.ctx == nil {
 		return
@@ -279,15 +306,15 @@ func (d *Daemon) showStartupRing() {
 	// recording indications, so it does not require a selected ring provider:
 	// an explicit no-provider baseline still stays dark once the introduction
 	// releases. The selected baseline is never overwritten by a forced frame.
-	params, ok := startupRingParams(ring.Caps().PixelCount)
-	if !ok {
+	pixelCount := ring.Caps().PixelCount
+	if pixelCount <= 0 {
 		return
 	}
 
 	d.startupMu.Lock()
 	defer d.startupMu.Unlock()
 	// An introduction that is still running is replaced, never stacked. The
-	// generation bump above makes its fade a no-op against this presentation.
+	// generation bump above makes its frame updates inert.
 	d.startupGen++
 	d.releaseStartupRingLocked("replaced")
 	pres, err := d.openAppPresentation(routing.SystemAppID, "", resourceID)
@@ -295,7 +322,7 @@ func (d *Daemon) showStartupRing() {
 		d.logs.Warnf("daemon", "", "startup ring presentation: %v", err)
 		return
 	}
-	if err := d.updateAppPresentation(routing.SystemAppID, "", pres, presentations.RingEffect(startupRingPreset, params)); err != nil {
+	if err := d.updateAppPresentation(routing.SystemAppID, "", pres, presentations.RingFrame(startupRingFrame(pixelCount, 0))); err != nil {
 		d.logs.Warnf("daemon", "", "startup ring: %v", err)
 		d.closeAppPresentation(routing.SystemAppID, "", pres)
 		return
@@ -310,53 +337,49 @@ func (d *Daemon) showStartupRing() {
 	d.startupPres, d.startupCapture = pres, cap.ID
 	gen := d.startupGen
 	d.logs.Infof("daemon", "", "startup ring introduction on %s (capture=%s)", resourceID, cap.ID)
-	go d.runStartupRing(gen, params)
+	go d.runStartupRing(gen, pixelCount)
 }
 
-// runStartupRing holds the lit run for its fade-in, then tapers it in steps
-// that are each validated against the owning generation. The final dark step
-// gets one frame interval before release, so the handover to the selected
-// baseline is not a visible jump.
-func (d *Daemon) runStartupRing(gen uint64, base presets.Params) {
-	timer := time.NewTimer(startupRingHold)
-	defer timer.Stop()
-	select {
-	case <-d.ctx.Done():
-		d.finishStartupRing(gen, "cancelled")
-		return
-	case <-timer.C:
-	}
-	intensity, _ := base["intensity"].(float64)
-	for i := 1; i <= startupRingFadeOut; i++ {
-		params := cloneParams(base)
-		params["intensity"] = intensity * (1 - float64(i)/startupRingFadeOut)
-		params["fade_in"] = 0.0
-		if !d.fadeStartupRing(gen, params) {
-			d.finishStartupRing(gen, "failed")
-			return
-		}
+// runStartupRing drives the fill, hold and fade at a bounded frame rate. Every
+// step is validated against the owning generation, so a replaced or cancelled
+// introduction stops writing without touching the newer owner. Release happens
+// after the fade, not with a forced black frame over the selected baseline.
+func (d *Daemon) runStartupRing(gen uint64, pixelCount int) {
+	start := time.Now()
+	ticker := time.NewTicker(startupRingFrameStep)
+	defer ticker.Stop()
+	for {
 		select {
 		case <-d.ctx.Done():
 			d.finishStartupRing(gen, "cancelled")
 			return
-		case <-time.After(startupRingStep):
+		case now := <-ticker.C:
+			elapsed := now.Sub(start)
+			if !d.drawStartupRing(gen, pixelCount, elapsed) {
+				d.finishStartupRing(gen, "failed")
+				return
+			}
+			if elapsed >= startupRingTotal {
+				d.finishStartupRing(gen, "complete")
+				return
+			}
 		}
 	}
-	d.finishStartupRing(gen, "complete")
 }
 
-// fadeStartupRing writes one taper step only while gen still owns the
+// drawStartupRing writes one rendered frame only while gen still owns the
 // introduction. The update happens under the ownership lock: a newer system
-// capture may be selected over this presentation, but a stale step must never
+// capture may be selected over this presentation, but a stale frame must never
 // land after the presentation was released or replaced.
-func (d *Daemon) fadeStartupRing(gen uint64, params presets.Params) bool {
+func (d *Daemon) drawStartupRing(gen uint64, pixelCount int, elapsed time.Duration) bool {
+	pixels := startupRingFrame(pixelCount, elapsed)
 	d.startupMu.Lock()
 	defer d.startupMu.Unlock()
 	if d.startupGen != gen || d.startupPres == nil {
 		return false
 	}
-	if err := d.updateAppPresentation(routing.SystemAppID, "", d.startupPres, presentations.RingEffect(startupRingPreset, params)); err != nil {
-		d.logs.Warnf("daemon", "", "startup ring fade: %v", err)
+	if err := d.updateAppPresentation(routing.SystemAppID, "", d.startupPres, presentations.RingFrame(pixels)); err != nil {
+		d.logs.Warnf("daemon", "", "startup ring frame: %v", err)
 		return false
 	}
 	return true

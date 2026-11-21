@@ -15,7 +15,6 @@ import (
 	"capsulad/internal/ids"
 	"capsulad/internal/logbus"
 	"capsulad/internal/presentations"
-	"capsulad/internal/presets"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
 	"capsulad/internal/sounds"
@@ -188,62 +187,190 @@ func startupRingOwnership(d *Daemon) (*presentations.Presentation, string) {
 	return d.startupPres, d.startupCapture
 }
 
-// TestStartupRingGeometryFollowsRingCapabilities derives the run from the
-// advertised geometry instead of a fixed pixel list, and pins the blue-teal
-// fade-in contract of the rendered effect.
-func TestStartupRingGeometryFollowsRingCapabilities(t *testing.T) {
-	for _, pixels := range []int{12, 6, 4, 1, 39, 48} {
-		params, ok := startupRingParams(pixels)
-		if !ok {
-			t.Fatalf("%d-pixel ring: no startup parameters", pixels)
+// TestStartupRingFrameUsesAdvertisedGeometry derives the fill from the
+// advertised pixel count instead of a fixed run: every advertised pixel is lit
+// by the end of the sweep on every geometry, and the frame never assumes the
+// simulator's 12 pixels.
+func TestStartupRingFrameUsesAdvertisedGeometry(t *testing.T) {
+	for _, pixels := range []int{1, 2, 6, 12, 39, 48} {
+		frame := startupRingFrame(pixels, startupRingSweep)
+		if len(frame) != pixels {
+			t.Fatalf("%d-pixel ring: frame has %d pixels, want %d", pixels, len(frame), pixels)
 		}
-		want := pixels / 3
-		if want < 1 {
-			want = 1
+		for i, px := range frame {
+			if px != startupRingColor {
+				t.Fatalf("%d-pixel ring: pixel %d = %v at the end of the sweep, want the full blue-teal colour", pixels, i, px)
+			}
 		}
-		if want > startupRingMaxRun {
-			want = startupRingMaxRun
+		atZero := startupRingFrame(pixels, 0)
+		if len(atZero) != pixels {
+			t.Fatalf("%d-pixel ring: first frame has %d pixels", pixels, len(atZero))
 		}
-		if count, _ := params["count"].(int64); int(count) != want {
-			t.Fatalf("%d-pixel ring: count = %v, want %d", pixels, params["count"], want)
-		}
-		if start, _ := params["start"].(int64); start != 0 {
-			t.Fatalf("%d-pixel ring: start = %v, want the top pixel 0", pixels, params["start"])
+		for i, px := range atZero {
+			if px != (backend.RGB{}) {
+				t.Fatalf("%d-pixel ring: first frame pixel %d = %v, want dark", pixels, i, px)
+			}
 		}
 	}
-	if _, ok := startupRingParams(0); ok {
-		t.Fatal("a ring with no pixels accepted the introduction")
+	if got := len(startupRingFrame(0, startupRingSweep)); got != 0 {
+		t.Fatalf("a ring with no pixels rendered %d pixels", got)
 	}
 
-	params, _ := startupRingParams(12)
-	dark, err := presets.RingFrame(startupRingPreset, params, 12, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, px := range dark {
-		if px != (backend.RGB{}) {
-			t.Fatalf("t=0 pixel %d = %v, want the fade-in to start dark", i, px)
+	// The sweep is a contiguous prefix from the top: at half the sweep the
+	// first half of a 12-pixel ring is lit and the rest is still dark.
+	half := startupRingFrame(12, startupRingSweep/2)
+	for i, px := range half {
+		switch {
+		case i < 6 && px == (backend.RGB{}):
+			t.Fatalf("pixel %d is dark halfway through the sweep: %v", i, half)
+		case i >= 6 && px != (backend.RGB{}):
+			t.Fatalf("pixel %d is lit before the sweep reached it: %v", i, half)
 		}
 	}
-	lit, err := presets.RingFrame(startupRingPreset, params, 12, startupRingFadeIn)
-	if err != nil {
-		t.Fatal(err)
+
+	// The leading pixel ramps up instead of snapping to full intensity, and
+	// the pixels behind the head stay dark until it reaches them.
+	first := startupRingFrame(12, startupRingFrameStep)
+	if first[0] == (backend.RGB{}) || first[0] == startupRingColor {
+		t.Fatalf("leading pixel = %v, want a partial first frame", first[0])
 	}
-	if lit[0].B <= lit[0].G || lit[0].G <= lit[0].R {
-		t.Fatalf("top pixel %v is not blue-teal", lit[0])
-	}
-	for i := 4; i < len(lit); i++ {
-		if lit[i] != (backend.RGB{}) {
-			t.Fatalf("pixel %d = %v outside the derived four-pixel run", i, lit[i])
+	for i := 1; i < len(first); i++ {
+		if first[i] != (backend.RGB{}) {
+			t.Fatalf("pixel %d lit before the leading edge arrived: %v", i, first)
 		}
 	}
 }
 
+// observedRing is a ring device with an advertised geometry independent of the
+// simulator's 12 pixels. It records the frames the output loop actually wrote.
+type observedRing struct {
+	mu    sync.Mutex
+	caps  backend.RingCaps
+	frame backend.RingFrame
+}
+
+func newObservedRing(pixels int) *observedRing {
+	return &observedRing{caps: backend.RingCaps{PixelCount: pixels, SupportsRGB: true}}
+}
+
+func (r *observedRing) Caps() backend.RingCaps { return r.caps }
+func (r *observedRing) ResourceID() string     { return "light.ring.main" }
+func (r *observedRing) WriteRing(f backend.RingFrame) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frame = backend.RingFrame{Pixels: append([]backend.RGB(nil), f.Pixels...), Brightness: f.Brightness}
+	return nil
+}
+func (r *observedRing) Snapshot() backend.RingFrame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return backend.RingFrame{Pixels: append([]backend.RGB(nil), r.frame.Pixels...), Brightness: r.frame.Brightness}
+}
+
+// ringBackend replaces only the ring device, so a test can advertise a
+// geometry larger than the simulator profile while the rest of the backend
+// (audio, touch, sensors) stays intact.
+type ringBackend struct {
+	backend.Backend
+	ring backend.RingDevice
+}
+
+func (b *ringBackend) Ring() backend.RingDevice { return b.ring }
+
+// startDaemonWithRing is startEmptyDaemon with a ring geometry chosen by the
+// test. The swap happens before Run so no reader observes the old device.
+func startDaemonWithRing(t *testing.T, base string, ring backend.RingDevice) *Daemon {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.DataDir = base
+	cfg.RunDir = filepath.Join(base, "run")
+	cfg.SocketPath = filepath.Join(cfg.RunDir, "hal.sock")
+	cfg.AppsDir = filepath.Join(base, "apps")
+	cfg.AssetsDir = filepath.Join(base, "assets")
+	cfg.WebUIAddr = ""
+	cfg.SandboxMode = "none"
+	cfg.NativeLibDir = nativeLibDir(t)
+	if err := os.MkdirAll(cfg.AppsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d, err := New(ctx, cfg)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	d.dev = &ringBackend{Backend: d.dev, ring: ring}
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Log("daemon shutdown timed out")
+		}
+	})
+	return d
+}
+
+// TestStartupRingLightsEveryPixelOfAdvertisedRing drives the cue through the
+// real output loop on a 48-pixel ring and asserts the written frames: all 48
+// pixels light, not a fixed 12-pixel run. This is the capability-geometry
+// counterpart to the rendered-frame unit test above.
+func TestStartupRingLightsEveryPixelOfAdvertisedRing(t *testing.T) {
+	base := shortTempDir(t)
+	marker := filepath.Join(base, startupSoundMarker)
+	if err := os.WriteFile(marker, []byte("played\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const pixels = 48
+	ring := newObservedRing(pixels)
+	d := startDaemonWithRing(t, base, ring)
+	ringID := d.ringResourceID()
+	waitForAppSelection(t, d, ringID, ringAppID)
+
+	d.showStartupRing()
+	pres, capture := startupRingOwnership(d)
+	if pres == nil || capture == "" {
+		t.Fatal("the startup ring did not take ring ownership")
+	}
+	defer d.stopStartupRing("test cleanup")
+	waitFor(t, time.Second, "startup ring selected", func() bool {
+		return d.router.Current(ringID).SelectedCaptureID == capture
+	})
+
+	full := false
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.router.Current(ringID).SelectedCaptureID != capture {
+			break
+		}
+		frame := ring.Snapshot()
+		if len(frame.Pixels) == pixels {
+			all := true
+			for _, px := range frame.Pixels {
+				if px != startupRingColor {
+					all = false
+					break
+				}
+			}
+			if all {
+				full = true
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !full {
+		t.Fatalf("the output loop never wrote all %d advertised pixels lit", pixels)
+	}
+}
+
 // TestStartupRingFadesAndRestoresBaseline drives the introduction on the
-// simulator backend and asserts the observable frames: a full blue-teal run on
-// the top of the ring, intermediate levels on both sides of the peak (a fade,
-// not a snap), and the selected ring baseline selected again afterwards
-// instead of a forced black frame.
+// simulator backend and asserts the observable frames: a clockwise fill, a
+// fully lit whole-ring peak in blue-teal, intermediate levels during the
+// fade-out, and the selected ring baseline selected again afterwards instead
+// of a forced black frame.
 func TestStartupRingFadesAndRestoresBaseline(t *testing.T) {
 	base := shortTempDir(t)
 	marker := filepath.Join(base, startupSoundMarker)
@@ -270,9 +397,11 @@ func TestStartupRingFadesAndRestoresBaseline(t *testing.T) {
 	})
 
 	var (
-		levels    []int
-		peak      int
-		peakFrame backend.RingFrame
+		sawPartial bool
+		sawFull    bool
+		fullFrame  backend.RingFrame
+		afterPeak  []int
+		peak       int
 	)
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
@@ -281,66 +410,65 @@ func TestStartupRingFadesAndRestoresBaseline(t *testing.T) {
 		}
 		frame := sim.RingSnapshot()
 		if len(frame.Pixels) == pixelCount {
-			// Blue is the largest channel of the blue-teal run, so it tracks
-			// the indicator intensity across the fade.
+			lit, full := 0, true
+			for _, px := range frame.Pixels {
+				if px != (backend.RGB{}) {
+					lit++
+				}
+				if px != startupRingColor {
+					full = false
+				}
+			}
+			switch {
+			case full:
+				if !sawFull {
+					sawFull, fullFrame = true, frame
+				}
+			case lit > 0:
+				sawPartial = true
+			}
+			// Blue is the largest channel of the blue-teal fill, so it tracks
+			// the global fade level.
 			level := int(frame.Pixels[0].B)
-			levels = append(levels, level)
 			if level > peak {
-				peak, peakFrame = level, frame
+				peak = level
+			}
+			if sawFull {
+				afterPeak = append(afterPeak, level)
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	if peak == 0 {
-		t.Fatal("the introduction never lit the ring")
+	if !sawPartial {
+		t.Fatal("the introduction never showed the clockwise fill; it lit the whole ring at once")
+	}
+	if !sawFull {
+		t.Fatal("the introduction never lit the whole ring")
+	}
+	for i, px := range fullFrame.Pixels {
+		if px != startupRingColor {
+			t.Fatalf("peak frame pixel %d = %v, want the whole ring in the blue-teal accent %v", i, px, startupRingColor)
+		}
 	}
 	if peak < 200 {
 		t.Fatalf("peak blue level %d, want a full-intensity frame", peak)
 	}
-	top := peakFrame.Pixels[0]
-	if top.B <= top.G || top.G <= top.R {
-		t.Fatalf("peak frame %v is not blue-teal", top)
-	}
-	run := pixelCount / 3
-	if run < 1 {
-		run = 1
-	}
-	for i, px := range peakFrame.Pixels {
-		if i < run && px == (backend.RGB{}) {
-			t.Fatalf("peak frame left derived pixel %d dark", i)
-		}
-		if i >= run && px != (backend.RGB{}) {
-			t.Fatalf("peak frame lit pixel %d outside the derived run", i)
-		}
-	}
 
-	peakIndex := 0
-	for i, level := range levels {
-		if level == peak {
-			peakIndex = i
-		}
-	}
-	var after []int
-	for _, level := range levels[peakIndex:] {
-		if level > 0 && level < peak-10 {
-			after = append(after, level)
-		}
-	}
 	distinct := map[int]bool{}
-	for _, level := range after {
-		distinct[level] = true
-	}
-	if len(distinct) < 2 {
-		t.Fatalf("fade-out levels after the peak = %v, want at least two intermediate steps", after)
-	}
 	fellBelowQuarter := false
-	for _, level := range levels {
-		if level > 0 && level < peak/4 {
+	for _, level := range afterPeak {
+		if level > 0 && level < peak {
+			distinct[level] = true
+		}
+		if level <= peak/4 {
 			fellBelowQuarter = true
 		}
 	}
+	if len(distinct) < 2 {
+		t.Fatalf("fade-out levels after the peak = %v, want at least two intermediate steps", afterPeak)
+	}
 	if !fellBelowQuarter {
-		t.Fatalf("levels %v never approached dark, so the introduction has no fade", levels)
+		t.Fatalf("levels %v never approached dark, so the introduction has no fade", afterPeak)
 	}
 
 	// The release must return the selected baseline, not paint a black frame.
@@ -482,9 +610,9 @@ func TestStartupRingStaleFadeCannotTouchNewerOwner(t *testing.T) {
 	if first == "" || second == "" || first == second {
 		t.Fatalf("replacement captures = %q, %q; want two distinct owners", first, second)
 	}
-	time.Sleep(startupRingHold + 2*startupRingStep)
+	time.Sleep(startupRingSweep + startupRingHold/2)
 	if _, capture := startupRingOwnership(d); capture != second {
-		t.Fatalf("a stale fade released the current introduction: capture %q, want %q", capture, second)
+		t.Fatalf("a stale frame released the current introduction: capture %q, want %q", capture, second)
 	}
 	waitFor(t, 2*time.Second, "replacement introduction selected", func() bool {
 		return d.router.Current(ringID).SelectedCaptureID == second
@@ -503,7 +631,7 @@ func TestStartupRingStaleFadeCannotTouchNewerOwner(t *testing.T) {
 	waitFor(t, 2*time.Second, "muted indication selected", func() bool {
 		return d.router.Current(ringID).SelectedCaptureID == mic
 	})
-	time.Sleep(startupRingHold + 2*startupRingStep)
+	time.Sleep(startupRingTotal + 2*startupRingFrameStep)
 	frame := sim.RingSnapshot()
 	d.indicatorMu.Lock()
 	still := d.micCaptureID
@@ -609,30 +737,36 @@ func TestStartupRingRendersBeforeSlowBootApps(t *testing.T) {
 		return capture != ""
 	})
 
-	sawFrame, minBlue := false, 255
-	deadline := time.Now().Add(800 * time.Millisecond)
+	sawFrame, sawPartial := false, false
+	deadline := time.Now().Add(900 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		sel := d.router.Current(ringID)
 		if sel.SelectedAppID == routing.SystemAppID && sel.SelectedCaptureID != "" {
 			if frame := sim.RingSnapshot(); len(frame.Pixels) == pixelCount {
-				if blue := int(frame.Pixels[0].B); blue > 0 {
-					sawFrame = true
-					if blue < minBlue {
-						minBlue = blue
+				lit := 0
+				for _, px := range frame.Pixels {
+					if px != (backend.RGB{}) {
+						lit++
 					}
+				}
+				if lit > 0 {
+					sawFrame = true
+				}
+				if lit > 0 && lit < pixelCount {
+					sawPartial = true
 				}
 			}
 		}
-		if sawFrame && minBlue <= 24 {
+		if sawFrame && sawPartial {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	if !sawFrame {
 		t.Fatal("the introduction produced no physical frame while boot app startup was blocked")
 	}
-	if minBlue > 60 {
-		t.Fatalf("first introduction frames were already at blue=%d; the fade-in was clipped", minBlue)
+	if !sawPartial {
+		t.Fatal("the introduction produced no fill frame while boot app startup was blocked; the writer started after the sweep")
 	}
 	waitFor(t, 2*time.Second, "full introduction frame while boot app startup is blocked", func() bool {
 		frame := sim.RingSnapshot()
