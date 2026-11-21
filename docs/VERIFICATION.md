@@ -267,13 +267,13 @@ staged.
   `build/linux-arm64/release-20261117b/verify-after-recovery.sh` re-runs the whole verification
   once the speaker is reachable. This is gate 31.
 
-### 2026-11-18 full-stack deployment (all 12 apps, startup ring)
+### 2026-11-18 full-stack deployment (all 12 apps, earlier top-run startup ring)
 
 A coordinated `capsulad-cli deploy` of the 2026-11-18 working tree (HEAD `1c6bb20` plus the
-startup-ring work and the size-optimised CLI/Web UI) was applied over ADB to the Capsula Mini
-rev 4. Artifacts were cross-built for aarch64 / glibc ≤ 2.33 with the repo-local bullseye
-sysroot toolchain; every ELF passed the version/SONAME/`DT_NEEDED` gates. No device reboot was
-performed.
+earlier top-run startup-ring work and the size-optimised CLI/Web UI) was applied over ADB to the
+Capsula Mini rev 4. Artifacts were cross-built for aarch64 / glibc ≤ 2.33 with the repo-local
+bullseye sysroot toolchain; every ELF passed the version/SONAME/`DT_NEEDED` gates. No device
+reboot was performed.
 
 - **Deployed stack.** `capsulad` 28,639,384 B `4ddb9111…`, `capsulad-cli` 8,781,976 B
   `90420043…`, `lib/libcapsulad.so.1.0.0` 6,500,208 B `fa742e8f…` (SONAME `libcapsulad.so.1`,
@@ -325,6 +325,10 @@ performed.
   retains the earlier boots' ring lines (22:32, 22:35, 22:38) while the per-boot context has
   only the final one. The physical fade-in/out is **not** optically measured; the evidence is
   the daemon's presentation lifecycle and the reviewed backend/simulator proof.
+  **Historical implementation:** this deployed boot ran the 2026-11-18 revision's short top-run
+  cue (its simulator proof derived four lit pixels on the 12-pixel ring), not the whole-ring cue
+  that replaced it. These lines are device evidence for that revision only; the current whole-ring
+  cue has simulator/host evidence below and has not yet been deployed or observed on the unit.
 - **Startup audio (digital monitor only).** The final restart was captured on
   `alsa_playback.monitor` and `master.monitor` (16 kHz mono, gzip) with no microphone
   recording. The master monitor has a **10.800 s** non-silent span (peak 890) and the ALSA
@@ -566,6 +570,160 @@ deploy, no daemon restart and no boot-hook change.
   is kept on the build host as `build/device-apps/org.capsulad.airplay-0.1.0.tar.gz` (member
   `airplay` sha256 `6fb1faf18362afb92fe42b6d7d9f154286db48ca38fe8ba5d8208876f862c895`) for
   rollback with `app install`.
+
+### 2026-11-21 deployment: whole-ring startup cue, PA HTTP relay, renamed labels and rebuilt QuickJS
+
+The working tree at HEAD `2f1f0cf` plus the reviewed uncommitted changes was built for the
+Rockchip stock target and deployed with the canonical `capsulad-cli deploy` over ADB
+(`192.168.1.50:5555`). The bundle carried the daemon, CLI, native runtime/metadata, QuickJS and
+MicroPython hosts, the stock boot hook and five product packages. Radio, Marusia, Dumb Assistant
+and the three dev apps were deliberately not reinstalled, so their packages, app data and
+settings were left untouched.
+
+- **Artifacts and staged identity.** `capsulad` 28,901,528 B sha256 `c7a40f44…`;
+  `capsulad-cli` 8,781,976 B sha256 `582cc0f6…`; `lib/libcapsulad.so.1.0.0` 6,419,344 B sha256
+  `cdd84b74…` (SONAME `libcapsulad.so.1`; `DT_NEEDED` `libgcc_s.so.1`, `libpthread.so.0`,
+  `libm.so.6`, `libdl.so.2`, `libc.so.6`; maximum `GLIBC_2.29`, below the board's 2.33 ceiling);
+  `lib/capsulad-native.json` sha256 `f4491337…` (ABI 1.0, library `libcapsulad.so.1`);
+  `lib/capsulad-quickjs` 1,114,128 B sha256 `7b10bea4…` (quickjs-ng 0.18.0 from the pinned
+  source in an arm64 buster container with gcc 8.3; maximum `GLIBC_2.17`);
+  `lib/capsulad-micropython` sha256 `49edcf80…` (its source was unchanged and the staged target
+  binary was already byte-identical to the installed one; maximum `GLIBC_2.29`); boot hook
+  sha256 `91440905…` unchanged. The directory bundle (13 files, 50,560,189 B; 23,634,829 B as a
+  `.tar.gz`, sha256 `fa5cb32b…`) matched file-for-file between host and device before
+  deployment. Installed daemon, CLI, runtime, metadata, script hosts, header and boot hook
+  hashes match the staged files exactly after both restarts; no `.prev` or staging tree remains.
+- **Packages.** AirPlay 2 receiver `0.1.0` archive sha256 `a9a09a1f…` (member `airplay`
+  4,727,864 B sha256 `a72f6aeb…`, static FFmpeg AAC, maximum `GLIBC_2.28`); Cadence Client
+  `0.1.0` `6b31c9b8…` (member `cadence` `84063c6a…`); Home Assistant integration `0.1.0`
+  `532c3a30…` (member `homeassistant` `6a5a2230…`); PA Speaker `0.1.0` `a72c8dd6…` (member
+  `main.py` `53be4ebd…`); Simon Says `1.1.0` `a2258d05…` (member `main.js` `593662f6…` and the
+  nine packaged WAVs). Every installed member hash and every `manifest.toml` name/version/ABI
+  matched its archive. `app list` now reports **AirPlay 2 receiver**, **Cadence Client** and
+  **Home Assistant integration**, and `media list` names the AirPlay 2 receiver.
+- **Deployment.** `/data` had 8,137 KiB free. The detached script stopped the daemon through
+  `S99btctl.sh stop`, moved the old AirPlay package and rotated log to `/tmp` (4,713 KiB and
+  515 KiB, so the package staging peak could fit), and ran
+  `capsulad-cli deploy /tmp/capsulad-bundle -staging /run -timeout 300s` with
+  `CAPSULAD_OUTPUT_TRACE=1`. The deploy log recorded every package install/update, the runtime,
+  the boot hook, the CLI and the daemon, then `restarted through /etc/init.d/S99btctl.sh restart`
+  and `daemon healthy`, exit 0. The moved old AirPlay copy was removed after success. `/data`
+  ended with about 8.6 MiB free; `/tmp` and `/run` were cleaned.
+- **Startup ring, traced restart (digital).** Startup sound is on, so the boot cue ran. The
+  output trace recorded a partial first frame `[{13 57 71} {0 0 0} …]`, a full 12-pixel frame
+  `[{39 172 213} ×12]` after the sweep (pre-brightness; writer brightness 0.79), a uniform fade
+  `[{10 42 52} ×12]`, then `startup ring complete; selected ring baseline restored` 1.915 s
+  after the introduction started. An earlier sampled sweep frame carried the full-intensity
+  `{40 175 217}` pixels. The selected ring baseline is the explicit no-provider blank, and the
+  next write is `presentation=— capture=— … pixels=[{0 0 0} ×12]`. This is backend submission
+  evidence, not an optical measurement.
+- **Restart and persistence.** A final `S99btctl.sh stop`/`start` restored the pre-test
+  `security/credentials.json` (removing the temporary PA operator key's revoked record; file
+  hashes and 0600 root ownership match the snapshot) and started without
+  `CAPSULAD_OUTPUT_TRACE`. `/proc/<daemon>/environ` contains no `CAPSULAD_*` variable. That
+  restart logged the introduction and `startup ring complete; selected ring baseline restored`,
+  with only the three ownership-transition ring writes and no 30 ms frame samples, the expected
+  untraced behaviour. `settings.json` sha256 `144415b6…` was byte-identical before and after:
+  revision 4200, master 47%, assistant `org.capsulad.cadence`, timezone `Asia/Irkutsk`,
+  microphone live, startup sound on, wakeword enabled and clock display baseline were unchanged.
+  Assets, wakeword data, WiFi state and every security file matched the snapshot. Only AirPlay's
+  app-managed `device_identity`/`raop_key` rotated (revision 132 -> 136); `pairings` stayed
+  `e30=` (empty), name/ports/pin/features were unchanged, and no pair/unpair request was sent.
+- **PA HTTP relay through the packaged app.** A temporary operator-scoped key was created on the
+  device (never printed) and `POST /api/apps/org.capsulad.pa/play` with the packaged Simon
+  `red-short.wav` (0.18 s, 24 kHz mono S16) returned HTTP 200 in 0.268 s:
+  `{"played":true,"frames":4320,"sampleRateHz":24000,"channels":1,"detail":"played 4320 frames
+  at 24000 Hz/1 ch"}`. The PA app logged `mixer=48000 Hz/2 ch (STREAM_CLOSED: playback
+  finished)` and the daemon logged its playback stream opened and closed; no stream remained.
+  The key was revoked and the security store was restored to its exact pre-test bytes at the
+  final restart. This covers the MicroPython host, app bus, routing/ownership and mixer
+  submission, not acoustic output.
+- **Simon packaged audio/host.** Launching `org.capsulad.simon` took the ring, segment and panel
+  captures and opened its speaker stream. The packaged QuickJS app logged
+  `tones loaded=9 packaged wav 24000Hz mono 16-bit`, `ring pixels=12 rgb=true`, then `round=1`,
+  `play round=1 symbols=1` and a blue three-pixel ring frame; stopping the run closed the
+  playback stream and restored the clock display and blank ring baselines. On a second run a
+  bounded `parec` of `master.monitor` captured 0.320 s (15,344 frames) of non-zero 48 kHz
+  stereo PCM, peak 191 and RMS 128.4 over the non-zero span, matching one packaged 0.32 s long
+  cue. This proves the rebuilt QuickJS host's `readPackageFile` against the archive's nine WAVs
+  and digital PCM reaching the output monitor; it is not an acoustic recording.
+- **Cadence, Home Assistant and AirPlay readiness.** All three native runs reached `APP_READY`
+  after deployment and after the final restart, one run each with `sandbox=mountns`; this is
+  also the on-device load proof for the rebuilt runtime, because the AirPlay target container's
+  own load smoke is limited to glibc 2.28 and rejects a `GLIBC_2.29` runtime. Cadence logged
+  `link_unconfigured: set server_url and a device_token…`, `ready board=vk-capsula-mini` and
+  `settings applied: not configured`; no enrollment code was redeemed and no Cadence setting
+  was written. Home Assistant logged its integration node and 19 entities and remained ready
+  with the broker unset; its mDNS `browse _mqtt._tcp` deadlines continued and no broker or Home
+  Assistant instance was contacted. AirPlay published `_airplay._tcp`/`_raop._tcp` and its
+  media projection; no sender session was attempted. From the build host, `/healthz` returned
+  `ok` (HTTP 200) and `/` returned HTTP 200, and `dns-sd` listed `Capsula Mini` under both
+  `_airplay._tcp` and `_raop._tcp` after the final restart.
+- **Limits.** The proof is internal state, app-bus calls, backend frame writes, mixer/stream
+  state and installed-file identity. There was no photometric, electrical or acoustic
+  measurement, no Apple sender, no MQTT broker/Home Assistant instance, no Cadence server or
+  code redemption, and no command-level input. The pre-existing `word.personal` wakeword
+  provenance warning remains (the wakeword store was preserved unchanged). `/data` has
+  about 8.6 MiB free, so the next package update still needs the same staging discipline.
+  Rollback copies and evidence are in `build/deploy-20261120T225529Z/` on the build host; the
+  device keeps no deploy backup after the accepted stack.
+
+### 2026-11-21 Cadence Client package replacement: audio.output advertisement
+
+Only `org.capsulad.cadence` was replaced. The daemon, CLI, native runtime and the other app
+runs were left running. Because Cadence is the selected assistant, a public `app stop` is a
+recovery stop and restarts it immediately, so the app was temporarily deselected through
+`SettingsService/UpdateSettings`, stopped, installed, reselected and started. The global
+settings values are unchanged; revision 4203 -> 4205 is the two selection writes.
+
+- **Artifact.** Built from the reviewed working tree at HEAD `2f1f0cf` plus its uncommitted
+  changes for aarch64 glibc with the repo-local bullseye sysroot toolchain (Go 1.22.6,
+  `CC=build/linux-arm64/sysroot/toolchain/cc-aarch64-linux-gnu`). Package
+  `org.capsulad.cadence-0.1.0.tar.gz` 1,577,629 B sha256 `44fefc4c…`; member `cadence`
+  4,057,264 B sha256 `6f54ea91…`; `manifest.toml` sha256 `ad1d810c…`; `README.md` sha256
+  `ad39355f…`. The app id, display name **Cadence Client** and version `0.1.0` are unchanged.
+  `check-elf-interp.sh` passed and `check-target-compat.sh` printed `TARGET_COMPAT_OK`: aarch64
+  ELF, `/lib/ld-linux-aarch64.so.1`, highest symbol `GLIBC_2.17` (board ceiling 2.33),
+  `libdl.so.2`/`libpthread.so.0`/`libc.so.6` present on the device, zero undefined symbols.
+  Repackaging the staged tree produced the same archive byte-for-byte.
+  `go list -deps ./cmd/cadence` still names no `net/http`, `crypto/tls` or gRPC package.
+- **Install and rollback.** The previous installed member was `84063c6a…`
+  (`manifest.toml` `ad1d810c…`, `README.md` `494a3323…`); its archive is preserved at
+  `build/rollback-cadence-20261121/org.capsulad.cadence-0.1.0.tar.gz` sha256 `6b31c9b8…`.
+  `capsulad-cli app install` reported `reinstalled org.capsulad.cadence (0.1.0) … active now:
+  the daemon reloaded its application registry`. Installed member hashes equal the new archive
+  exactly, `app list` reports Cadence Client `0.1.0` native, and `/data` ended with about
+  7.8 MiB free and no `.upload-*` staging tree. `app provenance` still reports
+  `PROVENANCE_NOT_PROVIDED`; the release carries no attestation, unchanged from before.
+- **Run state.** Before the replacement the app had one `run_ae4fe…` at `APP_READY`. After it
+  has one `run_3082ec…` at `APP_READY`, pid 7739, `sandbox=mountns`; clock, AirPlay, Home
+  Assistant and PA kept their original run IDs and states. The app log records
+  `ready board=vk-capsula-mini`, `settings applied server=https://192.168.1.96:9443/` with
+  `board=vk-capsula-mini`, and `link_up server="9a6b257f" report= full`; its native run maps
+  `/capsulad/lib/libcapsulad.so.1.0.0` with no `(deleted)` entry.
+- **Settings and enrollment.** Cadence's app-settings revision stayed 12 and every value is
+  unchanged: `server_url=https://192.168.1.96:9443/`, `device_token` present,
+  `device_token_file` empty, `board=vk-capsula-mini`, `ca_pem=/assets/ca.crt`,
+  `hold_release_tail_ms=1000`, `follow_up=true`, `enroll_code` absent; the app-settings file
+  sha256 stayed `be50084f…`. No code was redeemed and no Cadence setting was written. Global
+  settings values are identical, including the restored assistant
+  `org.capsulad.cadence`; the revision bump is the only difference.
+- **Live dashboard, read-only.** The owner session at `https://192.168.1.96:9443/` showed the
+  enrolled device **Online**, last seen `2026-11-21T09:45:37Z`, daemon
+  `capsulad-cadence/0.1.0`, with capability **audio.output** v1, State `channels=2`,
+  `maxBitrate=128000`, `available=true`, an empty config schema and no commands. The rendered
+  device page says **Desired configuration** "Nothing set: the device's defaults apply." The
+  server log shows `link_closed code=1006` followed by `link_open` at 09:45:37, and the
+  `device_capabilities` row is `desired=NULL`, `desired_gen=0`, `applied_gen=0`,
+  `applied_error=''`, `state={"channels":2,"maxBitrate":128000}`. No ConfigSet was pending, so
+  no live ConfigApplied was generated; the exact-source acknowledgement path is covered by
+  `TestConfigSetIsAcknowledgedOnTheSourceConnection` (pass) and the host integration tests.
+  No dashboard setting was changed, no Say was sent and no audio was streamed.
+- **Limits.** The live proof is installed-file identity, daemon/run state, app-log link-up,
+  dashboard/DB capability state and a host ack test, not a live config exchange: producing one
+  would require changing the dashboard's desired configuration, which this task did not
+  authorize. No announcement, TTS, microphone capture, acoustic or optical measurement was
+  made. The temporary deselection is observable as the settings revision advance.
 
 ## 2026-11-18 current-change evidence: AirPlay advertisement, Simon 1.1.0, radio and app guides
 
@@ -1236,7 +1394,41 @@ not the speaker; read the level stated in each part.
   [Known pre-existing failures](#known-pre-existing-failures)); the clean race run reported
   **0 data races**. `make test-sdk` exited 0; its per-suite counts and the gated Go SDK result
   (37 pass, 0 fail, 1 skip) are recorded in the networking bullet below.
-- **Startup ring introduction (simulator backend, 2026-11-18).** Proof level: backend
+- **Startup ring introduction (simulator backend, 2026-11-21, current whole-ring cue).** Proof
+  level: backend submission — frames the output loop wrote into the simulator or test ring device,
+  not emitted light. The current cue fills the whole advertised ring clockwise from pixel 0 behind
+  a soft leading edge (0.7 s), holds every pixel lit (0.7 s), then fades the whole ring out (0.5 s,
+  about 1.9 s total). Frames are normal `presentations.RingFrame` content under a system
+  presentation/capture, updated every 30 ms under the 33 ms output loop; the geometry comes from
+  `RingCaps.PixelCount` and no longer uses a preset run, a 12-pixel clamp or a board-specific pixel
+  list.
+  `go test -race -ldflags '-linkmode=external' -run 'TestStartup' -v ./internal/daemon` passed
+  (`ok`, 13.208 s) with `TestStartupRingFrameUsesAdvertisedGeometry` (1/2/6/12/39/48-pixel
+  rendered frames), `TestStartupRingLightsEveryPixelOfAdvertisedRing`,
+  `TestStartupRingFadesAndRestoresBaseline`, `TestStartupRingFollowsStartupCueDecision`
+  (installation-boot, explicit-no-provider and `startup_sound_enabled` sub-cases),
+  `TestStartupRingStaleFadeCannotTouchNewerOwner`, `TestStartupRingRendersBeforeSlowBootApps`,
+  `TestStartupCueMarkerConsumesTheIntroduction` and `TestStartupRingReleasedOnShutdown`;
+  `TestStartupCueFollowsMarkerAndSetting` also passed. A repeated
+  `go test -ldflags '-linkmode=external' -run 'TestStartupRing' -count=3 ./internal/daemon` run
+  passed (`ok`, 34.243 s). `TestStartupRingFadesAndRestoresBaseline` samples the simulator's written
+  ring frames and asserts a partial fill frame before the full ring (not an all-at-once switch), a
+  frame with all 12 advertised pixels at the authored blue-teal `#28AFD9`, at least two
+  intermediate fade-out levels reaching the quarter level, and release back to the selected ring
+  baseline frames. `TestStartupRingLightsEveryPixelOfAdvertisedRing` replaces only the ring device
+  with a 48-pixel recording device before `Run` and asserts frames actually written by the output
+  loop light all 48 advertised pixels. The explicit-no-provider sub-case still takes the ring
+  transiently and restores the all-zero blank baseline after release; cancellation, replacement and
+  shutdown release only the cue's own capture/presentation and leave a newer owner untouched.
+  The 2026-11-21 deployment record above is the device evidence for this cue: the traced boot
+  wrote the partial fill, a full 12-pixel hold and a uniform fade, then released to the explicit
+  no-provider blank baseline; the final untraced restart repeated the introduction and release.
+  Limits: emitted light, gamma/brightness as seen, real LED timing, device boot order and acoustic
+  synchronization were still not measured. The 2026-11-18 device startup-ring record above
+  describes the earlier top-run implementation and is not evidence for this whole-ring cue.
+- **Startup ring introduction (simulator backend, 2026-11-18, earlier top-run implementation —
+  historical).** This is the historical record for the cue that lit a short top run; the current
+  whole-ring evidence is the preceding bullet. Proof level: backend
   submission — frames the output loop wrote into the simulator's ring, not emitted light.
   `go test -race -ldflags '-linkmode=external' -run 'TestStartup' -v ./internal/daemon`
   passed (`ok`, 18.466 s) with
@@ -1257,8 +1449,9 @@ not the speaker; read the level stated in each part.
   documented marker intent (a failed audio open does not consume the one-shot cue) and remains
   pinned by `TestStartupCueFollowsMarkerAndSetting`. The shutdown test cancels the daemon with an
   active introduction and asserts the capture/presentation are released and the capture is no
-  longer selected. The geometry test covers 39- and 48-pixel rings, which now keep the preset's
-  12-pixel top arc instead of silently dropping the introduction.
+  longer selected. At that revision the geometry test covered 39- and 48-pixel rings, which kept
+  the preset's 12-pixel top arc instead of silently dropping the introduction; the current
+  whole-ring cue instead fills all advertised pixels.
   The explicit-no-provider sub-case forces the installation cue decision while
   `light.ring.main` is an explicit none: the transient introduction still took the ring (as the
   muted-microphone indication does), released at its bounded lifetime, and left
@@ -1267,9 +1460,9 @@ not the speaker; read the level stated in each part.
   `TestFrameworkOwnedClockStartsWithNoProviderSelections` still pass; the restart fixture now
   records the startup marker so it asserts the persisted baseline after a later boot rather than
   the one-time installation indication, and `TestOutputClearsUnownedDisplayAndRing` passes.
-  The live simulator daemon (`-platform simulator`, fresh data directory, `-output-trace`,
-  `-dev-admin`, `/state` polled about every 60 ms) wrote the derived four-pixel top run
-  (pixel count 12 → count 4, pixel 0 = top): the first submitted frame was
+  The live simulator daemon for that revision (`-platform simulator`, fresh data directory,
+  `-output-trace`, `-dev-admin`, `/state` polled about every 60 ms) wrote its derived four-pixel
+  top run (pixel count 12 → count 4, pixel 0 = top): the first submitted frame was
   `{2,10,12}`-per-pixel (near dark), the fade-in sampled 119 → 155 → 180 → 216 → 217 on the
   authored blue channel (`#28AFD9`), the full run held under `brightness=0.8`, and the
   fade-out steps measured 181 → 145 → 109 → 72 → 36, each one sixth of the peak. The
@@ -1637,7 +1830,10 @@ not the speaker; read the level stated in each part.
   Proof level: request bytes, session resolution and protocol ordering only; the diagnostic line's
   numbers are host-test evidence, not device measurements.
 
-- **`apps/cadence`: voice-assistant client for a Cadence server (host only).** The app speaks
+- **`apps/cadence`: Cadence Client, voice-assistant client for a Cadence server (host and device).**
+  *Pre-2026-11-21 record, kept as history. The dated update at the end of this bullet supersedes its
+  announcement-refusal behaviour, capability scope and test-package count; the live device record
+  is [2026-11-21 Cadence Client package replacement](#2026-11-21-cadence-client-package-replacement-audiooutput-advertisement).* The app speaks
   the upstream `cadence.v2` device link over the shared SDK's verified TLS stream: `Hello`
   (protocol 2) → `Welcome` → an empty `CapabilityReport`, then `SessionStart` / `MicAudio` /
   `SessionCancel` up and `SessionEvent` / `StreamStart` / `AudioDown` / `StreamEnd` /
@@ -1715,6 +1911,130 @@ not the speaker; read the level stated in each part.
   the host. **Not** established: behaviour against a real Cadence server (none runs here), the
   framework's real capture indication and physical audio, LED gamma, and acoustic echo during a
   follow-up. Those need an enrolled device and a deployed server.
+
+  **Update 2026-11-21 — Cadence Client rename, announcements, dashboard enrollment, CA asset
+  path.** The package display name is now **Cadence Client**; the app id and package path are
+  unchanged. The announcement refusal above is historical: the client now implements
+  `STREAM_PURPOSE_ANNOUNCE`. Source verification against upstream `main`
+  `9a6b257fd6e21b8f0e725461af332489fb11e383`: `server/internal/voice/announce.go` sends
+  `StreamStart` with purpose ANNOUNCE, an empty `session_id`, `Duck: true`, paced `AudioDown`
+  packets and one `StreamEnd`; `device/internal/session/controller.go` plays it outside a session,
+  refuses one that carries a session id, and cuts an older announcement when a newer starts. The
+  client opens speaker playback only, with no microphone, ring capture or session. It opens its
+  own ducking conversation only when the stream sets `duck`; on `StreamEnd` it drains the playback
+  tail for at most 5 s and releases the conversation. A newer announcement cuts the older one,
+  including a tail already draining; dismiss, link loss, shutdown and playback failure abort and
+  release it. The writer and the SDK playback handle share one context, so a cut cancels playback
+  instead of waiting out its drain timeout. The writer reports its terminal result to the
+  controller; a decode/write/close failure releases ducking without waiting for another frame,
+  and `StreamEnd` logs the drained outcome rather than an early `ok`. Completions carry a local
+  owner token as well as the server stream id, so a reused id cannot clear a replacement. Link
+  lifecycle events and envelopes share one ordered queue and carry a connection generation; a
+  frame queued before a disconnect or left from an older link is dropped. Link-up/down and
+  terminal `StreamEnd`/`SessionClose` wait for queue room instead of being dropped under
+  saturation; advisory frames may still be dropped and logged. A session-bearing announcement
+  or a non-Opus codec is refused with one log line. Completion cancels the announcement's
+  writer/playback context on success, failure or abort instead of retaining it until app
+  shutdown. An announcement never opens a follow-up window.
+
+  Enrollment now follows the upstream dashboard: `POST <server_url>/v2/enroll` with
+  `{"code","fingerprint":{"board"}}`. The new `enroll_code` masked setting is single-use and expires
+  after 30 minutes; `board` is `auto`, `vk-capsula-mini` or `sim`. Auto reports `vk-capsula-mini`
+  on a Capsula Mini and `sim` on the simulator from the framework model. The exchange is scoped to
+  its server, board, code and CA hash; a settings change with different inputs cancels it, and
+  its result is installed only after **one** `ApplicationConfigurationService.Update`
+  compare-and-swap sets the token and clears the matching code at the revision that started it. A
+  stale revision, or an exchange superseded while in flight, is discarded rather than writing one
+  server's token into another's configuration. Settings callbacks and enrollment installs publish
+  through one revision-aware path under one lock, so an older enrollment result cannot overwrite
+  a newer settings callback, wake the old link or change the shared redactor away from the
+  published configuration. Each attempt's context is cancelled on success, failure or
+  supersession. The settings echo carrying the committed token is idempotent. A 403 logs one actionable line, including the dashboard-default Simulator mismatch.
+  `Hello.board` follows the setting. The dashboard's default board is Simulator; the supported
+  hardware model is VK Capsula Mini, documented in `apps/cadence/README.md`.
+
+  `ca_pem` now accepts inline PEM or a shared-asset path (`cadence/ca.pem`, with the canonical
+  `/assets/...` alias the Assets page shows). The path uses the store grammar: relative, no
+  traversal, dot components, backslashes or symlinks, and a regular file containing a CERTIFICATE
+  block. It is read on each settings change. Before a new CA is published, the shared SDK parses
+  it as a root store; a missing, unsafe or unusable asset rejects that snapshot and keeps the
+  previous configuration and working link.
+
+  **Live dashboard diagnosis (2026-11-21).** On the user's running server the
+  dashboard showed the enrolled `capsulad` device **Online**, with `link_open`
+  (2026-11-20T23:47:42Z) and no `link_close`, so the link is up. The device
+  detail showed **No capabilities yet**, and three dashboard **Say** attempts
+  logged `announce ... code="no_audio"` (23:48:01, 23:48:10, 23:51:56); the
+  dashboard's TTS setting was `deepgram-aura`, so this is the upstream
+  `announcePlan` path, not an unconfigured TTS: it returns `no_audio` when the
+  device has no `audio.output` state (`reported == false`). Replies alone have
+  an upstream default (mono/64 kbps), which is why text turns could complete
+  while announcements could not. The client had advertised an empty capability
+  report; it now advertises `audio.output` (empty config schema, state schema
+  `{channels,maxBitrate}`; `level` is deliberately omitted because the app has
+  no live volume-change subscription and a connect-time value would go stale),
+  sends `StateDelta` after the report with the stereo/128 kbps ceiling and no
+  level, and acknowledges a `ConfigSet` on the connection that carried it
+  (other configs are refused explicitly). Upstream treats a missing level as
+  unknown: channels/bitrate still drive reply/announcement encoding, while the
+  dashboard volume control and the model's volume note are omitted. It
+  does not advertise `media.player`: the dashboard **Media** card requires a
+  `MediaSessionState`/`media.player` session and its volume slider requires
+  `audio.output`'s `set_level`, which a supervised app cannot perform; assistant
+  replies/announcements are streamed TTS, not media sessions. That remains a
+  separate media-player scope and the card correctly stays "Nothing is playing".
+  The live device was not touched for this diagnosis. The fix was later packaged
+  and installed as the [2026-11-21 Cadence Client replacement](#2026-11-21-cadence-client-package-replacement-audiooutput-advertisement):
+  the live dashboard then reported `audio.output` v1 with state
+  `{"channels":2,"maxBitrate":128000}`. The host integrated tests also read the
+  client's actual `CapabilityReport` and `StateDelta` from the fake upstream and
+  assert those values, so the handshake advertisement is both host- and
+  live-proven. A live `ConfigSet`/`ConfigApplied` exchange was not produced
+  because that needs a desired configuration on the dashboard.
+
+  Checks run in this tree after the change: `cd apps/cadence && go test -ldflags
+  '-linkmode=external' ./...` (9 test packages, 0 failures; the announcement and enrollment code
+  plus the settings/runtime tests are new), `go test -race -ldflags '-linkmode=external' ./...`
+  (0 races), `go vet ./...` (clean), and `go list -deps ./cmd/cadence` (still no `net/http`,
+  `crypto/tls` or gRPC; enrollment uses `capsulad.OpenHTTP`). The manifest was loaded and validated
+  through `internal/manifest` (8 settings; `board` select with three choices).
+
+  **Fresh host-runtime integrated proof.** The host SDK was built without overwriting `build/lib`
+  or `sdk/native/target`: `CARGO_TARGET_DIR=/tmp/capsulad-host-target cargo build --release
+  --locked --manifest-path sdk/native/Cargo.toml`, then the dylib, its symlink and the
+  `emit-runtime-metadata.sh` metadata were staged in `/tmp/capsulad-host-runtime`. With
+  `CAPSULAD_NATIVE_LIB_DIR=/tmp/capsulad-host-runtime`, these real-app + real-daemon + real-SDK
+  tests pass against loopback fakes:
+
+  - `TestCadenceCaptureAndMicOverLocalServer` (5.62 s): link up, ring capture grant, non-blank
+    teal frame, microphone open, dismiss and release.
+  - `TestCadenceEnrollmentFromDashboardCode` (4.55 s,
+    `internal/daemon/cadence_integration_test.go`): the app POSTs `K7M4QX` with
+    `fingerprint.board=sim` to a loopback `/v2/enroll`, the fake answers with
+    `dev-enrolled`/`tok-enrolled`, the app links with `Authorization: Bearer tok-enrolled`, and
+    the real application-configuration store then shows `device_token.has_value=true` and
+    `enroll_code.has_value=false`. The same test asserts `enroll_ok board=sim` and `enroll_stored`
+    in the app log; the remote-supplied device id is not logged.
+  - `TestCadenceAnnouncementReachesSimulatorPlayback` (5.04 s): a hand-encoded announce
+    `StreamStart`/`AudioDown`/`StreamEnd` (one valid Opus packet) reaches the simulator speaker
+    sink with non-zero PCM; playback is open while it plays, no microphone stream opens, the app
+    takes no ring capture, and the announcement ends and releases playback.
+  - `TestCadenceInvalidCAKeepsTheWorkingLink` (4.72 s): an asset labeled CERTIFICATE but with
+    unusable bytes is rejected by the SDK before the config is replaced; the app logs the
+    rejection, its existing link stays up, and no `link_down` follows.
+  - `TestCadenceTLSEnrollmentAndRestart` (5.08 s): a private test CA is written to the shared
+    asset store; the app enrolls over HTTPS `/v2/enroll`, links over WSS with that CA, and after
+    the selected assistant is stopped and the supervisor restarts it, the persisted token is
+    reused (`Authorization: Bearer tok-tls`) with no second code redemption.
+
+  All five passed together in 25.03 s. The four non-capture tests also passed together under
+  `-race` (20.74 s). This is the boundary that can be proved on the host: real process, SDK,
+  framework services, settings store, TLS/HTTP/WSS transport, private CA from the asset store,
+  supervisor restart and simulator sink. The tokens are fakes and the CA is generated in the
+  test. It still does not prove a live Cadence deployment's code database, a real TTS
+  announcement, device audio, LED gamma or acoustic echo; a valid but unrelated CA (as opposed
+  to an unusable one) is not separately exercised. The earlier device-package artifacts remain
+  the historical arm64 Linux builds described above; no new package was built for this change.
 
 - **Native SDK network helpers and primitives (host only).** `libcapsulad` now owns the
   outbound path: `src/http.rs` (bounded HTTP/1.1 with verified TLS 1.2+, one request per call
@@ -2129,7 +2449,7 @@ host/simulator evidence only. No app package has been installed or run on the un
   dashes, and the release 1018 ms later exited 0.5 ms after it was seen. `sandbox=none` on that
   host. Limits: segments only (no ring or audio), no device, optical or timing measurement beyond
   those host timestamps.
-- **Home Assistant bridge tests and simulator lifecycle (reported by the app's author).** The
+- **Home Assistant integration tests and simulator lifecycle (reported by the app's author).** The
   suite was reported race-clean (`CGO_ENABLED=1 go test -race -count=1 ./...` ok for
   `cmd/homeassistant` and `internal/{appcfg,ha,hw,mqtt}`) and re-verified against the final
   artifact (`CGO_ENABLED=1 go test -count=1 ./...` ok, `go vet ./...` clean, `gofmt -l .` empty);
@@ -2319,8 +2639,106 @@ host/simulator evidence only. No app package has been installed or run on the un
   here: `max_seconds` had been silently forced back to its default on every boot because the app
   misread the app-private settings event; the run above shows `pa: settings revision=2
   max_seconds=1` followed by `the WAV holds 32002 bytes of audio; max_seconds=1 allows 32000`.
-  Proof level: API behaviour, routing/ownership and PCM submission — not acoustic output. No
-  device run; the script host has no filesystem, so a caller supplies the bytes.
+  Proof level: API behaviour, routing/ownership and PCM submission — not acoustic output. The
+  2026-11-21 deployment record above adds the on-device packaged-app run through the HTTP relay;
+  the script host has no filesystem, so a caller supplies the bytes.
+
+### PA Speaker HTTP relay
+
+- **Current change (host).** `POST /api/apps/org.capsulad.pa/play` relays one raw WAV body to
+  `org.capsulad.pa`'s `SpeakerService/Play` over the app bus. An administrator browser session
+  (with CSRF and same-origin proof) or an `operator` API key may call it; a `status` key is
+  refused. The route never opens `AudioService.Playback`: the app remains the sole playback
+  owner, and a request disconnect cancels its routed call. `go test
+  -ldflags=-linkmode=external ./internal/webui -run 'TestPA' -count=1` → `ok
+  capsulad/internal/webui`; the package's full suite also passes, as does
+  `go test -race -ldflags=-linkmode=external ./internal/webui -run 'TestPA' -count=1`. The
+  focused tests pin operator/status auth, CSRF and cross-origin refusal, `405` for non-POST,
+  raw-WAV framing and the exact `PlayResult` JSON, the app-status mapping (invalid, resource,
+  deadline, precondition, unavailable, cancelled, unimplemented, internal, permission), the
+  declared-size 32 MiB body cap, client-cancel propagation to the routed call, both context and
+  gRPC `DeadlineExceeded` mapping to HTTP 504 across start/send/recv (`TestPADeadlineMapsTo504`),
+  the hand-written PlayRequest/PlayEvent/PlayResult codec, the app's initial/per-frame credit
+  behavior, a real
+  HTTP/1.1 stalled upload (declared `Content-Length` and chunked) returning its rejection
+  promptly, and a second request waiting at the admission gate. `python3
+  apps/pa/tests/test_app.py` → `Ran 29 tests`, `OK`; the test caller now drains credits and event
+  results.
+- **Production-path simulator run (host).** A temporary host runtime was prepared with
+  `OUT=/tmp/pa-http-host/lib WORK=/tmp/pa-http-host/work TARGETS=micropython sh interpreter/build.sh`
+  (`capsulad-micropython` plus the fresh `/tmp/capsulad-host-runtime` metadata and dylib
+  copied alongside it); the test ran with
+  `CAPSULAD_NATIVE_LIB_DIR=/tmp/pa-http-host/lib`. `go test -ldflags=-linkmode=external -run
+  TestPAHTTPProductionIntegration ./internal/daemon -count=1 -v` passed in 37.9 s. It starts the
+  real daemon with the real HTTPS Web UI listener (temporary certificate, password, and operator
+  and status keys), the real `AppBusService.Call` route, and the packaged PA app staged by
+  `apps/pa/build.sh` (`PACKAGE=0`) into a temporary apps tree. It proves operator-key and
+  browser-session authorization, status-key `403`, fixed-length and chunked uploads, a stalled
+  real HTTP/1.1 upload receiving `400` promptly, a 2.3 MiB second clip waiting for a 2 s first
+  clip and then playing (not `413`), cancellation during the drain releasing the playback
+  stream, a slow producer sending 8 KiB/s so each completed read is forwarded as a partial
+  frame (20.2 s, no 15 s frame timeout), and a direct app-bus call sharing the app with an HTTP
+  caller: the HTTP relay waits for the app's initial credit until the direct clip ends, then
+  plays without `413`. Each accepted clip is checked through `Simulator.LastOutput` (non-zero
+  mixed PCM reached the virtual sink) and `AudioService` stream state (no PA playback stream
+  remains); the test writes the one-shot startup marker first so the sink contains only the
+  clip. The app grants two initial request-frame credits and one more after each fully consumed
+  frame; the HTTP relay starts with none, reads a chunk, waits for credit, sends it, and repeats,
+  so direct and HTTP producers share the single-threaded consumer without filling the SDK queue.
+  The optional 30 s / 11.5 MiB credit probe
+  (`PA_HTTP_E2E_LONG=1`, same command with `-run TestPAHTTPProductionIntegrationLongClip`)
+  passed in 33.4 s. Proof level: the real production path through the simulator backend's
+  digital sink — not a device run and not acoustic output. The app package changes its `Play`
+  API to the credit stream; `docs/speaker.md` and the test caller were updated in the same
+  change. All data, app, security and host outputs live under temporary directories; no device
+  was touched.
+
+### Simon packaged tones
+
+- **Current change (host).** Simon 1.1.0 now ships nine pre-rendered 24 kHz mono 16-bit PCM
+  WAVs in `audio/` and loads them once at startup through `capsulad.readPackageFile`; the
+  runtime oscillator/base64 synthesis loop is gone. Playback, flush, ring/score/input and
+  teardown behaviour are unchanged. This supersedes the earlier 22-test count and host
+  requirement for current builds; those entries remain as recorded history.
+- **App and packaging proof.** `make test-simon` → `tests 39`, `pass 39`, `fail 0` (contract
+  tests, RIFF boundary/padding regressions and a packaging test).
+  `CAPSULAD_CLI=build/bin/capsulad-cli-host sh apps/simon/build.sh` wrote
+  `build/apps/org.capsulad.simon-1.1.0.tar.gz` with exactly
+  `manifest.toml`, `main.js`, `README.md`, `audio/` and the nine WAVs; the archived `main.js`
+  sha256 matched the source, all archived WAVs matched source byte-for-byte, and the packaged
+  PCM payloads (four colours, long and short, and the error sweep) were byte-identical to the
+  previous runtime synthesis. Removing a tone makes the build fail with the missing path.
+- **Host proof.** The QuickJS host compiled with `-Wall -Wextra` against the pinned `libqjs.a`;
+  `capsulad-quickjs --check` printed `SDK prelude compiled`. A native probe read a valid
+  package file and rejected `../` traversal, a symlink escape and an absolute path. The in-tree
+  `main.js` test host is a fake, so these are the build-host/native checks.
+- **Real host/simulator package run.** With a rebuilt macOS `capsulad-quickjs`, a simulator
+  daemon and the actual archive installed, the app logged
+  `tones loaded=9 packaged wav 24000Hz mono 16-bit`, opened
+  `playback stream=… input=PCM_S16LE/24000/1`, played `round=1 symbols=1` and reached
+  `await round=1 position=0`; stopping closed the playback stream and left no run. No
+  `unsupported`/`unavailable` line appeared. Repeating the run with only the archived
+  `audio/red-long.wav` RIFF length corrupted (PCM untouched) produced
+  `unsupported: audio/red-long.wav: RIFF length does not match the file`, no `tones loaded`, no
+  capture/presentation/playback stream and no remaining run — the fail-before-ownership path
+  through the real host.
+  Proof level: host runtime, package bytes and simulator stream state; no device, emitted light
+  or acoustic output.
+- **No preexisting package reader.** QuickJS had no filesystem API (documented in `sdk.md`):
+  `capsulad.env.appDir` exposed only the path, and `AssetService` only catalogs the separate
+  shared `/assets` store — it has no content-read RPC and is not the app package. Build-time
+  embedding/base64 of the WAVs into `main.js` was considered and rejected: it would not load
+  premade package files, would add a generator to the build, and would keep the audio in the
+  script rather than the package. The new `capsulad.readPackageFile` is the minimal capability:
+  app-directory-relative, slash-separated, no `.`/`..`, regular files only, 8 MiB cap,
+  `realpath` containment, and catchable errors. MicroPython still has no file access.
+- **Deployment requirement.** The device must receive the matching rebuilt
+  `lib/capsulad-quickjs` (`make interpreter-quickjs`/`make interpreter`); older hosts make the
+  app log the missing `readPackageFile` (or `Call.tryRecv`) and stop before owning any stream.
+  The 2026-11-21 deployment record above installed that host and ran the packaged app on the
+  device.
+- **Limits.** The 2026-11-21 deployment record above adds the on-device packaged run (nine tones
+  loaded, playback stream opened, a round played); no acoustic measurement was made.
 
 ## Verified against the live vendor service
 
