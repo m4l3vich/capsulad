@@ -785,6 +785,29 @@ glibc 2.33).
   discoverability remain administrator-only and are still not announced by the app. Physical
   ring, panel and audio proof is unchanged from the prior deployment.
 
+### 2026-11-22 app settings modal header fix
+
+- **Symptom and cause.** Opening an application's settings modal on the deployed SPA threw
+  `TypeError: null is not an object (evaluating 'data.app')`. The modal header slot rendered
+  `data.app.version`, `data.app.systemApp` and `data.app.background` before the application
+  snapshot arrived; the body already had a loading branch, the header did not.
+- **Fix and host proof.** The header now uses optional chaining for those three fields and the
+  SPA was rebuilt (`index-b01760f8.js`). On the macOS simulator, opening the Clock settings
+  modal produced the full application dialog and zero console errors; `web` tests remained
+  92 pass / 0 fail.
+- **Device update and recovery.** The arm64 daemon was rebuilt in `golang:1.22-bullseye`
+  (28 MB stripped, `GLIBC_2.17`) and deployed as a daemon-only, CLI-free bundle because the
+  data partition still held only 6.5 MiB free. That deploy's health wait exceeded the boot
+  service's own window (`daemon did not become healthy; falling back to the vendor assistant`),
+  the board later reset, and `/data/capsdemo/capsulad` was absent at the next boot. Recovery
+  pushed the built daemon and CLI back to `/data/capsdemo`, then started the canonical service
+  with `/etc/init.d/S99btctl.sh start`; `boot.log` recorded `daemon healthy` and health returned
+  `0`. The device serves the rebuilt asset `/assets/index-b01760f8.js`; the app list and the
+  selected assistant (`org.capsulad.cadence`) were unchanged.
+- **Limit.** The device's authenticated Web UI was not opened (the administrator password is
+  not available to this session), so the modal fix is browser-verified on the simulator and
+  the embedded asset is identified on the device; no physical display/audio claim is made.
+
 ### Assistant API-key scope: Rockchip deployment
 
 - **Installed stack.** A detached `capsulad-cli deploy` over ADB installed only the
