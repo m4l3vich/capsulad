@@ -16,7 +16,7 @@ routes. The shared boundary is documented in the source as `opSink`
 frames and the MCP frontend collects it into a tool-call reply, but both drive the same
 `dispatch` and operation validation, with separate scope checks before dispatch.
 
-Related reading: [README.md](../README.md) for the architecture,
+Related reading: [ARCHITECTURE.md](ARCHITECTURE.md) for the system architecture,
 [docs/DEVELOPMENT.md](DEVELOPMENT.md) for builds and fixtures,
 [docs/VERIFICATION.md](VERIFICATION.md) for proof levels.
 

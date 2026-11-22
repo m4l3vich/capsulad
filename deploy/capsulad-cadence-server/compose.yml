@@ -1,0 +1,93 @@
+name: cadence-server
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: cadence-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cadence
+      POSTGRES_PASSWORD: cadence
+      POSTGRES_DB: cadence
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "cadence", "-d", "cadence"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+
+  cadence:
+    image: cadence-server:local
+    container_name: cadence-server
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://cadence:cadence@postgres:5432/cadence?sslmode=disable
+      CADENCE_MASTER_KEY_FILE: /run/cadence/master.key
+      CADENCE_PUBLIC_ORIGIN: https://${CADENCE_HOST}:${CADENCE_PORT}
+      CADENCE_TRUSTED_PROXY: 172.16.0.0/12
+      SSL_CERT_DIR: /run/cadence-ca-certs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data/keys:/run/cadence:ro
+      - ./data/ca-certs:/run/cadence-ca-certs:ro
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
+  dashboard:
+    image: cadence-dashboard:local
+    container_name: cadence-dashboard
+    restart: unless-stopped
+    environment:
+      CADENCE_API_INTERNAL: http://cadence:8080
+    depends_on:
+      - cadence
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    container_name: cadence-nginx
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until [ -s /certs/server.crt ] && [ -s /certs/server.key ] && [ -s /certs/ca.crt ]; do
+          echo "waiting for certs: run 'docker compose --profile setup up certs'"
+          sleep 2
+        done
+        exec /docker-entrypoint.sh nginx -g 'daemon off;'
+    environment:
+      CADENCE_HOST: ${CADENCE_HOST}
+      CADENCE_PORT: ${CADENCE_PORT}
+      NGINX_ENVSUBST_FILTER: ^CADENCE_(HOST|PORT)$
+    ports:
+      - "${CADENCE_PORT}:${CADENCE_PORT}"
+    depends_on:
+      - cadence
+    volumes:
+      - ./nginx:/etc/nginx/templates:ro
+      - ./data/certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  setup:
+    profiles: [setup]
+    image: alpine:3.22
+    entrypoint: ["sh", "/script/make-certs.sh"]
+    environment:
+      CADENCE_HOST: ${CADENCE_HOST}
+    volumes:
+      - ./setup:/script:ro
+      - ./data:/out
+      - ./data/certs:/certs
+      - ./data/keys:/keys

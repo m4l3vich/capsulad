@@ -1,8 +1,9 @@
 # Development and deployment
 
-This is the working manual for building, packaging, testing and deploying capsulad. The
-application contract is the [application manual](app_development/README.md); measured evidence
-is in [VERIFICATION.md](VERIFICATION.md).
+This is the working manual for building, packaging, testing and deploying capsulad. The system
+overview is in [ARCHITECTURE.md](ARCHITECTURE.md), the application contract is the
+[application manual](app_development/README.md), and measured evidence is in
+[VERIFICATION.md](VERIFICATION.md).
 
 ## Prerequisites
 
@@ -14,6 +15,41 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Node.js + npm | rebuilding the Web UI (`web/`) and the Simon and Soundboard contract tests (`node --test`); the built SPA is checked in |
 | Python 3 | the PA unit tests (`make test-pa`), the MicroPython host prelude self-test (`make test-interpreter`), and regenerating the Web UI icon subset (a venv, see [Web UI](#web-ui)) |
 | `protoc` | regenerating Go bindings and the embedded descriptor after schema changes |
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `cmd/capsulad` | daemon entrypoint and flags |
+| `cmd/capsulad-cli` | administrative CLI: apps, deploy, certificates, settings, Wi-Fi, logs, platform tools |
+| `cmd/ledmap`, `cmd/waketrain`, `cmd/wakeword-negatives` | bring-up and training tools |
+| `internal/daemon` | wiring, gRPC services, supervision, routing and output loops |
+| `internal/bus` | reverse-RPC app bus |
+| `internal/presentations`, `internal/routing` | dynamic outputs and capture stack |
+| `internal/audio`, `internal/input`, `internal/wakeword` | realtime services |
+| `internal/bluetooth`, `internal/wifi`, `internal/discovery` | BlueZ, Wi-Fi and mDNS integrations |
+| `internal/backend/profile` | data-only board profiles: Rockchip rev 4 stock, Amlogic A113X stock/Alpine and the neutral simulator |
+| `internal/backend/rockchip`, `internal/backend/amlogic` | board backends: paths, quirks, vendor ABIs |
+| `internal/backend/linuxdev`, `internal/backend/syswatchdog` | shared device plumbing (evdev/IIO/LED class, watchdog) |
+| `internal/backend/simulator.go` | complete virtual backend |
+| `internal/backend/rockchip/inspect` | offline stock-firmware inspector |
+| `internal/sandbox` | Linux namespace/UID launcher and runtime discovery |
+| `internal/artifact`, `internal/manifest`, `internal/registry` | package format, manifest schema, installation |
+| `internal/assets` | shared read-only asset store |
+| `internal/websecurity` | self-signed TLS, Argon2id password, API keys, sessions |
+| `internal/provenance` | Sigstore/GitHub attestation verification |
+| `internal/webui`, `web` | HTTPS server, MCP frontend, embedded SPA and its protobuf WebSocket |
+| `internal/sounds` | embedded framework UI cues and their CC BY-SA `COPYING` |
+| `sdk/native` | Rust shared engine behind the C ABI: UDS gRPC, HTTP/TLS, remote gRPC, primitives, header and C example |
+| `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
+| `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
+| `apps/dumbassistant`, `apps/marusia`, `apps/cadence`, `apps/opencapsula` | the four optional assistants |
+| `apps/simon`, `apps/soundboard`, `apps/hardwaretest`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party app packages. Each package root `README.md` is also the app's packaged user guide |
+| `deploy/rockchip-stock`, `deploy/amlogic-stock`, `deploy/amlogic-alpine` | boot hooks and bring-up scripts per platform |
+| `installer` | the separate host module for the cross-platform terminal installer |
+| `proto` | framework and standard contract schemas (media, clock, ring, web) |
+| `docs` | architecture, application manual, development, verification, behavior, hardware, wakeword and glossary |
+| `tools` | release, build, image, ABI and deployment helper scripts |
 
 ## Build profiles and targets
 
@@ -333,6 +369,13 @@ there). `BUNDLE_CLI=0` opts into a CLI-free device bundle; the default (`BUNDLE_
 the documented adb flow. The target is rebuilt from an empty directory, so changing the mode
 cannot leave a CLI from a previous bundle in the output.
 
+Release core bundles carry no app archives: `tools/release.sh core` and `tools/release.sh apps`
+populate the separate core and app channels, and the installer fetches them independently. The
+development `make deploy-bundle` helper can still include `apps/*.tar.gz`, but it only copies
+ready-made archives. It refuses to assemble while `build/apps` still holds a staged directory or
+archive for the retired `org.capsulad.radio.tuner` companion, printing the `rm -rf` cleanup
+instead of shipping it; a fresh bundle never stages that package.
+
 ```text
 capsulad                    daemon binary
 capsulad-cli                CLI binary (omitted with BUNDLE_CLI=0)
@@ -645,7 +688,7 @@ simulator accepts no injected input.
 
 Useful `capsulad` flags: `-platform`, `-data-dir`, `-socket`, `-web-addr` (empty
 disables the UI), `-native-lib-dir`, `-sandbox auto|namespaces|mountns|uid|none`,
-`-single-app <app-id>`, `-dev-admin`, `-mem-limit-mb`, `-output-trace`,
+`-single-app <app-id>`, `-dev-admin`, `-mem-limit-mb` (default 80 MiB soft heap), `-output-trace`,
 `-wakeword-trace`, `-watchdog`.
 
 `-single-app <app-id>` is a launch policy for a dedicated speaker deployment: the daemon

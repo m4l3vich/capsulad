@@ -6,7 +6,8 @@ pass does not establish a coherent user experience.
 
 ## Start with the current contracts
 
-- [README.md](README.md) is the architecture and capability overview.
+- [README.md](README.md) is the project overview; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is
+  the system architecture and capability overview.
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) is the build, packaging, deployment and test
   manual. [docs/VERIFICATION.md](docs/VERIFICATION.md) separates device evidence from
   simulator/host evidence and records the open gates.

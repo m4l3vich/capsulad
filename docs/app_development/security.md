@@ -116,6 +116,67 @@ The networking entry points are appended to ABI 1.0 in this pre-release tree; de
 stream, UDP, listener or mDNS entry points, and a listener call without a usable control
 channel returns `UNSUPPORTED` rather than creating anything.
 
+### First-party network egress
+
+The daemon, the framework plane and every other first-party component stay local-only. Four
+optional packages open outbound connections, each only after the operator configured it or asked
+it to play. The AirPlay receiver is the one first-party app with inbound network surface, and
+every part of it is daemon-mediated.
+
+- `apps/marusia`, the assistant. While it is installed and selected as the assistant, a turn
+  sends microphone PCM and the device identity (serial from the non-empty `serial` setting,
+  otherwise `DeviceService.GetInfo.hardware_serial`, otherwise host-only local `/proc/cpuinfo`,
+  otherwise empty; plus the distinct `device_id` value and the advertised client version) together
+  with the vendor session credential it holds — the masked `session_id` and `session_secret`
+  settings, or the session recovered from the vendor agent's root-only state file — to the
+  configured vendor endpoint over HTTPS, and logs the selected serial source once per process
+  without logging the serial value. The `Invalid 'x-device-sn'` rejection remains legible, directs
+  operators to the `serial` setting and the framework-reported serial, and preserves the original
+  gRPC status; when no source resolves, the warning names that setting. It fetches the HTTPS TTS
+  URL that endpoint returns. Nothing is sent when the app is not selected or idle. With a session
+  configured the app validates it without an attach; only a device without a session sends the
+  provisioning attach, which carries the device serial and the configured `xtoken_id` (empty when
+  unset) and whose refusal is logged. A turn with no recognised text and no command is reported as
+  a no-answer with the terminal error indication, never as a completed turn.
+- `apps/opencapsula`, the OpenCapsula client. While it is installed and selected as the voice
+  assistant, a turn opens one outbound TLS connection to the operator's configured OpenCapsula
+  server, streams microphone PCM for the brokered Gemini Live or OpenAI Realtime session, and
+  sends the voice audio the framework routed to it. Nothing is sent while the app is stopped,
+  unselected or unconfigured, and it never opens a listening socket.
+- `apps/homeassistant`, the Home Assistant integration. It is an MQTT client for the broker named
+  in its `broker_host`/`broker_port` settings, or for the broker it finds by browsing `_mqtt._tcp`
+  when `broker_discover` is on. It publishes its discovery payloads, its availability and one
+  state topic per published entity, and applies the commands Home Assistant sends back to the
+  ring, the segment display and the Bluetooth source; `broker_tls` performs a verified TLS 1.2+
+  handshake through the shared transport with no insecure mode (as a plain MQTT session it sends
+  everything in clear on the local network), and the username/password settings are the broker
+  credential. It publishes device state to whatever broker the operator points it at, so the
+  broker is as trusted as the operator makes it; nothing is sent while the app is stopped or
+  unconfigured, and it never opens a listening socket.
+- `apps/radio`, the internet radio. It opens one outbound HTTP/1.1 connection per play to the
+  station URL from the operator's station list (verified TLS for `https://`, plain for `http://`),
+  follows bounded redirects and one playlist level, refuses an HTTPS→HTTP downgrade, strips ICY
+  metadata and decodes the MP3 in-process. It sends the HTTP request and nothing else — no
+  credential, no device identity — and it plays only the station the user selected. Nothing is
+  fetched while the radio is stopped or paused, and a pause ends the network stream, so a resume
+  re-dials. There is no companion app and therefore no app-to-app audio path: the fetch, decode
+  and speaker write happen in one supervised run, and its packaged settings document can only
+  submit patches for its own declared settings through the sandboxed `capsulad.settings-ui/1`
+  bridge. See [routed calls and trust](#routed-calls-and-trust).
+- `apps/airplay`, the AirPlay 2 receiver. It is the one first-party app with inbound network
+  surface, and every part of it is daemon-mediated: the RTSP control port, each audio channel, the
+  event channel and the PTP multicast receiver are listeners the daemon allocated and bound under
+  its policy (PTP group joins are restricted to 224.0.0.1 on ports 319/320), and
+  `_airplay._tcp`/`_raop._tcp` are published by the daemon's Avahi responder, which validates the
+  63-byte instance label and the 255-byte per-item TXT limit before registering. The app never
+  binds a socket and never reaches the internet: it writes RTCP reports and remote-control
+  commands only to the sender that connected to it, and it decodes the sender's audio locally.
+  Both records publish the same 32-byte ed25519 HomeKit long-term public key as `pk`; the legacy
+  2048-bit RSA key is never advertised (its base64 form exceeds the TXT item limit) and is used
+  only to decrypt an `ANNOUNCE` that carries `rsaaeskey`. A sender on the local link is as trusted
+  as the operator's network makes it; there is no password and no pairing code, matching the
+  upstream receiver's transient-pairing behaviour.
+
 ## Identity and UIDs
 
 - Every run in `mountns` or `uid` mode, and in `namespaces` when the daemon is privileged, gets a
@@ -178,8 +239,8 @@ Two consequences follow. Both are accepted rather than mitigated:
   is an unauthenticated arbitrary-egress primitive for any ready local app: any app that is ready
   could make it dial an address of its choosing. Any handler that fetches, connects or forwards
   to a caller-supplied destination must perform the check above before dialing; an interface that
-  does so is not an egress primitive, and the repository README records which first-party apps
-  are in that state.
+  does so is not an egress primitive. [First-party network egress](#first-party-network-egress)
+  records which first-party apps are in that state.
 
 The posture remains: **apps are trusted local code, and the app-bus plane is local only** (one
 framework Unix socket, no network listener, no per-app sockets). Keep administrator or per-user

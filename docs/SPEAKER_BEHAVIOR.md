@@ -241,6 +241,15 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   leaves the socket, its live subscriptions and its epoch intact; only a real transport failure
   closes the socket and starts the reconnect. The wakeword area shows guided training and the real
   last 20 engine detections only.
+- **Web UI surfaces.** The signed-in console has five destinations — Overview, Settings, Files,
+  Access and Diagnostics. Installed app details, including each app's packaged user guide, open as
+  a modal on Overview rather than a separate route. The Files page manages the shared asset store
+  (size and SHA-256 per entry, upload to a store-relative path, delete). The Access page labels an
+  explicit key grant as “status only”, “assistant controls” or “full administration”. The
+  Overview Bluetooth speaker card shows a green `connected` chip beside the speaker-mode toggle
+  when any `pairedDevices` row reports `connected === true`; its tooltip and `aria-label` read
+  `Connected: <names>`, and the chip disappears when no device is connected. That chip is
+  snapshot state, not a Bluetooth-policy cache.
 - **Web UI appearance and language.** The appearance switch beside **Sign out** offers Light, Dark,
   and System. The choice is saved in the browser, not on the speaker. System is the default and
   follows the OS appearance live; Light and Dark stay fixed. A language switch beside it offers
