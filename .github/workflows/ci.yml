@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.6"
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - name: Host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libopus-dev libavcodec-dev libavutil-dev
+      - name: Native runtime for host tests
+        run: make native
+      - name: Go, SDK and installer suites
+        run: make test
+      - name: Script-app and app-module suites
+        run: make test-apps
+      - name: Race detector
+        run: make test-race
+      - name: Bundle assembly contract
+        run: sh tools/check-deploy-bundle.sh
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Rebuild the embedded Web UI
+        run: make web
+      - name: Checked-in UI artifacts are current
+        run: git diff --exit-code -- internal/webui/dist internal/appui/assets/kit.css
+
+  darwin:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.6"
+          cache: true
+      - name: Installer suite
+        run: make test-installer

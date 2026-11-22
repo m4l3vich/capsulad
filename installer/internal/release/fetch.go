@@ -67,33 +67,52 @@ func (f *Fetcher) ManifestURL() string {
 	return strings.TrimRight(f.BaseURL, "/") + "/" + ManifestFile
 }
 
+// AppsURL is the app-channel manifest location.
+func (f *Fetcher) AppsURL() string {
+	return strings.TrimRight(f.BaseURL, "/") + "/" + AppsFile
+}
+
 // FetchManifest downloads release.json. Release manifests are small.
 func (f *Fetcher) FetchManifest(ctx context.Context) (*Manifest, error) {
+	data, err := f.fetchJSON(ctx, f.ManifestURL(), "release manifest")
+	if err != nil {
+		return nil, err
+	}
+	return Load(data)
+}
+
+// FetchAppsManifest downloads apps.json. A missing app channel is reported as
+// a 404; callers may fall back to the legacy apps embedded in release.json.
+func (f *Fetcher) FetchAppsManifest(ctx context.Context) (*AppsManifest, error) {
+	data, err := f.fetchJSON(ctx, f.AppsURL(), "app manifest")
+	if err != nil {
+		return nil, err
+	}
+	return LoadApps(data)
+}
+
+func (f *Fetcher) fetchJSON(ctx context.Context, url, label string) ([]byte, error) {
 	if err := f.checkScheme(); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.ManifestURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := f.client().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
+		return nil, fmt.Errorf("fetch %s: %w", label, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch release manifest: HTTP %s", resp.Status)
+		return nil, fmt.Errorf("fetch %s: HTTP %s", label, resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
+		return nil, fmt.Errorf("fetch %s: %w", label, err)
 	}
-	m, err := Load(data)
-	if err != nil {
-		return nil, err
-	}
-	return m, nil
+	return data, nil
 }
 
 // Artifact returns a verified local file for one manifest entry, downloading it

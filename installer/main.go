@@ -21,8 +21,10 @@ var version = "dev"
 func main() {
 	var (
 		artifacts  = flag.String("artifacts", "", "offline release tree (release.json or discoverable platform directories)")
-		releaseURL = flag.String("release-url", "", "release download base URL (default: latest GitHub release)")
-		releaseTag = flag.String("release-tag", "", "GitHub release tag (overridden by -release-url)")
+		releaseURL = flag.String("release-url", "", "core release download base URL (default: latest GitHub release)")
+		releaseTag = flag.String("release-tag", "", "GitHub core release tag (overridden by -release-url)")
+		appsURL    = flag.String("apps-url", "", "app channel download base URL (default: the rolling apps release)")
+		appsTag    = flag.String("apps-tag", "", "GitHub app channel tag (overridden by -apps-url)")
 		adbPath    = flag.String("adb", "adb", "path to the adb binary")
 		sshKey     = flag.String("ssh-key", "", "SSH private key path (prefills the Alpine key field)")
 		configDir  = flag.String("config-dir", "", "state directory (default: <user config>/capsulad-installer)")
@@ -54,6 +56,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "capsulad-installer: -release-url and -release-tag are mutually exclusive")
 		os.Exit(2)
 	}
+	if *appsURL != "" && *appsTag != "" {
+		fmt.Fprintln(os.Stderr, "capsulad-installer: -apps-url and -apps-tag are mutually exclusive")
+		os.Exit(2)
+	}
 
 	cfg := *configDir
 	if cfg == "" {
@@ -81,6 +87,8 @@ func main() {
 		ArtifactsDir: *artifacts,
 		ReleaseURL:   *releaseURL,
 		ReleaseTag:   *releaseTag,
+		AppsURL:      *appsURL,
+		AppsTag:      *appsTag,
 		ADBPath:      *adbPath,
 		SSHKey:       *sshKey,
 		ConfigDir:    cfg,

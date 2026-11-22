@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -60,7 +61,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.status = ""
 		case "enter":
 			if m.deviceIx == 0 {
-				m.status = "The original Capsula is not yet supported by capsulad."
+				m.status = "The original Capsula is not supported by capsulad."
 				return true, nil
 			}
 			m.screen = screenFirmware
@@ -514,13 +515,21 @@ func (m *model) prepareCmd() tea.Cmd {
 
 		var provider release.Provider
 		if opts.ArtifactsDir != "" {
-			p, manifest, err := release.OfflineProvider(opts.ArtifactsDir)
+			coreProvider, manifest, err := release.OfflineProvider(opts.ArtifactsDir)
 			if err != nil {
 				res.err = err
 				return res
 			}
 			logf("offline release %s from %s", manifest.Version, opts.ArtifactsDir)
-			provider = p
+			provider = coreProvider
+			appManifest, err := release.LoadAppsFile(filepath.Join(opts.ArtifactsDir, release.AppsFile))
+			if err == nil {
+				logf("offline app channel %s", appManifest.Version)
+				provider = release.NewCombinedProvider(coreProvider, release.NewLocalAppsProvider(opts.ArtifactsDir, appManifest))
+			} else if !os.IsNotExist(err) {
+				res.err = err
+				return res
+			}
 		} else {
 			f := release.NewFetcher(releaseBase(opts), opts.CacheDir)
 			f.Log = logf
@@ -532,7 +541,24 @@ func (m *model) prepareCmd() tea.Cmd {
 				return res
 			}
 			logf("release %s", manifest.Version)
-			provider = release.NewRemoteProvider(f, manifest)
+			coreProvider := release.NewRemoteProvider(f, manifest)
+			provider = coreProvider
+
+			appFetcher := release.NewFetcher(appsBase(opts), opts.CacheDir)
+			appFetcher.Log = logf
+			appFetcher.Progress = func(label string, done, total int64) { progress(label, done, total) }
+			logf("fetching the app channel from %s", appFetcher.AppsURL())
+			appManifest, appErr := appFetcher.FetchAppsManifest(ctx)
+			if appErr != nil {
+				if opts.AppsURL != "" || opts.AppsTag != "" {
+					res.err = appErr
+					return res
+				}
+				logf("app channel unavailable (%v); using apps embedded in the core release", appErr)
+			} else {
+				logf("app channel %s", appManifest.Version)
+				provider = release.NewCombinedProvider(coreProvider, release.NewRemoteAppsProvider(appFetcher, appManifest))
+			}
 		}
 
 		var dev device.Device
@@ -956,4 +982,11 @@ func releaseBase(opts Options) string {
 		return release.NormalizeBaseURL(opts.ReleaseURL)
 	}
 	return release.DefaultBaseURL(opts.ReleaseTag)
+}
+
+func appsBase(opts Options) string {
+	if opts.AppsURL != "" {
+		return release.NormalizeBaseURL(opts.AppsURL)
+	}
+	return release.DefaultAppsBaseURL(opts.AppsTag)
 }

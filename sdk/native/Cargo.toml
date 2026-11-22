@@ -2,7 +2,7 @@
 name = "capsulad-native"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Capsulad native SDK: UDS gRPC engine, outbound HTTP, TCP/TLS streams, UDP, daemon-mediated listeners, mDNS and a stable C ABI"
 publish = false

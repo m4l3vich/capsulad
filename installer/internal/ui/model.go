@@ -24,6 +24,8 @@ type Options struct {
 	ArtifactsDir string
 	ReleaseURL   string
 	ReleaseTag   string
+	AppsURL      string
+	AppsTag      string
 	ADBPath      string
 	SSHKey       string
 	ConfigDir    string

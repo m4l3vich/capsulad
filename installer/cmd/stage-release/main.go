@@ -21,8 +21,9 @@ func main() {
 	platform := flag.String("platform", "", "rockchip-stock, amlogic-stock or amlogic-alpine")
 	bundle := flag.String("bundle", "", "deployment bundle .tar.gz for this platform")
 	apps := flag.String("apps", "", "comma-separated app .tar.gz files for this platform (optional)")
+	flat := flag.Bool("flat", false, "write GitHub-release assets with a platform__ filename prefix")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: stage-release -out DIR -version VERSION -platform PLATFORM -bundle FILE [-apps FILE[,FILE...]]\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: stage-release -out DIR -version VERSION -platform PLATFORM -bundle FILE [-apps FILE[,FILE...]] [-flat]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -39,6 +40,7 @@ func main() {
 		Platform: *platform,
 		Bundle:   *bundle,
 		Apps:     list,
+		Flat:     *flat,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stage-release: %v\n", err)

@@ -30,10 +30,14 @@ version.
 ## Installation
 
 For an existing Capsula Mini, use the cross-platform terminal installer in
-[installer/](installer/README.md). Build it with `make installer` and run
-`build/installer/capsulad-installer`; it detects the firmware over ADB or SSH, backs up the
+[installer/](installer/README.md). Build it with `make installer` and run the host's
+`build/installer/<os>-<arch>/capsulad-installer`; it detects the firmware over ADB or SSH, backs up the
 stock userspace before changing anything, deploys capsulad detached, configures Wi-Fi and the
 administrator password, and installs the first-party apps you choose.
+
+Release builds have three public targets and two inputs: `make core LIBC=gnu|musl`,
+`make apps LIBC=gnu|musl` and `make installer`, with `PROFILE=release|debug`. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#build-profiles-and-targets).
 
 ## Architecture
 
@@ -336,8 +340,10 @@ interface's `docs` Markdown — which the Web UI renders as inert text in the ap
 ## Deployment and boot
 
 A deployment bundle is a directory or `.tar.gz` with these top-level entries:
-`capsulad`, `lib/` (native runtime and headers), `apps/*.tar.gz`, `boot/S99btctl.sh` and,
-optionally, `capsulad-cli`. `make deploy-bundle` includes the CLI by default;
+`capsulad`, `lib/` (native runtime and headers), `boot/S99btctl.sh` and,
+optionally, `capsulad-cli`. Release core bundles carry no app archives: apps are a separate
+channel. The development `make deploy-bundle` helper can still include `apps/*.tar.gz`.
+It includes the CLI by default;
 `make deploy-bundle BUNDLE_CLI=0` assembles a CLI-free bundle that leaves a separately
 installed `<data-dir>/capsulad-cli` untouched (neither removed nor updated), so on-device
 deployment and recovery then need a CLI pushed separately, for example through the

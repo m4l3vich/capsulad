@@ -1,0 +1,141 @@
+name: release-apps
+
+on:
+  push:
+    tags: ["apps-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-apps-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      core: ${{ steps.meta.outputs.core }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          [[ "$tag" =~ ^apps-[0-9A-Za-z._-]+$ ]]
+          branch="${{ github.event.repository.default_branch }}"
+          git fetch --no-tags origin "$branch"
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"
+          core=$(git tag --list 'v*' --sort=-v:refname | head -1 | sed 's/^v//')
+          echo "version=${tag#apps-}" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [meta, verify]
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [gnu, musl]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build apps
+        run: make apps LIBC=${{ matrix.libc }} PROFILE=release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apps-${{ matrix.libc }}
+          path: build/${{ matrix.libc }}/release/apps/*.tar.gz
+          retention-days: 7
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.6"
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: apps-gnu
+          path: build/gnu/release/apps
+      - uses: actions/download-artifact@v4
+        with:
+          name: apps-musl
+          path: build/musl/release/apps
+      - name: Stage app channel
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          CORE: ${{ needs.meta.outputs.core }}
+        run: |
+          set -euo pipefail
+          args=(--out dist --version "$VERSION")
+          if [ -n "$CORE" ]; then
+            args+=(--core "$CORE")
+          fi
+          tools/release.sh apps --libc gnu --platform rockchip-stock "${args[@]}"
+          tools/release.sh apps --libc gnu --platform amlogic-stock "${args[@]}"
+          tools/release.sh apps --libc musl --platform amlogic-alpine "${args[@]}"
+      - name: Verify app channel
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          CORE: ${{ needs.meta.outputs.core }}
+        run: |
+          set -euo pipefail
+          jq -e --arg v "$VERSION" \
+            '.schema == 1 and .version == $v and
+             (.firmwares | keys | sort) == ["amlogic-alpine","amlogic-stock","rockchip-stock"]' \
+            dist/apps.json
+          jq -e '[.firmwares[].apps | length == 10] | all' dist/apps.json
+          if [ -n "$CORE" ]; then
+            jq -e --arg core "$CORE" '.core == $core' dist/apps.json
+          fi
+          jq -r '.firmwares[].apps[].path' dist/apps.json | sort -u |
+            while IFS= read -r path; do
+              case "$path" in */*) echo "nested asset: $path" >&2; exit 1;; esac
+              test -f "dist/$path"
+            done
+          cp dist/apps.json "dist/apps-$VERSION.json"
+          tools/release.sh checksums --out dist
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*"
+      - name: Publish app channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view apps >/dev/null 2>&1; then
+            gh release edit apps --draft=false --prerelease --title "App channel"
+          else
+            gh release create apps --prerelease --title "App channel" \
+              --notes "Rolling first-party app packages. Core firmware is released under v* tags."
+          fi
+          # Archives first, then manifests, then checksums. A client that reads
+          # during the upload still sees the previous apps.json pointing at
+          # archives that remain present.
+          for f in dist/gnu__*.tar.gz dist/musl__*.tar.gz; do
+            [ -f "$f" ] || continue
+            gh release upload apps "$f" --clobber
+          done
+          gh release upload apps "dist/apps-$VERSION.json" --clobber
+          gh release upload apps dist/apps.json --clobber
+          gh release upload apps dist/SHA256SUMS --clobber
+          test "$(gh release view apps --json isPrerelease --jq .isPrerelease)" = "true"

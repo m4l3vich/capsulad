@@ -29,14 +29,15 @@ SHA-256 host-key fingerprint and asks you to trust it.
 
 ```sh
 make installer
-./build/installer/capsulad-installer
+./build/installer/darwin-arm64/capsulad-installer   # or the host's os-arch
 ```
 
-`make installer` builds for the host. A direct build works too:
+`make installer` cross-builds darwin, linux and windows for amd64 and arm64 into
+`build/installer/<os>-<arch>/`. A host-only direct build works too:
 
 ```sh
 cd installer
-go build -o ../build/installer/capsulad-installer .
+go build -o ../build/installer/host/capsulad-installer .
 ```
 
 ### Flags
@@ -44,17 +45,26 @@ go build -o ../build/installer/capsulad-installer .
 | Flag | Meaning |
 |---|---|
 | `-artifacts DIR` | offline release tree, either with `release.json` or discoverable |
-| `-release-url URL` | override the release download base |
-| `-release-tag TAG` | use `/releases/download/TAG/` on GitHub |
+| `-release-url URL` | override the core release download base |
+| `-release-tag TAG` | use `/releases/download/TAG/` on GitHub for the core |
+| `-apps-url URL` | override the app-channel download base |
+| `-apps-tag TAG` | use `/releases/download/TAG/` on GitHub for the app channel |
 | `-adb PATH` | adb binary (default: resolves `adb`) |
 | `-ssh-key PATH` | prefills the Alpine private-key field |
 | `-config-dir DIR` | state root (default `<user config>/capsulad-installer`) |
 | `-cache-dir DIR` | download cache (default `<user cache>/capsulad-installer`) |
 | `-version` | print the installer version |
 
-`-release-url` and `-release-tag` are mutually exclusive. Online mode uses
-GitHub **Releases**, never GitHub **Packages**: arbitrary files cannot be
-downloaded from Packages, so the manifest and artifacts live on a release.
+`-release-url` and `-release-tag` are mutually exclusive; the same applies to
+`-apps-url` and `-apps-tag`. Online mode uses GitHub **Releases**, never GitHub
+**Packages**: arbitrary files cannot be downloaded from Packages, so the
+manifests and artifacts live on releases.
+
+The core and apps are independent channels. The core default is the repository's
+latest `v*` release; the app default is the rolling `apps` release, which is
+marked prerelease so it never becomes the repository's GitHub "latest". If the
+app channel is absent, the installer falls back to any app list embedded in the
+core `release.json` for compatibility with older combined releases.
 
 ## What the interface does
 
@@ -149,37 +159,71 @@ are preserved by the hook) and the vendor files stay on disk. `S99btctl.sh
 disable` (Rockchip), `S99sysmon.sh disable` (Amlogic stock) or stopping and
 disabling the OpenRC service (Alpine) returns boot ownership to the image.
 
-## Release layout and manifest
+## Release channels
+
+The core and the apps are separate release channels.
+
+### Core release
+
+A `vX.Y.Z` GitHub release carries one `release.json` and one deployment bundle
+per platform. It carries no app archives. GitHub release assets are flat, so
+asset names use a platform prefix rather than a directory:
 
 ```text
 release.json
-rockchip-stock/deploy-bundle.tar.gz
-rockchip-stock/apps/<id>-<version>.tar.gz
-amlogic-stock/deploy-bundle.tar.gz
-amlogic-stock/apps/<id>-<version>.tar.gz
-amlogic-alpine/deploy-bundle.tar.gz
-amlogic-alpine/apps/<id>-<version>.tar.gz
+rockchip-stock__deploy-bundle.tar.gz
+amlogic-stock__deploy-bundle.tar.gz
+amlogic-alpine__deploy-bundle.tar.gz
 ```
 
-Only the selected platform is downloaded. `release.json` schema 1:
+`release.json` schema 1:
 
 ```json
 {
   "schema": 1,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "firmwares": {
     "rockchip-stock": {
       "label": "Jailbroken stock (Rockchip RK3308)",
       "bundle": {
-        "path": "rockchip-stock/deploy-bundle.tar.gz",
+        "path": "rockchip-stock__deploy-bundle.tar.gz",
         "size": 40123456,
         "sha256": "<64 lowercase hex characters>"
       },
+      "apps": []
+    }
+  }
+}
+```
+
+### App channel
+
+The rolling `apps` release is a prerelease, so `releases/latest/download/` keeps
+pointing at the latest core release. It carries `apps.json`, a dated snapshot,
+and app archives named by libc. Both gnu stock platforms share the gnu assets:
+
+```text
+apps.json
+apps-<version>.json
+gnu__org.capsulad.simon-1.1.0.tar.gz
+musl__org.capsulad.simon-1.1.0.tar.gz
+```
+
+`apps.json` schema 1:
+
+```json
+{
+  "schema": 1,
+  "version": "2026.11.23.1",
+  "core": "0.5.0",
+  "firmwares": {
+    "rockchip-stock": {
+      "label": "Jailbroken stock (Rockchip RK3308)",
       "apps": [
         {
           "id": "org.capsulad.simon",
-          "version": "0.1.0",
-          "path": "rockchip-stock/apps/org.capsulad.simon-0.1.0.tar.gz",
+          "version": "1.1.0",
+          "path": "gnu__org.capsulad.simon-1.1.0.tar.gz",
           "size": 123456,
           "sha256": "<64 lowercase hex characters>"
         }
@@ -189,38 +233,44 @@ Only the selected platform is downloaded. `release.json` schema 1:
 }
 ```
 
-Every `path` is relative to the release root, uses forward slashes and may not
-escape it. `firmwares` may carry any subset of the three platform keys. The
-installer refuses an unknown schema, an empty version, duplicate app IDs,
-malformed hashes and unsafe paths before fetching anything.
+Every `path` is relative to its channel root, uses forward slashes and may not
+escape it. `firmwares` may carry any subset of the three platform keys. Both
+manifests reject an unknown schema, an empty version, duplicate app IDs,
+malformed hashes and unsafe paths before fetching anything. The app archive is
+downloaded only after the core bundle; a missing app channel falls back to the
+core manifest's app list for compatibility.
 
 ### Offline trees
 
 With `-artifacts DIR`, a `release.json` at the root is used and every artifact is
-re-hashed before use. If `release.json` is absent the installer discovers the
-tree: each known platform directory must hold `deploy-bundle.tar.gz` (or exactly
-one other tarball) and may hold `apps/<id>-<version>.tar.gz`. Sizes and SHA-256
-digests are computed locally; the resulting manifest is the same shape.
+re-hashed before use. If `apps.json` is present beside it, that app channel is
+used; otherwise the core manifest's apps are used. If `release.json` is absent
+the installer discovers the nested tree: each known platform directory must
+hold `deploy-bundle.tar.gz` (or exactly one other tarball) and may hold
+`apps/<id>-<version>.tar.gz`. Sizes and SHA-256 digests are computed locally;
+the resulting manifest is the same shape.
 
-### Staging a release
+### Staging releases
 
-`cmd/stage-release` is a build-host tool. It copies the bundle and apps, hashes
-them, and merges one platform into `release.json` without dropping other
-platforms:
+`cmd/stage-release` and `cmd/stage-apps` are build-host tools. They copy and
+hash artifacts and merge one platform into the channel manifest without
+dropping other platforms. `-flat` writes GitHub-release asset names:
 
 ```sh
 cd installer
-go run ./cmd/stage-release \
-  -out ../build/release \
-  -version 0.4.0 \
-  -platform rockchip-stock \
-  -bundle ../build/deploy-bundle.tar.gz \
-  -apps ../build/apps/org.capsulad.simon-0.1.0.tar.gz,../build/apps/org.capsulad.pa-0.1.0.tar.gz
+go run ./cmd/stage-release -flat \
+  -out ../dist -version 0.5.0 -platform rockchip-stock \
+  -bundle ../build/gnu/release/deploy-bundle.tar.gz
+
+go run ./cmd/stage-apps -flat \
+  -out ../dist -version 2026.11.23.1 -core 0.5.0 \
+  -platform rockchip-stock -libc gnu \
+  -apps ../build/gnu/release/apps/org.capsulad.simon-1.1.0.tar.gz,...
 ```
 
-Build the bundle with the device CLI included (`make deploy-bundle BUNDLE_CLI=1`,
-the default) when staging a release the installer can deploy. The bundled CLI
-must support the secret-safe `settings app APPID KEY@-` form (and
+Build the core bundle with the device CLI included when staging a release the
+installer can deploy. The bundled CLI must support the secret-safe
+`settings app APPID KEY@-` form (and
 `-password-stdin`); build the bundle from the matching CLI revision. `stage-release`
 copies files; it never compiles or packages an app. `-apps` may be omitted for a
 bundle-only platform; the manifest then carries an empty app list.

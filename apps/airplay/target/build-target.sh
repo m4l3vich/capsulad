@@ -60,7 +60,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ------------------------------------------------------------ pinned inputs --
-sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+sha_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+sha_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    sha256sum "$@"
+  fi
+}
 
 fetch_pinned() { # URL SHA256 DEST
   url=$1 sha=$2 dest=$3
@@ -195,7 +208,7 @@ build_abi() {
   [ "$staged_abi" = "$abi" ] ||
     die "$abi: $pkg declares abi \"$staged_abi\"; refusing to publish it"
 
-  ( cd "$OUT/$abi" && shasum -a 256 ./*.tar.gz ./airplay > SHA256SUMS )
+  ( cd "$OUT/$abi" && sha_file ./*.tar.gz ./airplay > SHA256SUMS )
   say "=== $abi: artifact ready ==="
   sed -n '1,10p' "$OUT/$abi/SHA256SUMS" >&2
 }

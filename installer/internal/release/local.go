@@ -16,11 +16,24 @@ import (
 // on GitHub Packages: arbitrary files cannot be downloaded from Packages.
 const base = "https://github.com/m4l3vich/capsulad/releases"
 
+// defaultAppsTag is the rolling app-channel release. It is deliberately not
+// the repository's GitHub "latest" release, which tracks core firmware.
+const defaultAppsTag = "apps"
+
 // DefaultBaseURL returns the download base for the latest release, or for a
 // named tag when tag is non-empty.
 func DefaultBaseURL(tag string) string {
 	if tag == "" {
 		return base + "/latest/download/"
+	}
+	return base + "/download/" + pathEscape(tag) + "/"
+}
+
+// DefaultAppsBaseURL returns the app-channel base. An empty tag selects the
+// rolling apps release.
+func DefaultAppsBaseURL(tag string) string {
+	if tag == "" {
+		tag = defaultAppsTag
 	}
 	return base + "/download/" + pathEscape(tag) + "/"
 }

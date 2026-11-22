@@ -9,12 +9,33 @@ else
 CXX_DL := -ldl
 endif
 
-# Build profile. `make` and `make release` strip Go binaries and use Cargo's
-# release profile; `make debug` keeps symbols and uses Cargo's dev profile.
+# The release build surface has two inputs only:
+#
+#   LIBC    gnu | musl
+#   PROFILE release | debug
+#
+# `make core`, `make apps` and `make installer` are the public build targets.
+# The older granular targets below remain as implementation/development
+# helpers; they are not part of the release interface.
+LIBC ?= gnu
+ifeq ($(filter $(LIBC),gnu musl),)
+$(error LIBC must be gnu or musl)
+endif
+
 PROFILE ?= release
 ifeq ($(filter $(PROFILE),release debug),)
 $(error PROFILE must be release or debug)
 endif
+
+# The tag is the release identity. A source checkout without git falls back to
+# a development version; release CI always builds from the tag.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed -e 's/^v//' -e 's/^apps-//' -e 's/^$$/0.1.0-dev/')
+VERSION_LDFLAGS := -X capsulad/internal/version.Version=$(VERSION)
+
+# Every public target writes below build/<libc>/<profile>, so gnu/musl and
+# release/debug never share outputs.
+BUILDROOT ?= build/$(LIBC)/$(PROFILE)
+WORKROOT ?= build/work/$(LIBC)/$(PROFILE)
 
 # The Go target decides linking, not the build host: a darwin target needs the
 # external linker for LC_UUID, while Linux cross-builds keep the internal one.
@@ -32,12 +53,12 @@ HOST_GO_LINKMODE := $(if $(filter darwin,$(HOST_GOOS)),-linkmode=external,)
 
 ifeq ($(PROFILE),release)
 GO_BUILD_FLAGS := -trimpath
-GO_LDFLAGS := -s -w $(GO_LINKMODE)
+GO_LDFLAGS := -s -w $(GO_LINKMODE) $(VERSION_LDFLAGS)
 NATIVE_CARGO_MODE := --release
 NATIVE_PROFILE_DIR := release
 else
 GO_BUILD_FLAGS :=
-GO_LDFLAGS := $(GO_LINKMODE)
+GO_LDFLAGS := $(GO_LINKMODE) $(VERSION_LDFLAGS)
 NATIVE_CARGO_MODE :=
 NATIVE_PROFILE_DIR := debug
 endif
@@ -193,7 +214,29 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host installer test-installer deploy-bundle web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence opencapsula simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-opencapsula test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
+.PHONY: core apps installer _core _app-deps _apps check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host installer-host test-installer deploy-bundle web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence opencapsula simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-opencapsula test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
+
+# Public release targets. Everything else below is an internal or development
+# helper; only LIBC and PROFILE are inputs.
+core:
+	@sh tools/build-core.sh "$(LIBC)" "$(PROFILE)"
+
+apps:
+	@sh tools/build-apps.sh "$(LIBC)" "$(PROFILE)"
+
+installer:
+	@sh tools/build-installer.sh "$(PROFILE)"
+
+# Complete device core: both binaries, the shared runtime and the script hosts.
+_core: capsulad capsulad-cli native interpreter
+
+# The app packages need the runtime metadata/library and a packager, but not the
+# daemon or the script hosts.
+_app-deps: native capsulad-cli
+
+# AirPlay is built separately by its pinned container recipe and copied into
+# APPDIR by tools/build-apps.sh.
+_apps: _app-deps dumbassistant marusia cadence opencapsula simon soundboard pa radio homeassistant
 
 all: release
 
@@ -215,7 +258,7 @@ daemon-debug:
 	$(MAKE) PROFILE=debug daemon
 
 check-target-toolchain:
-	@sh tools/check-target-cc.sh "$(GOOS)" "$(GOARCH)" "$(HOST_GOOS)" "$(TARGET_ABI)" "$(CC)"
+	@sh tools/check-target-cc.sh "$(GOOS)" "$(GOARCH)" "$(HOST_GOOS)" "$(HOST_GOARCH)" "$(TARGET_ABI)" "$(CC)"
 
 capsulad:
 	mkdir -p $(BINDIR)
@@ -232,7 +275,7 @@ capsulad-cli:
 capsulad-cli-host:
 	mkdir -p $(BINDIR)
 	rm -f $(HOST_CLI)
-	GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build $(GO_BUILD_FLAGS) -tags=$(CLI_TAGS) -ldflags '$(HOST_GO_LINKMODE)' -o $(HOST_CLI) ./cmd/capsulad-cli
+	GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build $(GO_BUILD_FLAGS) -tags=$(CLI_TAGS) -ldflags '$(HOST_GO_LINKMODE) $(VERSION_LDFLAGS)' -o $(HOST_CLI) ./cmd/capsulad-cli
 
 # One directory that `capsulad-cli deploy` accepts as-is. Layout:
 # capsulad, capsulad-cli (unless BUNDLE_CLI=0), lib/ (native runtime incl.
@@ -376,13 +419,13 @@ endif
 # pinned sources; stage the hosts beside libcapsulad so the launcher can find
 # them. QUICKJS_SRC/MICROPYTHON_SRC may point at already extracted pinned trees.
 interpreter:
-	sh interpreter/build.sh
+	OUT=$(LIBDIR) WORK=$(WORKROOT)/interp sh interpreter/build.sh
 
 interpreter-quickjs:
-	TARGETS=quickjs sh interpreter/build.sh
+	OUT=$(LIBDIR) WORK=$(WORKROOT)/interp TARGETS=quickjs sh interpreter/build.sh
 
 interpreter-micropython:
-	TARGETS=micropython sh interpreter/build.sh
+	OUT=$(LIBDIR) WORK=$(WORKROOT)/interp TARGETS=micropython sh interpreter/build.sh
 
 # Optional first-party app. It is a separate nested module and is never part
 # of `all`, `release` or `debug`. The binary is compiled and packaged on the
@@ -391,7 +434,7 @@ interpreter-micropython:
 dumbassistant: $(PACKAGER_TARGET)
 	rm -rf $(APPDIR)/org.capsulad.dumbassistant
 	mkdir -p $(APPDIR)/org.capsulad.dumbassistant/assets
-	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.dumbassistant/dumbassistant ./cmd/dumbassistant
+	cd apps/dumbassistant && CGO_ENABLED=1 $(GOBUILD) -o $(abspath $(APPDIR))/org.capsulad.dumbassistant/dumbassistant ./cmd/dumbassistant
 	cp apps/dumbassistant/manifest.toml $(APPDIR)/org.capsulad.dumbassistant/manifest.toml
 	cp apps/dumbassistant/README.md $(APPDIR)/org.capsulad.dumbassistant/README.md
 	@$(MAKE) check-target-toolchain
@@ -414,7 +457,7 @@ marusia: $(PACKAGER_TARGET)
 	}
 	rm -rf $(APPDIR)/org.capsulad.marusia
 	mkdir -p $(APPDIR)/org.capsulad.marusia/ui
-	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.marusia/marusia ./cmd/marusia
+	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(abspath $(APPDIR))/org.capsulad.marusia/marusia ./cmd/marusia
 	cp apps/marusia/manifest.toml $(APPDIR)/org.capsulad.marusia/manifest.toml
 	cp apps/marusia/README.md $(APPDIR)/org.capsulad.marusia/README.md
 	cp -R apps/marusia/ui/. $(APPDIR)/org.capsulad.marusia/ui/
@@ -440,7 +483,7 @@ cadence: $(PACKAGER_TARGET)
 opencapsula: $(PACKAGER_TARGET)
 	rm -rf $(APPDIR)/org.capsulad.opencapsula
 	mkdir -p $(APPDIR)/org.capsulad.opencapsula
-	cd apps/opencapsula && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.opencapsula/opencapsula ./cmd/opencapsula
+	cd apps/opencapsula && CGO_ENABLED=1 $(GOBUILD) -o $(abspath $(APPDIR))/org.capsulad.opencapsula/opencapsula ./cmd/opencapsula
 	cp apps/opencapsula/manifest.toml $(APPDIR)/org.capsulad.opencapsula/manifest.toml
 	cp apps/opencapsula/README.md $(APPDIR)/org.capsulad.opencapsula/README.md
 	@$(MAKE) check-target-toolchain
@@ -487,7 +530,7 @@ radio: $(PACKAGER_TARGET)
 # binary and packages it with the manifest, its descriptor and its bridge
 # documentation beside it. It needs the host native runtime (`make native`).
 homeassistant:
-	OUT=$(abspath $(APPDIR)) sh apps/homeassistant/build.sh
+	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/homeassistant/build.sh
 
 # The AirPlay 2 receiver is a native app: the build script compiles the Go
 # binary, stages the manifest, the media-contract descriptor and the interface
@@ -523,11 +566,11 @@ product-apps: simon pa radio homeassistant airplay
 # `test-interpreter`).
 test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-opencapsula test-radio test-homeassistant test-airplay test-installer
 
-# The terminal installer is a separate nested Go module and a host tool. It is
-# never cross-built into a device image; the host link mode applies on darwin.
-installer:
+# Host-only installer build used by development. `make installer` is the
+# public target and builds all supported host platforms.
+installer-host:
 	mkdir -p $(INSTALLERDIR)
-	cd installer && GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build -trimpath -ldflags "-s -w $(HOST_GO_LINKMODE)" -o $(abspath $(INSTALLER)) .
+	cd installer && GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(HOST_GO_LINKMODE)" -o $(abspath $(INSTALLER)) .
 
 # No device or network is needed: the suite drives fake devices and in-process
 # TLS servers. The linkext package makes darwin test binaries link externally.

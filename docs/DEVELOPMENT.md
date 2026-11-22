@@ -9,7 +9,7 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Tool | Needed for |
 |---|---|
 | Go 1.22.5 or newer | daemon, CLI, tools, Go SDK |
-| Rust 1.85 or newer with Cargo | `libcapsulad`, Rust binding |
+| Rust 1.88 or newer with Cargo | `libcapsulad`, Rust binding |
 | C compiler | Go SDK cgo shim, C/C++ example, script hosts |
 | Node.js + npm | rebuilding the Web UI (`web/`) and the Simon and Soundboard contract tests (`node --test`); the built SPA is checked in |
 | Python 3 | the PA unit tests (`make test-pa`), the MicroPython host prelude self-test (`make test-interpreter`), and regenerating the Web UI icon subset (a venv, see [Web UI](#web-ui)) |
@@ -17,32 +17,61 @@ is in [VERIFICATION.md](VERIFICATION.md).
 
 ## Build profiles and targets
 
-`make` is the release profile (`-trimpath -s -w`, Cargo release); `make debug` keeps
-symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps` and
-`build/deploy-bundle`.
+The release build surface has two inputs:
+
+| Variable | Values | Default |
+|---|---|---|
+| `LIBC` | `gnu`, `musl` | `gnu` |
+| `PROFILE` | `release`, `debug` | `release` |
+
+The three public targets are:
 
 | Command | Builds |
 |---|---|
-| `make` / `make release` | daemon, CLI, Go/Rust bindings, native library and header |
-| `make debug` | the same targets without stripping |
-| `make daemon` | only `capsulad` and `capsulad-cli` (no native SDK, no cgo) |
-| `make sdk` | `make sdk-go` and `make sdk-rust` |
-| `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
-| `make web` | `npm ci && npm run build` into `internal/webui/dist`, plus the settings-document kit at `internal/appui/assets/kit.css` |
-| `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
-| `make dumbassistant` / `make marusia` / `make cadence` / `make opencapsula` | the four optional assistants (Cadence Client and OpenCapsula Client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
-| `make simon` / `make soundboard` / `make hardwaretest` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the Soundboard, the Hardware Test, the PA Speaker service, the Internet Radio (one native package), the Home Assistant integration and the AirPlay 2 receiver (`product-apps` is the five product apps together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
-| `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_CLI=0` omits the CLI |
+| `make core LIBC=gnu\|musl` | daemon, CLI, `libcapsulad` + metadata, QuickJS and MicroPython hosts |
+| `make apps LIBC=gnu\|musl` | all ten first-party app archives, including AirPlay |
+| `make installer` | the terminal installer for darwin/linux/windows on amd64 and arm64 |
 
-Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
-internal linker emits Mach-O binaries that current dyld rejects (missing `LC_UUID`). The
-Makefile keys this off the target `GOOS`, not the build host.
+Outputs are separated by both inputs:
 
-`capsulad-cli` and `capsulad-cli-host` add `-tags=grpcnotrace`, which drops gRPC's optional
-`x/net/trace` integration and the template stack only it reaches; the CLI never registers
-those handlers and gRPC tracing is off by default, so the wire behavior is unchanged. Set
-`CLI_TAGS=` to build the untagged client. The daemon and app targets keep the default tag
-set.
+```text
+build/<libc>/<profile>/bin/capsulad
+build/<libc>/<profile>/bin/capsulad-cli
+build/<libc>/<profile>/lib/...
+build/<libc>/<profile>/apps/*.tar.gz
+build/installer/<os>-<arch>/capsulad-installer[.exe]
+```
+
+`make core` and `make apps` run inside the matching pinned builder image
+(`tools/images/gnu.Dockerfile` or `tools/images/musl.Dockerfile`) on an arm64 host. The
+builder selects the compiler, Rust target, ABI and glibc ceiling; there are no `CC`,
+`GOOS`, `GOARCH`, `TARGET_ABI`, `NATIVE_TARGET` or `BUNDLE_*` inputs in the release path.
+AirPlay is still built by its own pinned container recipe inside `make apps`.
+
+`tools/release.sh core|apps|installer` turns those outputs into the flat GitHub release
+assets and `release.json`/`apps.json`. Platform and boot-hook selection lives in that
+script, not in Make.
+
+The older granular targets (`native`, `interpreter`, `deploy-bundle`, the individual app
+targets and the `sdk` targets) remain available as development and implementation helpers.
+They are not part of the release interface and are not used by CI.
+
+`make test` and `make test-apps` run on the host and are not device builds. `make web`
+rebuilds the checked-in Web UI assets. Go targets whose `GOOS` is `darwin` still use
+`-linkmode=external`, and the CLI still builds with `-tags=grpcnotrace`.
+
+CI is split the same way:
+
+- `.github/workflows/ci.yml` runs on pull requests, `main` and as the release gate.
+- `.github/workflows/release-core.yml` runs on `v*` tags and publishes `release.json`
+  plus the three platform bundles as the repository's latest release.
+- `.github/workflows/release-apps.yml` runs on `apps-*` tags and updates the rolling
+  `apps` prerelease with `apps.json` and the libc-prefixed app archives.
+
+Both release workflows build on native arm64 runners inside the pinned builder images.
+`tools/release.sh` maps a platform to its libc and boot hook, assembles the bundles, and
+stages the flat GitHub assets. The app channel is marked prerelease so `latest/download/`
+continues to resolve the core release.
 
 ## Cross build for the device
 
@@ -67,7 +96,7 @@ CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -C sdk/g
 For a reproducible glibc baseline, build inside an arm64 Bullseye container:
 `docker run --rm --platform linux/arm64 -v "$PWD":/src -w /src golang:1.22-bullseye make
 daemon-release GOOS=linux GOARCH=arm64` (the daemon) and the same form with
-`rust:1.85-slim-bullseye` for `make native … NATIVE_TARGET=aarch64-unknown-linux-gnu`.
+`rust:1.88-bullseye` for `make native … NATIVE_TARGET=aarch64-unknown-linux-gnu`.
 
 Check the result before installing anything; every symbol must be at or below the target's glibc (2.33 on RK3308, 2.28 on Amlogic stock):
 

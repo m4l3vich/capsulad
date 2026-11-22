@@ -15,6 +15,11 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT=${OUT:-"$ROOT/build/lib"}
 WORK=${WORK:-"$ROOT/build/interp"}
+# Workers change directory (MicroPython's embed make) and embed these paths in
+# generated makefiles, so a relative OUT/WORK would be reinterpreted from the
+# new cwd. Normalize both against the repository root.
+case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
+case "$WORK" in /*) ;; *) WORK="$ROOT/$WORK" ;; esac
 COMMON="$ROOT/interpreter/common"
 QUICKJS_DIR="$ROOT/interpreter/quickjs"
 MICROPYTHON_DIR="$ROOT/interpreter/micropython"
@@ -159,7 +164,9 @@ EOF
   objdir="$mp_work/obj"
   rm -rf "$objdir"
   mkdir -p "$objdir"
-  cflags="-O2 -std=c99 -fno-common -I$mp_work -I$mp_pkg -I$MICROPYTHON_DIR -I$COMMON -I$INCLUDE"
+  # modcapsulad uses clock_gettime/CLOCK_MONOTONIC, which a strict -std=c99
+  # build hides unless the POSIX feature set is requested.
+  cflags="-O2 -std=c99 -D_POSIX_C_SOURCE=200809L -fno-common -I$mp_work -I$mp_pkg -I$MICROPYTHON_DIR -I$COMMON -I$INCLUDE"
   count=0
   for source in $(find "$mp_pkg/py" "$mp_pkg/extmod" "$mp_pkg/shared/runtime" "$mp_pkg/port" -name '*.c' | sort); do
     count=$((count + 1))

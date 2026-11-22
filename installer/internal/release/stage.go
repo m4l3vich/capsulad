@@ -19,6 +19,11 @@ type StageOptions struct {
 	Platform string
 	Bundle   string
 	Apps     []string
+	// Flat writes release assets directly under Out with the platform as a
+	// filename prefix. GitHub Releases cannot serve directory components:
+	// /releases/download/<tag>/<platform>/<file> is a 404, while
+	// /releases/download/<tag>/<platform>__<file> is an asset.
+	Flat bool
 }
 
 // Stage copies a bundle and app archives into OUT, hashes them and merges the
@@ -40,16 +45,23 @@ func Stage(opts StageOptions) (*Manifest, error) {
 	root := opts.Out
 	platformDir := filepath.Join(root, opts.Platform)
 	appsDir := filepath.Join(platformDir, "apps")
+	bundleName := "deploy-bundle.tar.gz"
+	bundlePath := opts.Platform + "/" + bundleName
+	if opts.Flat {
+		platformDir = root
+		appsDir = root
+		bundleName = opts.Platform + "__" + bundleName
+		bundlePath = bundleName
+	}
 	if err := os.MkdirAll(appsDir, 0o755); err != nil {
 		return nil, err
 	}
 
-	bundleName := "deploy-bundle.tar.gz"
 	bundleDest := filepath.Join(platformDir, bundleName)
 	if err := copyInto(opts.Bundle, bundleDest); err != nil {
 		return nil, fmt.Errorf("stage-release: bundle: %w", err)
 	}
-	bundle, err := hashFile(bundleDest, opts.Platform+"/"+bundleName)
+	bundle, err := hashFile(bundleDest, bundlePath)
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +79,17 @@ func Stage(opts StageOptions) (*Manifest, error) {
 			return nil, fmt.Errorf("stage-release: app %s supplied twice", id)
 		}
 		seen[id] = true
-		dest := filepath.Join(appsDir, name)
+		destName := name
+		destPath := opts.Platform + "/apps/" + name
+		if opts.Flat {
+			destName = opts.Platform + "__" + name
+			destPath = destName
+		}
+		dest := filepath.Join(appsDir, destName)
 		if err := copyInto(src, dest); err != nil {
 			return nil, fmt.Errorf("stage-release: app %s: %w", id, err)
 		}
-		f, err := hashFile(dest, opts.Platform+"/apps/"+name)
+		f, err := hashFile(dest, destPath)
 		if err != nil {
 			return nil, err
 		}
