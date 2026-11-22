@@ -121,7 +121,7 @@ activation carries what a turn needs).
 |---|---|---|
 | `default_app_by_resource` | map<string,string> | Resource ID → provider app ID. |
 | `default_assistant_app_id` | string | Selected assistant. |
-| `wakewords` | `WakewordBinding[]` | Per-word configuration: `{model_id, app_id, enabled}`. Absent means the legacy state (every installed word is live under `wakeword_enabled` and targets the selected assistant); present means authoritative, one entry per installed word, and a word without an entry is disabled. `app_id` empty targets the selected assistant. |
+| `wakewords` | `WakewordBinding[]` | Per-word configuration: `{model_id, app_id, enabled}`. Absent means every installed word is live under `wakeword_enabled` and targets the selected assistant; present means authoritative, one entry per installed word, and a word without an entry is disabled. `app_id` empty targets the selected assistant. |
 | `wakeword_enabled` | bool | Global framework wakeword detection switch. A word activates only when this switch, its own `enabled` and its availability all hold. |
 | `display_brightness` | map<string,float> | Per resource, `[0,1]`. |
 | `master_volume` | float | `[0,1]` control position on the device's logarithmic master taper. 0 is exact silence, 1 is unity, 0.05 is about -57 dBFS and 0.5 is about -30 dBFS. The mixer applies the gain; apps must not treat the value as a linear amplitude. |
@@ -143,10 +143,6 @@ installed word disabled; an update that does not own the field leaves the curren
 revision returns `ABORTED`. Validation failures (volume outside `[0,1]`, unknown timezone, invalid
 hostname, unknown field, more than eight wake words, a duplicate `model_id`) return
 `INVALID_ARGUMENT`.
-
-The retired `wakeword_model_id` field (tag 3) is reserved, not reused. It was a selector that never
-gated a detection, so it carried no behavior to preserve: per-word enablement and the app binding are
-`wakewords`, and a client that still writes the old field is ignored.
 
 ## RoutingService
 
@@ -370,7 +366,7 @@ consumed), or one that exceeds 30 minutes in total, with `DEADLINE_EXCEEDED`. A 
 reported only before the install reaches its commit point, so nothing has been swapped,
 "nothing was installed" is true and the staging slot is released; the package may already be
 unpacked and verified at that point. Once the commit begins (the validated package is being
-swapped in), the call no longer times out: it waits for and returns the real result, because a
+swapped in), the call does not time out: it waits for and returns the real result, because a
 committed install cannot be reported as abandoned. Only one upload is unpacked at a time (the
 78.5 MiB data partition cannot hold two packages beside the installed set), so a second upload
 waits up to 30 s and is then refused with `RESOURCE_EXHAUSTED`.

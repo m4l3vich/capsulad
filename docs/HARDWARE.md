@@ -1,12 +1,12 @@
 # Capsula Mini hardware (RK3308 stock image and Amlogic A113X)
 
 Hardware, firmware and interface facts for the supported targets: the Capsula Mini rev 4
-(serial family `03104B1D40E15C55`, jailbroken stock Rockchip image) and the VK Capsula Mini
-on Amlogic A113X, in both its jailbroken stock Buildroot image and Alpine Linux. Every
-measurement below states its proof level: probe result (kernel/device state), backend submission
-(what the daemon wrote to a driver), digital output (a captured PCM/monitor stream), or
-electrical/acoustic/optical measurement. Facts borrowed from a published third-party survey or
-project are labelled as such; they are not measurements taken here.
+(RK3308, jailbroken stock Rockchip image) and the VK Capsula Mini on Amlogic A113X, in both its
+jailbroken stock Buildroot image and Alpine Linux. Every measurement below states its proof level:
+probe result (kernel/device state), backend submission (what the daemon wrote to a driver), digital
+output (a captured PCM/monitor stream), or electrical/acoustic/optical measurement. Facts borrowed
+from a published third-party survey or project are labelled as such; they are device-class facts,
+not measurements taken on every unit.
 
 ## Platform
 
@@ -52,7 +52,7 @@ paths, stock supplicant files, vendor processes or watchdog opener.
 | `-platform rockchip-stock` (alias `rockchip`) | RK3308 stock backend | supported; unvalidated vendor paths report `PARTIAL`/`UNVERIFIED` |
 | `-platform amlogic-stock` | Amlogic A113X stock backend | supported; the clock panel is `UNVERIFIED` because its vendor ABI is unrecovered |
 | `-platform amlogic-alpine` | Amlogic A113X Alpine backend | supported; the panel and ring are probed, not assumed |
-| `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE` | the two Amlogic backends | now reported by the daemon; the wire enum values are no longer reserved |
+| `CAPSULA_MINI_AMLOGIC_STOCK`, `CAPSULA_MINI_AMLOGIC_ALPINE` | the two Amlogic backends | reported by the daemon as platform enum values |
 
 ## Displays and LED ring
 
@@ -149,27 +149,9 @@ capped at 12 dB, unity gain (no AGC), a −1 dBFS peak limiter, and a 256-sample
 chain resets on mute, source reopen or a capture gap. Wakeword inference, enrollment and training
 consume this same processed tap (`framework.dsp.v1`); untouched physical `speex` samples exist only
 at `audio.input.microphone.raw`, and frames whose tap declaration does not match are rejected.
-Estimator behaviour and its measured limits are in [WAKEWORD.md](WAKEWORD.md).
-
-The detection budget is per **frontend**, not per word. One complete frontend emits an embedding in
-37.9 ms mean against an 80 ms hop, which is why every installed word shares it: N words add only
-their own heads over one 16×96 embedding ring, and per-hop scoring of N heads allocates nothing.
-Each word keeps one in-memory classifier head of about 53 KB (weights plus its widened embedding
-window) and one JSON artifact of about 130 KB under `<data-dir>/wakeword/models/<id>.json` (the
-installed reference artifact measures 132,984 bytes). Eight words are therefore about 1 MB of
-`/data` plus roughly 0.4 MB of process memory, over one shared 1.15 MB frontend. Installing or
-deleting a word rebuilds the ensemble and re-subscribes one runner, which costs roughly two seconds
-of warm-up for all words; a per-word enable toggle or rebinding takes effect on the next activation
-and costs nothing. The host measurements over N=1…5
-and the device limits are in [WAKEWORD.md](WAKEWORD.md#multiple-wakewords-and-app-binding).
-
-Synthetic pink, brown/rumble and amplitude-modulated room regressions measure 4.23, 8.33 and 3.42 dB
-of cleanup. Real-world evidence is one 10 s background recording — mostly music played through a Mac's
-own or external speakers, not through the Capsula Mini — where cleanup measures 2.9 dB overall and 2.7 dB in
-80–300 Hz. The recording is unannotated and has no local playback reference to cancel the music, so
-it is consumed background evidence, not fan/traffic, music-immunity, new-location or zero-FAR proof.
-Endpoint negotiation with a real `speex` source, subjective suppression benefit and transparency are
-hardware/listening gates.
+Estimator behaviour, the shared-frontend budget and measured limits are in
+[WAKEWORD.md](WAKEWORD.md#quality-limits). Endpoint negotiation with a real `speex` source,
+subjective suppression benefit and transparency are device/listening gates.
 
 ## Microphone gate and mute
 
@@ -211,39 +193,18 @@ and gestures inferred from ordered presses are deliverable. Partial capture rece
 forwarding every key, with all system effects suppressed. The user's map is authoritative — east
 is volume up, west is volume down — and direction is not inverted from a single passive trace.
 
-Raw captures from `/dev/input/event0` show the node is `gpio-keys` only, advertising `EV_SYN|EV_KEY`
+Raw `/dev/input/event0` captures show the node is `gpio-keys` only, advertising `EV_SYN|EV_KEY`
 (`EV=3`), and that a swipe over the whole panel emits exactly one press + SYN + release + SYN.
 Full-panel up reports `0x72` (`volume_down`), right `0xf8` (`mic_toggle`), down `0xf8` and left
-`0x73` (`volume_up`). A swipe anchored at the physical centre can report `0x2c0`
-(`BTN_TRIGGER_HAPPY1`) or `0x246` (`KEY_VOICECOMMAND`). The centre key is therefore the only extra
-gesture evidence a single contact adds: a bare volume edge acts immediately as a volume step, with
-zero deferral. Because the pad reports one key per gesture, a whole-panel crossing appears as two
-opposite end-stop edges; `volume_down` then `volume_up` (or the reverse) with no centre between them
-and a press-to-press gap of at most 400 ms is the full-panel crossing — `swipe_right` (next) or
-`swipe_left` (previous). The leading edge has already stepped when the second resolves the gesture,
-so that one step is reverted through the canonical master-volume path and the completing edge is
-suppressed: the crossing costs a revert inside the 400 ms window, never a deferral. A slow opposite
-pair (> 400 ms) stays two deliberate steps, and a single end-stop key remains a tap, not a skip gesture. The
-retained device log contains a real `center p+0ms r+115ms | gap 14ms volume_down p+130ms down`
-centre→edge pair (130 ms press-to-press, inside the 250 ms window); its previous heuristic also
-scored `volume_down … gap 123ms volume_up` as `swipe_right`, which is now the full-panel crossing
-shape rather than the rejected unanchored pair. The centre gate is a centre press followed by a
-volume edge — no press-gap allowance while the centre is still held, or within 700 ms after it is
-released (the usable form on this pad, which reports one key at a time); the documented
-opposite→centre→direction chain also has 250 ms inter-contact and
-1500 ms total bounds. Every contact acts on its own edge, so a chain's leading edge has already
-produced its action when the direction contact completes the gesture, and a full-panel crossing's
-leading step is reverted the same way. Circles are recognised in full
-capture only. The measured `swipe_half.hex` capture reports one gesture as `0xf8` and the next as
-`0x2c0`, while `swipe_full.hex` holds three gestures with no centre contact; a single edge-only
-report is still indistinguishable from a volume tap, which is why the crossing needs the ordered
-opposite pair inside the window.
-
-These captures prove the event shape, not the deployed resolver's behaviour: the centre→edge pair is
-observed in a retained device log, while the new resolver's on-device recognition still needs
-confirmation with physical presses. Host-side gesture, zero-deferral and full-capture-only circle
-contracts are in [VERIFICATION.md](VERIFICATION.md); the full gesture and precedence contract is in
-[SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md).
+`0x73` (`volume_up`); a swipe anchored at the physical centre can report `0x2c0`
+(`BTN_TRIGGER_HAPPY1`) or `0x246` (`KEY_VOICECOMMAND`) instead. The pad reports one key at a time,
+so a bare volume edge is indistinguishable from a volume tap and the centre key is the only extra
+gesture evidence a single contact adds. The gesture contract therefore treats a centre tap followed
+by a volume edge as the usable centre form, and two opposite volume edges with no centre between
+them inside 400 ms as the full-panel crossing; a lone end-stop key stays a tap. These captures
+prove the event shape, not the deployed resolver's recognition. The full gesture and precedence
+contract is in [SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md#interaction-contract); the device proof
+status is in [VERIFICATION.md](VERIFICATION.md#open-gates).
 
 ## Vendor stack and supersede
 
@@ -259,14 +220,7 @@ descriptor. Two owners of the key and three of the timer are not workable.
 
 `capsulad -supersede=auto` (the default on `*-stock` platforms) stops `sysmon` and `voice-agent`,
 escalates to SIGKILL when SIGTERM is ignored, asks the framework's own watchdog feeder to release
-the device and stops every other `/dev/watchdog` holder, then arms the timer itself:
-
-```
-INFO daemon    superseding voice-agent pid=418 (SIGTERM)
-INFO daemon    superseding sysmon pid=427 (SIGTERM)
-INFO daemon    superseding voice-agent pid=437 (SIGTERM)
-INFO watchdog  /dev/watchdog armed, timeout=21s
-```
+the device and stops every other `/dev/watchdog` holder, then arms the timer itself.
 
 `-supersede=off` leaves the vendor stack alone; an explicit comma list replaces the default set. A
 reaper stops any superseded process that respawns. Capture is unaffected by supersede: a 2 s take
@@ -278,7 +232,7 @@ alongside them works — the driver does not enforce exclusive ownership — but
 stock agent until it is stopped as well. When the vendor assistant does not start, the nodes have
 one writer.
 
-`capsulad -platform rockchip-stock` starts on this image and reports `mode=mountns`; the built-in
+`capsulad -platform rockchip-stock` starts on the stock image and reports `mode=mountns`; the built-in
 clock and ring system apps drive `display.segment.front` and the LED ring without separately
 installed clock or ring packages.
 
@@ -348,10 +302,9 @@ peer advertises. If no transport appears, the daemon **requests** the peer's A2D
 connection**, and never disconnects the source to renegotiate: dropping a user's phone off the
 adapter stops their audio mid-sentence and cannot be undone by the daemon, and a reconnect can land
 on an even worse profile. The bound is per connection, not per source: a fresh connection is a fresh
-negotiation and may ask again immediately — the field case where a third reconnect was refused
-because the previous connection's request was remembered left the host with no audio output at all —
-while a second verdict inside one connection is refused, so a source that keeps landing on a
-non-A2DP profile is not asked in a loop. A newer connection, a disconnect and daemon shutdown cancel a pending
+negotiation and may ask again immediately, while a second verdict inside one connection is refused,
+so a source that keeps landing on a non-A2DP profile is not asked in a loop. A newer connection, a
+disconnect and daemon shutdown cancel a pending
 verdict, and a source that stays without a transport keeps its link and its `audio link is not
 A2DP` verdict instead of being cycled. A successful `ConnectProfile` is never logged as a profile
 that is up: the log states the observed transport instead.
@@ -391,9 +344,9 @@ capabilities. The local SEP advertises the spec's four-octet media codec capabil
 (`F3 7F 02 35`: 44.1/48/32/16 kHz with joint stereo and stereo, 16/12/8 blocks, 8/4 subbands,
 loudness and SNR, bitpool 2..53). The maximum is 53 because that is the A2DP-recommended
 high-quality ceiling for 44.1 kHz joint stereo and every SBC source must support it; a higher
-advertiseable value (the Mac offers 250) buys no audible quality for SBC and only spends airtime.
-PA keeps app playback and the microphones. Negotiation reached CONFIGURED/OPEN and created a
-transport on hardware; audible parity with the vendor chain is a listening gate.
+advertiseable value (some sources offer 250) buys no audible quality for SBC and only spends
+airtime. PA keeps app playback and the microphones. Negotiation reached CONFIGURED/OPEN and
+created a transport on hardware; audible parity with the vendor chain is a listening gate.
 
 **Volume.** The framework master is the listening level and the AVRCP absolute-volume register mirrors
 it in both directions. A volume the source reports (BlueZ `PropertiesChanged`, or the coalesced
@@ -402,29 +355,21 @@ persists it and applies the local gain, so moving the phone's slider moves the s
 on the speaker (dial, keys, Web UI, an app) is written back to the source's register so the source's
 own level display can follow it; the write is a display mirror, applied asynchronously and never on
 the key or render path, coalesced over about 100 ms so the leading step of a full-panel swipe and its
-revert produce one write, and the native sink's only gain stage is the framework mixer's canonical
-60 dB logarithmic master taper, with no per-stream trim and no compensation factor for the source's
-share. Field evidence from
-the deployed build: every speaker-side change logs `transport volume mirrored to the source: N%` and
-BlueZ accepts the write with no refusal — whether the peer applies or displays it is the peer's
-decision, and this MacBook does not move its own level display. That is not chased further on our
-side. Both alternatives fail on the unit: writing the register *and* letting it attenuate the stream
-made 10 % on both ends sound near-silent, and compensating the local trim for the host's share made 5 %
-far too loud, because this peer reports the written value back without actually attenuating the A2DP
-stream, so its "confirmation" is not evidence. The peer's report of the level the daemon just wrote is
-therefore suppressed as an echo: a report within one AVRCP step (the peer's own rounding) of a level
-written in the last 900 ms is ignored instead of adopted, while anything further away is the user's
-slider and is adopted at once, even while a write is still open. The window is deliberately narrow —
-an earlier 4-step/5-second filter swallowed a whole slider drag and made the speaker lag the phone.
+revert produce one write. The native sink's only gain stage is the framework mixer's canonical 60 dB
+logarithmic master taper, with no per-stream trim and no compensation for the source's share.
+BlueZ accepts the mirror write without refusal; whether a peer applies or displays it is the peer's
+decision. A peer that reports the written value back without attenuating the A2DP stream is not
+evidence of attenuation, so that report is suppressed as an echo: a report within one AVRCP step
+(the peer's own rounding) of a level written in the last 900 ms is ignored instead of adopted, while
+anything further away is the user's slider and is adopted at once, even while a write is still open.
 The echo memory holds the last four writes, is cleared on connect and disconnect so a new session
 cannot inherit it, and adds no polling. A source without a writable register is not an error: the
 write is refused, logged once per session at Debug, and the speaker keeps attenuating locally while a
 source-side slider still drives the master.
 A source is **not** trusted as the only attenuation:
-with the capsulad master at 5 % (then linear) and a source output at minimum, the transport volume
-could read ~6/127 while the captured stream was near full scale and the speaker ~90–100 % loud —
-the slider moved without attenuating the stream. Proof level: D-Bus property read plus digital capture;
-loudness is acoustic.
+at a low framework master with a source output at minimum, the transport volume could read ~6/127
+while the captured stream was near full scale and the speaker was loud — the slider moved without
+attenuating the stream. Proof level: D-Bus property read plus digital capture; loudness is acoustic.
 
 With PulseAudio as fallback owner the loopback carries the same canonical taper as its local safety
 gain (cube-root compensated, because PA sink-input volume is cubic) while the source is held at a
@@ -456,23 +401,21 @@ browser never receives a Bluetooth address: each paired device is identified by 
 from the address, and unpair resolves that ID server-side before calling the framework. Unpair is
 exercised against the simulator manager only.
 
-Verified with a paired MacBook: after `Device1.ConnectProfile(0x110A)` and the AVRCP profile,
+Verified with a paired laptop source: after `Device1.ConnectProfile(0x110A)` and the AVRCP profile,
 `Device1.Connected=true`, `MediaControl1.Connected=true`, and `MediaPlayer1`/`MediaTransport1`
 objects exist; AVRCP Play/Pause/Next/Previous calls succeed and the player state moves to `playing`;
 setting the framework volume to 50 % writes `Volume=64` of 127 on the idle A2DP transport and
 restoring 80 % writes `102`; toggling `Pairable`/`Discoverable` from the Web UI reaches BlueZ and
-survives a reboot
-(`bluetooth_discoverable` is a typed setting and discoverable implies pairable). That MacBook's
-`MediaPlayer1` exposes `Device` and `Position` but no `Status` or `Track` at rest, so title/artist
-stay empty: metadata is read when a source publishes it, and macOS fills those attributes only for
-some players.
+survives a reboot (`bluetooth_discoverable` is a typed setting and discoverable implies pairable).
+Some peers expose `Device` and `Position` on `MediaPlayer1` but no `Status` or `Track` at rest, so
+title/artist stay empty: metadata is read only when a source publishes it.
 
 The Web UI "Now playing" panel is fed by the framework, not by a shipped app: while a source is
 connected, the panel lists one framework-owned player (`bluetooth`) built from the public
 `BluetoothMediaService`, with the playback direction the daemon resolved and the source's metadata,
 and its transport buttons call that service's `Command`. No media app is bundled and no app id is
-reserved for one. The simulator proves the provider view and command routing; the MacBook session
-above predates it, so the rendered Overview was not observed against a physical phone.
+reserved for one. The simulator proves the provider view and command routing; the rendered Overview
+against a physical phone is not observed.
 
 ## mDNS and Avahi
 
@@ -531,7 +474,7 @@ and falls back to `in_illuminance_raw` or the i2c-driver paths (unit `lux-raw`).
 
 ## Device probe results
 
-Kernel 4.4.167 on the Capsula Mini, reached over `adb` at `192.168.1.50:5555`.
+Kernel 4.4.167 on a Capsula Mini rev 4, probed over `adb`.
 
 | Probe | Result | Proof level |
 |---|---|---|
@@ -603,7 +546,7 @@ liveness contract:
   timeout. That is the intended fail-safe: the supervisor owns the timer and its death returns the
   device to a known state.
 - Proof limits: the driver facts (21 s, ignored magic close, `ENOTTY` disable, no
-  `/sys/class/watchdog`) are probe results on this unit, and the health-gated reset itself has not
+  `/sys/class/watchdog`) are probe results on the rev 4, and the health-gated reset itself has not
   been observed on hardware. Host tests pin the supervisor's decisions, the feeder lifetime, the
   handback path and the stale-pid cleanup, not a real reset.
 
@@ -613,21 +556,19 @@ job. Never `SIGKILL` a framework feeder for the same reason: ask for the handbac
 
 ## Ambient-light brightness
 
-The stock brightness is not the `powf(x, 4)` curve in `ClockBrightnessCalc` (0x157258) — that path
-feeds something else. The displayed value comes from the light handler at 0x27ca68, which reads
-`in_illuminance_both_input` (the same IIO file the framework uses) and maps:
+The displayed stock value comes from a light handler that reads `in_illuminance_both_input` (the
+same IIO file the framework uses) and maps:
 
 ```
 lux < 5        -> 0
 lux > 32768    -> 100
-otherwise      -> trunc(logf(0.75 + 0.05*lux) * 19.9375)   // percent
+otherwise      -> trunc(log(0.75 + 0.05*lux) * 19.9375)   // percent
 clamped to [5, 95]; re-applied only when |new - applied| > 5
 ```
 
-Constants: `0x3d4ccccd` (0.05), 0.75, `0x419f806b` (19.9375), thresholds 5 and `0x453b8000` (32768).
-Confirmed by the driver's LED-class brightness: the stock unit wrote **14/255** at 7.4 lux and the
-framework writes **13/255** at 7.3 lux (5 % floor, one LSB of truncation). The framework animates
-toward each new value at 0.06 per 100 ms tick, matching the smooth stock transition.
+Driver readback on a rev 4 unit agrees: the stock unit wrote **14/255** at 7.4 lux and the framework
+writes **13/255** at 7.3 lux (5 % floor, one LSB of truncation). The framework animates toward each
+new value at 0.06 per 100 ms tick, matching the smooth stock transition.
 
 Framework divergence: the vendor curve returns 0 below 5 lux, which blanks an enabled automatic
 display in darkness. The framework keeps the stock curve across the sensor range but floors the auto
@@ -647,18 +588,9 @@ A second Capsula Mini board family runs the same product on an Amlogic A113X. It
 SoC, a different amplifier, a different Wi-Fi module and a different display controller; nothing
 from the RK3308 sections above transfers except the framework contracts.
 
-**Evidence level.** Board facts now come from the supplied offline images (device trees and kernel
+**Evidence level.** Board facts come from the supplied offline images (device trees and kernel
 config), plus a published hardware survey and two third-party projects. The offline DT/config facts
 are first-hand but not a boot test; nothing here is claimed as live proof.
-
-Supplied images inspected read-only (provenance; no user data or keys are reproduced):
-
-| Artifact | SHA-256 |
-|---|---|
-| stock `device.dtb` (from the after-jailbreak dump) | `928710fd7b975194259a9b4ab3879ee698f5a2db1353ec206210ea35dd86caa2` |
-| Alpine `fw_alpine/vk-mini-a113x.dtb` | `35284a73514d35fdf199a8694e417c7af22457feaebf3f3d55d1893e5ee5f7f5` |
-| Alpine `fw_alpine/Image` (6.18.44) | `5b906997a6594dd1452e8ca3edbdacc27c2ba1615d81a36866ff1908b0c7ba0a` |
-| Alpine kernel `config_alpine` | `7f4b544a97ab7961971ed188c0b9032a22aefa7ee174c414f793577b0e4dc1cc` |
 
 From the device trees: the stock root model is `Amlogic` (compatible `amlogic,axg`) and the Alpine
 root is `vk,capsula-mini` / `amlogic,a113d` / `amlogic,meson-axg`, model “VK Capsula Mini (Amlogic
@@ -675,7 +607,7 @@ Alpine `config_alpine`: `CONFIG_LED_IS31FL32XX`/`CONFIG_LEDS_AW21036`/`CONFIG_BH
 
 Third-party sources for the facts the images do not settle:
 
-- cmp18, "VK Капсула Мини (на Amlogic A113X), часть 1" (debianlive.ru, 2026-08-23): board photos,
+- cmp18, "VK Капсула Мини (на Amlogic A113X), часть 1" (debianlive.ru): board photos,
   UART console, the part list, and an Alpine 3.24.1 image on a mainline 6.18 kernel;
 - `ryysel/capsula-mini-airplay2`: the recovered `/dev/topleds` ABI and the 36-channel map it says
   the stock `voice-agent` uses on this board;
@@ -684,7 +616,7 @@ Third-party sources for the facts the images do not settle:
 - `byrbyrka/capsula-mini-tweaker`: the line-display sysfs interface (`message`, `map_seg7`,
   `brightness`, `clock:colon:{top,bottom}`) and the ALSA mixer usage.
 
-No Amlogic unit was probed for this change, so every subsystem below reports what the code can
+No Amlogic unit has been probed, so every subsystem below reports what the code and images can
 prove locally. A `PARTIAL` here means "the interface exists and is driven, one hardware check
 pending", not "measured".
 
@@ -802,7 +734,7 @@ reports a missing node, so `-watchdog auto` arms when the module loads.
   replaces, so it is the name the hook wraps; `S99btctl.sh` keeps `btctl` untouched. `disable`
   writes the stock `S99sysmon.sh` back verbatim and starts `sysmon` again; `enable` restores the
   saved wrapper (`boot/S99sysmon.sh.wrapper`); the embedded rollback copy matches the extracted
-  vendor script byte-for-byte (354 bytes, verified offline). Both are idempotent, and the daemon's
+  vendor script byte-for-byte. Both are idempotent, and the daemon's
   `-supersede auto` still stops `voice-agent`/`sysmon` at runtime and reaps a respawned copy.
   Data directory: `/data/local/capsulad`.
 - **Alpine.** `deploy/amlogic-alpine/capsulad` is an OpenRC service installed as
@@ -822,95 +754,31 @@ walk target exists, that check is a manual one and the panel map stays third-par
 
 ### Build and ABI
 
-Both Amlogic userlands are aarch64. The RK3308 stock image is glibc 2.33; the supplied Amlogic stock image is glibc 2.28, so package ABIs must contain
-`linux` (the supplied stock image ships **glibc 2.28**, so native packages must not require newer
-symbols; the RK3308 image ships glibc 2.33); Alpine is musl 1.2.6, so its profile accepts only ABIs containing `musl`. A glibc-linked native
-app package is rejected on Alpine by the existing architecture gate, not by a second rule.
-`make daemon GOOS=linux GOARCH=arm64` cross-builds both binaries. The native SDK needs its own Rust
-target: `aarch64-unknown-linux-gnu` for stock, `aarch64-unknown-linux-musl` for Alpine. `make
-deploy-bundle DEPLOY_PLATFORM=amlogic-alpine` defaults `NATIVE_TARGET` to the musl triple and refuses
-to assemble a bundle whose `lib/libcapsulad.so` does not look musl-linked (the reverse for
-`amlogic-stock`), so a glibc runtime cannot be installed on Alpine by accident. **Proof level:** the musl shared runtime was built on the host (arm64 Alpine container) with
-`-C target-feature=-crt-static`; its ELF `DT_NEEDED` names `libc.musl-aarch64.so.1`, and an Alpine
-`dlopen`/`dlsym("capsulad_abi_major")` smoke resolved the symbol. No device loaded it.
+Both Amlogic userlands are aarch64. The RK3308 stock image is glibc 2.33; the supplied Amlogic stock
+image is glibc 2.28, so native packages must not require newer symbols; Alpine is musl 1.2.6, so its
+profile accepts only ABIs containing `musl`. A glibc-linked native app package is rejected on Alpine
+by the existing architecture gate, not by a second rule. `make daemon GOOS=linux GOARCH=arm64`
+cross-builds both binaries. The native SDK needs its own Rust target:
+`aarch64-unknown-linux-gnu` for stock, `aarch64-unknown-linux-musl` for Alpine. `make deploy-bundle
+DEPLOY_PLATFORM=amlogic-alpine` defaults `NATIVE_TARGET` to the musl triple and refuses to assemble a
+bundle whose `lib/libcapsulad.so` does not look musl-linked (the reverse for `amlogic-stock`), so a
+glibc runtime cannot be installed on Alpine by accident.
 
-For **Amlogic stock** the glibc runtime must be linked against the image's glibc 2.28. A
-bullseye-era build needs `GLIBC_2.29`/`2.30` and the device loader rejects it
-(`libm.so.6: version GLIBC_2.29 not found`), even though app packages built for 2.28 load. Build it
-with `tools/build-native-glibc228.sh` (Debian buster, archived repos, verifies the symbol ceiling and
-writes `build/lib` plus metadata). The deploy gate independently refuses a runtime above
-`Architecture.MaxGLIBC` (2.28 here, 2.33 on RK3308), so a 2.33 build cannot be installed on this
-board by accident. Verified build: Rust 1.100 in buster produced 6,313,560 B,
-`DT_NEEDED` = `libgcc_s.so.1`, `libpthread.so.0`, `libm.so.6`, `libdl.so.2`, `libc.so.6`, and the
-highest symbol version is **GLIBC_2.28** (sha256 `620297dd…c895354f4a3db9`); the same binary loads
-on a buster (2.28) image and the app reaches its first framework call (`connect failed (7)` for a
-nonexistent socket). The independently built app package also maxes at 2.28, so runtime and package
-are coherent on the stock rootfs. A superseded 2.33-era build (`7b6c7a6c…`, max `GLIBC_2.30`) is
-rejected by the loader at `libm.so.6: version GLIBC_2.29 not found` and by the deploy gate with the
-same reason.
+For Amlogic stock the glibc runtime must be linked against the image's glibc 2.28. A newer build
+fails the loader (`libm.so.6: version GLIBC_2.29 not found`) even when app packages built for 2.28
+load. Build it with `tools/build-native-glibc228.sh` (Debian buster, archived repos, verifies the
+symbol ceiling and writes `build/lib` plus metadata). The deploy gate independently refuses a runtime
+above `Architecture.MaxGLIBC` (2.28 here, 2.33 on RK3308), so a newer build cannot be installed by
+accident. **Proof level:** both runtimes were built and loaded only on the host (a buster container
+for glibc, an arm64 Alpine container for musl); no device loaded either, so service start, app launch
+and audio remain device gates.
 
-## Open hardware gates
+## Unverified hardware facts
 
-1. **Ring gamma.** Channel maps are verified on the unit; the 2.2 ring gamma is not
-   photometer-verified.
-2. **Audio under load.** Latency and underrun behaviour under sustained load, and pre-roll timing,
-   are unmeasured; routing, ducking and indication termination are verified digitally.
-3. **Touch contract.** Confirm on the unit, with physical presses and the deployed resolver, that a
-   bare volume tap steps exactly once with no added latency, a volume edge pressed while the centre
-   is still held (or within 700 ms of its release) resolves `swipe_right`/`swipe_left` while the
-   centre keeps its own action, the
-   opposite→centre→direction chain resolves the gesture after its leading edge has already stepped,
-   a full-panel crossing (`volume_down`→`volume_up` or the reverse, no centre, ≤ 400 ms
-   press-to-press) resolves `swipe_right`/`swipe_left`, suppresses the completing step and reverts
-   the leading one, a slow opposite pair stays two steps, a held circle summons at 700 ms, a single
-   end-stop key stays a volume step, and an unfinished
-   sequence produces no further effect — with windows following the kernel timestamp even when the
-   read loop is delayed. The centre→edge form and the volume timing are now device-confirmed (a
-   79 ms centre→`volume_up` resolved `swipe_right` and sent `BLUETOOTH_MEDIA_NEXT`; a 114 ms
-   centre→`volume_down` sent `BLUETOOTH_MEDIA_PREVIOUS`). Still open on the unit: the full-capture
-   circle traversal, the 700 ms hold summon, and whether any deliberate action other than a
-   centre tap or a whole-panel crossing can carry a gesture — the pad reports one key at a time and
-   a lone end-stop edge carries no gesture evidence. Raw coordinate semantics need a different panel.
-4. **Power cycle and pairing.** The boot hook, health gate and vendor fallback are exercised by
-   service restarts, not by a power cycle. Pair and unpair a throwaway device through the Web UI
-   (unpair is deliberately not run against the user's MacBook), exercise a source that publishes
-   AVRCP track metadata, and decide the boundary for the vendor helpers that keep running (`okcall`,
-   `stereoctl`, `telemetryd`, `snapclient`).
-5. **Native A2DP ordering.** Confirm the sink is advertised before the adapter is connectable after a
-   cold boot and after a BlueZ restart or power cycle, that a failed registration keeps
-   pairable/discoverable off with the documented `Detail`, and that a source connected in the
-   pre-daemon autopower window either recovers A2DP on the same link or needs a reconnect. Confirm a
-   strict peer accepts the conformant four-octet SBC capability IE, and record the
-   "audio link is not A2DP" Warn together with the one A2DP profile request per source and its
-   outcome, confirming the source stays connected throughout. PA-module removal timing around an
-   active source, and the retirement of an idle module set while a paused source is still connected,
-   are real-device gates.
-6. **mDNS host name.** Save a label, confirm `.local` resolution with `avahi-resolve`, restart Avahi
-   through the device init system and confirm the label is re-adopted, and check that a colliding or
-   invalid name keeps the prior name and reports the collision. With the label active, a Settings GET
-   and a daemon restart must produce zero `SetHostName` calls (`dbus-monitor --system
-   "interface=org.freedesktop.Avahi.Server,member=SetHostName"`) and no warning.
-8. **Amlogic ring and panel.** On a unit, confirm `/dev/topleds` reports 36 channels and that the
-   recovered permutation renders the ring clockwise from the top on this board too; confirm the
-   `clock-led1..30` array accepts `brightness` writes (the documented read path) and that the
-   published table lights the expected segments, including the colon; confirm which panel is fitted
-   (IS31FL3236A or AW21036) and, on Alpine, whether the line display, the per-segment LED class
-   devices or both exist. Only if no LED class array exists on a stock unit does recovering the
-   private `/dev/is31fl32xx` ioctl become the gate.
-9. **Amlogic audio and watchdog.** On Alpine, confirm `Master Playback Volume` (the `mastervol`
-   softvol) exists only after the first playback stream has opened `default`: the first `amixer
-   sset` may fail, the pin retries on the next `SetMasterVolume`, and until it lands the framework
-   volume is multiplied by the image's softvol — verify the pin lands and the level matches before
-   trusting volume. Measure capture latency on the PDM array. On stock, measure whether
-   `/dev/watchdog` can be disarmed (magic close, `WDIOC_SETOPTIONS`) and record it in
-   `Watchdog.Nowayout`. The flag records a measured fact only and does not gate the handoff: a
-   transferable descriptor is always handed to a feeder, and `Close` is used only when the
-   platform exposes none, where the flag chooses the wording of that release path.
-10. **Amlogic stock autostart.** Confirm whether `/etc/init.d/S??*` really is expanded before the
-   overlay mounts on firmware 44.90 (the AirPlay 2 package replaces `S50avahi-daemon` for exactly
-   this reason), and choose the supported autostart mechanism: base-image hook, or a stock script
-   that starts it. Service restarts alone do not satisfy this gate.
-11. **Amlogic brightness.** Measure the stock ambient-brightness response before claiming automatic
-   brightness parity; today the Amlogic profiles use the framework policy curve deliberately.
+Channel maps and key codes are measured, but emitted ring gamma (2.2) has no photometer result, the
+full-panel and circle gesture matrix has not been exercised with physical presses, and no Amlogic
+A113X unit has been probed. Those subsystems report `PARTIAL`/`UNVERIFIED` rather than inventing a
+result. The current gate list, with the evidence needed to close each one, is in
+[VERIFICATION.md](VERIFICATION.md#open-gates).
 
 

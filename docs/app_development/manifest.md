@@ -16,8 +16,7 @@ declared here.
 Validation runs at packaging (`capsulad-cli app package`), at install and at launch. Unknown
 keys are rejected, so a typo cannot silently disable a feature. There is no per-app instance
 policy field: every installed app has at most one live run, and a launch while it is running is
-delivered as an invocation (see [lifecycle.md](lifecycle.md#invocations)). A manifest that still
-declares the removed `single_instance` key is rejected as unknown.
+delivered as an invocation (see [lifecycle.md](lifecycle.md#invocations)).
 
 ## Top-level fields
 
@@ -89,8 +88,6 @@ Optional requirement metadata for a native app that loads the shared SDK runtime
   the version mismatch.
 - This is a requirement, not a negotiation. Declaring it is what makes "the SDK is missing" a
   clear install-time error instead of a runtime crash.
-- Packages built before the capability requirement was removed still carry
-  `native_sdk.required_capabilities`; they load normally and that key is ignored.
 
 ## `[[settings]]`
 

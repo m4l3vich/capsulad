@@ -1,5 +1,6 @@
 import { Topic } from '../proto/web_pb.js'
 import { socket } from './ws.js'
+import { t } from './i18n.js'
 
 // Small adapter over the one authenticated WebSocket. Wi-Fi snapshots never
 // scan; scanWifi() is the only call that submits the explicit scan command.
@@ -21,7 +22,7 @@ export async function fetchWifi() {
 // view, so a broken contract fails loudly instead of rendering "no networks".
 function wifiView(result, command) {
   const view = result?.wifi?.wifi
-  if (!view) throw new Error(`malformed Wi-Fi ${command} response: missing WifiView`)
+  if (!view) throw new Error(t('errors.malformedWifi', { command }))
   return view
 }
 

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, useTemplateRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ModalDialog from '../components/ModalDialog.vue'
 import Icon from '../components/Icon.vue'
 import { formatBytes } from '../lib/format.js'
@@ -19,6 +20,7 @@ import {
 // component only refuses obviously unusable input before a transfer starts.
 
 const emit = defineEmits(['close', 'installed'])
+const { t } = useI18n()
 
 const storage = ref(null)
 const storageError = ref('')
@@ -56,10 +58,10 @@ const storageTone = computed(() => {
 })
 
 const freeText = computed(() =>
-  storage.value?.available ? formatBytes(storage.value.freeBytes) : 'Unavailable')
+  storage.value?.available ? formatBytes(storage.value.freeBytes) : t('common.unavailable'))
 
 const usedText = computed(() => {
-  if (!storage.value?.available || storagePercent.value === null) return 'Unavailable'
+  if (!storage.value?.available || storagePercent.value === null) return t('common.unavailable')
   return `${formatBytes(storage.value.usedBytes)} (${storagePercent.value}%)`
 })
 
@@ -71,7 +73,7 @@ async function loadStorage() {
   } catch (err) {
     if (err?.name === 'AbortError') return
     storage.value = { available: false, totalBytes: 0, freeBytes: 0, usedBytes: 0 }
-    storageError.value = 'The applications filesystem could not be read.'
+    storageError.value = t('install.storageReadFailed')
   } finally {
     storageLoading.value = false
   }
@@ -84,7 +86,7 @@ onUnmounted(() => {
 })
 
 function cancelled(err) {
-  return err?.name === 'AbortError' || err?.message === 'install cancelled'
+  return err?.name === 'AbortError' || err?.message === t('errors.installCancelled')
 }
 
 function beforeClose() {
@@ -100,10 +102,10 @@ function cancelInstall() {
 
 function reportFailure(err) {
   if (cancelled(err)) {
-    notify.info('Install cancelled.')
+    notify.info(t('install.cancelled'))
     return
   }
-  error.value = err?.message || 'The install failed.'
+  error.value = err?.message || t('install.failed')
   notify.error(error.value)
 }
 
@@ -188,18 +190,18 @@ function onDrop(event) {
 <template>
   <ModalDialog
     max-width="max-w-xl"
-    title="Install an app"
+    :title="$t('install.title')"
     :before-close="beforeClose"
     @close="emit('close')"
   >
     <div class="flex flex-wrap items-center justify-between gap-4 rounded border border-base-300 p-3">
       <dl class="flex flex-col justify-between gap-2">
         <div>
-          <dt class="text-xs uppercase tracking-wide text-base-content/60">Disk space free</dt>
+          <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('install.diskFree') }}</dt>
           <dd class="data-value">{{ freeText }}</dd>
         </div>
         <div>
-          <dt class="text-xs uppercase tracking-wide text-base-content/60">Disk space used</dt>
+          <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('install.diskUsed') }}</dt>
           <dd class="data-value">{{ usedText }}</dd>
         </div>
       </dl>
@@ -211,19 +213,19 @@ function onDrop(event) {
         :style="{ '--value': storagePercent }"
         :aria-valuenow="storagePercent"
         role="progressbar"
-        :aria-label="`${storagePercent}% of the applications filesystem used`"
+        :aria-label="$t('install.percentUsedAria', { percent: storagePercent })"
       >
         {{ storagePercent }}%<br/>
-        <span class="text-xs uppercase tracking-wide text-base-content/60">used</span>
+        <span class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('install.usedLabel') }}</span>
       </div>
-      <div v-else class="text-sm text-base-content/60" role="status">Unavailable</div>
+      <div v-else class="text-sm text-base-content/60" role="status">{{ $t('common.unavailable') }}</div>
     </div>
 
-    <p v-if="storageLoading" class="mt-1 text-xs text-base-content/60">Checking the applications filesystem…</p>
+    <p v-if="storageLoading" class="mt-1 text-xs text-base-content/60">{{ $t('install.checkingFilesystem') }}</p>
     <p v-else-if="storageError" class="mt-1 text-xs text-warning">{{ storageError }}</p>
 
     <p class="mt-3 text-sm">
-      Choose a .tar.gz app package file or enter a URL to install the app.
+      {{ $t('install.choosePackage') }}
     </p>
 
     <input
@@ -240,7 +242,7 @@ function onDrop(event) {
       class="mt-2 flex w-full flex-col items-center gap-1 rounded-box border-2 border-dashed p-6 text-center transition-colors disabled:opacity-50"
       :class="dragging ? 'border-primary bg-base-200' : 'border-base-300 hover:border-primary'"
       :disabled="busy"
-      aria-label="Choose a .tar.gz package file, or drop one here"
+      :aria-label="$t('install.chooseFileAria')"
       @click="pickFile"
       @dragenter.prevent="startDrag"
       @dragover.prevent="startDrag"
@@ -249,10 +251,10 @@ function onDrop(event) {
     >
       <Icon size="32px" class="text-primary">cloud_upload</Icon>
       <span class="text-sm font-medium">
-        {{ dragging ? 'Drop the package to install it' : 'Drop a .tar.gz package here or choose a file' }}
+        {{ dragging ? $t('install.dropPackage') : $t('install.dropOrChoose') }}
       </span>
       <span class="text-xs text-base-content/60">
-        The speaker accepts at most {{ formatBytes(MAX_PACKAGE_BYTES) }} per package.
+        {{ $t('install.maxPerPackage', { size: formatBytes(MAX_PACKAGE_BYTES) }) }}
       </span>
     </button>
 
@@ -261,13 +263,13 @@ function onDrop(event) {
         class="progress progress-primary flex-1"
         :value="Math.round(progress * 100)"
         max="100"
-        aria-label="Upload progress"
+        :aria-label="$t('install.uploadProgress')"
       />
       <span class="text-sm font-mono">{{ Math.round(progress * 100) }}%</span>
     </div>
 
     <form class="mt-4 flex flex-col gap-2" @submit.prevent="installFromURL">
-      <label for="app-package-url" class="text-sm font-medium">Install from a URL</label>
+      <label for="app-package-url" class="text-sm font-medium">{{ $t('install.installFromUrl') }}</label>
       <div class="flex flex-wrap gap-2">
         <input
           id="app-package-url"
@@ -282,17 +284,17 @@ function onDrop(event) {
         />
         <button type="submit" class="btn btn-primary btn-sm" :disabled="busy">
           <Icon size="16px">download</Icon>
-          Install
+          {{ $t('install.install') }}
         </button>
       </div>
       <p class="text-xs text-base-content/60">
-        The speaker downloads the archive over http or https and validates it like an upload.
+        {{ $t('install.urlHint') }}
       </p>
     </form>
 
     <div v-if="urlBusy" class="mt-2 flex items-center gap-2 text-sm" role="status">
       <span class="loading loading-spinner loading-sm"></span>
-      <span>Downloading and installing…</span>
+      <span>{{ $t('install.downloading') }}</span>
     </div>
 
     <div v-if="error" class="alert alert-error mt-3 py-2 text-sm" role="alert">
@@ -301,7 +303,7 @@ function onDrop(event) {
 
     <div v-if="busy" class="mt-3 flex justify-end">
       <button type="button" class="btn btn-ghost btn-sm" @click="cancelInstall">
-        Cancel install
+        {{ $t('install.cancelInstall') }}
       </button>
     </div>
   </ModalDialog>

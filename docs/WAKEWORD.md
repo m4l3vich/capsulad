@@ -45,8 +45,8 @@ error rather than reinterpreted.
   first-vowel gate is ≥0.85 of reference (worst 0.896), and room re-engagement plus a second speech
   segment after a pause are preserved. Sustained amplitude-modulated room events are deliberately
   preserved so speech is not learned as noise. Synthetic pink, brown/rumble and amplitude-modulated
-  room regressions measure 4.23, 8.33 and 3.42 dB of cleanup; the one authorized 10 s background
-  recording — Mac-speaker music, no local playback reference — measures 2.9 dB overall and 2.7 dB at
+  room regressions measure 4.23, 8.33 and 3.42 dB of cleanup; one unannotated 10 s consumer-music
+  background recording that did not play through the speaker measures 2.9 dB overall and 2.7 dB at
   80–300 Hz, which is consumed background evidence, not fan/traffic, music-immunity or zero-FAR proof.
 - **Frontend.** Raw int16 magnitudes → Hann/FFT/mel → pretrained Google/openWakeWord speech
   embeddings. The incremental backbone reuses convolution/pooling state. ARM64 NEON kernels process
@@ -108,7 +108,7 @@ The embedding package has ONNX reference vectors, incremental/full-window parity
 ARM64/generic kernel comparisons; its race-enabled checks pass. `tools/export_oww.py` verifies the
 upstream ONNX digests and `tools/gen_oww_fixtures.py` regenerates vectors.
 
-Measured on the connected RK3308 (four Cortex-A35 cores, 1.008 GHz) over ten seconds of PCM:
+Measured on the RK3308 (four Cortex-A35 cores, 1.008 GHz) over ten seconds of PCM:
 
 | Measurement | Result |
 |---|---|
@@ -132,14 +132,12 @@ negatives → train → calibrate → final test → install and the final line 
 (threshold 0.59)`. Daemon high-water memory: 23,564 kB before training, 96,496 kB at peak
 (+72,932 kB), idle RSS 25,884 kB afterward; zero ERROR-level and zero capture-error lines.
 
-An on-device A35 replay of the installed artifact (`/tmp/capsulad-warm-score-linux`, statically
-linked ARM64 scorer, 4,212,234 bytes, SHA-256
-`13409352cb0cff10c8772b3b7b62093cfba4e0899bfd56cd534b74c343348d16`) against the active model and the
-15 captured files exited 0 in 81 s: 6/6 word takes had a longest run of 6, 5, 6, 5, 6, 6 windows
-(all ≥2, maximum score 1.0000) and 9/9 background takes a longest run of 0 (maximum score 0.0000),
-using `wk_1794372342762_background.wav` as real-room preroll and the runtime 80 ms hop,
-two-consecutive-score and 2.9-second-cooldown policy. The daemon did not restart, logged zero
-ERROR-level lines and kept wakeword enabled with the microphone unmuted.
+An on-device A35 replay of the installed artifact against the active model and the 15 captured files
+exited 0: 6/6 word takes had a longest run of 6, 5, 6, 5, 6, 6 windows (all ≥2, maximum score
+1.0000) and 9/9 background takes a longest run of 0 (maximum score 0.0000), using a real-room
+background take as preroll and the runtime 80 ms hop, two-consecutive-score and 2.9-second-cooldown
+policy. The daemon did not restart, logged zero ERROR-level lines and kept wakeword enabled with the
+microphone unmuted.
 
 ## Training through Settings → Wakeword
 
@@ -223,38 +221,30 @@ are no feature-read or classifier-install RPCs.
 
 ## Multiple wakewords and app binding
 
-**Installing and migrating.** The previous build kept one artifact at
-`<data-dir>/wakeword/model.json`. On the first scan the daemon moves it to
-`models/<its-id>.json` with a rename: no settings write, no retrain and no byte change
+**Installing and importing.** A single artifact can be imported from
+`<data-dir>/wakeword/model.json` (or the `-wakeword-model` path). On the first scan the daemon
+moves it to `models/<its-id>.json` with a rename: no settings write, no retrain and no byte change
 (the fallback copy path preserves bytes too, and is used only when the file is on another
-filesystem). `-wakeword-model` is an import source for that one migration; the live store is always
-the models directory. A file whose name is not a valid id, whose internal `id` disagrees with its file
-name, or whose JSON does not load is left on disk, reported in the log with its reason and listed in
-the Wakeword section as **needing attention** — it is never a functioning fallback and never
-overwritten by a training run that happens to use the same id until the operator does so explicitly.
+filesystem). The live store is always the models directory. A file whose name is not a valid id,
+whose internal `id` disagrees with its file name, or whose JSON does not load is left on disk,
+reported in the log with its reason and listed in the Wakeword section as **needing attention** —
+it is never a functioning fallback and never overwritten by a training run that happens to use the
+same id until the operator does so explicitly.
 
 **Settings.** `wakewords` is the durable per-word list (`{model_id, app_id, enabled}`), replaced as a
-whole by one patch, the same shape as `default_app_by_resource`. Its semantics are deliberately
-backwards compatible:
+whole by one patch, the same shape as `default_app_by_resource`:
 
-- Absent (`nil`) is the legacy state: every installed word is live under the global
-  `wakeword_enabled` switch and bound to the selected assistant. That is exactly the previous
-  single-model behavior.
+- Absent (`nil`) keeps every installed word live under the global `wakeword_enabled` switch and
+  bound to the selected assistant.
 - Present is authoritative and materialized to contain every installed word. A word with no entry is
   **disabled**; a word is live only when the global switch, its own `enabled` and its availability
   all hold. At most eight entries are accepted and a duplicate `model_id` is refused.
 - An explicit empty list means **no word is live**. The JSON document always carries the key, so
-  `null` is the legacy state and `[]` is the explicit one; a client states the explicit state over
+  `null` is the absent state and `[]` is the explicit one; a client states the explicit state over
   the RPC by owning the `wakewords` mask with no entries, because a repeated field cannot otherwise
-  distinguish "absent" from "empty". Deleting the last word leaves `[]` behind rather than falling
-  back to legacy.
+  distinguish "absent" from "empty". Deleting the last word leaves `[]` behind.
 - `app_id` empty means the selected assistant. Deleting a word drops its entry; installing one
   appends a disabled entry.
-
-The retired `wakeword_model_id` setting is gone, together with its settings key and its protobuf tags
-(both reserved). It is not replaced by a new alias: **the old selector never gated anything.** The
-engine never consulted it, so the documented "installed model, selected and enabled" gate did not
-exist; this change implements the real per-word gate instead of preserving a cosmetic one.
 
 **Selection and delivery.** A word bound to an app delivers to that app only. If the app is not ready
 the activation is logged and dropped with an explicit reason, and is **not** rerouted to the selected
@@ -274,9 +264,9 @@ Memory is not the constraint: the in-memory classifier head is about 53 KB per w
 persisted artifact on `/data` is about 130 KB per word (JSON encoding); one 1.15 MB frontend and
 1.3 MB of shared assets exist once.
 
-**Rollback.** Restore the previous artifact file and the previous `wakewords` value (or delete the
-`wakewords` key to return to the legacy state) and restart the daemon. Removing `models/` and putting
-the old single file back at `wakeword/model.json` is also honored: the next scan migrates it again.
+**Rollback.** Restore the artifact file and the previous `wakewords` value (or delete the
+`wakewords` key to return to the absent state) and restart the daemon. Removing `models/` and putting
+a single artifact back at `wakeword/model.json` is also honored: the next scan imports it again.
 Taking the word out of the list (or clearing the global switch) suspends it immediately without
 touching the artifact, which is the safe way to silence a word that misbehaves in the field.
 
@@ -295,9 +285,8 @@ The host benchmark below measures the marginal cost of extra heads, not the on-d
 
 Re-run with `go test ./internal/wakeword -run '^$' -bench BenchmarkEnsembleProcess`. The per-hop
 allocation count is constant because only the shared frontend allocates; scoring every head allocates
-nothing (`TestEnsembleScoringDoesNotAllocate`). The frontend itself is unchanged, and
-`TestEnsembleMatchesSingleModelEngine` proves the ensemble returns exactly the score the single-model
-engine returned for the same artifact and audio, so this is not a new detector.
+nothing (`TestEnsembleScoringDoesNotAllocate`), and `TestEnsembleMatchesSingleModelEngine` proves the
+ensemble returns exactly the single-model engine's score for the same artifact and audio.
 
 ## Negative mining, refusals and measured quality
 
@@ -310,16 +299,13 @@ per-window storage and copies no features.
 
 Hard-negative mining addresses canonical windows only. Every mining round scores at most 32,768
 distinct windows on at most four goroutines and returns at most the requested budget of distinct
-canonical indices, so a duplicated view of one local window can occupy at most one hard slot.
-Without this, a 1:1 repeated local block filled half of every hard set and half of the sampled
-budget with copies of a few windows, and genuine corpus windows were never sampled. When the
-canonical pool is larger than the cap, the sample is drawn with a seeded uniform rejection sampler
-over canonical indices (one bitmap bit per canonical window), not with a fixed stride. The draw for
-each round is a pure function of the pool shape, the training seed and the round, which keeps the
-sample reproducible on every platform and keeps a long stream or a duplicated local block from
-excluding whole sources. The additive fresh random draw, its floor, the hard budget floor, one
-scoring pass per round and 30-minute RPC bound are unchanged. A seeded run remains byte-identical;
-`TestFitClassifierDeterministic` and its hard-negative variant cover that contract.
+canonical indices, so a duplicated view of one local window can occupy at most one hard slot and
+genuine corpus windows stay in the draw. When the canonical pool is larger than the cap, the sample
+is drawn with a seeded uniform rejection sampler over canonical indices (one bitmap bit per
+canonical window), not with a fixed stride. The draw for each round is a pure function of the pool
+shape, the training seed and the round, which keeps the sample reproducible on every platform and
+keeps a long stream or a duplicated local block from excluding whole sources. A seeded run is
+byte-identical; `TestFitClassifierDeterministic` and its hard-negative variant cover that contract.
 
 **Refusals.** A refused run is a `*wakeword.TrainingFailure`: distinct machine causes (for example
 `too_few_word_takes`, `duplicate_takes`, `short_context`, `no_positive_windows`,
@@ -341,89 +327,32 @@ take IDs are used, and no retrain starts on its own. The dialog turns the causes
 and lists the takes to re-record; a consumed final test still requires a fresh setup, and dismissal
 still cancels.
 
-**Measured quality.** The success event and the Wakeword section show the certificate already stored
-in `Classifier.Trained`: the calibrated threshold and, for the tune split, the final test and the
+**Measured quality.** The success event and the Wakeword section show the certificate stored in
+`Classifier.Trained`: the calibrated threshold and, for the tune split, the final test and the
 auxiliary off-policy corpus, word recordings, detected recordings, recall and false activations. The
 values are copied from the artifact; the browser neither recomputes a metric nor invents one. An
-artifact trained before the record existed shows no table instead of zeros.
+artifact without a certificate record shows no table rather than zeros.
 
-**Upstream applicability.** The ideas in `tanggenx/station-wakeword` PR #5 were reviewed without
-copying its code or data (it has no source license). Adopted, reimplemented idiomatically here:
-hard-negative deduplication/diversity, structured training-failure diagnostics and exposing gate
-metrics to the operator. Rejected with reason: taking playback to the browser would break the
-privacy contract in this document and [SPEAKER_BEHAVIOR.md](SPEAKER_BEHAVIOR.md) — the browser
-receives samples and status only, never PCM or stored takes; Alice/cloud TTS augmentation sends
-text to a third party with no license or terms, a hardcoded endpoint and no benefit for a
-single-speaker model; its seeded 5/1 split with "recall below 0.8 is only a note" is weaker than
-this project's whole-recording content split and ≥80% recall with zero false activations on both
-tune and final test; and its evaluator's synthetic-silence warm-up and pre-completion hit counting
-would misreport the daemon's actual two-window, cooldown and post-word policy.
+## Quality limits
 
-## Quality evidence and limits
+The installed reference model was trained from six word takes, three room takes and six unrelated
+phrases with the warm corpus. It passed its tune split and final regression with zero false
+activations at the calibrated threshold, but those recordings have already served diagnosis and
+regression, so this is not an independent positive certificate. Six takes are a small enrollment,
+and this is not a speaker-independent model.
 
-The candidates below are development evidence on already-consumed audio, not a certificate.
+A processed-tap replay of the six backed-up word takes — 2.32 s of same-session ambient audio, the
+word and a 1 s tail, DSP applied once across prefix, body and tail, replayed in sequential
+1280-sample windows under the two-consecutive-score and 2.9 s cooldown policy — fired 6/6 raw and
+6/6 processed. That is raw-trained model usability only: processing does not disable the detector,
+but the result says nothing about calibration, accuracy or a daily false-alarm rate.
 
-- Eight word takes replayed against the licensed corpus expose unseen speech activating at the
-  calibrated threshold, so no personal model is installed from them. The evaluator judges the decision
-  time (step 6), so a preceding partial score does not invalidate a correct post-word activation while
-  a premature fire still consumes cooldown; correct derivatives are verified with guarded finite
-  differences.
-- A threshold-0.81 candidate passed the private tune split (2/2 words, zero false activations) and
-  the private final regression (2/2, zero) and removed eight of nine known false activations, yet
-  one legitimate non-keyword Russian phrase fired after 8.0 s.
-- With Russian training broadened by the 194 auxiliary recordings that are train-only, a
-  threshold-0.52 candidate removed all nine old false activations, but a new 39-minute set produced
-  one Russian false activation at 1.76 s (English zero). That fire lay inside the generic cold-start
-  blind spot, which the corpus fix addresses; the threshold stays unchanged. Neither candidate is
-  installed.
-- The warm corpus closes that blind spot: a real same-split noise prefix precedes each body, so the
-  first ~2 seconds is represented in training and evaluation. The failing 1.76-second development
-  clip scores zero false activations (peak 0.0124), and the nine-clip error-timing regression
-  scores zero (peak 0.1269). Both are regressions on consumed audio.
-
-The installed artifact (formerly `model.json`, now `models/word.personal.json`) is 132,984 bytes,
-SHA-256
-`5f92202fddc38629db4d9a6db3c965a57ffcb812ad09d41b634e27428fc267e3`: version 3, id `word.personal`,
-display `Маруся`, language `ru`, threshold 0.59, context 16, projection 24, hidden 24. It is the
-native compact serialization of the host candidate `64ba9f43…` (192,372 bytes pretty-printed); both
-carry canonical JSON SHA-256
-`fdf16ba5e396b00e98528fc06af3189dfe95b22063ab8cd7125c9393d02b472d` with identical weights, threshold
-and metrics (maximum absolute weight difference 0.0).
-
-The installed model is trained from six word takes, three room takes and six unrelated phrases with
-fixed seed 1, the warm 872-stream corpus and threshold 0.59; it passed the private tune split (2/2,
-zero) and the private final regression (2/2, zero). Threshold 0.590 is the normal tune-split
-calibration grid result; threshold and seed are not tuned against the later evaluation sets, which
-score the frozen model only. Those private final recordings have already served diagnosis and
-regression, so this is not an independent positive certificate. Six word takes are a small
-enrollment, and this is not a speaker-independent Russian model.
-
-**Processed-tap usability.** Fed the processed tap, a warm classifier replay of all six backed-up
-word takes — 2.32 s of its own same-session ambient audio, the word and a 1 s tail, DSP applied once
-across prefix, body and tail, replayed in sequential 1280-sample windows under the real
-two-consecutive-score policy and 2.9 s cooldown — fired 6/6 raw and 6/6 processed. That is
-raw-trained model usability only: processing does not disable the installed detector, but the result
-says nothing about calibration, accuracy or a daily false-alarm rate. It is a different algorithm
-and dataset from the dumb-assistant endpointer result and must not be merged with it.
-
-**Fourth negative set.** Manifest SHA-256
-`95406ffd0a04be2db102357818bc4c6969fe32258e26a526924653d40aa3ac7b`: 237 whole clips, 2,416.67
-seconds raw (about 40.3 minutes) — 133 English clips from 39 official LibriSpeech `dev-clean`
-speakers and 104 Russian clips from the official FLEURS test split. The English speakers are
-physically disjoint from all 32 main-corpus train voices and from the exhausted `test-clean` pool;
-the Russian sentence texts are disjoint from all dev/v1/v2 text and from the 98 texts of the v3 set,
-and no clip or raw hash appears in the 1,339 other inputs. The frozen candidate is evaluated once:
-zero false activations in both languages over 2,409.28 scored seconds (at most 79 ms of trailing PCM
-per clip is unscored), peak scores 0.0253 English and 0.4960 Russian at threshold 0.59, no preroll
-false activations. The evaluation is negative-only — it measures false activations, not positive
-recall — and the Russian manifest's first TSV column is a sentence ID, not a speaker ID, so
-sentence-text disjointness is real while voice independence is unknown.
-
-Zero false activations in roughly 40 minutes of held-out audio is not a daily false-alarm-rate
-guarantee. After setup, evaluate new phrases, confusable words, distances, playback and long
-real-room backgrounds through the actual capture path, and never report window accuracy as wakeword
-accuracy. The user reports live use as "mostly works fine": informal field feedback, not a measured
-accuracy or false-alarm rate.
+A held-out negative-only evaluation over roughly 40 minutes of English and Russian speech (about
+2,409 scored seconds) found zero false activations at the calibrated threshold. That measures false
+activations, not positive recall, and a short held-out run is not a daily false-alarm guarantee.
+After setup, evaluate new phrases, confusable words, distances, playback and long real-room
+backgrounds through the actual capture path, and never report window accuracy as wakeword accuracy.
+Live-use reports are informal field feedback, not a measured rate.
 
 ## Licensed negative corpus
 
@@ -439,9 +368,8 @@ minutes noise and 16 minutes music. Four licensed source IDs are retained: `libr
 | [MS-SNSD Freesound noise subset](https://github.com/microsoft/MS-SNSD) | CC0; DEMAND CC-BY-SA files explicitly excluded |
 | [Kevin MacLeod / Incompetech](https://incompetech.com/music/royalty-free/licenses/) | CC-BY-4.0; per-track attribution retained |
 
-All 356 recordings of the FLEURS `ru_ru` development archive are included (162 original selection
-plus 194 that also served auxiliary evaluation); the 194 are train-only and never described as
-held-out. No official FLEURS test audio and no v3/v4 evaluation audio is in the corpus. Whole
+All 356 recordings of the FLEURS `ru_ru` development archive are included; 194 of them are
+train-only and never described as held-out. No official FLEURS test audio is in the corpus. Whole
 recordings stay within one split, and LibriSpeech speaker identities also stay whole within a split;
 Russian files stay whole, but speaker independence is not claimed. No Station negatives, NC/ND/SA
 recordings or pretrained non-commercial keyword heads are used. The Google/openWakeWord embedding
@@ -455,16 +383,11 @@ deterministic ID-seeded noise choice, offset and quiet log-uniform RMS target be
 S16 units; short noise is tiled, and a missing or silent same-split noise source is a hard failure,
 never a zero fallback.
 
-The gzip `CNEG0002` file is 24,386,227 bytes on disk (26,558,985 logical): 114,429-byte JSON header
-and 26,444,544-byte float16 payload, SHA-256
-`fbdaf9b30a7d4e2b8a83eb1ef85b05e253272b447b259992b1735e09801f88c8`. Its sidecar
-`negatives.bin.provenance.json.gz` is 514,451 bytes, SHA-256
-`5041ec978799b29477eecad5f66acdd8e3c3c9c5a4a78d3276ba24147c826ced`, decompressing byte-for-byte to
-the 5,120,812-byte JSON (`fe13f5af…`) that embeds one 2,243,735-byte source sidecar once. It records
-source URLs, split programme, per-stream prefix noise identity/offset/gain, raw and converted body
-hashes, complete licensing and prior sidecar lineage. Split totals: train 745 streams / 111,125
-frames / 7,716.929 s original audio; tune 62 / 14,447 / 1,057.767; test 65 / 12,160 / 870.858.
-Preroll is excluded from these exposure figures.
+The gzip `CNEG0002` file and its `.provenance.json.gz` sidecar record source URLs, the split
+programme, per-stream prefix-noise identity/offset/gain, raw and converted body hashes, complete
+licensing and prior sidecar lineage. Split totals: train 745 streams / 111,125 frames / 7,716.929 s
+original audio; tune 62 / 14,447 / 1,057.767; test 65 / 12,160 / 870.858. Preroll is excluded from
+these exposure figures.
 
 Build the corpus on a host (Python 3, ffmpeg/ffprobe, Go; none of these is installed on the device):
 

@@ -27,6 +27,14 @@ The administrative CLI is `capsulad-cli` (`capsulad-cli status`, `app`, `deploy`
 change together with the daemon; the native C ABI is v1 and is frozen within its major
 version.
 
+## Installation
+
+For an existing Capsula Mini, use the cross-platform terminal installer in
+[installer/](installer/README.md). Build it with `make installer` and run
+`build/installer/capsulad-installer`; it detects the firmware over ADB or SSH, backs up the
+stock userspace before changing anything, deploys capsulad detached, configures Wi-Fi and the
+administrator password, and installs the first-party apps you choose.
+
 ## Architecture
 
 ```text

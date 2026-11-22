@@ -2,7 +2,9 @@ package websecurity
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -115,6 +117,41 @@ func TestPasswordAndAPIKeys(t *testing.T) {
 	}
 }
 
+func TestServerCertificateIsAnImportableCA(t *testing.T) {
+	dir := t.TempDir()
+	store := Open(dir, DefaultOptions())
+	if _, err := store.InitServerCert(CertOptions{Hostname: "localhost"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.CertPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatal("certificate is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cert.IsCA || !cert.BasicConstraintsValid {
+		t.Fatalf("IsCA = %v, BasicConstraintsValid = %v", cert.IsCA, cert.BasicConstraintsValid)
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatalf("KeyUsage = %v; want CertSign", cert.KeyUsage)
+	}
+	var serverAuth bool
+	for _, usage := range cert.ExtKeyUsage {
+		if usage == x509.ExtKeyUsageServerAuth {
+			serverAuth = true
+		}
+	}
+	if !serverAuth {
+		t.Fatalf("ExtKeyUsage = %v; want server auth", cert.ExtKeyUsage)
+	}
+}
+
 func TestRevokedAPIKeysLeaveTheListAfterSevenDays(t *testing.T) {
 	dir := t.TempDir()
 	store := Open(dir, DefaultOptions())
@@ -130,18 +167,21 @@ func TestRevokedAPIKeysLeaveTheListAfterSevenDays(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC()
-	store.mu.Lock()
-	for i := range store.doc.APIKeys {
-		switch store.doc.APIKeys[i].Name {
-		case "fresh":
-			at := now.Add(-6 * 24 * time.Hour)
-			store.doc.APIKeys[i].RevokedAt = &at
-		case "expired":
-			at := now.Add(-8 * 24 * time.Hour)
-			store.doc.APIKeys[i].RevokedAt = &at
+	if err := store.updateCredentials(func(doc *persisted) (bool, error) {
+		for i := range doc.APIKeys {
+			switch doc.APIKeys[i].Name {
+			case "fresh":
+				at := now.Add(-6 * 24 * time.Hour)
+				doc.APIKeys[i].RevokedAt = &at
+			case "expired":
+				at := now.Add(-8 * 24 * time.Hour)
+				doc.APIKeys[i].RevokedAt = &at
+			}
 		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	store.mu.Unlock()
 
 	keys := store.ListAPIKeys()
 	if len(keys) != 1 || keys[0].Name != "fresh" {

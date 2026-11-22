@@ -141,19 +141,20 @@ or equate extra animation with polish.
 - Run the narrowest relevant checks after changes; use `-race` for touched shared
   lifecycle/state paths. Root Go tests do not cover nested modules. `make test` runs the root
   module, `sdk/go`, the nested app Go modules (the four assistants, the native Internet Radio,
-  the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the native crate
-  and the C++ example; `make test-opencapsula` runs just the OpenCapsula client module;
+  the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the native crate,
+  the C++ example and the terminal installer's host suite; `make test-opencapsula` runs just the
+  OpenCapsula client module;
   `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, the MicroPython
   host prelude) and repeats the radio and bridge Go modules; `make test-race` adds the race
   detector to the root module.
   Focused commands are in
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests). Standalone Go test commands on macOS need
-  `-ldflags '-linkmode=external'`, as the Makefile and app build helpers already handle.
-  `internal/daemon` `TestDumbAssistantEndsAfterSpeechOverColoredRoom` fails on this host and
-  reproduces on pristine HEAD; treat it as environmental, not as a regression.
+  `-ldflags '-linkmode=external'`, as the Makefile and app build helpers already handle. A red
+  suite is a regression until the same failure is shown to reproduce on pristine HEAD; record that
+  comparison instead of labelling the test environmental from memory.
 - Host daemon integration tests require a matching host native runtime and metadata
-  (`build/lib`, or `CAPSULAD_NATIVE_LIB_DIR`). Do not mistake a Linux library for a usable macOS
-  test runtime.
+  (`build/lib`, or `CAPSULAD_NATIVE_LIB_DIR`). A target-platform library is not a usable host test
+  runtime.
 - For device-facing changes, verify the reachable surface when device work is authorized. Use
   bounded input/routing/driver-write traces; `-output-trace` instructions are in the behavior
   document. An audio stream-open log is not proof of sound output: the speaker's output monitor

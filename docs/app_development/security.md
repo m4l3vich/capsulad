@@ -282,18 +282,13 @@ do. Script packages cannot carry provenance evidence in this contract.
 
 ## Native SDK ABI requirement
 
-A native app that loads the shared SDK runtime declares an ABI requirement, not a grant:
-
-```toml
-[native_sdk]
-abi_major = 1
-min_minor = 0
-```
+A native app that loads the shared SDK runtime declares the `[native_sdk]` requirement documented
+in [manifest.md](manifest.md#native_sdk). From a security standpoint it is a requirement, not a
+grant:
 
 - The requirement is preflighted at install and again at launch against the installed runtime's
   metadata (`capsulad-native.json`). A wrong major or a too-new minor is a hard install failure
-  naming the mismatch.
-- The binding independently re-checks the library it loaded at startup.
+  naming the mismatch, and the binding independently re-checks the loaded library at startup.
 - The ABI requirement describes the shared library contract only. It does not enumerate
   per-method permissions; those are decided by the daemon from the caller's identity.
 

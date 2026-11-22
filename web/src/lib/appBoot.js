@@ -1,4 +1,5 @@
 import { session } from './session.js'
+import { t } from './i18n.js'
 
 async function requestBoot(appId, options = {}) {
   const response = await fetch(`/api/apps/${encodeURIComponent(appId)}/boot`, {
@@ -8,7 +9,7 @@ async function requestBoot(appId, options = {}) {
   })
   const body = await response.json()
   if (!response.ok) {
-    const error = new Error(body.error || `Request failed (${response.status})`)
+    const error = new Error(body.error || t('errors.bootRequestFailed', { status: response.status }))
     error.status = response.status
     throw error
   }

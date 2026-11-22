@@ -29,11 +29,11 @@ onBeforeUnmount(() => {
       <Icon size="20px">{{ currentThemeIcon }}</Icon>
     </summary>
     <ul class="menu dropdown-content bg-base-100 rounded-box z-1 w-52 p-2 shadow-sm">
-      <li class="text-xs p-2 text-base-content/50">Colour theme</li>
+      <li class="text-xs p-2 text-base-content/50">{{ $t('theme.label') }}</li>
       <li v-for="theme in THEME_MODES" :key="theme.id">
         <a @click="setThemeMode(theme.id)">
           <Icon size="20px">{{ theme.icon }}</Icon>
-          {{ theme.label }}
+          {{ $t(`theme.${theme.id}`) }}
         </a>
       </li>
     </ul>

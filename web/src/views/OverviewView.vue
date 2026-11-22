@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { MediaAction, Topic } from '../proto/web_pb.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { coldPlayLaunch, hasLiveRun, hasReadyRun, isColdPlay } from '../lib/appActions.js'
@@ -16,6 +17,7 @@ import Icon from '../components/Icon.vue'
 import { notify } from '../lib/toast.js'
 import { connectedBadge } from '../stores/overviewBluetooth.js'
 
+const { t } = useI18n()
 const { data, error, loading, refresh } = useTopic('overview')
 // const data = ref(null)
 // const error = ref(null)
@@ -54,7 +56,7 @@ watch(error, (value) => {
   }
   if (!data.value || value === lastRefreshError) return
   lastRefreshError = value
-  notify.warning(`The last refresh failed: ${value}`)
+  notify.warning(t('overview.refreshFailed', { error: value }))
 })
 
 const runsByApp = computed(() => {
@@ -101,7 +103,7 @@ watch(busy, (value) => {
 async function run(key, command, message) {
   if (busy.value) return false
   if (liveState.value !== 'open') {
-    notify.error('The speaker is not connected.')
+    notify.error(t('overview.speakerNotConnected'))
     return false
   }
   busy.value = key
@@ -110,7 +112,7 @@ async function run(key, command, message) {
     if (message) notify.success(message)
     return true
   } catch (err) {
-    notify.error(err?.message || 'The device rejected the request.')
+    notify.error(err?.message || t('overview.deviceRejected'))
     return false
   } finally {
     busy.value = ''
@@ -123,7 +125,7 @@ async function setDiscoverable(next) {
   const ok = await run(
     'bt:discoverable',
     { bluetooth: { setDiscoverable: { discoverable: next } } },
-    next ? 'This speaker is now visible to nearby devices' : 'This speaker is hidden from nearby devices'
+    next ? t('overview.discoverableOn') : t('overview.discoverableOff')
   )
   if (!ok) {
     discoverable.value = previous
@@ -138,7 +140,7 @@ async function setIncoming(next) {
   const ok = await run(
     'bt:incoming',
     { bluetooth: { setIncomingConnections: { incomingConnections: next } } },
-    next ? 'Incoming connections are allowed' : 'Incoming connections are blocked'
+    next ? t('overview.incomingOn') : t('overview.incomingOff')
   )
   if (!ok) {
     incoming.value = previous
@@ -155,14 +157,14 @@ async function launch(app) {
   const missing = missingArgument(app)
   if (missing) {
     selectedApp.value = app.appId
-    notify.error(`${app.displayName} needs ${missing.name}; set it in Settings.`)
+    notify.error(t('overview.launchNeedsArgument', { name: app.displayName, argument: missing.name }))
     return
   }
   const args = (app.launchArguments || [])
     .filter((arg) => String(arg.value || '').trim())
     .map((arg) => ({ name: arg.name, value: arg.value }))
   const ok = await run(`launch:${app.appId}`, { launch: { appId: app.appId, arguments: args } },
-    `Launch requested for ${app.displayName}`)
+    t('overview.launchRequested', { name: app.displayName }))
   if (ok) await refresh()
 }
 
@@ -203,7 +205,7 @@ async function stopRuns(app) {
   closeMenu()
   if (busy.value) return
   if (liveState.value !== 'open') {
-    notify.error('The speaker is not connected.')
+    notify.error(t('overview.speakerNotConnected'))
     return
   }
   const restart = selectedRole(app.appId)
@@ -213,9 +215,9 @@ async function stopRuns(app) {
     for (const runItem of live) {
       await socket.request({ stop: { appId: app.appId, runId: runItem.runId } })
     }
-    notify.success(`${restart ? 'Restart' : 'Stop'} requested for ${app.displayName}`)
+    notify.success(t(restart ? 'overview.restartRequested' : 'overview.stopRequested', { name: app.displayName }))
   } catch (err) {
-    notify.error(err?.message || 'The device rejected the request.')
+    notify.error(err?.message || t('overview.deviceRejected'))
   } finally {
     if (busy.value === key) busy.value = ''
     // A partial stop is possible when several runs were addressed; the
@@ -258,7 +260,7 @@ async function openDelete(app) {
   } catch (err) {
     if (err?.name === 'AbortError') return
     if (deleteTarget.value?.appId === app.appId) {
-      deleteStorageError.value = err?.message || 'The package size could not be read.'
+      deleteStorageError.value = err?.message || t('overview.packageSizeUnreadable')
     }
   } finally {
     if (deleteTarget.value?.appId === app.appId) deleteStorageLoading.value = false
@@ -285,12 +287,12 @@ async function confirmDelete() {
   deleteBusy.value = true
   try {
     await removePackage(app.appId)
-    notify.success(`Removed ${app.displayName || app.appId}. Its settings were kept.`)
+    notify.success(t('overview.removedApp', { name: app.displayName || app.appId }))
     deleteBusy.value = false
     closeDelete()
     await refresh()
   } catch (err) {
-    notify.error(err?.message || 'The device rejected the removal.')
+    notify.error(err?.message || t('overview.removalRejected'))
   } finally {
     deleteBusy.value = false
   }
@@ -311,11 +313,11 @@ function canRunAction(app, action) {
 
 function actionHint(app, action) {
   if (appReady(app.appId)) return ''
-  if (appLive(app.appId)) return 'The application is starting or stopping; try again when it is ready.'
+  if (appLive(app.appId)) return t('overview.startingOrStopping')
   if (isColdPlay(action, app, appRuns(app.appId))) {
-    return 'Not running: Play launches the radio with its saved station; it still exits when idle.'
+    return t('overview.coldPlayHint')
   }
-  return 'Launch the application before using this action.'
+  return t('overview.launchBeforeAction')
 }
 
 async function runAction(app, action) {
@@ -325,12 +327,12 @@ async function runAction(app, action) {
     notify.info(actionHint(app, action))
     return
   }
-  if (action.confirmBeforeRun && !window.confirm(`${label}?`)) return
+  if (action.confirmBeforeRun && !window.confirm(t('overview.confirmAction', { label }))) return
   if (appReady(app.appId)) {
     await run(
       `action:${app.appId}:${action.actionId}`,
       { action: { appId: app.appId, actionId: action.actionId } },
-      `${label} sent to ${app.displayName}`
+      t('overview.actionSent', { label, name: app.displayName })
     )
     return
   }
@@ -343,7 +345,7 @@ async function runAction(app, action) {
 async function coldPlay(app, action, label) {
   if (busy.value) return
   if (liveState.value !== 'open') {
-    notify.error('The speaker is not connected.')
+    notify.error(t('overview.speakerNotConnected'))
     return
   }
   const key = `action:${app.appId}:${action.actionId}`
@@ -353,7 +355,7 @@ async function coldPlay(app, action, label) {
     const view = snapshot?.application
     if (appReady(app.appId)) {
       await socket.request({ action: { appId: app.appId, actionId: action.actionId } })
-      notify.info(`${label} sent to ${app.displayName}`)
+      notify.info(t('overview.actionSent', { label, name: app.displayName }))
       await refresh()
       return
     }
@@ -369,7 +371,7 @@ async function coldPlay(app, action, label) {
       view?.values || []
     )
     if (!plan) {
-      notify.info('Launch the application before using this action.')
+      notify.info(t('overview.launchBeforeAction'))
       return
     }
     if (plan.error) {
@@ -377,10 +379,10 @@ async function coldPlay(app, action, label) {
       return
     }
     await socket.request({ launch: { appId: app.appId, arguments: plan.arguments } })
-    notify.success(`${label} requested`)
+    notify.success(t('overview.actionRequested', { label }))
     await refresh()
   } catch (err) {
-    notify.error(err?.message || 'The device rejected the request.')
+    notify.error(err?.message || t('overview.deviceRejected'))
   } finally {
     if (busy.value === key) busy.value = ''
   }
@@ -413,7 +415,7 @@ function selectProvider(provider) {
 
 function playerCount(provider) {
   const count = (provider.players || []).length
-  return `${count} player${count === 1 ? '' : 's'}`
+  return t('overview.playerCount', { count }, count)
 }
 
 // --- popover menus ---------------------------------------------------------
@@ -523,9 +525,9 @@ function trackTime(ms) {
     <div class="flex flex-wrap items-end justify-between gap-2">
       <h1 v-if="!data && !error && loading" class="text-xl font-semibold leading-tight my-2 text-primary flex items-center gap-4">
         <span class="loading loading-spinner loading-md"></span>
-        Still loading…
+        {{ $t('overview.loading') }}
       </h1>
-      <h1 v-else class="text-xl font-semibold leading-tight my-2" :title="data?.device?.deviceId || 'Unknown device'">
+      <h1 v-else class="text-xl font-semibold leading-tight my-2" :title="data?.device?.deviceId || $t('common.unknownDevice')">
         {{ deviceHeadline(data?.device) }}
       </h1>
     </div>
@@ -540,8 +542,8 @@ function trackTime(ms) {
     </div>
 
     <div v-else-if="error && !data" class="alert alert-error" role="alert">
-      <span class="text-sm">The speaker snapshot is unavailable: {{ error }}</span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Try again</button>
+      <span class="text-sm">{{ $t('overview.snapshotUnavailable', { error }) }}</span>
+      <button type="button" class="btn btn-sm btn-ghost" @click="refresh">{{ $t('common.retry') }}</button>
     </div>
 
     <template v-else-if="data">
@@ -551,7 +553,7 @@ function trackTime(ms) {
         <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
           <div class="flex items-center gap-2">
             <Icon size="16px">volume_up</Icon>
-            <span class="text-xs font-medium uppercase tracking-wide">Master volume</span>
+            <span class="text-xs font-medium uppercase tracking-wide">{{ $t('overview.masterVolume') }}</span>
           </div>
           <VolumeControl />
           <MicrophoneControl />
@@ -561,20 +563,20 @@ function trackTime(ms) {
         <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
           <div class="flex items-center gap-2">
             <Icon size="16px">video_library</Icon>
-            <span class="text-xs font-medium uppercase tracking-wide flex-grow">Now playing</span>
+            <span class="text-xs font-medium uppercase tracking-wide flex-grow">{{ $t('overview.nowPlaying') }}</span>
             <div v-if="otherProviders.length" class="relative" data-menu="providers">
               <button
                 type="button"
                 class="badge badge-primary badge-sm cursor-pointer"
                 aria-haspopup="menu"
                 :aria-expanded="openMenu === 'providers'"
-                :title="`Show the other ${otherProviders.length} media provider${otherProviders.length === 1 ? '' : 's'}`"
+                :title="$t('overview.otherProvidersTitle', { count: otherProviders.length }, otherProviders.length)"
                 @click="toggleMenu('providers', $event)"
-              >+{{ otherProviders.length }} more</button>
+              >+{{ otherProviders.length }} {{ $t('common.moreShort') }}</button>
               <ul
                 v-if="openMenu === 'providers'"
                 role="menu"
-                aria-label="Other media providers"
+                :aria-label="$t('overview.otherProviders')"
                 class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
               >
                 <li v-for="provider in otherProviders" :key="providerKey(provider)" role="none">
@@ -584,7 +586,7 @@ function trackTime(ms) {
                     class="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200"
                     @click="selectProvider(provider)"
                   >
-                    <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId || 'Media' }}</span>
+                    <span class="max-w-full truncate font-medium">{{ provider.name || provider.appId || $t('overview.media') }}</span>
                     <span class="text-[11px] text-base-content/60">
                       {{ playerCount(provider) }}
                     </span>
@@ -593,16 +595,16 @@ function trackTime(ms) {
               </ul>
             </div>
           </div>
-          <p v-if="!providers.length" class="text-sm my-auto">Nothing is playing.</p>
+          <p v-if="!providers.length" class="text-sm my-auto">{{ $t('overview.nothingPlaying') }}</p>
           <div v-else class="flex min-w-0 flex-col gap-1">
             <p v-if="providers.length > 1" class="truncate text-[11px] text-base-content/60">
-              {{ activeProvider.name || 'Media app' }}
+              {{ activeProvider.name || $t('overview.mediaApp') }}
             </p>
             <ul class="flex flex-col gap-2">
               <li v-for="player in activeProvider.players" :key="player.playerId" class="flex min-w-0 flex-col gap-1.5">
                 <div class="flex min-w-0 items-start justify-between items-center gap-2">
                   <div class="min-w-0">
-                    <p class="truncate text-sm font-medium">{{ player.title || player.mediaName || 'Untitled media' }}</p>
+                    <p class="truncate text-sm font-medium">{{ player.title || player.mediaName || $t('overview.untitledMedia') }}</p>
                     <p class="truncate text-xs text-base-content/60">
                       {{ [player.artist, player.album].filter(Boolean).join(' · ') || player.sourceName || player.playerId }}
                     </p>
@@ -661,7 +663,7 @@ function trackTime(ms) {
         <div class="card p-4 h-full flex min-w-0 flex-col gap-2 justify-between border border-base-300 bg-base-100">
           <div class="flex items-center gap-2">
             <Icon size="16px">bluetooth</Icon>
-            <span class="text-xs font-medium uppercase tracking-wide flex-grow">Bluetooth speaker</span>
+            <span class="text-xs font-medium uppercase tracking-wide flex-grow">{{ $t('overview.bluetoothSpeaker') }}</span>
             <span
               v-if="bluetoothConnected"
               class="badge badge-success badge-sm shrink-0"
@@ -680,12 +682,12 @@ function trackTime(ms) {
           </div>
           <template v-if="bluetooth?.present">
             <p v-if="bluetooth.name" class="truncate text-sm">
-              Device name: <code class="rounded bg-base-200 px-1 py-0.5 font-mono">{{ bluetooth.name }}</code>
+              {{ $t('overview.deviceName') }} <code class="rounded bg-base-200 px-1 py-0.5 font-mono">{{ bluetooth.name }}</code>
             </p>
             <hr/>
-            <label class="flex flex-col gap-1 text-sm" :title="!incoming ? 'Enable speaker mode first.' : ''">
+            <label class="flex flex-col gap-1 text-sm" :title="!incoming ? $t('overview.enableSpeakerModeFirst') : ''">
               <span class="flex items-center justify-between gap-3">
-                <span :class="{ 'text-base-content/60': !incoming }">Pairing mode</span>
+                <span :class="{ 'text-base-content/60': !incoming }">{{ $t('overview.pairingMode') }}</span>
                 <input
                   type="checkbox"
                   class="toggle toggle-primary toggle-sm"
@@ -697,11 +699,11 @@ function trackTime(ms) {
               </span>
             </label>
             <p v-if="!bluetoothReady" class="text-xs text-warning">
-              {{ liveState !== 'open' ? 'Disconnected: policy changes are paused.' : 'Turn Bluetooth on to change these policies.' }}
+              {{ liveState !== 'open' ? $t('overview.disconnectedPolicies') : $t('overview.turnBluetoothOn') }}
             </p>
             <p v-if="data.bluetoothError" class="text-xs text-error">{{ data.bluetoothError }}</p>
           </template>
-          <p v-else class="text-xs text-base-content/60">{{ bluetooth?.detail || 'Bluetooth is not available.' }}</p>
+          <p v-else class="text-xs text-base-content/60">{{ bluetooth?.detail || $t('overview.bluetoothUnavailable') }}</p>
         </div>
       </section>
 
@@ -710,14 +712,14 @@ function trackTime(ms) {
         <div class="card-body gap-3 p-4">
           <div class="flex items-center gap-2">
             <Icon size="20px">widgets</Icon>
-            <h2 class="text-sm font-semibold uppercase tracking-wide">Installed applications</h2>
+            <h2 class="text-sm font-semibold uppercase tracking-wide">{{ $t('overview.installedApps') }}</h2>
             <span class="badge badge-soft badge-primary badge-sm">{{ apps.length }}</span>
 
             <span class="flex-grow"/>
 
             <button class="btn btn-xs btn-primary" @click="showInstallModal = true">
               <Icon size="16px">system_update_alt</Icon>
-              Install an app
+              {{ $t('overview.installApp') }}
             </button>
           </div>
           <div v-if="apps.length" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -733,12 +735,12 @@ function trackTime(ms) {
                 </div>
 
                 <div class="flex flex-wrap gap-1.5">
-                  <span v-if="app.systemApp" class="badge badge-outline badge-sm opacity-50">built-in</span>
-                  <span v-if="selectedRole(app.appId)" class="badge badge-primary badge-sm">default</span>
+                  <span v-if="app.systemApp" class="badge badge-outline badge-sm opacity-50">{{ $t('common.builtIn') }}</span>
+                  <span v-if="selectedRole(app.appId)" class="badge badge-primary badge-sm">{{ $t('common.defaultLabel') }}</span>
                 </div>
               </div>
               <div class="mt-auto flex flex-wrap items-center justify-between gap-2">
-                <span v-if="isRunning(app.appId)" class="badge badge-success badge-md" role="status">Running</span>
+                <span v-if="isRunning(app.appId)" class="badge badge-success badge-md" role="status">{{ $t('overview.running') }}</span>
                 <button
                   v-else
                   type="button"
@@ -747,17 +749,17 @@ function trackTime(ms) {
                   @click="launch(app)"
                 >
                   <Icon size="16px">play_arrow</Icon>
-                  Launch
+                  {{ $t('overview.launch') }}
                 </button>
                 <div class="flex items-center gap-1">
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs"
-                    :aria-label="`Settings for ${app.displayName}`"
+                    :aria-label="$t('overview.settingsFor', { name: app.displayName })"
                     @click="selectedApp = app.appId"
                   >
                     <Icon size="16px">settings</Icon>
-                    Settings
+                    {{ $t('overview.settingsButton') }}
                   </button>
                   <div class="relative" :data-menu="`actions:${app.appId}`">
                     <button
@@ -765,17 +767,17 @@ function trackTime(ms) {
                       class="btn btn-ghost btn-xs"
                       aria-haspopup="menu"
                       :aria-expanded="openMenu === `actions:${app.appId}`"
-                      :aria-label="`Actions for ${app.displayName}`"
-                      :title="`Run a declared action for ${app.displayName}`"
+                      :aria-label="$t('overview.actionsFor', { name: app.displayName })"
+                      :title="$t('overview.runActionFor', { name: app.displayName })"
                       @click="toggleMenu(`actions:${app.appId}`, $event)"
                     >
                       <Icon size="16px">more_vert</Icon>
-                      Actions
+                      {{ $t('overview.actionsLabel') }}
                     </button>
                     <ul
                       v-if="openMenu === `actions:${app.appId}`"
                       role="menu"
-                      :aria-label="`Actions for ${app.displayName}`"
+                      :aria-label="$t('overview.actionsFor', { name: app.displayName })"
                       class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
                     >
                       <template v-if="isRunning(app.appId) && app.canStop">
@@ -785,11 +787,11 @@ function trackTime(ms) {
                             role="menuitem"
                             class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
                             :disabled="!!busy || liveState !== 'open'"
-                            :title="selectedRole(app.appId) ? 'Stopping a selected default restarts it.' : 'Stop the application.'"
+                            :title="selectedRole(app.appId) ? $t('overview.stopDefaultTitle') : $t('overview.stopTitle')"
                             @click="stopRuns(app)"
                           >
                             <Icon size="20px" class="mr-1">{{ selectedRole(app.appId) ? 'refresh' : 'stop' }}</Icon>
-                            {{ selectedRole(app.appId) ? 'Restart' : 'Stop' }}
+                            {{ selectedRole(app.appId) ? $t('overview.restart') : $t('overview.stop') }}
                           </button>
                         </li>
                       </template>
@@ -803,7 +805,7 @@ function trackTime(ms) {
                             @click="launch(app)"
                           >
                             <Icon size="20px" class="mr-1">play_arrow</Icon>
-                            Launch
+                            {{ $t('overview.launch') }}
                           </button>
                         </li>
                         <li v-if="hasLaunchArguments(app)">
@@ -812,11 +814,11 @@ function trackTime(ms) {
                             role="menuitem"
                             class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
                             :disabled="!!busy || liveState !== 'open'"
-                            title="Review the launch arguments in Settings before starting the app."
+                            :title="$t('overview.reviewLaunchArgumentsTitle')"
                             @click="openLaunchArguments(app)"
                           >
                             <Icon size="20px" class="mr-1">list</Icon>
-                            Launch with arguments
+                            {{ $t('overview.launchWithArguments') }}
                           </button>
                         </li>
                       </template>
@@ -842,7 +844,7 @@ function trackTime(ms) {
                         </button>
                       </li>
                       <li v-if="!actionsOf(app).length" class="menu-disabled px-2 py-1.5 opacity-50 w-full">
-                        This app doesn't declare any actions.
+                        {{ $t('overview.noActions') }}
                       </li>
 
                       <template v-if="canDelete(app)">
@@ -853,11 +855,11 @@ function trackTime(ms) {
                             role="menuitem"
                             class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
                             :disabled="!!busy || isRunning(app.appId)"
-                            :title="isRunning(app.appId) ? 'Stop the app before removing its package.' : 'Remove the package but keep its settings.'"
+                            :title="isRunning(app.appId) ? $t('overview.removeBeforeStop') : $t('overview.removeKeepsSettings')"
                             @click="openDelete(app)"
                           >
                             <Icon size="20px" class="mr-1">delete</Icon>
-                            Delete this app
+                            {{ $t('overview.deleteApp') }}
                           </button>
                         </li>
                       </template>
@@ -867,7 +869,7 @@ function trackTime(ms) {
               </div>
             </article>
           </div>
-          <p v-else class="text-sm text-base-content/60">No applications are installed.</p>
+          <p v-else class="text-sm text-base-content/60">{{ $t('overview.noApps') }}</p>
         </div>
       </section>
 
@@ -889,35 +891,34 @@ function trackTime(ms) {
     <ModalDialog
       v-if="deleteTarget"
       max-width="max-w-md"
-      title="Delete this app"
+      :title="$t('overview.deleteApp')"
       :before-close="beforeDeleteClose"
       @close="closeDelete"
     >
       <p class="text-sm">
-        Remove <span class="font-semibold">{{ deleteTarget.displayName || deleteTarget.appId }}</span>
-        (<span class="data-value">{{ deleteTarget.appId }}</span>) from the applications filesystem?
+        {{ $t('overview.removeFromFilesystem', { name: deleteTarget.displayName || deleteTarget.appId, appId: deleteTarget.appId }) }}
       </p>
       <p class="mt-2 text-sm">
-        <template v-if="deleteStorageLoading">Measuring the package…</template>
+        <template v-if="deleteStorageLoading">{{ $t('overview.measuringPackage') }}</template>
         <template v-else-if="deleteStorage">
-          The package uses {{ formatBytes(deleteStorage.sizeBytes) }}, so deleting it frees that much space.
+          {{ $t('overview.packageUses', { size: formatBytes(deleteStorage.sizeBytes) }) }}
         </template>
-        <template v-else>The package size could not be read.</template>
+        <template v-else>{{ $t('overview.packageSizeUnreadable') }}</template>
       </p>
       <p class="mt-2 text-sm text-base-content/60">
-        The app's settings are kept, so reinstalling it restores its configuration.
+        {{ $t('overview.settingsKept') }}
       </p>
       <p v-if="deleteStorageError" class="mt-2 text-sm text-warning">{{ deleteStorageError }}</p>
       <p v-else-if="deleteStorage?.available" class="mt-2 text-xs text-base-content/60">
-        Free space now: {{ formatBytes(deleteStorage.freeBytes) }} of {{ formatBytes(deleteStorage.totalBytes) }}.
+        {{ $t('overview.freeSpaceNow', { free: formatBytes(deleteStorage.freeBytes), total: formatBytes(deleteStorage.totalBytes) }) }}
       </p>
       <template #footer>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="deleteBusy" @click="closeDelete">
-          Cancel
+          {{ $t('common.cancel') }}
         </button>
         <button type="button" class="btn btn-error btn-sm" :disabled="deleteBusy" @click="confirmDelete">
           <span v-if="deleteBusy" class="loading loading-spinner loading-sm"></span>
-          Delete
+          {{ $t('common.delete') }}
         </button>
       </template>
     </ModalDialog>

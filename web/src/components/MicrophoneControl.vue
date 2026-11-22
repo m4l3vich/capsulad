@@ -35,13 +35,13 @@ async function applyEnabled(next) {
         role="switch"
         :checked="enabled"
         :disabled="!available || submitting"
-        aria-label="Enable microphone"
+        :aria-label="$t('settings.microphoneToggleAria')"
         @change="applyEnabled($event.target.checked)"
       />
-      <span>{{ enabled ? 'Microphone on' : 'Microphone off' }}</span>
+      <span>{{ enabled ? $t('settings.microphoneOn') : $t('settings.microphoneOff') }}</span>
     </label>
-    <p v-if="!data" class="text-xs text-base-content/60">Waiting for the speaker’s settings…</p>
-    <p v-else-if="liveState !== 'open'" class="text-xs text-warning">Disconnected: changes are paused.</p>
+    <p v-if="!data" class="text-xs text-base-content/60">{{ $t('settings.waitingSettings') }}</p>
+    <p v-else-if="liveState !== 'open'" class="text-xs text-warning">{{ $t('settings.disconnectedPaused') }}</p>
     <p v-else-if="error" class="text-xs text-error">{{ error }}</p>
   </div>
 </template>

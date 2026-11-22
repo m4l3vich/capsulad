@@ -304,15 +304,14 @@ version string. Settings survive replacement because they are stored outside the
 Rollback means keeping the previous `.tar.gz` and installing it again; the deployment bundle's
 `.prev` files are not a rollback mechanism.
 
-Manifest schema is not compatible across daemon versions. A package installed by an older stack
-can declare a field the current daemon rejects — for example the removed `single_instance` — and
-an unknown key makes the registry skip that package. Deploy the daemon and its app packages
-together: the deployment bundle stops the daemon, installs or updates every bundled package, then
-replaces and restarts the daemon, so the new daemon never starts against old manifests. A
-daemon-only update over packages from an older stack leaves those apps unavailable until the
-packages are reinstalled, and so does a package that is not in the bundle. With `-restart never`
-the previous daemon remains active until the manual restart; the stack is fully updated only
-after that restart.
+Manifest schema is not compatible across daemon versions. A package from an older stack can
+declare a key the current daemon rejects, and an unknown key makes the registry skip that package.
+Deploy the daemon and its app packages together: the deployment bundle stops the daemon, installs
+or updates every bundled package, then replaces and restarts the daemon, so the new daemon never
+starts against old manifests. A daemon-only update over packages from an older stack leaves those
+apps unavailable until the packages are reinstalled, and so does a package that is not in the
+bundle. With `-restart never` the previous daemon remains active until the manual restart; the
+stack is fully updated only after that restart.
 
 ## End-to-end checklist
 

@@ -1,8 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  CONNECTED_BADGE_LABEL,
-  UNKNOWN_DEVICE_NAME,
   connectedBadge,
   connectedBadgeTitle,
   connectedDevices
@@ -24,7 +22,6 @@ test('badge is present and names both connected paired devices', () => {
   ])
 
   assert.ok(badge, 'expected a badge while a paired device is connected')
-  assert.equal(badge.label, CONNECTED_BADGE_LABEL)
   assert.equal(badge.label, 'connected')
   assert.deepEqual(badge.names, ['Pixel 7', 'Kitchen Echo'])
   // Tooltip and accessible name are the same text: names joined with ", ".
@@ -59,8 +56,8 @@ test('unnamed connected devices fall back to their id, then to a placeholder', (
     { connected: true }
   ])
   assert.ok(badge)
-  assert.deepEqual(badge.names, ['aa:bb:cc:dd:ee:ff', UNKNOWN_DEVICE_NAME])
-  assert.equal(badge.title, `Connected: aa:bb:cc:dd:ee:ff, ${UNKNOWN_DEVICE_NAME}`)
+  assert.deepEqual(badge.names, ['aa:bb:cc:dd:ee:ff', 'Unknown device'])
+  assert.equal(badge.title, 'Connected: aa:bb:cc:dd:ee:ff, Unknown device')
 })
 
 test('tooltip text joins names with ", " and is empty for no names', () => {

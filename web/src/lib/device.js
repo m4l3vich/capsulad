@@ -1,10 +1,10 @@
+import { t } from './i18n.js'
+
 // Device identity for the overview headline. Board revision, SoC vendor and
 // software target are three separate facts: the profile names the product, the
 // SoC names the silicon manufacturer, and the platform enum names the userland
 // the daemon was built for. The headline states all three rather than letting
 // the model probe stand in for the product.
-
-const UNKNOWN_DEVICE = 'Unknown device'
 
 /** First token of the reported SoC, mapped to the vendor spelling people recognize. */
 function socBrand(soc) {
@@ -12,9 +12,9 @@ function socBrand(soc) {
   if (token === 'rockchip') return 'Rockchip'
   if (token === 'amlogic') return 'Amlogic'
   // The simulator's SoC is "virtual"; both spellings mean "not real silicon".
-  if (token === 'simulator' || token === 'virtual') return 'host'
+  if (token === 'simulator' || token === 'virtual') return t('device.host')
   if (token) return token
-  return 'unknown SoC'
+  return t('device.unknownSoc')
 }
 
 /**
@@ -24,12 +24,12 @@ function socBrand(soc) {
 function softwareType(device) {
   const platform = String(device?.targetPlatform || '')
   if (platform === 'CAPSULA_MINI_ROCKCHIP_STOCK' || platform === 'CAPSULA_MINI_AMLOGIC_STOCK') {
-    return 'stock'
+    return t('device.stock')
   }
-  if (platform === 'CAPSULA_MINI_AMLOGIC_ALPINE') return 'Alpine Linux'
-  if (platform === 'TARGET_PLATFORM_UNSPECIFIED' || platform === 'simulator') return 'simulator'
+  if (platform === 'CAPSULA_MINI_AMLOGIC_ALPINE') return t('device.alpine')
+  if (platform === 'TARGET_PLATFORM_UNSPECIFIED' || platform === 'simulator') return t('device.simulator')
   if (platform) return String(device?.firmware || '').trim() || platform
-  return String(device?.firmware || '').trim() || 'simulator'
+  return String(device?.firmware || '').trim() || t('device.simulator')
 }
 
 /**
@@ -38,6 +38,6 @@ function softwareType(device) {
  * header is never blank.
  */
 export function deviceHeadline(device) {
-  const revision = String(device?.boardRevision || device?.model || '').trim() || UNKNOWN_DEVICE
+  const revision = String(device?.boardRevision || device?.model || '').trim() || t('common.unknownDevice')
   return `${revision} (${socBrand(device?.soc)}, ${softwareType(device)})`
 }

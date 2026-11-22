@@ -212,10 +212,10 @@ C/C++ consumers load it and never reimplement the transport; an app must not bun
 major/minor versions, `capsulad_get_api` negotiation, opaque handles, library-owned buffers,
 status codes and threading guarantees — where a major mismatch is an explicit error, not a
 best-effort load. New entry points are appended within ABI 1.0 (pre-release); the stream, UDP,
-listener and mDNS surface plus `CAPSULAD_STATUS_UNSUPPORTED` follow the HTTP, remote-gRPC and
-primitive additions without changing the ABI identity. The table stays append-only at ABI 1.0
-until the first external consumer or release. The SDK/package version (`0.5`, also exported to apps as
-`CAPSULAD_SDK`) is separate from the ABI version.
+listener and mDNS surface plus `CAPSULAD_STATUS_UNSUPPORTED` are part of that table without changing
+the ABI identity. The table stays append-only at ABI 1.0 until the first external consumer or
+release. The SDK/package version (`0.5`, also exported to apps as `CAPSULAD_SDK`) is separate from
+the ABI version.
 
 ## Networking
 

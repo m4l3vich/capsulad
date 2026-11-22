@@ -30,6 +30,7 @@ test('other schemes, relative paths and credential URLs are refused', () => {
 
 test('the package archive bound matches the transport limit', () => {
   assert.equal(MAX_PACKAGE_BYTES, 65 * 1024 * 1024)
+  assert.equal(packageFileError(null), 'Choose a package archive.')
   assert.equal(packageFileError({ size: 0 }), 'The archive is empty.')
   assert.equal(packageFileError({ size: MAX_PACKAGE_BYTES }), '')
   assert.match(packageFileError({ size: MAX_PACKAGE_BYTES + 1 }), /at most 65 MiB/)

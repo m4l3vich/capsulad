@@ -200,10 +200,9 @@ process and applies the restart policy: `restart_on_failure`, or the app being t
 default provider (which is restarted even without the flag).
 
 The backoff is immediate for the first failure, then 1, 2, 4 and 8 seconds; every further
-failure restarts after 8 seconds. There is no longer delay and no 30-second cap — the delay
-plateaus at 8 seconds. A run that stays ready for 30 seconds resets the sequence. A run that
-reports ready and dies immediately keeps accumulating, so the loop becomes visible rather than
-spinning.
+failure restarts after 8 seconds, and the delay plateaus there. A run that stays ready for 30
+seconds resets the sequence. A run that reports ready and dies immediately keeps accumulating, so
+the loop becomes visible rather than spinning.
 
 `restart_on_failure` also covers a clean self-exit (status 0): the supervisor cannot distinguish
 an intentional idle exit from an early clean failure, so it relaunches the app. An app that exits

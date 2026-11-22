@@ -270,12 +270,12 @@ The AirPlay exception is fixed daemon policy, not a manifest feature. A phone or
 the sender volume is controlling the speaker's physical level, so the installed AirPlay 2 receiver
 follows an authenticated session that owns the active media on the same persisted `master_volume`
 the keys and the Web UI use. Attaching, a probe request or an event-only connection does not move
-the level, and a retired sender cannot keep writing it. No package can opt in by declaring an
-interface, `provides`, a native-SDK requirement or any other manifest field: the daemon
-recognizes only the installed `org.capsulad.airplay` receiver, and only its live READY run whose
-Unix-socket peer PID matches the supervised process. A host that cannot report peer credentials
-(the simulator) refuses the app path. Trust in the receiver comes from the administrator
-installing the package; the run identity is not a request field.
+the level, and a sender that no longer owns the session cannot keep writing it. No package can
+opt in by declaring an interface, `provides`, a native-SDK requirement or any other manifest
+field: the daemon recognizes only the installed `org.capsulad.airplay` receiver, and only its
+live READY run whose Unix-socket peer PID matches the supervised process. A host that cannot
+report peer credentials (the simulator) refuses the app path. Trust in the receiver comes from
+the administrator installing the package; the run identity is not a request field.
 
 The receiver does not fold the sender level into its PCM. The master gain is applied once by
 the framework mixer — using the same 0–1 position and logarithmic taper as the volume keys —

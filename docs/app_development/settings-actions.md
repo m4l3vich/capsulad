@@ -314,12 +314,12 @@ not fixed page colours. On mount the host opens the document with a reserved
 `#capsulad-theme=light|dark` fragment so the first paint already matches; the bootstrap consumes
 it before the app script runs.
 
-The first-kit CSS variables (`--surface`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`,
-`--err`, `--radius`, `--sans`, `--mono`) remain as aliases of the active daisyUI theme, but the
-first-kit component classes (`stack`, `row`, `spread`, `field`, `check`, `pill`, `notice`,
-`actions`, `mono`, `empty`) are no longer emitted. A packaged document that used them keeps
-working through the bridge but must be migrated to the daisyUI set above to be styled. The
-protocol, patches, CSP and response headers are unchanged.
+Compatibility aliases for the first-kit CSS variables (`--surface`, `--fg`, `--muted`, `--accent`,
+`--ok`, `--warn`, `--err`, `--radius`, `--sans`, `--mono`) map to the active daisyUI theme. There
+are no first-kit component styles: a packaged document that uses the old `stack`, `row`, `spread`,
+`field`, `check`, `pill`, `notice`, `actions`, `mono` or `empty` classes still loads and works
+through the bridge but is unstyled until migrated to the daisyUI set above. The protocol, patches,
+CSP and response headers are unchanged.
 
 ### `capsulad.settings-ui/1:` protocol
 

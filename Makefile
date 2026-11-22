@@ -54,6 +54,8 @@ GOBUILD := $(GO_ENV) $(GO) build $(GO_BUILD_FLAGS) -ldflags '$(GO_LDFLAGS)'
 CLI_TAGS ?= grpcnotrace
 
 BINDIR ?= build/bin
+INSTALLERDIR ?= build/installer
+INSTALLER ?= $(INSTALLERDIR)/capsulad-installer
 HOST_CLI ?= $(BINDIR)/capsulad-cli-host
 LIBDIR ?= build/lib
 INCLUDEDIR ?= build/include
@@ -191,7 +193,7 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence opencapsula simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-opencapsula test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
+.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host installer test-installer deploy-bundle web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence opencapsula simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-opencapsula test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
 
 all: release
 
@@ -519,7 +521,19 @@ product-apps: simon pa radio homeassistant airplay
 # detector to the root module. The script-app suites need Node or CPython, so
 # they stay out of it: run them with `make test-apps` (`test-simon`, `test-pa`,
 # `test-interpreter`).
-test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-opencapsula test-radio test-homeassistant test-airplay
+test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-opencapsula test-radio test-homeassistant test-airplay test-installer
+
+# The terminal installer is a separate nested Go module and a host tool. It is
+# never cross-built into a device image; the host link mode applies on darwin.
+installer:
+	mkdir -p $(INSTALLERDIR)
+	cd installer && GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) build -trimpath -ldflags "-s -w $(HOST_GO_LINKMODE)" -o $(abspath $(INSTALLER)) .
+
+# No device or network is needed: the suite drives fake devices and in-process
+# TLS servers. The linkext package makes darwin test binaries link externally.
+test-installer:
+	cd installer && GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) $(GO) test ./...
+
 
 test-go:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...
@@ -608,5 +622,5 @@ test-airplay:
 # Remove generated binaries and packages but leave build/demo (operator data)
 # untouched.
 clean:
-	rm -rf $(BINDIR) $(LIBDIR) $(INCLUDEDIR) $(APPDIR) $(DEPLOYDIR) $(DEPLOY_TARBALL)
+	rm -rf $(BINDIR) $(LIBDIR) $(INCLUDEDIR) $(APPDIR) $(DEPLOYDIR) $(DEPLOY_TARBALL) $(INSTALLERDIR)
 	@if [ -f $(NATIVE_MANIFEST) ]; then $(CARGO) clean --manifest-path $(NATIVE_MANIFEST); fi

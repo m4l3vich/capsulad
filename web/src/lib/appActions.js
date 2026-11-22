@@ -8,6 +8,7 @@
 // fallback, and the separate Launch form draft is never an input.
 
 import { safeJson, status } from './format.js'
+import { t } from './i18n.js'
 
 /** The explicit shipped contract for a stopped Play that is a launch. */
 export const coldPlayContract = Object.freeze({
@@ -57,12 +58,12 @@ export function coldPlayLaunch(action, app, runs, schemaSettings, values) {
   if (!isColdPlay(action, app, runs)) return null
   const def = (schemaSettings || []).find((entry) => entry.key === coldPlayContract.setting)
   if (!def) {
-    return { error: 'The saved station setting is unavailable; check the application settings.' }
+    return { error: t('overview.stationSettingUnavailable') }
   }
   const state = (values || []).find((entry) => entry.key === coldPlayContract.setting)
   const value = String(settingValue(def, state) ?? '').trim()
   if (!value) {
-    return { error: 'The saved station selection is unavailable; choose a station in the application settings.' }
+    return { error: t('overview.stationSelectionUnavailable') }
   }
   return { arguments: [{ name: coldPlayContract.argument, value }] }
 }

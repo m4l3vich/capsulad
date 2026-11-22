@@ -1,8 +1,9 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic, liveState } from '../lib/live.js'
-import { shortId, status } from '../lib/format.js'
+import { shortId, status, formatNumber } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 
 // Diagnostics is read-only except for stopping a run. Metrics arrive with the
@@ -14,6 +15,7 @@ const LOG_LIMIT = 400
 const PAUSED_LIMIT = 200
 
 const { data, error, loading, refresh, appliedRevision } = useTopic(topicNames.diagnostics)
+const { t } = useI18n()
 
 // Envelope revisions are per connection and per domain. Logs have no revision
 // gate (a log event is never made stale by a full view), while metrics and
@@ -34,7 +36,7 @@ watch(error, (value) => {
   }
   if (!data.value || value === lastRefreshError) return
   lastRefreshError = value
-  notify.warning(`Refresh failed: ${value}`)
+  notify.warning(t('diagnostics.refreshFailed', { error: value }))
 })
 
 // --- hardware and backends --------------------------------------------------
@@ -43,19 +45,37 @@ const device = computed(() => data.value?.device || null)
 const backends = computed(() => device.value?.subsystemBackends || [])
 
 function shown(value) {
-  return value === undefined || value === null || value === '' ? 'Unavailable' : value
+  return value === undefined || value === null || value === '' ? t('common.unavailable') : value
 }
 
 function plainPlatform(value) {
   const text = status(value)
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Unavailable'
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : t('common.unavailable')
 }
 
 function appLabel(appId) {
   const id = String(appId || '')
   const leaf = id.split('.').pop() || id
   const words = leaf.replace(/[-_]/g, ' ').trim()
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Unknown app'
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : t('common.unknownApp')
+}
+
+// Run state is a protocol string; the badge shows the translated label. The
+// class comparison still uses status() so an unknown future value degrades to
+// the neutral badge but stays readable.
+const RUN_STATE_KEYS = {
+  ready: 'runStates.ready',
+  starting: 'runStates.starting',
+  stopping: 'runStates.stopping',
+  failed: 'runStates.failed',
+  exited: 'runStates.exited',
+  unspecified: 'runStates.unspecified'
+}
+
+function runStateLabel(value) {
+  const key = status(value)
+  if (!key) return t('diagnostics.unknownStatus')
+  return RUN_STATE_KEYS[key] ? t(`diagnostics.${RUN_STATE_KEYS[key]}`) : key
 }
 
 // --- metrics ----------------------------------------------------------------
@@ -70,9 +90,9 @@ const cpuPercent = computed(() => {
 
 const cpuCount = computed(() => Number(metrics.value?.cpuCount) || 0)
 const cpuCaption = computed(() => {
-  if (!metrics.value?.cpuAvailable) return 'Not reported on this platform'
-  if (cpuPercent.value === null) return 'Value not reported'
-  return cpuCount.value > 0 ? `${cpuCount.value} cores` : 'Current load'
+  if (!metrics.value?.cpuAvailable) return t('diagnostics.notReported')
+  if (cpuPercent.value === null) return t('diagnostics.valueNotReported')
+  return cpuCount.value > 0 ? t('diagnostics.cores', { count: cpuCount.value }) : t('diagnostics.currentLoad')
 })
 
 const memoryTotal = computed(() => Number(metrics.value?.memoryTotalBytes) || 0)
@@ -103,12 +123,12 @@ function clampPercent(value) {
 }
 
 function formatPercent(value) {
-  return `${Number(value).toFixed(1)}%`
+  return `${formatNumber(value, 1)}%`
 }
 
 function formatBytes(value) {
   const bytes = Number(value)
-  if (!Number.isFinite(bytes) || bytes < 0) return 'Unavailable'
+  if (!Number.isFinite(bytes) || bytes < 0) return t('common.unavailable')
   if (bytes === 0) return '0 B'
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   let scaled = bytes
@@ -117,7 +137,8 @@ function formatBytes(value) {
     scaled /= 1024
     unit += 1
   }
-  return `${scaled >= 100 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`
+  const digits = scaled >= 100 || unit === 0 ? 0 : 1
+  return `${formatNumber(scaled, digits)} ${units[unit]}`
 }
 
 function formatUptime(seconds) {
@@ -125,10 +146,10 @@ function formatUptime(seconds) {
   const days = Math.floor(total / 86400)
   const hours = Math.floor((total % 86400) / 3600)
   const minutes = Math.floor((total % 3600) / 60)
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m`
-  return `${total}s`
+  if (days > 0) return `${days}${t('format.daysShort')} ${hours}${t('format.hoursShort')}`
+  if (hours > 0) return `${hours}${t('format.hoursShort')} ${minutes}${t('format.minutesShort')}`
+  if (minutes > 0) return `${minutes}${t('format.minutesShort')}`
+  return `${total}${t('format.secondsShort')}`
 }
 
 // --- runs -------------------------------------------------------------------
@@ -151,8 +172,8 @@ async function stopRun(run) {
     const stop = result.stop || {}
     const isDefault = Boolean(stop.selectedDefault || selected)
     notify.success(isDefault
-      ? `${appLabel(run.appId)} was restarted and stays on because it is the default app. Choose another default in Settings to switch it off.`
-      : `${appLabel(run.appId)} was stopped.`)
+      ? t('diagnostics.defaultRestartMessage', { app: appLabel(run.appId) })
+      : t('diagnostics.stoppedMessage', { app: appLabel(run.appId) }))
     await refresh()
   } catch (err) {
     notify.error(err.message)
@@ -172,13 +193,13 @@ const atBottom = ref(true)
 const severityFilter = ref('all')
 const textFilter = ref('')
 
-const severityOptions = [
-  { value: 'all', label: 'All levels' },
-  { value: 'error', label: 'Error' },
-  { value: 'warn', label: 'Warning' },
-  { value: 'info', label: 'Info' },
-  { value: 'debug', label: 'Debug' }
-]
+const severityOptions = computed(() => [
+  { value: 'all', label: t('diagnostics.severityAll') },
+  { value: 'error', label: t('diagnostics.severityError') },
+  { value: 'warn', label: t('diagnostics.severityWarning') },
+  { value: 'info', label: t('diagnostics.severityInfo') },
+  { value: 'debug', label: t('diagnostics.severityDebug') }
+])
 
 function severityKey(entry) {
   return String(entry.severity || 'info').toLowerCase()
@@ -422,17 +443,16 @@ onUnmounted(() => {
   <div class="mx-auto w-full max-w-6xl space-y-6">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Diagnostics</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">{{ $t('diagnostics.title') }}</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          System info, stats, running apps and live logs.
+          {{ $t('diagnostics.intro') }}
         </p>
       </div>
     </header>
 
     <div v-if="!live && data" role="status" class="alert alert-warning py-2">
       <span class="text-sm">
-        The connection to the speaker was lost. These readings are from the last update and will refresh when it
-        reconnects.
+        {{ $t('diagnostics.connectionLost') }}
       </span>
     </div>
 
@@ -446,54 +466,54 @@ onUnmounted(() => {
     </div>
 
     <div v-else-if="!data" class="alert">
-      <span class="text-sm">Diagnostics are unavailable. {{ error || 'The speaker did not send a status update.' }}</span>
+      <span class="text-sm">{{ $t('diagnostics.unavailable', { error: error || $t('diagnostics.noStatus') }) }}</span>
     </div>
 
     <template v-if="data">
       <!-- hardware / software / backends -->
       <section class="card border border-base-300 bg-base-100">
         <div class="card-body gap-4 p-5">
-          <h2 class="card-title text-base">About this speaker</h2>
+          <h2 class="card-title text-base">{{ $t('diagnostics.about') }}</h2>
 
           <dl class="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Model</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.model') }}</dt>
               <dd class="mt-0.5">{{ shown(device?.model) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">capsulad version</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.daemonVersion') }}</dt>
               <dd class="mt-0.5">{{ shown(device?.daemonVersion) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Platform</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.platform') }}</dt>
               <dd class="mt-0.5">{{ plainPlatform(device?.targetPlatform) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Chip</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.chip') }}</dt>
               <dd class="mt-0.5">{{ shown(device?.soc) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Board revision</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.boardRevision') }}</dt>
               <dd class="mt-0.5">{{ shown(device?.boardRevision) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Kernel</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.kernel') }}</dt>
               <dd class="mt-0.5 break-words font-mono text-xs">{{ shown(device?.kernel) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Firmware</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.firmware') }}</dt>
               <dd class="mt-0.5">{{ shown(device?.firmware) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Platform ID</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.platformId') }}</dt>
               <dd class="mt-0.5 font-mono text-xs">{{ shown(device?.targetPlatform) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Device ID</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.deviceId') }}</dt>
               <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.deviceId) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Boot ID</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.bootId') }}</dt>
               <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.bootId) }}</dd>
             </div>
           </dl>
@@ -505,9 +525,9 @@ onUnmounted(() => {
         <template v-if="metricsAvailable">
           <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div class="rounded-lg border border-base-300 bg-base-100 p-4">
-              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Processor</h3>
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.cpu') }}</h3>
               <p class="mt-2 text-2xl font-semibold tabular-nums">
-                {{ metrics?.cpuAvailable && cpuPercent !== null ? formatPercent(cpuPercent) : 'Unavailable' }}
+                {{ metrics?.cpuAvailable && cpuPercent !== null ? formatPercent(cpuPercent) : $t('common.unavailable') }}
               </p>
               <progress
                 v-if="metrics?.cpuAvailable && cpuPercent !== null"
@@ -519,9 +539,9 @@ onUnmounted(() => {
             </div>
 
             <div class="rounded-lg border border-base-300 bg-base-100 p-4">
-              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Memory</h3>
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.memory') }}</h3>
               <p class="mt-2 text-2xl font-semibold tabular-nums">
-                {{ memoryAvailable ? formatBytes(memoryUsed) : 'Unavailable' }}
+                {{ memoryAvailable ? formatBytes(memoryUsed) : $t('common.unavailable') }}
               </p>
               <progress
                 v-if="memoryAvailable"
@@ -530,14 +550,14 @@ onUnmounted(() => {
                 max="100"
               ></progress>
               <p class="mt-2 text-xs text-base-content/60">
-                {{ memoryAvailable ? `used of ${formatBytes(memoryTotal)} (${formatPercent(memoryPercent)})` : 'Not reported on this platform' }}
+                {{ memoryAvailable ? $t('diagnostics.usedOf', { total: formatBytes(memoryTotal), percent: formatPercent(memoryPercent) }) : $t('diagnostics.notReported') }}
               </p>
             </div>
 
             <div class="rounded-lg border border-base-300 bg-base-100 p-4">
-              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Storage</h3>
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.storage') }}</h3>
               <p class="mt-2 text-2xl font-semibold tabular-nums">
-                {{ diskAvailable ? formatBytes(diskFree) : 'Unavailable' }}
+                {{ diskAvailable ? formatBytes(diskFree) : $t('common.unavailable') }}
               </p>
               <progress
                 v-if="diskAvailable"
@@ -546,28 +566,28 @@ onUnmounted(() => {
                 max="100"
               ></progress>
               <p class="mt-2 text-xs text-base-content/60">
-                {{ diskAvailable ? `free of ${formatBytes(diskTotal)} (${formatPercent(diskUsedPercent)} used)` : 'Not reported on this platform' }}
+                {{ diskAvailable ? $t('diagnostics.freeOf', { total: formatBytes(diskTotal), percent: formatPercent(diskUsedPercent) }) : $t('diagnostics.notReported') }}
               </p>
             </div>
 
             <div class="rounded-lg border border-base-300 bg-base-100 p-4">
-              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Temperature</h3>
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('diagnostics.temperature') }}</h3>
               <p class="mt-2 text-2xl font-semibold tabular-nums">
-                {{ temperatureAvailable && temperature !== null ? `${temperature.toFixed(1)} °C` : 'Unavailable' }}
+                {{ temperatureAvailable && temperature !== null ? `${formatNumber(temperature, 1)} °C` : $t('common.unavailable') }}
               </p>
               <p class="mt-3 text-xs text-base-content/60">
-                {{ temperatureAvailable && temperature !== null ? 'Device temperature' : 'Not reported on this platform' }}
+                {{ temperatureAvailable && temperature !== null ? $t('diagnostics.deviceTemperature') : $t('diagnostics.notReported') }}
               </p>
             </div>
           </div>
           <p v-if="uptimeAvailable" class="text-sm text-base-content/60 mt-4 mx-2">
-            Speaker has been running for {{ formatUptime(metrics.uptimeSeconds) }}
+            {{ $t('diagnostics.uptime', { uptime: formatUptime(metrics.uptimeSeconds) }) }}
           </p>
         </template>
         <div v-else class="rounded-lg border bg-base-100 border-base-300 p-4 text-sm">
-          <p class="font-medium">Health readings unavailable</p>
+          <p class="font-medium">{{ $t('diagnostics.healthUnavailable') }}</p>
           <p class="mt-1 text-base-content/70">
-            {{ metrics?.detail || 'This device does not report processor, memory, storage or temperature readings.' }}
+            {{ metrics?.detail || $t('diagnostics.healthDetail') }}
           </p>
         </div>
       </section>
@@ -576,10 +596,10 @@ onUnmounted(() => {
       <section class="card border border-base-300 bg-base-100">
         <div class="card-body gap-4 p-5">
           <div>
-            <h2 class="card-title text-base">Running apps</h2>
+            <h2 class="card-title text-base">{{ $t('diagnostics.runningApps') }}</h2>
             <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-              Apps marked <span class="badge badge-ghost badge-sm">Default</span> keep themselves running, so their
-              button says Restart. To switch one off, choose another default in Settings.
+              {{ $t('diagnostics.runningAppsIntro1') }} <span class="badge badge-ghost badge-sm">{{ $t('common.defaultBadge') }}</span>
+              {{ $t('diagnostics.runningAppsIntro2') }}
             </p>
           </div>
 
@@ -587,9 +607,9 @@ onUnmounted(() => {
             <table class="table table-sm">
               <thead>
                 <tr class="text-xs uppercase tracking-wide text-base-content/60">
-                  <th scope="col">App</th>
-                  <th scope="col">Status</th>
-                  <th scope="col"><span class="sr-only">Actions</span></th>
+                  <th scope="col">{{ $t('diagnostics.app') }}</th>
+                  <th scope="col">{{ $t('common.status') }}</th>
+                  <th scope="col"><span class="sr-only">{{ $t('common.actions') }}</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -597,15 +617,15 @@ onUnmounted(() => {
                   <td>
                     <div class="flex flex-wrap items-center gap-2">
                       <span class="text-sm font-medium">{{ appLabel(run.appId) }}</span>
-                      <span v-if="isSelectedRun(run)" class="badge badge-ghost badge-sm">Default</span>
+                      <span v-if="isSelectedRun(run)" class="badge badge-ghost badge-sm">{{ $t('common.defaultBadge') }}</span>
                     </div>
                     <p class="mt-0.5 font-mono text-[11px] text-base-content/50" :title="`${run.appId} · ${run.runId}`">
-                      {{ shortId(run.runId) }}<span v-if="run.pid"> · process {{ run.pid }}</span>
+                      {{ shortId(run.runId) }}<span v-if="run.pid"> · {{ $t('diagnostics.process', { pid: run.pid }) }}</span>
                     </p>
                   </td>
                   <td>
                     <span class="badge badge-sm" :class="status(run.state) === 'ready' ? 'badge-success' : 'badge-neutral'">
-                      {{ status(run.state) || 'unknown' }}
+                      {{ runStateLabel(run.state) }}
                     </span>
                     <p v-if="run.statusDetail" class="mt-1 max-w-xs break-words text-xs text-base-content/60">
                       {{ run.statusDetail }}
@@ -618,12 +638,12 @@ onUnmounted(() => {
                       :class="isSelectedRun(run) ? 'btn-outline' : 'btn-error btn-outline'"
                       :disabled="actionPending"
                       :title="isSelectedRun(run)
-                        ? 'Default app: this restarts it. Choose another default in Settings to switch it off.'
-                        : 'Stop this app'"
+                        ? $t('diagnostics.defaultRestartTitle')
+                        : $t('diagnostics.stopThisApp')"
                       @click="stopRun(run)"
                     >
                       <span v-if="busyRun === run.runId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                      {{ isSelectedRun(run) ? 'Restart' : 'Stop' }}
+                      {{ isSelectedRun(run) ? $t('application.restart') : $t('application.stop') }}
                     </button>
                   </td>
                 </tr>
@@ -631,7 +651,7 @@ onUnmounted(() => {
             </table>
           </div>
           <p v-else class="rounded border border-base-300 p-4 text-sm text-base-content/70">
-            No apps are running right now.
+            {{ $t('diagnostics.noRuns') }}
           </p>
         </div>
       </section>
@@ -641,11 +661,11 @@ onUnmounted(() => {
         <div class="card-body gap-3 p-5">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-2">
-              <h2 class="card-title text-base">Logs</h2>
+              <h2 class="card-title text-base">{{ $t('diagnostics.logs') }}</h2>
               <span class="badge badge-sm" :class="paused ? 'badge-warning' : live ? 'badge-success' : 'badge-neutral'">
-                {{ paused ? 'Paused' : live ? 'Running' : 'Offline' }}
+                {{ paused ? $t('diagnostics.paused') : live ? $t('diagnostics.running') : $t('diagnostics.offline') }}
               </span>
-              <span v-if="paused" class="badge badge-outline badge-sm">{{ pendingCount }} new</span>
+              <span v-if="paused" class="badge badge-outline badge-sm">{{ $t('diagnostics.newCount', { count: pendingCount }) }}</span>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <button
@@ -654,13 +674,13 @@ onUnmounted(() => {
                 :class="paused ? 'btn-warning' : 'btn-outline'"
                 :aria-pressed="paused"
                 @click="togglePause"
-              >{{ paused ? 'Resume' : 'Pause' }}</button>
-              <button type="button" class="btn btn-ghost btn-sm" :disabled="!logEntries.length" @click="clearLogs">Clear</button>
+              >{{ paused ? $t('diagnostics.resume') : $t('diagnostics.pause') }}</button>
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="!logEntries.length" @click="clearLogs">{{ $t('diagnostics.clear') }}</button>
             </div>
           </div>
 
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <label class="sr-only" for="log-severity">Filter activity by level</label>
+            <label class="sr-only" for="log-severity">{{ $t('diagnostics.filterLevel') }}</label>
             <select
               id="log-severity"
               v-model="severityFilter"
@@ -668,29 +688,29 @@ onUnmounted(() => {
             >
               <option v-for="option in severityOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
-            <label class="sr-only" for="log-filter">Search activity by app or message</label>
+            <label class="sr-only" for="log-filter">{{ $t('diagnostics.searchActivity') }}</label>
             <input
               id="log-filter"
               v-model="textFilter"
               type="search"
               class="input input-bordered input-sm w-full sm:max-w-xs"
-              placeholder="Search apps or messages"
+              :placeholder="$t('diagnostics.searchPlaceholder')"
               autocomplete="off"
               spellcheck="false"
             />
             <span class="text-xs text-base-content/60">
-              {{ filteredLogs.length }} of {{ logEntries.length }} shown
+              {{ $t('diagnostics.shownOf', { shown: filteredLogs.length, total: logEntries.length }) }}
             </span>
             <button
               v-if="severityFilter !== 'all' || textFilter"
               type="button"
               class="btn btn-ghost btn-xs"
               @click="resetFilters"
-            >Clear filters</button>
+            >{{ $t('diagnostics.clearFilters') }}</button>
           </div>
 
           <p v-if="paused" class="text-xs text-base-content/70">
-            While paused, new entries wait here (up to {{ PAUSED_LIMIT }}) and appear when you resume.
+            {{ $t('diagnostics.pausedHint', { limit: PAUSED_LIMIT }) }}
           </p>
 
           <div
@@ -698,7 +718,7 @@ onUnmounted(() => {
             class="h-80 overflow-y-auto rounded-lg border border-base-300 bg-base-200/40 p-3 font-mono text-xs leading-relaxed"
             role="log"
             aria-live="off"
-            aria-label="Recent activity entries"
+            :aria-label="$t('diagnostics.logAria')"
             tabindex="0"
             @scroll="onLogScroll"
           >
@@ -710,22 +730,21 @@ onUnmounted(() => {
               >
                 <span class="badge badge-xs shrink-0 uppercase" :class="severityBadge(entry)">{{ severityKey(entry) }}</span>
                 <span class="shrink-0 text-base-content/60">
-                  {{ entry.component || 'system' }}<span v-if="entry.appId"> — {{ appLabel(entry.appId) }}</span>
+                  {{ entry.component || $t('common.systemName') }}<span v-if="entry.appId"> — {{ appLabel(entry.appId) }}</span>
                 </span>
                 <span class="min-w-0 whitespace-pre-wrap break-words">{{ entry.message }}</span>
               </li>
             </ul>
-            <p v-else-if="logEntries.length" class="text-base-content/70">Nothing matches this filter.</p>
-            <p v-else class="text-base-content/70">Nothing here yet.</p>
+            <p v-else-if="logEntries.length" class="text-base-content/70">{{ $t('diagnostics.nothingMatches') }}</p>
+            <p v-else class="text-base-content/70">{{ $t('diagnostics.nothingYet') }}</p>
           </div>
 
           <div class="flex flex-wrap items-center justify-between gap-2">
             <p class="text-xs text-base-content/60">
-              Keeps the latest {{ LOG_LIMIT }} entries in this browser; the newest is at the bottom. After a
-              reconnect the list refreshes.
+              {{ $t('diagnostics.logTail', { limit: LOG_LIMIT }) }}
             </p>
             <button v-if="!atBottom && filteredLogs.length" type="button" class="btn btn-xs btn-outline" @click="scrollToBottom">
-              Jump to latest
+              {{ $t('diagnostics.jumpLatest') }}
             </button>
           </div>
         </div>

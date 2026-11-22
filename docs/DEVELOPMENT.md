@@ -11,7 +11,7 @@ is in [VERIFICATION.md](VERIFICATION.md).
 | Go 1.22.5 or newer | daemon, CLI, tools, Go SDK |
 | Rust 1.85 or newer with Cargo | `libcapsulad`, Rust binding |
 | C compiler | Go SDK cgo shim, C/C++ example, script hosts |
-| Node.js + npm | rebuilding the Web UI (`web/`) and the Simon contract tests (`node --test`); the built SPA is checked in |
+| Node.js + npm | rebuilding the Web UI (`web/`) and the Simon and Soundboard contract tests (`node --test`); the built SPA is checked in |
 | Python 3 | the PA unit tests (`make test-pa`), the MicroPython host prelude self-test (`make test-interpreter`), and regenerating the Web UI icon subset (a venv, see [Web UI](#web-ui)) |
 | `protoc` | regenerating Go bindings and the embedded descriptor after schema changes |
 
@@ -42,8 +42,7 @@ Makefile keys this off the target `GOOS`, not the build host.
 `x/net/trace` integration and the template stack only it reaches; the CLI never registers
 those handlers and gRPC tracing is off by default, so the wire behavior is unchanged. Set
 `CLI_TAGS=` to build the untagged client. The daemon and app targets keep the default tag
-set. The measured effect is recorded in
-[VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).
+set.
 
 ## Cross build for the device
 
@@ -102,6 +101,13 @@ build must keep emitting it.
 The checked-in `internal/webui/dist` is embedded with `go:embed`, so an ordinary Go build
 needs no Node toolchain. For frontend work, run Vite against a live simulator daemon; Vite
 serves sources and proxies `/api`, `/healthz` and `/ws` to the daemon's real HTTPS surface.
+Every user-visible string lives in `web/src/locales/en-GB.js` (the source catalogue) and
+`ru-RU.js`; add a locale by importing its catalogue, adding it to the `MESSAGES` map in
+`src/lib/i18n.js`, and adding one `AVAILABLE_LOCALES` entry.
+`npm test` checks key parity, placeholders and locale-sensitive formatting. The Access page
+downloads the server certificate from `/api/cert.pem` and the same self-signed certificate as a
+CA file from `/api/ca.pem`; a plaintext HTTP request to the HTTPS listener gets a guidance page
+instead of a TLS error.
 The served tree also carries `LICENSE-material-symbols.txt` and `THIRD-PARTY.md`, copied
 verbatim from `web/public` by the Vite build and reachable at `/LICENSE-material-symbols.txt`
 and `/THIRD-PARTY.md`, so a released binary ships the Apache-2.0 notice for the font it
@@ -264,14 +270,24 @@ A fresh install is not started automatically (`start_on_boot` applies at daemon 
 update never resurrects an app the user stopped, and removal keeps the app's stored settings
 under `<data-dir>/app-settings/<app-id>/settings.json` and never rewrites a persisted
 default-provider selection. With the daemon stopped or with `deploy -restart never`, the
-on-disk path above still applies: those packages become visible at the next start. (The live
-install/remove path and the Apps page are simulator-verified, with the browser session and the
-refusals recorded in
+on-disk path above still applies: those packages become visible at the next start. (Host and
+simulator evidence for the live install/remove path and the Apps page is recorded in
 [VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).)
 
 `app start` on a running app delivers an invocation instead of spawning a second process; every
 app is a singleton. A launch while the existing run is stopping is refused with
 `FAILED_PRECONDITION`.
+
+## Terminal installer
+
+`installer/` is a separate host Go module (`capsulad/installer`) for the cross-platform
+terminal installer. It is never built into a device image: `make installer` builds
+`build/installer/capsulad-installer` for the host and `make test-installer` runs its fake-device
+and in-process TLS suites. The installer talks to stock over ADB and Alpine over SSH, discovers
+the platform, streams a pre-change backup, deploys a release bundle (which must carry
+`capsulad-cli`) detached, then configures credentials, Wi-Fi, first-party apps and Marusia. Its
+release manifest, artifact layout, security model and limits are in
+[installer/README.md](../installer/README.md).
 
 ## Deployment bundles
 
@@ -284,10 +300,7 @@ they belong in the bundle. The bundle contains host-targeted binaries unless you
 installing it on the Capsula Mini fails the daemon's self-check (`-version` cannot execute
 there). `BUNDLE_CLI=0` opts into a CLI-free device bundle; the default (`BUNDLE_CLI=1`) keeps
 the documented adb flow. The target is rebuilt from an empty directory, so changing the mode
-cannot leave a CLI from a previous bundle in the output. A stale `build/apps/org.capsulad.radio.tuner`
-directory or archive — from a build of the retired radio companion — fails the assembly with the
-exact `rm -rf` cleanup to run; no target deletes build artifacts implicitly, so the guard exists
-to keep a fresh bundle from staging that package.
+cannot leave a CLI from a previous bundle in the output.
 
 ```text
 capsulad                    daemon binary
@@ -423,9 +436,8 @@ bundle changes where the operator runs the CLI, not the rollback path.
 Storage tradeoff: a CLI-free bundle removes the CLI's bytes from the tarball and from the
 deployment write path, and removes the CLI-sized pre-deploy free-space requirement. It
 reclaims `/data` only when no CLI is installed there (the pushed `/tmp` flow above); a
-separately installed recovery CLI keeps consuming its own space and is not deleted. The
-measured bytes for the current build are in
-[VERIFICATION.md](VERIFICATION.md#verified-only-on-the-simulator-or-host).
+separately installed recovery CLI keeps consuming its own space and is not deleted. The saving
+is the CLI binary's own size in the tarball and the pre-deploy free-space check.
 
 ### Over adb
 
@@ -442,11 +454,11 @@ adb shell /data/capsdemo/capsulad -health -socket /data/capsdemo/run/hal.sock
 
 The bundle may be pushed as a directory or as the `.tar.gz`; a directory avoids a second
 unpacked copy in the tmpfs. **Run the deployment detached when the daemon owns the network
-interface.** On the Rockchip stock board the daemon owns the Wi-Fi station, so `deploy` stopping it
-drops the link, which kills an attached `adb shell` mid-deployment — observed three times in one
-session, once after the old daemon had been stopped and the binaries swapped but before the restart,
-leaving the board with no running daemon. `nohup ... &` is not enough (the shell's process group is
-killed); use a script and the init helper:
+interface.** On the Rockchip stock board the daemon owns the Wi-Fi station, so `deploy` stopping
+it drops the link, which can kill an attached `adb shell` mid-deployment after the old daemon was
+stopped and the binaries swapped but before the restart, leaving the board with no running
+daemon. `nohup ... &` is not enough (the shell's process group is killed); use a script and the
+init helper:
 
 ```sh
 # /tmp/deploy.sh
@@ -527,7 +539,7 @@ this process.
 
 Deployment ordering: `deploy` first compresses the replaced binary into staging while the
 feeder is still feeding, then asks it to hand the timer back (a shell feeder pins nothing and
-is skipped; a legacy Go feeder is asked), waits for `run/watchdog.feeder` to disappear — which
+is skipped; a daemon-copy feeder is asked), waits for `run/watchdog.feeder` to disappear — which
 is what releases the replaced inode's space — and removes the marker. So the gzip does not
 consume the window; only removing the old file, writing the new binary and restarting do, and
 whatever owner arms the device next has the remaining armed timeout (~21 s) to do it. If the
@@ -546,7 +558,7 @@ Operating consequences:
 - Never `kill -9` a feeder: on a nowayout timer the last feeder is the only thing keeping the
   board alive, and killing it is the reset path. `capsulad stop`, `S99btctl.sh` and the deploy
   tool all use the handback marker instead. `supersedeVendor` skips any process whose argv
-  carries `capsulad-watchdog-feeder` (or the legacy `__capsulad_watchdog_feeder`) and asks it
+  carries `capsulad-watchdog-feeder` (or the older `__capsulad_watchdog_feeder`) and asks it
   to release rather than signalling it.
 - `run/watchdog.feeder` is on the persistent partition, so it survives a reboot or a hard kill.
   A file whose pid is gone (or whose pid now belongs to another process) is stale: the daemon,
@@ -620,21 +632,23 @@ Platform selection:
 | `-platform` | Backend | Notes |
 |---|---|---|
 | `simulator` (default) | in-memory simulator | neutral `profile.Simulator`: no device paths or watchdog |
-| `rockchip-stock` (alias `rockchip`) | RK3308 stock backend | hardware profile; backend factory and watchdog opener are wired by `cmd/capsulad` |
+| `rockchip-stock` (alias `rockchip`) | RK3308 stock backend | hardware profile; the stock watchdog opener is wired by `cmd/capsulad` |
+| `amlogic-stock` | Amlogic A113X stock backend | stock Buildroot, glibc 2.28; the clock panel's vendor ABI is unrecovered and reports `UNVERIFIED` |
+| `amlogic-alpine` | Amlogic A113X Alpine backend | Alpine, musl; the panel and ring are probed, not assumed |
 
-`CAPSULA_MINI_AMLOGIC_STOCK` and `CAPSULA_MINI_AMLOGIC_ALPINE` remain in the wire enum as
-defined-but-unsupported/reserved values. This build has no internal platform constant, no
-selection case and no backend for them, so any other `-platform` value fails with
-`unknown platform ... (simulator, rockchip-stock)`.
+Any other `-platform` value fails with `unknown platform ... (simulator, rockchip-stock,
+amlogic-stock, amlogic-alpine)`. See [Amlogic A113X targets](#amlogic-a113x-targets) for the
+cross-build and boot-hook details.
 
 ## Tests
 
 ```sh
 make test              # every Go module: root, sdk/go, the four assistants, the native Internet
                        # Radio, the Home Assistant integration and the AirPlay 2
-                       # receiver, the Rust binding, the native crate and the C++
-                       # header compile
+                       # receiver, the Rust binding, the native crate, the C++ header
+                       # compile and the terminal installer's host suite
 make test-race         # root Go module with -race
+make test-installer    # the nested installer module (host tool; no device or network)
 make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia      # the apps/marusia module's tests from the repository root
 make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine, announcements, enrollment, settings
@@ -660,7 +674,7 @@ The script-app suites need Node or CPython, so they are not part of `make test`;
 `make test-apps` runs them together with the radio and bridge Go modules:
 
 ```sh
-make test-apps         # test-simon, test-radio, test-homeassistant, test-pa and test-interpreter
+make test-apps         # test-simon, test-soundboard, test-hardwaretest, test-radio, test-homeassistant, test-pa and test-interpreter
 make test-interpreter  # python3 interpreter/micropython/sdk_test.py (host prelude + timers)
 make test-simon        # node --test apps/simon/test/*.test.mjs
 make test-pa           # python3 apps/pa/tests/test_wav.py and test_app.py
@@ -726,11 +740,11 @@ The Go binding and native-crate suites need a host `libcapsulad` and its metadat
 the other SDK tests: `make native` first, and `CAPSULAD_TEST_LIBRARY` for gated tests. The C ABI
 identity itself is pinned by `make check-sdk-abi`, which `make test-sdk` runs first.
 
-Standalone Go test commands on macOS need `-ldflags '-linkmode=external'`; the Makefile
-and app build scripts already handle it. Host daemon integration tests need a matching host
-native runtime with metadata, normally `build/lib`, or the `CAPSULAD_NATIVE_LIB_DIR`
-override; a Linux library is not a usable macOS test runtime. Tests that start a daemon
-also need the real Mach-O runtime and its `capsulad-native.json`.
+Standalone Go test commands against a Darwin target need `-ldflags '-linkmode=external'`; the
+Makefile and app build scripts already handle it. Host daemon integration tests need a matching
+host native runtime with metadata, normally `build/lib`, or the `CAPSULAD_NATIVE_LIB_DIR`
+override; a target-platform library is not a usable host test runtime. Tests that start a daemon
+also need the real host runtime and its `capsulad-native.json`.
 
 The script-host smoke test covers ready, invocation, unary and routed calls, stream
 cancellation, stop/crash cleanup and a daemon-crash disconnect:
@@ -759,9 +773,9 @@ staged directory under `build/apps`. None of them is part of `all`, `release` or
 | `make soundboard` | `org.capsulad.soundboard` | Soundboard, a QuickJS app: the centre key plays the active shared `/assets` WAV, left/right swipes switch sounds and briefly show the active name, and the ring lights the sound's fixed or random colour. Its package carries `manifest.toml`, `main.js`, `README.md` and `ui/settings.html`; user WAVs are assets, not package files. The host must provide `capsulad.readAssetFile` and `Call.tryRecv`; an older host logs that it must be rebuilt and stops. |
 | `make hardwaretest` | `org.capsulad.hardwaretest` | Hardware Test, a native foreground app: `12:34` with the upper colon dot at 1 Hz and the lower at 2 Hz in ten-second phases, a clockwise rainbow chase, a 20% 440 Hz tone checked through the microphone with a red ring failure flash, and a full-panel capture showing 1-5 for the held key. Its package carries the binary, manifest and app guide; it needs the host native runtime and the rebuilt native SDK that understands `colonTop`/`colonBottom`. |
 | `make pa` | `org.capsulad.pa` | PA Speaker, a background MicroPython service: another app routes one `SpeakerService/Play` (a streamed WAV) and the app plays it through the framework speaker, replying after the queued audio drains. |
-| `make radio` | `org.capsulad.radio` | Internet Radio, a single native app: it keeps the station list, fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and writes paced PCM to the framework speaker in the same process, and serves the standard media contract. Its package carries the binary, the manifest, the `ui/settings.html` station picker, the media descriptor and the app guide. There is no companion package. |
+| `make radio` | `org.capsulad.radio` | Internet Radio, a single native app: it keeps the station list, fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and writes paced PCM to the framework speaker in the same process, and serves the standard media contract. Its package carries the binary, the manifest, the `ui/settings.html` station picker, the media descriptor and the app guide. It installs as one package. |
 | `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant integration, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
-| `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the legacy RAOP setup, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`, whose records carry the 32-byte ed25519 HomeKit key as `pk` inside a 63-byte instance label. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor, `docs/media.md`, the app guide `README.md` and `NOTICE`. |
+| `make airplay` | `org.capsulad.airplay` | The AirPlay 2 receiver, a native app: HAP transient pairing, FairPlay handshake replies, an encrypted RTSP control channel, realtime ALAC/AAC-LC/PCM over RTP, the RAOP setup path, and the standard media contract for the live session. It uses daemon-mediated listeners for every inbound port — including the PTP multicast receiver — and the daemon's responder for `_airplay._tcp`/`_raop._tcp`, whose records carry the 32-byte ed25519 HomeKit key as `pk` inside a 63-byte instance label. AAC decoding links FFmpeg's `libavcodec`/`libavutil`: the build needs `pkg-config --exists libavcodec libavutil` on the host, and a device package needs the target libraries (see the app README). Its package carries the binary, the manifest, the media-contract descriptor, `docs/media.md`, the app guide `README.md` and `NOTICE`. |
 
 ```sh
 make native                                            # the native apps link the shared SDK
@@ -812,34 +826,6 @@ detail; a selection writes the `station` setting through the sandboxed settings 
 [`apps/radio/README.md`](../apps/radio/README.md) for the station-list format, the controls, the
 display states and the streaming limits.
 
-### Upgrading from the retired radio companion
-
-The previous release was two packages: the MicroPython front end plus the native
-`org.capsulad.radio.tuner`. The single native app replaces both under the **unchanged** app id
-`org.capsulad.radio`, so its stored `stations`, `station` and `autoplay` settings survive the
-package replacement. Nothing is migrated or uninstalled implicitly; the upgrade is an ordinary
-app install after stopping the live runs.
-
-`app stop` takes a **run id**, not an app id, so resolve the runs first:
-
-```sh
-capsulad-cli app runs org.capsulad.radio.tuner   # note the run_… id, if the companion is installed
-capsulad-cli app stop <companion-run-id>
-capsulad-cli app remove org.capsulad.radio.tuner # only when it is installed
-capsulad-cli app runs org.capsulad.radio         # note the radio's run_… id
-capsulad-cli app stop <radio-run-id>
-capsulad-cli app install build/apps/org.capsulad.radio-<version>.tar.gz
-capsulad-cli app start org.capsulad.radio
-```
-
-`app install` refuses while a run is live, and `app runs` prints nothing for an app that is not
-installed, so the companion steps simply do not apply on a device that never had it. Removing the
-companion does not erase its persisted settings: `player_app` stays under
-`<data-dir>/app-settings/org.capsulad.radio.tuner/` as ordinary framework form state and is used
-by nothing. On the build host, remove the stale staging directory and archive explicitly before
-assembling a bundle (`rm -rf build/apps/org.capsulad.radio.tuner build/apps/org.capsulad.radio.tuner-*.tar.gz`);
-`make deploy-bundle` fails with that instruction if either is still present.
-
 ## Administration commands
 
 ```sh
@@ -855,17 +841,78 @@ capsulad-cli -data-dir build/demo cert renew -days 365
 capsulad-cli -data-dir build/demo settings show
 capsulad-cli -data-dir build/demo settings app capsulad.clock blink=true
 capsulad-cli -data-dir build/demo settings app capsulad.ring effect=static palette='#FF7828'
+capsulad-cli -data-dir build/demo settings app org.example.assistant vk.token@- < token.txt
 capsulad-cli -data-dir build/demo logs -app APP_ID -n 100
 capsulad-cli -data-dir build/demo media list
+capsulad-cli -data-dir build/demo wifi status
+capsulad-cli -data-dir build/demo wifi scan
+capsulad-cli -data-dir build/demo wifi connect 'Home Wi-Fi' -password-stdin -security wpa2
+capsulad-cli -data-dir build/demo wifi forget 'Home Wi-Fi'
 capsulad-cli platform inspect -root /path/to/extracted/rootfs
 capsulad-cli platform ledtest -ring
 ```
 
 Global flags precede the command: `-data-dir DIR`, `-socket PATH`, `-security-dir DIR`,
 `-native-lib-dir DIR`, `-json`. `settings app APPID key=value` reads values as JSON when
-they parse and as strings otherwise. `cert renew` requires a daemon restart to reload the
-listener certificate; `auth` changes apply live because the daemon watches the security
-store.
+they parse and as strings otherwise. `settings app APPID KEY@-` (or `KEY=-`) reads exactly
+one line from stdin, strips the line ending, and stores it as a raw JSON string without
+sniffing, so a numeric-looking token stays a string; it must be the only setting in the
+invocation. Use this form for session tokens and other secrets so they never appear in the
+device CLI's argv or `/proc/<pid>/cmdline`. `cert renew` requires a daemon restart to reload
+the listener certificate; `auth` changes apply live because the daemon watches the security
+store. A newly issued server certificate is self-signed with CA basic constraints and the
+certificate-signing key usage, so it can be imported as the trust anchor the Web UI guidance
+describes; the same certificate is still used for TLS. Certificates already on a device gain
+this only through `cert renew` or a fresh `auth init`.
+
+`auth init` and `auth set-password` accept `-password PASS` or `-password-stdin`; stdin reads
+exactly one line and the two flags are mutually exclusive. With neither flag an interactive
+terminal prompts, and a non-terminal `set-password` still generates a password. Use
+`-password-stdin` from an installer so the password never appears in `ps` or shell history.
+
+The `wifi` commands are the installer's station/provisioning surface. They call the local
+HTTPS administration API on `-web-url` (default `https://127.0.0.1:8443`, as bound by the
+device boot hooks) and are therefore available before the browser UI is initialised, as soon
+as `capsulad-cli auth init` has created the certificate and administrator. Each command mints
+a short-lived `cli-wifi-<random>` operator key from the local security store, presents it as
+`Authorization: Bearer`, retries a 401 for up to three seconds while the daemon reloads the
+store, and revokes the key before exiting. Only the device certificate at
+`<security-dir>/server.crt` is trusted; the system roots are not added, so a lookalike
+certificate for the same host cannot impersonate the daemon. There is no insecure mode.
+A `-web-url` whose host is not covered by the certificate SANs fails with a hostname message,
+so use `127.0.0.1` or renew the certificate with the intended name.
+
+```sh
+capsulad-cli wifi status [-web-url URL]
+capsulad-cli wifi scan [-web-url URL]
+capsulad-cli wifi connect SSID [-password PASS | -password-stdin] \
+    [-security wpa2|wpa3|open|...] [-web-url URL]
+capsulad-cli wifi forget SSID [-web-url URL]
+```
+
+`wifi status` never scans; `wifi scan` is the only command that energizes the radio.
+`-security` defaults to WPA2, which requires a passphrase; pass `-security open` for an open
+network. The installer supplies the mode explicitly rather than inferring it from a scan.
+`-password-stdin` reads one passphrase line, and neither the passphrase nor the temporary key
+is printed. Without `-json` the human output is a status block (state, SSID, IP, access point
+and saved networks), a scan list (SSID, security, signal), or the daemon's connect/forget
+message. With `-json` the CLI prints the daemon response object indented, preserving its
+fields:
+
+```json
+{"wifi": {"available": true, "state": "connected", "interface": "wlan0", "ssid": "Home Wi-Fi",
+  "ip_address": "192.168.1.20", "security": "wpa2", "detail": "", "ap_active": false,
+  "ap_ssid": "", "ap_address": "", "ap_portal_url": "", "ap_password_hint": "",
+  "scan_supported": true, "last_error": "",
+  "known_networks": [{"ssid": "Home Wi-Fi", "security": "wpa2", "has_password": true, "connected": true}]}}
+```
+
+`wifi scan` adds `{"message": "...", "results": [{"ssid": "...", "security": "wpa2",
+"signal_dbm": -52, "frequency_mhz": 2437, "connected": false}], "wifi": {...}}`; connect and
+forget return `{"message": "...", "wifi": {...}}`. A non-2xx reply exits non-zero with the
+daemon's `error` text. The routes live on the Web UI listener for CLI use; they are
+administrative plumbing, not an application-facing API.
+
 ## Amlogic A113X targets
 
 The Amlogic A113X board runs two supported userlands, and the same binaries serve both:
@@ -937,22 +984,14 @@ Verified in an arm64 Alpine container: `tools/check-native-libc.sh` reports `lib
 shows `/lib/ld-musl-aarch64.so.1`, and a C `dlopen("libcapsulad.so.1")` + `dlsym("capsulad_abi_major")`
 smoke loads the runtime and resolves the symbol. Host proof only: no device ran it.
 
-The container recipe used for the investigation (arm64 host, no privileged changes; the image is
-pulled into the local Docker store):
-
-```sh
-docker run --rm --platform linux/arm64 -v "$PWD":/src -w /src/sdk/native rust:alpine \
-  sh -c 'cargo check --locked --release --target aarch64-unknown-linux-musl'
-```
-
 App packages are built per target: `make deploy-bundle DEPLOY_PLATFORM=amlogic-alpine` exports
 `TARGET_ABI=linux-musl` (and `linux-gnu` otherwise), each native app build stages that value in its
 manifest `abi`, and the bundle refuses an archive with `entrypoint.runtime = "native"` whose `abi`
 does not name the target libc. QuickJS and MicroPython archives are libc-independent, so they pass
 without an `abi`; an archive declaring an unknown runtime is refused rather than guessed at. The
 packager never rewrites the field. `BUNDLE_NATIVE=0` remains available for a deliberately
-runtime-free bundle (static Go/script apps), but it is not the Alpine default. The ABI is
-unchanged (`1.0`).
+runtime-free bundle (static Go/script apps), but it is not the Alpine default. The ABI remains
+`1.0`.
 
 Boot hooks:
 

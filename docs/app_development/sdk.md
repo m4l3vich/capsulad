@@ -14,8 +14,8 @@ frameworks services. The library is a platform component: an app never bundles o
 
 The daemon-to-app wire protocol may change together with the daemon; the C ABI is v1 (1.0,
 pre-release) and is frozen within that major version. The stream, UDP, listener and mDNS entry
-points are appended to the table in this tree; a binding built against an earlier revision
-keeps working with its shorter table.
+points are part of the ABI 1.0 table; a binding built against an earlier revision keeps working
+with its shorter table.
 
 ## The native SDK model
 
@@ -137,7 +137,7 @@ with a remote error additionally carries the canonical gRPC code through `call_s
 | `CAPSULAD_STATUS_BUSY` | 13 | A bounded queue or the live-call budget is full. |
 | `CAPSULAD_STATUS_INTERNAL` | 14 | Engine invariant or an unexpected runtime failure. |
 | `CAPSULAD_STATUS_TOO_LARGE` | 15 | An HTTP body, header block, chunk, read length or datagram above its configured cap. |
-| `CAPSULAD_STATUS_UNSUPPORTED` | 16 | The runtime has no usable `CAPSULAD_CONTROL_FD`, so daemon-mediated listeners are unavailable. Appended to the v1 status list in this pre-release tree. |
+| `CAPSULAD_STATUS_UNSUPPORTED` | 16 | The runtime has no usable `CAPSULAD_CONTROL_FD`, so daemon-mediated listeners are unavailable. Part of the v1 status list. |
 
 `last_error()` returns the library's human-readable message for the last failure on the
 calling thread; it is diagnostic, not an error object.
@@ -289,9 +289,9 @@ table.http_close(http);
 
 ### Outbound TCP/TLS streams and UDP
 
-This pre-release tree appends outbound TCP with optional verified TLS and connected/unconnected
-UDP to the ABI 1.0 table. The complete contract — options, policy, limits, statuses and cleanup
-— is [network.md](network.md). Signatures:
+The ABI 1.0 table includes outbound TCP with optional verified TLS and connected/unconnected
+UDP. The complete contract — options, policy, limits, statuses and cleanup — is
+[network.md](network.md). Signatures:
 
 ```c
 int32_t tcp_open(const char *host, size_t host_len, uint16_t port,
@@ -596,7 +596,7 @@ a native transport status (7/10/...) from the numerically overlapping canonical 
 
 ### Networking
 
-The binding wraps the appended ABI v1 networking surface; the contract is [network.md](network.md).
+The binding wraps the ABI 1.0 networking surface; the contract is [network.md](network.md).
 
 | Call | Purpose |
 |---|---|
@@ -961,7 +961,7 @@ buffer once.
 
 ### Networking
 
-The crate wraps the appended ABI v1 networking surface; the contract is [network.md](network.md).
+The crate wraps the ABI 1.0 networking surface; the contract is [network.md](network.md).
 `net::Stream` (`open`, `read`, `write`, `shutdown`, `info`, `close`), `net::UdpSocket`
 (`open`, `send`, `recv`, `close`), `listener::Listener` (`open`, `accept`, `recv`, `send`,
 `info`, `close`) and `Client::publish_mdns`/`unpublish_mdns`/`browse_mdns` with `MdnsService`,

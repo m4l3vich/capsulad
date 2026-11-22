@@ -70,7 +70,7 @@ onScopeDispose(() => {
         min="0"
         max="100"
         step="1"
-        aria-label="Master output volume"
+        :aria-label="$t('settings.masterOutputVolume')"
         :disabled="!available || applying"
         @pointerdown="dragging = true"
         @pointerup="endDrag"
@@ -80,8 +80,8 @@ onScopeDispose(() => {
       />
       <span class="text-sm font-semibold tabular-nums">{{ local }}%</span>
     </div>
-    <p v-if="!data" class="text-xs text-base-content/60">Waiting for the speaker’s settings…</p>
-    <p v-else-if="liveState !== 'open'" class="text-xs text-warning">Disconnected: changes are paused.</p>
+    <p v-if="!data" class="text-xs text-base-content/60">{{ $t('settings.waitingSettings') }}</p>
+    <p v-else-if="liveState !== 'open'" class="text-xs text-warning">{{ $t('settings.disconnectedPaused') }}</p>
     <p v-else-if="error" class="text-xs text-error">{{ error }}</p>
   </div>
 </template>

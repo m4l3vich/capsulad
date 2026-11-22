@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic } from '../lib/live.js'
 import { changePassword, runAuthMutation } from '../lib/session.js'
@@ -14,6 +15,7 @@ import { notify } from '../lib/toast.js'
 // /api/session and owns the single reconnect.
 
 const { data, error: loadError, loading, refresh } = useTopic(topicNames.access)
+const { t } = useI18n()
 
 // A refresh failure keeps the last received state on screen; announce it once
 // per distinct failure instead of pinning a banner above the page.
@@ -25,7 +27,7 @@ watch(loadError, (value) => {
   }
   if (!data.value || value === lastLoadError) return
   lastLoadError = value
-  notify.warning(`Refresh failed: ${value} Showing the last received access state.`)
+  notify.warning(t('access.refreshFailed', { error: value }))
 })
 
 // --- password ---------------------------------------------------------------
@@ -36,9 +38,9 @@ const passwordAttempted = ref(false)
 const passwordBusy = ref(false)
 
 const passwordIssues = computed(() => ({
-  current: password.current ? '' : 'Enter the current administrator password.',
-  next: password.next.length >= 8 ? '' : 'Use at least 8 characters.',
-  confirm: password.confirm === password.next ? '' : 'The two new passwords do not match.'
+  current: password.current ? '' : t('access.currentRequired'),
+  next: password.next.length >= 8 ? '' : t('access.minLength'),
+  confirm: password.confirm === password.next ? '' : t('access.mismatch')
 }))
 const passwordValid = computed(() => !Object.values(passwordIssues.value).some(Boolean))
 
@@ -86,8 +88,8 @@ const secretCopied = ref(false)
 
 const keyNameDraft = computed(() => keyName.value.trim())
 const keyNameIssue = computed(() => {
-  if (!keyNameDraft.value) return 'Enter a name for the key.'
-  if (!KEY_NAME.test(keyNameDraft.value)) return 'Use 1–64 ASCII letters, digits, dots, underscores or hyphens.'
+  if (!keyNameDraft.value) return t('access.keyNameRequired')
+  if (!KEY_NAME.test(keyNameDraft.value)) return t('access.keyNameInvalid')
   return ''
 })
 const keyNameValid = computed(() => !keyNameIssue.value)
@@ -104,7 +106,7 @@ async function createKey() {
     secretCopied.value = false
     keyName.value = ''
     keyNameAttempted.value = false
-    notify.success('API key created; copy it now, it is not shown again')
+    notify.success(t('access.keyCreated'))
     await refresh()
   } catch (err) {
     notify.error(err.message)
@@ -118,9 +120,9 @@ async function copySecret() {
   try {
     await navigator.clipboard.writeText(newKey.value.value)
     secretCopied.value = true
-    notify.success('API key copied to the clipboard')
+    notify.success(t('access.keyCopied'))
   } catch (_) {
-    notify.warning('Clipboard unavailable; select the key text and copy it manually')
+    notify.warning(t('access.clipboardFailed'))
   }
 }
 
@@ -156,7 +158,7 @@ async function confirmRevoke() {
     await socket.request({ revokeApiKey: { name: key.name } })
     if (newKey.value?.name === key.name) dismissSecret()
     closeRevoke()
-    notify.success(`API key “${key.name}” revoked`)
+    notify.success(t('access.keyRevoked', { name: key.name }))
     await refresh()
   } catch (err) {
     notify.error(err.message)
@@ -187,7 +189,9 @@ const expiryDays = computed(() => {
 const expiryLabel = computed(() => {
   const days = expiryDays.value
   if (days === null) return ''
-  return days < 0 ? `expired ${Math.abs(days)} d ago` : `in ${days} d`
+  return days < 0
+    ? t('access.expiryPast', { days: Math.abs(days) })
+    : t('access.expiryFuture', { days })
 })
 const certNames = computed(() => [
   ...(status.value?.serverDnsNames || []),
@@ -205,16 +209,16 @@ onUnmounted(() => {
   <div class="mx-auto w-full max-w-6xl space-y-6">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Access</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">{{ $t('access.title') }}</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          Manage the administrator password and the API keys that scripts and MCP clients use.
+          {{ $t('access.intro') }}
         </p>
       </div>
     </header>
 
     <div v-if="!data && loadError" role="alert" class="alert alert-error">
-      <span><strong class="font-semibold">Access state unavailable.</strong> {{ loadError }}</span>
-      <button type="button" class="btn btn-sm btn-outline" @click="refresh">Try again</button>
+      <span><strong class="font-semibold">{{ $t('access.stateUnavailable') }}</strong> {{ loadError }}</span>
+      <button type="button" class="btn btn-sm btn-outline" @click="refresh">{{ $t('common.retry') }}</button>
     </div>
 
     <div v-if="!data && !loadError" class="grid gap-4 md:grid-cols-2" aria-hidden="true">
@@ -232,15 +236,15 @@ onUnmounted(() => {
         <section class="card border border-base-300 bg-base-100">
           <div class="card-body gap-4 p-5">
             <div>
-              <h2 class="card-title text-base">Administrator password</h2>
+              <h2 class="card-title text-base">{{ $t('access.passwordTitle') }}</h2>
               <p class="mt-1 text-sm text-base-content/70">
-                Changing it signs out every other browser and briefly reconnects this page.
+                {{ $t('access.passwordIntro') }}
               </p>
             </div>
 
             <form class="space-y-3" novalidate :aria-busy="passwordBusy" @submit.prevent="submitPassword">
               <label class="block">
-                <span class="mb-1 block text-sm font-medium">Current password</span>
+                <span class="mb-1 block text-sm font-medium">{{ $t('access.currentPassword') }}</span>
                 <input
                   v-model="password.current"
                   type="password"
@@ -260,7 +264,7 @@ onUnmounted(() => {
 
               <div class="grid gap-3 sm:grid-cols-2">
                 <label class="block">
-                  <span class="mb-1 block text-sm font-medium">New password</span>
+                  <span class="mb-1 block text-sm font-medium">{{ $t('access.newPassword') }}</span>
                   <input
                     v-model="password.next"
                     type="password"
@@ -279,7 +283,7 @@ onUnmounted(() => {
                   </p>
                 </label>
                 <label class="block">
-                  <span class="mb-1 block text-sm font-medium">Confirm new password</span>
+                  <span class="mb-1 block text-sm font-medium">{{ $t('access.confirmPassword') }}</span>
                   <input
                     v-model="password.confirm"
                     type="password"
@@ -302,15 +306,15 @@ onUnmounted(() => {
               <div class="flex flex-wrap items-center gap-3 pt-1">
                 <button type="submit" class="btn btn-primary btn-sm" :disabled="passwordBusy">
                   <span v-if="passwordBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                  Change password
+                  {{ $t('access.changePassword') }}
                 </button>
               </div>
               <details class="text-xs text-base-content/60">
-                <summary class="cursor-pointer">Password recovery</summary>
+                <summary class="cursor-pointer">{{ $t('access.recovery') }}</summary>
                 <div>
-                  Run
+                  {{ $t('access.recoveryRun') }}
                   <code class="mt-1 inline-block break-all font-mono border rounded px-1 bg-base-200 select-all">capsulad-cli auth set-password</code>
-                  in speaker's shell
+                  {{ $t('access.recoveryShell') }}
                 </div>
               </details>
             </form>
@@ -322,42 +326,48 @@ onUnmounted(() => {
           <section class="card border border-base-300 bg-base-100">
             <div class="card-body gap-4 p-5">
               <div class="flex flex-wrap items-start justify-between gap-2">
-                <h2 class="card-title text-base">Secure certificate</h2>
-                <a href="/api/cert.pem" download="capsulad-server.crt" class="btn btn-sm btn-outline">Download certificate</a>
+                <h2 class="card-title text-base">{{ $t('access.certificateTitle') }}</h2>
+                <div class="flex flex-wrap gap-2">
+                  <a href="/api/cert.pem" download="capsulad-server.crt" class="btn btn-sm btn-outline">{{ $t('access.downloadCertificate') }}</a>
+                  <a href="/api/ca.pem" download="capsulad-ca.crt" class="btn btn-sm btn-outline">{{ $t('access.downloadCA') }}</a>
+                </div>
               </div>
 
               <p class="text-sm text-base-content/70">
-                This speaker uses its own self-signed certificate. Download it and trust it on your devices to
-                remove the browser warning.
+                {{ $t('access.certIntro') }}
+              </p>
+
+              <p class="text-xs text-base-content/60">
+                {{ $t('access.caIntro') }}
               </p>
 
               <div class="text-sm">
-                <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Valid until</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('access.validUntil') }}</p>
                 <p class="mt-1">
                   <template v-if="expiryMs">{{ dateTime(expiryMs) }}</template>
-                  <span v-else>Unavailable</span>
+                  <span v-else>{{ $t('common.unavailable') }}</span>
                   <span v-if="expiryLabel" class="ml-1" :class="expiryDays < 0 ? 'text-error' : 'text-base-content/60'">{{ expiryLabel }}</span>
                 </p>
               </div>
 
               <details class="rounded border border-base-300 p-3">
-                <summary class="cursor-pointer text-sm font-medium">Certificate details</summary>
+                <summary class="cursor-pointer text-sm font-medium">{{ $t('access.certDetails') }}</summary>
                 <dl class="mt-3 space-y-3 text-sm">
                   <div>
-                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">SHA-256 fingerprint</dt>
-                    <dd class="mt-1 break-all font-mono text-xs">{{ fingerprint || 'Unavailable' }}</dd>
+                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('access.sha256') }}</dt>
+                    <dd class="mt-1 break-all font-mono text-xs">{{ fingerprint || $t('common.unavailable') }}</dd>
                   </div>
                   <div>
-                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Certificate names</dt>
-                    <dd class="mt-1 break-words font-mono text-xs">{{ certNames.length ? certNames.join(' ') : 'None reported' }}</dd>
+                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('access.certNames') }}</dt>
+                    <dd class="mt-1 break-words font-mono text-xs">{{ certNames.length ? certNames.join(' ') : $t('access.noneReported') }}</dd>
                   </div>
                   <div>
-                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Listeners</dt>
-                    <dd class="mt-1 break-words font-mono text-xs">{{ listeners.length ? listeners.join(' ') : 'None reported' }}</dd>
+                    <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('access.listeners') }}</dt>
+                    <dd class="mt-1 break-words font-mono text-xs">{{ listeners.length ? listeners.join(' ') : $t('access.noneReported') }}</dd>
                   </div>
                 </dl>
                 <p class="mt-3 text-xs text-base-content/60">
-                  Renewing the certificate is done on the speaker and needs a restart.
+                  {{ $t('access.renewHint') }}
                 </p>
               </details>
             </div>
@@ -370,31 +380,30 @@ onUnmounted(() => {
         <div class="card-body gap-4 p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 class="card-title text-base">Static API keys</h2>
+              <h2 class="card-title text-base">{{ $t('access.keysTitle') }}</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-                For scripts, monitoring tools and MCP clients. This page mints status keys, which can only read device
-                status and the server certificate. For speaker controls, use
+                {{ $t('access.keysIntro1') }}
                 <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-xs">capsulad-cli auth key create NAME --scope assistant</code>.
-                No key can sign in here or change the administrator password. Name a key after the place that will use it.
-                Read the <a
+                {{ $t('access.keysIntro2') }}
+                <a
                   class="link link-primary"
                   href="https://github.com/m4l3vich/capsulad/blob/master/docs/MCP.md"
                   target="_blank"
                   rel="noreferrer"
-                >API documentation</a>.
+                >{{ $t('access.apiDocs') }}</a>.
               </p>
             </div>
           </div>
 
           <form class="flex flex-col gap-2 sm:flex-row sm:items-start" novalidate @submit.prevent="createKey">
             <label class="block w-full sm:max-w-sm">
-              <span class="mb-1 block text-sm font-medium">Key name</span>
+              <span class="mb-1 block text-sm font-medium">{{ $t('access.keyName') }}</span>
               <input
                 v-model="keyName"
                 type="text"
                 class="input input-bordered w-full"
                 :class="{ 'input-error': (keyNameAttempted || keyNameDraft) && keyNameIssue }"
-                placeholder="home-monitor"
+                :placeholder="$t('access.keyNamePlaceholder')"
                 maxlength="64"
                 autocomplete="off"
                 spellcheck="false"
@@ -404,7 +413,7 @@ onUnmounted(() => {
                 @blur="keyNameAttempted = true"
               />
               <p id="key-name-hint" class="mt-1 text-xs" :class="(keyNameAttempted || keyNameDraft) && keyNameIssue ? 'text-error' : 'text-base-content/60'">
-                {{ (keyNameAttempted || keyNameDraft) && keyNameIssue ? keyNameIssue : 'Use letters, numbers, dots, hyphens or underscores (up to 64).' }}
+                {{ (keyNameAttempted || keyNameDraft) && keyNameIssue ? keyNameIssue : $t('access.keyNameHint') }}
               </p>
             </label>
             <button
@@ -413,22 +422,21 @@ onUnmounted(() => {
               :disabled="keyBusy || !keyNameValid"
             >
               <span v-if="keyBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-              Create key
+              {{ $t('access.createKey') }}
             </button>
           </form>
 
           <div v-if="newKey" role="status" class="alert alert-warning items-start">
             <div class="w-full space-y-2">
               <p class="text-sm">
-                Copy <strong class="font-semibold">{{ newKey.name }}</strong> now — this key is shown only once and
-                cannot be looked up again.
+                {{ $t('access.copyNow', { name: newKey.name }) }}
               </p>
               <code class="block break-all rounded border border-warning/40 bg-base-100 p-2 font-mono text-xs">{{ newKey.value }}</code>
               <div class="flex flex-wrap gap-2">
-                <button type="button" class="btn btn-xs btn-outline" @click="copySecret">{{ secretCopied ? 'Copied' : 'Copy key' }}</button>
-                <button type="button" class="btn btn-xs btn-ghost" @click="dismissSecret">Done, clear it</button>
+                <button type="button" class="btn btn-xs btn-outline" @click="copySecret">{{ secretCopied ? $t('access.copied') : $t('access.copyKey') }}</button>
+                <button type="button" class="btn btn-xs btn-ghost" @click="dismissSecret">{{ $t('access.clearIt') }}</button>
               </div>
-              <p class="text-xs">“Done” removes the key from this page. Store it where the script can read it.</p>
+              <p class="text-xs">{{ $t('access.clearHint') }}</p>
             </div>
           </div>
 
@@ -436,12 +444,12 @@ onUnmounted(() => {
             <table class="table table-sm">
               <thead>
                 <tr class="text-xs uppercase tracking-wide text-base-content/60">
-                  <th scope="col">Name</th>
-                  <th scope="col">Starts with</th>
-                  <th scope="col">Scope</th>
-                  <th scope="col">Added</th>
-                  <th scope="col">Status</th>
-                  <th scope="col"><span class="sr-only">Actions</span></th>
+                  <th scope="col">{{ $t('common.name') }}</th>
+                  <th scope="col">{{ $t('access.startsWith') }}</th>
+                  <th scope="col">{{ $t('common.scope') }}</th>
+                  <th scope="col">{{ $t('common.added') }}</th>
+                  <th scope="col">{{ $t('common.status') }}</th>
+                  <th scope="col"><span class="sr-only">{{ $t('common.actions') }}</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -457,7 +465,7 @@ onUnmounted(() => {
                   <td class="whitespace-nowrap text-xs">{{ dateTime(key.createdUnixMs) }}</td>
                   <td>
                     <span class="badge badge-sm" :class="key.revoked || !hasValidKeyScopes(key.scopes) ? 'badge-neutral' : 'badge-success'">
-                      {{ key.revoked ? 'revoked' : hasValidKeyScopes(key.scopes) ? 'active' : 'inactive' }}
+                      {{ key.revoked ? $t('access.revoked') : hasValidKeyScopes(key.scopes) ? $t('access.active') : $t('access.inactive') }}
                     </span>
                   </td>
                   <td class="text-right">
@@ -466,20 +474,19 @@ onUnmounted(() => {
                       type="button"
                       class="btn btn-xs btn-error btn-outline"
                       @click="askRevoke(key)"
-                    >Revoke</button>
-                    <span v-else class="text-xs text-base-content/50">no longer valid</span>
+                    >{{ $t('access.revoke') }}</button>
+                    <span v-else class="text-xs text-base-content/50">{{ $t('access.noLongerValid') }}</span>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p v-else class="rounded border border-base-300 p-4 text-sm text-base-content/70">
-            No automation keys yet. Create a status key here only if a script needs to read device status.
+            {{ $t('access.noKeys') }}
           </p>
 
           <p class="text-xs text-base-content/60">
-            Revoking a key cannot be undone. The entry stays in this list for 7 days after revocation,
-            then it is removed.
+            {{ $t('access.revokeHint') }}
           </p>
         </div>
       </section>
@@ -487,21 +494,20 @@ onUnmounted(() => {
 
     <dialog ref="revokeDialog" class="modal" aria-labelledby="revoke-key-title" @close="onRevokeClosed" @cancel="onRevokeCancel">
       <div class="modal-box">
-        <h3 id="revoke-key-title" class="text-lg font-semibold">Revoke API key</h3>
+        <h3 id="revoke-key-title" class="text-lg font-semibold">{{ $t('access.revokeTitle') }}</h3>
         <p class="mt-2 text-sm text-base-content/70">
-          Revoke <code class="font-mono font-semibold">{{ revokeTarget?.name }}</code>?
-          Any script using it will stop working immediately. This cannot be undone.
+          {{ $t('access.revokeBody', { name: revokeTarget?.name }) }}
         </p>
         <div class="modal-action">
-          <button type="button" class="btn btn-sm btn-ghost" :disabled="revokeBusy" @click="closeRevoke">Cancel</button>
+          <button type="button" class="btn btn-sm btn-ghost" :disabled="revokeBusy" @click="closeRevoke">{{ $t('common.cancel') }}</button>
           <button type="button" class="btn btn-sm btn-error" :disabled="revokeBusy" @click="confirmRevoke">
             <span v-if="revokeBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Revoke key
+            {{ $t('access.revokeKey') }}
           </button>
         </div>
       </div>
       <form method="dialog" class="modal-backdrop">
-        <button aria-label="Close revoke dialog" :disabled="revokeBusy">close</button>
+        <button :aria-label="$t('access.closeRevokeDialog')" :disabled="revokeBusy">{{ $t('access.closeLower') }}</button>
       </form>
     </dialog>
   </div>

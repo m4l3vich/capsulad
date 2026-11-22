@@ -1,5 +1,6 @@
 import { formatBytes } from './format.js'
 import { session } from './session.js'
+import { t } from './i18n.js'
 
 // Browser admin client for installed application packages. The device owns
 // validation, the running-app refusal and the atomic swap; these helpers only
@@ -11,10 +12,13 @@ export const MAX_PACKAGE_BYTES = 65 * 1024 * 1024
 
 /** Reject an unusable choice before the browser starts sending it. Empty string means valid. */
 export function packageFileError(file) {
-  if (!file) return 'Choose a package archive.'
-  if (Number(file.size) === 0) return 'The archive is empty.'
+  if (!file) return t('install.chooseArchive')
+  if (Number(file.size) === 0) return t('install.emptyArchive')
   if (Number(file.size) > MAX_PACKAGE_BYTES) {
-    return `The archive is ${formatBytes(file.size)}; the speaker accepts at most ${formatBytes(MAX_PACKAGE_BYTES)}.`
+    return t('install.archiveTooLarge', {
+      size: formatBytes(file.size),
+      max: formatBytes(MAX_PACKAGE_BYTES)
+    })
   }
   return ''
 }
@@ -25,32 +29,36 @@ export function packageFileError(file) {
  */
 export function packageURLError(value) {
   const text = String(value || '').trim()
-  if (!text) return 'Enter a package URL.'
+  if (!text) return t('install.urlRequired')
   let parsed
   try {
     parsed = new URL(text)
   } catch (_) {
-    return 'Enter an absolute http or https URL.'
+    return t('install.urlAbsolute')
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return 'Only http and https package URLs are supported.'
+    return t('install.urlScheme')
   }
-  if (!parsed.hostname) return 'The package URL needs a host.'
+  if (!parsed.hostname) return t('install.urlHost')
   // WHATWG URL folds "https:///pkg" into a host named "pkg"; the daemon's
   // parser does not, so require the literal authority separator here too.
-  if (!/^https?:\/\/[^/\s]+/i.test(text)) return 'The package URL needs a host.'
-  if (parsed.username || parsed.password) return 'The package URL must not contain credentials.'
-  if (parsed.hash) return 'The package URL must not contain a fragment.'
+  if (!/^https?:\/\/[^/\s]+/i.test(text)) return t('install.urlHost')
+  if (parsed.username || parsed.password) return t('install.urlCredentials')
+  if (parsed.hash) return t('install.urlFragment')
   return ''
 }
 
 function describeOutcome(result) {
   const name = result.displayName || result.appId
-  if (!result.replaced) return `Installed ${name} ${result.version}.`
+  if (!result.replaced) return t('install.outcomeInstalled', { name, version: result.version })
   if (result.previousVersion && result.previousVersion !== result.version) {
-    return `Updated ${name} from ${result.previousVersion} to ${result.version}.`
+    return t('install.outcomeUpdated', {
+      name,
+      previous: result.previousVersion,
+      version: result.version
+    })
   }
-  return `Reinstalled ${name} ${result.version}.`
+  return t('install.outcomeReinstalled', { name, version: result.version })
 }
 
 /** The sentence shown after a successful install. */
@@ -61,9 +69,9 @@ export function installOutcome(result) {
 async function readError(resp) {
   try {
     const body = await resp.json()
-    return body.error || `request failed (${resp.status})`
+    return body.error || t('errors.requestFailed', { status: resp.status })
   } catch (_) {
-    return `request failed (${resp.status})`
+    return t('errors.requestFailed', { status: resp.status })
   }
 }
 
@@ -90,7 +98,7 @@ function installResult(body) {
 export function installPackage(file, { onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new Error('install cancelled'))
+      reject(new Error(t('errors.installCancelled')))
       return
     }
     const xhr = new XMLHttpRequest()
@@ -121,15 +129,15 @@ export function installPackage(file, { onProgress, signal } = {}) {
         resolve(installResult(body))
         return
       }
-      reject(new Error(body.error || `install failed (${xhr.status})`))
+      reject(new Error(body.error || t('errors.installFailed', { status: xhr.status })))
     }
     xhr.onerror = () => {
       cleanup()
-      reject(new Error('install failed: the connection to the speaker was lost'))
+      reject(new Error(t('errors.connectionLostInstall')))
     }
     xhr.onabort = () => {
       cleanup()
-      reject(new Error('install cancelled'))
+      reject(new Error(t('errors.installCancelled')))
     }
     xhr.send(file)
   })
@@ -155,8 +163,8 @@ export async function installPackageFromURL(url, { signal } = {}) {
       signal
     })
   } catch (err) {
-    if (err?.name === 'AbortError') throw new Error('install cancelled')
-    throw new Error('install failed: the connection to the speaker was lost')
+    if (err?.name === 'AbortError') throw new Error(t('errors.installCancelled'))
+    throw new Error(t('errors.connectionLostInstall'))
   }
   let body = {}
   try {
@@ -165,7 +173,7 @@ export async function installPackageFromURL(url, { signal } = {}) {
     body = {}
   }
   if (!resp.ok || !body.app_id) {
-    throw new Error(body.error || `install failed (${resp.status})`)
+    throw new Error(body.error || t('errors.installFailed', { status: resp.status }))
   }
   return installResult(body)
 }
@@ -186,7 +194,7 @@ export async function appStorage({ signal } = {}) {
   } catch (_) {
     body = {}
   }
-  if (!resp.ok) throw new Error(body.error || `storage unavailable (${resp.status})`)
+  if (!resp.ok) throw new Error(body.error || t('errors.storageUnavailable', { status: resp.status }))
   return {
     available: Boolean(body.available),
     totalBytes: Number(body.total_bytes) || 0,
@@ -208,7 +216,7 @@ export async function appPackageStorage(appId, { signal } = {}) {
   } catch (_) {
     body = {}
   }
-  if (!resp.ok) throw new Error(body.error || `storage unavailable (${resp.status})`)
+  if (!resp.ok) throw new Error(body.error || t('errors.storageUnavailable', { status: resp.status }))
   return {
     sizeBytes: Number(body.size_bytes) || 0,
     freeBytes: Number(body.free_bytes) || 0,
@@ -244,9 +252,9 @@ export async function readGuide(appId, { signal } = {}) {
   } catch (_) {
     body = {}
   }
-  if (!resp.ok) throw new Error(body.error || `guide unavailable (${resp.status})`)
+  if (!resp.ok) throw new Error(body.error || t('errors.guideUnavailable', { status: resp.status }))
   const markdown = typeof body.markdown === 'string' ? body.markdown : ''
-  if (!markdown.trim()) throw new Error('The application user guide is empty.')
+  if (!markdown.trim()) throw new Error(t('errors.guideEmpty'))
   return {
     appId: String(body.app_id || appId),
     title: String(body.title || ''),

@@ -347,7 +347,7 @@ token does not register providers, and the speaker client does not register one 
 
 ## Proof level and limits
 
-Host evidence only; no device was accessed or deployed for this change.
+Host evidence only; no device measurement is recorded.
 
 - `go test ./internal/webui -run TestMCP` covers the real HTTP surface: `initialize`
   (version negotiation, capabilities, `Mcp-Session-Id`), scope-filtered `tools/list`, a
@@ -386,8 +386,7 @@ Host evidence only; no device was accessed or deployed for this change.
 - Not verified: an MCP conformance suite, third-party MCP clients, and a maximum-size
   (32 MiB asset / 65 MiB package) staged upload on the real 240 MiB board — the streaming
   path is exercised with multi-chunk transfers on the host, and the size limits are the
-  store's and artifact layer's own, not a re-statement. The browser proof for the Access
-  change is the WebSocket snapshot test plus the built bundle; no screenshot of a running
-  speaker was taken (no device access for this change). The protocol surface implemented
-  here is the subset above; there is no resources/prompts/sampling support and no
-  server-initiated stream.
+  store's and artifact layer's own, not a re-statement. The browser proof for the Access view is the
+  WebSocket snapshot test plus the built bundle; no screenshot of a running speaker was taken. The
+  protocol surface documented here is the subset above; there is no resources/prompts/sampling
+  support and no server-initiated stream.

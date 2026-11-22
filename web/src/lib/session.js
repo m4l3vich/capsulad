@@ -1,4 +1,5 @@
 import { reactive, watch } from 'vue'
+import { t } from './i18n.js'
 
 // Session state and the small HTTP auth surface. Auth mutations are tracked as
 // one in-flight promise: a password change can close the live socket before
@@ -73,7 +74,7 @@ async function readSession() {
     credentials: 'same-origin',
     headers: { Accept: 'application/json' }
   })
-  if (!resp.ok) throw new Error('session endpoint unavailable')
+  if (!resp.ok) throw new Error(t('errors.sessionEndpoint'))
   return resp.json()
 }
 
@@ -99,9 +100,9 @@ function jsonHeaders() {
 async function readError(resp) {
   try {
     const body = await resp.json()
-    return body.error || `request failed (${resp.status})`
+    return body.error || t('errors.requestFailed', { status: resp.status })
   } catch (_) {
-    return `request failed (${resp.status})`
+    return t('errors.requestFailed', { status: resp.status })
   }
 }
 
@@ -152,5 +153,5 @@ export async function changePassword(current, next, confirm) {
   applySession(data)
   session.checked = true
   session.expired = false
-  return body.message || 'password changed'
+  return body.message || t('errors.passwordChanged')
 }

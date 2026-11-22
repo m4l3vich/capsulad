@@ -185,16 +185,9 @@ func (s *Store) credentialsPath() string { return filepath.Join(s.root, "credent
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := os.ReadFile(s.credentialsPath())
-	if os.IsNotExist(err) {
-		return nil
-	}
+	doc, err := readCredentials(s.credentialsPath())
 	if err != nil {
 		return err
-	}
-	var doc persisted
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("parse credentials: %w", err)
 	}
 	s.doc = doc
 	return nil
@@ -205,23 +198,46 @@ func (s *Store) Load() error {
 // live sessions without polling.
 func (s *Store) CredentialsPath() string { return s.credentialsPath() }
 
+func (s *Store) lockCredentials() (func(), error) {
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		return nil, err
+	}
+	return acquireCredentialsLock(filepath.Join(s.root, "credentials.lock"))
+}
+
+// readCredentials reads the persisted document. A missing file is an empty
+// document, not an error.
+func readCredentials(path string) (persisted, error) {
+	var doc persisted
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return doc, nil
+	}
+	if err != nil {
+		return doc, err
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return doc, fmt.Errorf("parse credentials: %w", err)
+	}
+	return doc, nil
+}
+
 // Reload re-reads credentials changed by another process and reports whether
 // the admin password changed. A password change invalidates every in-memory
-// session; API-key edits leave sessions intact.
+// session; API-key edits leave sessions intact. The file lock keeps a reload
+// that raced a writer from adopting the pre-write document.
 func (s *Store) Reload() (passwordChanged bool, err error) {
-	data, err := os.ReadFile(s.credentialsPath())
-	if os.IsNotExist(err) {
-		return false, nil
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockCredentials()
 	if err != nil {
 		return false, err
 	}
-	var doc persisted
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return false, fmt.Errorf("parse credentials: %w", err)
+	defer unlock()
+	doc, err := readCredentials(s.credentialsPath())
+	if err != nil {
+		return false, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	before := ""
 	if s.doc.Password != nil {
 		before = s.doc.Password.Hash
@@ -238,11 +254,39 @@ func (s *Store) Reload() (passwordChanged bool, err error) {
 	return false, nil
 }
 
-func (s *Store) persistLocked() error {
+// updateCredentials runs one persisted mutation against the freshest document
+// while holding the cross-process lock, then saves and adopts it. A stale Store
+// handle therefore cannot revert a change another process made in the meantime.
+func (s *Store) updateCredentials(fn func(*persisted) (bool, error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockCredentials()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	doc, err := readCredentials(s.credentialsPath())
+	if err != nil {
+		return err
+	}
+	changed, err := fn(&doc)
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := s.persistDoc(doc); err != nil {
+			return err
+		}
+	}
+	s.doc = doc
+	return nil
+}
+
+func (s *Store) persistDoc(doc persisted) error {
 	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(s.doc, "", "  ")
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -281,15 +325,16 @@ func (s *Store) SetPassword(password string) error {
 		Hash: base64.StdEncoding.EncodeToString(hash),
 		Time: t, Memory: memory, Threads: threads, KeyLen: keyLen,
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.doc.Password
-	s.doc.Password = rec
-	if err := s.persistLocked(); err != nil {
-		s.doc.Password = prev
+	if err := s.updateCredentials(func(doc *persisted) (bool, error) {
+		doc.Password = rec
+		return true, nil
+	}); err != nil {
 		return err
 	}
+	// A password change invalidates every browser session.
+	s.mu.Lock()
 	s.sessions = map[string]session{}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -353,22 +398,25 @@ func (s *Store) CreateAPIKeyWithScopes(name string, scopes []string) (string, AP
 		Name: name, Prefix: token[:16], Hash: hex.EncodeToString(sum[:]), CreatedAt: time.Now().UTC(),
 		Scopes: normalized,
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.doc.APIKeys) >= maxAPIKeys {
-		return "", APIKeyInfo{}, fmt.Errorf("maximum of %d API keys reached", maxAPIKeys)
-	}
-	for _, existing := range s.doc.APIKeys {
-		if existing.Name == name {
-			return "", APIKeyInfo{}, fmt.Errorf("API key %q already exists", name)
+	var created APIKeyInfo
+	err = s.updateCredentials(func(doc *persisted) (bool, error) {
+		pruneRevoked(doc, time.Now().UTC())
+		if activeKeyCount(*doc) >= maxAPIKeys {
+			return false, fmt.Errorf("maximum of %d API keys reached", maxAPIKeys)
 		}
-	}
-	s.doc.APIKeys = append(s.doc.APIKeys, rec)
-	if err := s.persistLocked(); err != nil {
-		s.doc.APIKeys = s.doc.APIKeys[:len(s.doc.APIKeys)-1]
+		for _, existing := range doc.APIKeys {
+			if existing.Name == name {
+				return false, fmt.Errorf("API key %q already exists", name)
+			}
+		}
+		doc.APIKeys = append(doc.APIKeys, rec)
+		created = infoFromRecord(rec)
+		return true, nil
+	})
+	if err != nil {
 		return "", APIKeyInfo{}, err
 	}
-	return token, infoFromRecord(rec), nil
+	return token, created, nil
 }
 
 func infoFromRecord(rec apiKeyRecord) APIKeyInfo {
@@ -407,30 +455,62 @@ func (s *Store) APIKeyScopes(token string) (APIKeyInfo, []string, bool) {
 
 // Revoked keys stay visible for a grace period so an administrator can see
 // that a credential was revoked, then they are removed from the store. Keeping
-// them forever would eventually exhaust maxAPIKeys with unusable records.
+// them forever would eventually exhaust the active-key budget with unusable
+// records.
 const revokedKeyRetention = 7 * 24 * time.Hour
 
-func (s *Store) ListAPIKeys() []APIKeyInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	kept := s.doc.APIKeys[:0]
-	pruned := false
-	for _, rec := range s.doc.APIKeys {
+// pruneRevoked drops tombstones past the retention window and reports whether
+// the document changed. It is shared by the listing and the create path so a
+// long-lived installation cannot accrete tombstones forever.
+func pruneRevoked(doc *persisted, now time.Time) bool {
+	kept := doc.APIKeys[:0]
+	for _, rec := range doc.APIKeys {
 		if rec.RevokedAt != nil && now.Sub(*rec.RevokedAt) >= revokedKeyRetention {
-			pruned = true
 			continue
 		}
 		kept = append(kept, rec)
 	}
-	if pruned {
-		s.doc.APIKeys = kept
-		// A failed rewrite leaves the hidden records on disk; the next listing
-		// retries. The catalog must still render without an I/O error path.
-		_ = s.persistLocked()
+	changed := len(kept) != len(doc.APIKeys)
+	doc.APIKeys = kept
+	return changed
+}
+
+// activeKeyCount is the issuance budget: tombstones awaiting their grace period
+// do not consume a slot.
+func activeKeyCount(doc persisted) int {
+	n := 0
+	for _, rec := range doc.APIKeys {
+		if rec.RevokedAt == nil {
+			n++
+		}
 	}
-	out := make([]APIKeyInfo, 0, len(kept))
-	for _, rec := range kept {
+	return n
+}
+
+func (s *Store) ListAPIKeys() []APIKeyInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := s.doc
+	now := time.Now().UTC()
+	if unlock, err := s.lockCredentials(); err == nil {
+		defer unlock()
+		if fresh, err := readCredentials(s.credentialsPath()); err == nil {
+			doc = fresh
+			if pruneRevoked(&doc, now) {
+				// A failed rewrite leaves the tombstones on disk; the next
+				// listing retries. The catalog must still render without an
+				// I/O error path.
+				_ = s.persistDoc(doc)
+			}
+		}
+	} else {
+		// Without the lock, prune only the in-memory copy and never rewrite a
+		// document another process may be changing.
+		pruneRevoked(&doc, now)
+	}
+	s.doc = doc
+	out := make([]APIKeyInfo, 0, len(doc.APIKeys))
+	for _, rec := range doc.APIKeys {
 		out = append(out, infoFromRecord(rec))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -438,20 +518,20 @@ func (s *Store) ListAPIKeys() []APIKeyInfo {
 }
 
 func (s *Store) RevokeAPIKey(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.doc.APIKeys {
-		if s.doc.APIKeys[i].Name != name {
-			continue
+	return s.updateCredentials(func(doc *persisted) (bool, error) {
+		for i := range doc.APIKeys {
+			if doc.APIKeys[i].Name != name {
+				continue
+			}
+			if doc.APIKeys[i].RevokedAt != nil {
+				return false, nil
+			}
+			now := time.Now().UTC()
+			doc.APIKeys[i].RevokedAt = &now
+			return true, nil
 		}
-		if s.doc.APIKeys[i].RevokedAt != nil {
-			return nil
-		}
-		now := time.Now().UTC()
-		s.doc.APIKeys[i].RevokedAt = &now
-		return s.persistLocked()
-	}
-	return fmt.Errorf("API key %q not found", name)
+		return false, fmt.Errorf("API key %q not found", name)
+	})
 }
 
 func (s *Store) ActiveAPIKeyCount() int {
@@ -594,11 +674,11 @@ func (s *Store) newServerCert(opts CertOptions) (CertInfo, error) {
 		Subject:               pkix.Name{CommonName: opts.Hostname, Organization: []string{"Capsulad Web UI"}},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.AddDate(0, 0, opts.Days),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:              dns,
 		IPAddresses:           ips,
-		IsCA:                  false,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)

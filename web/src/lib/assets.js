@@ -1,4 +1,5 @@
 import { session } from './session.js'
+import { t } from './i18n.js'
 
 // Browser admin client for the shared read-only asset store. The same
 // directory is mounted at /assets inside every app sandbox, so these calls
@@ -13,17 +14,17 @@ const STAGING_PREFIX = '.capsulad-upload-'
 /** Client-side copy of the store's path rules. Empty string means valid. */
 export function assetPathError(value) {
   const path = String(value ?? '').trim()
-  if (!path) return 'Enter a destination path.'
-  if (path.includes('\0')) return 'The path contains a control character.'
-  if (path.includes('\\')) return 'Use / as the path separator.'
-  if (path.startsWith('/')) return 'Use a path relative to the asset store, not an absolute path.'
-  if (path.length > 4096) return 'The path is too long.'
+  if (!path) return t('errors.assetPathRequired')
+  if (path.includes('\0')) return t('errors.assetPathControl')
+  if (path.includes('\\')) return t('errors.assetPathSeparator')
+  if (path.startsWith('/')) return t('errors.assetPathAbsolute')
+  if (path.length > 4096) return t('errors.assetPathTooLong')
   for (const part of path.split('/')) {
     if (!part || part === '.' || part === '..') {
-      return 'The path cannot contain empty, "." or ".." components.'
+      return t('errors.assetPathComponents')
     }
-    if (part.startsWith(STAGING_PREFIX)) return 'That name is reserved for uploads in progress.'
-    if (part.length > 255) return 'Each path component must be at most 255 characters.'
+    if (part.startsWith(STAGING_PREFIX)) return t('errors.assetPathReserved')
+    if (part.length > 255) return t('errors.assetPathComponentLength')
   }
   return ''
 }
@@ -42,9 +43,9 @@ export function shortHash(hash) {
 async function readError(resp) {
   try {
     const body = await resp.json()
-    return body.error || `request failed (${resp.status})`
+    return body.error || t('errors.requestFailed', { status: resp.status })
   } catch (_) {
-    return `request failed (${resp.status})`
+    return t('errors.requestFailed', { status: resp.status })
   }
 }
 
@@ -107,10 +108,10 @@ export function uploadAsset(file, target, { onProgress } = {}) {
         body = {}
       }
       if (xhr.status >= 200 && xhr.status < 300 && body.asset) resolve(body.asset)
-      else reject(new Error(body.error || `upload failed (${xhr.status})`))
+      else reject(new Error(body.error || t('errors.uploadFailed', { status: xhr.status })))
     }
-    xhr.onerror = () => reject(new Error('upload failed: the connection to the speaker was lost'))
-    xhr.onabort = () => reject(new Error('upload cancelled'))
+    xhr.onerror = () => reject(new Error(t('errors.connectionLostUpload')))
+    xhr.onabort = () => reject(new Error(t('errors.uploadCancelled')))
     xhr.send(file)
   })
 }

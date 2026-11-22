@@ -132,7 +132,7 @@ onBeforeUnmount(() => {
       name="toast"
       class="flex flex-col gap-2"
       role="region"
-      aria-label="Notifications"
+      :aria-label="$t('common.notifications')"
       aria-live="polite"
       aria-atomic="false"
     >
@@ -148,7 +148,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="btn btn-ghost btn-xs btn-square -mr-1.5 -mt-0.5 shrink-0"
-          aria-label="Dismiss notification"
+          :aria-label="$t('common.dismissNotification')"
           @click="dismissToast(toast.id)"
         >
           <svg aria-hidden="true" viewBox="0 0 20 20" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2">

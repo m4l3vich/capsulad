@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, useTemplateRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ModalDialog from '../components/ModalDialog.vue'
 import { notify } from '../lib/toast.js'
 import {
@@ -20,6 +21,7 @@ import Icon from '../components/Icon.vue'
 // session cookie and CSRF token from the shell.
 
 const ROOT = '/assets/'
+const { t } = useI18n()
 const folder = ref(ROOT)
 const assets = ref([])
 const totalBytes = ref(0)
@@ -85,7 +87,7 @@ async function load() {
       freeBytes.value = 0
       freeAvailable.value = false
     } else {
-      notify.warning(`Refresh failed: ${err.message}`)
+      notify.warning(t('assets.refreshFailed', { error: err.message }))
     }
   } finally {
     loading.value = false
@@ -104,7 +106,11 @@ const fileInput = useTemplateRef('fileInput')
 async function uploadFile(file) {
   if (!file) return
   if (file.size > MAX_ASSET_BYTES) {
-    notify.error(`“${file.name}” is ${formatBytes(file.size)}; the store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`)
+    notify.error(t('assets.tooLarge', {
+      name: file.name,
+      size: formatBytes(file.size),
+      max: formatBytes(MAX_ASSET_BYTES)
+    }))
   }
 
   pickedFile.value = file
@@ -117,7 +123,7 @@ async function uploadFile(file) {
       }
     })
     progress.value = 1
-    notify.success(`Saved /assets/${entry.id} (${formatBytes(entry.size_bytes)}).`)
+    notify.success(t('assets.saved', { id: entry.id, size: formatBytes(entry.size_bytes) }))
     await load()
   } catch (err) {
     notify.error(err.message)
@@ -148,8 +154,8 @@ function startDrag(event) {
 const createFolderTarget = computed(() => folder.value.substring(ROOT.length) + createFolderName.value.trim())
 const createFolderIssue = computed(() => {
   const name = createFolderName.value.trim()
-  if (!name) return 'Enter a folder name.'
-  if (name.includes('/')) return 'Create one level at a time: open the parent folder first.'
+  if (!name) return t('assets.folderNameRequired')
+  if (name.includes('/')) return t('assets.oneLevelAtATime')
   return assetPathError(createFolderTarget.value)
 })
 
@@ -160,7 +166,7 @@ async function confirmCreateFolder() {
     const id = await createFolder(createFolderTarget.value)
     createFolderModal.value = false
     createFolderName.value = ''
-    notify.success(`Created /assets/${id}.`)
+    notify.success(t('assets.created', { id }))
     await load()
   } catch (err) {
     notify.error(err.message)
@@ -172,9 +178,9 @@ async function confirmCreateFolder() {
 async function copyPath(entry) {
   try {
     await navigator.clipboard.writeText(`/assets/${entry.id}`)
-    notify.success(`Copied /assets/${entry.id}.`)
+    notify.success(t('assets.copied', { id: entry.id }))
   } catch (_) {
-    notify.error('Could not copy the path; your browser refused clipboard access.')
+    notify.error(t('assets.copyFailed'))
   }
 }
 
@@ -204,7 +210,7 @@ async function confirmDelete() {
   try {
     await deleteAsset(entry.id)
     deleteTarget.value = null
-    notify.success(`Deleted /assets/${entry.id}. Apps referencing it will fail to read it.`)
+    notify.success(t('assets.deleted', { id: entry.id }))
     await load()
   } catch (err) {
     notify.error(err.message)
@@ -221,12 +227,12 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
   <div class="space-y-4">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Files</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">{{ $t('assets.title') }}</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          This is a shared store for files that apps can use. Apps can access it (read-only) at <code class="font-mono text-xs">/assets/</code>
+          {{ $t('assets.intro1') }} <code class="font-mono text-xs">/assets/</code>
         </p>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          You can drop a file into the folder view below to upload it there.
+          {{ $t('assets.intro2') }}
         </p>
       </div>
     </header>
@@ -248,13 +254,13 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
     >
       <div v-if="uploading" class="card-body absolute pointer-events-none bg-base-200/75 w-full h-full z-10 flex flex-col justify-center items-center">
         <Icon size="48px" class="text-primary">cloud_upload</Icon>
-        <span class="text-primary font-bold">Uploading "{{ pickedFile.name }}" ({{ formatBytes(pickedFile.size) }})</span>
+        <span class="text-primary font-bold">{{ $t('assets.uploading', { name: pickedFile.name, size: formatBytes(pickedFile.size) }) }}</span>
         <div class="flex gap-4 items-center">
           <progress
             class="progress progress-primary w-[300px]"
             :value="Math.round(progress * 100)"
             max="100"
-            aria-label="Upload progress"
+            :aria-label="$t('assets.uploadProgress')"
           />
           <span class="text-sm font-mono" v-text="(progress * 100).toFixed(2) + '%'"/>
         </div>
@@ -262,33 +268,33 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
 
       <div v-if="dragging" class="card-body absolute pointer-events-none bg-base-200/75 w-full h-full z-10 flex flex-col justify-center items-center">
         <Icon size="48px" class="text-primary">cloud_upload</Icon>
-        <span class="text-primary font-bold">Drop to upload this file into {{ folder }}</span>
+        <span class="text-primary font-bold">{{ $t('assets.dropToUpload', { folder }) }}</span>
       </div>
 
       <div class="card-body gap-3 p-5">
         <div class="flex flex-wrap items-baseline gap-4">
           <h2 class="card-title text-base flex-grow" v-text="folder"/>
           <span class="text-xs text-base-content/60">
-            {{ formatBytes(totalBytes) }} used ·
-            <template v-if="freeAvailable">{{ formatBytes(freeBytes) }} free</template>
-            <template v-else>free space unavailable</template>
+            {{ $t('assets.used', { size: formatBytes(totalBytes) }) }} ·
+            <template v-if="freeAvailable">{{ $t('assets.free', { size: formatBytes(freeBytes) }) }}</template>
+            <template v-else>{{ $t('assets.freeUnavailable') }}</template>
           </span>
 
           <button class="btn btn-sm btn-primary btn-outline" @click="createFolderModal = true">
-            Create a folder
+            {{ $t('assets.createFolder') }}
           </button>
 
           <button class="btn btn-sm btn-primary" @click="() => fileInput.click()">
-            Upload
+            {{ $t('assets.upload') }}
           </button>
         </div>
 
         <div v-if="loadError" role="alert" class="alert alert-error py-2 text-sm">
           <span>
-            <strong class="font-semibold">Asset list unavailable.</strong>
+            <strong class="font-semibold">{{ $t('assets.listUnavailable') }}</strong>
             {{ loadError }}
           </span>
-          <button type="button" class="btn btn-sm btn-outline" :disabled="loading" @click="load">Try again</button>
+          <button type="button" class="btn btn-sm btn-outline" :disabled="loading" @click="load">{{ $t('common.retry') }}</button>
         </div>
 
         <div v-if="loading && !loaded" class="space-y-2" aria-hidden="true">
@@ -298,10 +304,10 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
         </div>
 
         <div v-else-if="empty" class="rounded-xl border border-dashed border-base-300 p-6 text-center">
-          <p class="text-sm font-medium">The store is empty</p>
+          <p class="text-sm font-medium">{{ $t('assets.emptyTitle') }}</p>
           <p class="mt-1 text-sm text-base-content/70">
-            Upload a WAV reply, an image or a data file above. It becomes available to apps at
-            <code class="font-mono text-xs">/assets/&lt;path&gt;</code> immediately.
+            {{ $t('assets.emptyBody') }}
+            <code class="font-mono text-xs">/assets/&lt;path&gt;</code> {{ $t('assets.immediately') }}
           </p>
         </div>
 
@@ -309,11 +315,11 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
           <table class="table table-sm">
             <thead>
               <tr>
-                <th scope="col">Path</th>
-                <th scope="col">Type</th>
-                <th scope="col" class="text-right">Size</th>
+                <th scope="col">{{ $t('common.path') }}</th>
+                <th scope="col">{{ $t('common.type') }}</th>
+                <th scope="col" class="text-right">{{ $t('common.size') }}</th>
                 <th scope="col">SHA-256</th>
-                <th scope="col"><span class="sr-only">Actions</span></th>
+                <th scope="col"><span class="sr-only">{{ $t('common.actions') }}</span></th>
               </tr>
             </thead>
             <tbody>
@@ -350,8 +356,8 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
                       v-if="entry.media_type !== 'folder'"
                       type="button"
                       class="btn btn-xs btn-ghost btn-square tooltip"
-                      data-tip="Copy path"
-                      aria-label="Copy file path"
+                      :data-tip="$t('assets.copyPath')"
+                      :aria-label="$t('assets.copyFileAria')"
                       @click="copyPath(entry)"
                     >
                       <Icon size="16px" class="text-primary">file_copy</Icon>
@@ -360,8 +366,8 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
                       v-if="entry.media_type !== 'folder'"
                       type="button"
                       class="btn btn-primary btn-xs btn-ghost tooltip"
-                      data-tip="Download"
-                      :aria-label="`Download ${entry.path}`"
+                      :data-tip="$t('assets.download')"
+                      :aria-label="$t('assets.downloadAria', { path: entry.path })"
                       @click="downloadEntry(entry)"
                     >
                       <Icon size="20px" class="text-primary">download</Icon>
@@ -370,12 +376,12 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
                       v-if="entry.media_type !== 'folder'"
                       type="button"
                       class="btn btn-error btn-xs btn-outline tooltip"
-                      data-tip="Delete"
-                      :aria-label="`Delete ${entry.path}`"
+                      :data-tip="$t('assets.deleteTip')"
+                      :aria-label="$t('assets.deleteAria', { path: entry.path })"
                       @click="askDelete(entry)"
                     >
                       <Icon size="16px">delete</Icon>
-                      Delete
+                      {{ $t('common.delete') }}
                     </button>
                   </div>
                 </td>
@@ -386,9 +392,9 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
       </div>
     </section>
 
-    <ModalDialog v-if="createFolderModal" title="Create a new folder" @close="createFolderModal = false" max-width="max-h-sm">
+    <ModalDialog v-if="createFolderModal" :title="$t('assets.newFolderTitle')" @close="createFolderModal = false" max-width="max-h-sm">
       <div class="text-sm">
-        Enter a name for the folder that will be created in <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">{{ folder }}</code>:
+        {{ $t('assets.newFolderIntro') }} <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">{{ folder }}</code>:
       </div>
       <label class="input input-sm input-bordered flex w-full items-center gap-2 w-full mt-2">
         <Icon size="16px" class="text-primary">folder_open</Icon>
@@ -396,14 +402,14 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
           v-model="createFolderName"
           type="search"
           class="grow text-sm"
-          placeholder="New Folder (1)"
+          :placeholder="$t('assets.newFolderPlaceholder')"
           autocomplete="off"
           @keydown.enter.prevent="confirmCreateFolder"
         />
       </label>
       <p v-if="createFolderIssue && createFolderName" class="mt-2 text-xs text-error">{{ createFolderIssue }}</p>
       <template #footer>
-        <button type="button" class="btn btn-ghost" :disabled="createFolderBusy" @click="createFolderModal = false">Cancel</button>
+        <button type="button" class="btn btn-ghost" :disabled="createFolderBusy" @click="createFolderModal = false">{{ $t('common.cancel') }}</button>
         <button
           type="button"
           class="btn btn-primary"
@@ -412,17 +418,17 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
           @click="confirmCreateFolder"
         >
           <span v-if="createFolderBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          Create
+          {{ $t('common.create') }}
         </button>
       </template>
     </ModalDialog>
 
-    <ModalDialog v-if="deleteTarget" title="Delete asset" @close="deleteTarget = null" max-width="max-h-sm">
+    <ModalDialog v-if="deleteTarget" :title="$t('assets.deleteTitle')" @close="deleteTarget = null" max-width="max-h-sm">
       <p class="text-sm">
-        Delete <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">/assets/{{ deleteTarget.id }}</code> from the shared store? This cannot be undone.
+        {{ $t('assets.deletePrefix') }} <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">/assets/{{ deleteTarget.id }}</code> {{ $t('assets.deleteSuffix') }}
       </p>
       <template #footer>
-        <button type="button" class="btn btn-ghost" :disabled="deleteBusy" @click="deleteTarget = null">Cancel</button>
+        <button type="button" class="btn btn-ghost" :disabled="deleteBusy" @click="deleteTarget = null">{{ $t('common.cancel') }}</button>
         <button
           type="button"
           class="btn btn-error"
@@ -431,7 +437,7 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
           @click="confirmDelete"
         >
           <span v-if="deleteBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          Delete
+          {{ $t('common.delete') }}
         </button>
       </template>
     </ModalDialog>

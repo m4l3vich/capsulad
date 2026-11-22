@@ -1,11 +1,13 @@
 <script setup>
 import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { navigate } from '../router.js'
 import { login, runAuthMutation, session } from '../lib/session.js'
 import { notify } from '../lib/toast.js'
 
 defineProps({ expired: { type: Boolean, default: false } })
 
+const { t } = useI18n()
 const password = ref('')
 const busy = ref(false)
 
@@ -24,7 +26,7 @@ async function submit() {
     // only the requested destination is left for this view to apply.
     navigate(target, { replace: true })
   } catch (err) {
-    notify.error(err?.message || 'Sign in failed')
+    notify.error(err?.message || t('login.failed'))
   } finally {
     busy.value = false
   }
@@ -42,16 +44,16 @@ async function submit() {
         </div>
 
         <div>
-          <h1 class="text-lg font-semibold">Sign in to Web UI</h1>
+          <h1 class="text-lg font-semibold">{{ $t('login.title') }}</h1>
         </div>
 
         <div v-if="expired" class="alert alert-warning py-2" role="alert">
-          <span class="text-sm">The session ended. Please sign in again.</span>
+          <span class="text-sm">{{ $t('login.expired') }}</span>
         </div>
 
         <form class="flex flex-col gap-3" @submit.prevent="submit">
           <label class="form-control w-full">
-            <span class="label-text pb-1 text-sm font-medium">Administrator password</span>
+            <span class="label-text pb-1 text-sm font-medium">{{ $t('login.passwordLabel') }}</span>
             <input
               v-model="password"
               type="password"
@@ -64,12 +66,12 @@ async function submit() {
           </label>
           <button type="submit" class="btn btn-primary w-full" :disabled="busy || !password">
             <span v-if="busy" class="loading loading-spinner loading-xs"></span>
-            {{ busy ? 'Signing in…' : 'Sign in' }}
+            {{ busy ? $t('login.signingIn') : $t('login.signIn') }}
           </button>
         </form>
 
         <p class="text-xs leading-relaxed text-base-content/60">
-          The certificate is self-signed; compare its fingerprint with
+          {{ $t('login.certNote') }}
           <code class="rounded bg-base-200 px-1 py-0.5 font-mono select-all">capsulad-cli cert status</code>.
         </p>
       </div>

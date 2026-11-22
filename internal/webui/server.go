@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
@@ -151,6 +152,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/password", s.sessionOnly(s.changePassword))
 	mux.HandleFunc("GET /api/status", s.anyAuth(s.apiStatus))
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
+	mux.HandleFunc("GET /api/ca.pem", s.anyAuth(s.caPEM))
+	// The Wi-Fi routes are the machine-facing form of the shared controller.
+	// An operator key drives them; a status-scoped key is refused. Methodless
+	// registrations answer 405 instead of falling through to the SPA.
+	mux.HandleFunc("GET /api/wifi", s.operatorOnly(s.httpWifiStatus))
+	mux.HandleFunc("POST /api/wifi/scan", s.operatorOnly(s.httpWifiScan))
+	mux.HandleFunc("POST /api/wifi/connect", s.operatorOnly(s.httpWifiConnect))
+	mux.HandleFunc("POST /api/wifi/forget", s.operatorOnly(s.httpWifiForget))
+	mux.HandleFunc("/api/wifi", wifiMethodNotAllowed)
+	mux.HandleFunc("/api/wifi/scan", wifiMethodNotAllowed)
+	mux.HandleFunc("/api/wifi/connect", wifiMethodNotAllowed)
+	mux.HandleFunc("/api/wifi/forget", wifiMethodNotAllowed)
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
 	mux.HandleFunc("GET /api/apps/{appID}/guide", s.sessionOnly(s.appGuide))
 	mux.HandleFunc("GET /api/apps/{appID}/boot", s.sessionOnly(s.appBoot))
@@ -180,17 +193,32 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		return err
+	}
+	return s.serve(ctx, ln)
+}
+
+// serve runs the HTTPS server on an already-bound listener. The probe wrapper
+// answers plain HTTP with guidance instead of a TLS handshake error; TLS
+// connections are handed to the same server and certificate as before.
+func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
 		Addr:              s.Addr,
 		Handler:           s.Handler(),
 		TLSConfig:         s.TLS,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       90 * time.Second,
+		// Wi-Fi connect allows a 60 s association; the reply must still fit.
+		WriteTimeout: 90 * time.Second,
+		IdleTimeout:  90 * time.Second,
 	}
-	ln, err := net.Listen("tcp", s.Addr)
-	if err != nil {
+	// ServeTLS normally wires HTTP/2 from TLSConfig.NextProtos. Because the
+	// listener is wrapped here, configure it explicitly so negotiated h2
+	// connections keep the same handler behaviour.
+	if err := http2.ConfigureServer(srv, nil); err != nil {
+		_ = ln.Close()
 		return err
 	}
 	s.Logs.Infof("webui", "", "HTTPS listening on %s (self-signed certificate, password/API-key auth; realtime WebSocket)", ln.Addr())
@@ -198,7 +226,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// was revoked so their staged work does not outlive the credential.
 	go s.reconcileMCPKeysOnAccess(ctx)
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ServeTLS(ln, "", "") }()
+	go func() { errCh <- srv.Serve(tls.NewListener(&probeListener{Listener: ln}, s.TLS)) }()
 	select {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -228,8 +256,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 
 // sessionOnly wraps a handler that requires a browser session. API keys are
 // deliberately not accepted: a browser mutation proves the session's CSRF and
-// origin, and an operator key uses operatorOnly for the one machine-facing
-// mutation route.
+// origin, and a machine-facing route uses operatorOnly instead.
 func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := s.authenticate(r)
@@ -261,11 +288,12 @@ func (s *Server) sessionOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// operatorOnly authorizes one machine-facing mutation: an operator-scoped API
-// key (the automation credential the MCP frontend uses) or an administrator
-// browser session with the usual same-origin and CSRF proof. It is deliberately
-// narrower than anyAuth, which accepts a status key, and unlike sessionOnly it
-// accepts API keys so a headless caller can drive the one app-specific route.
+// operatorOnly authorizes the machine-facing administration routes: an
+// operator-scoped API key (the automation credential the MCP frontend and the
+// Wi-Fi CLI use) or an administrator browser session with the usual
+// same-origin and CSRF proof. It is deliberately narrower than anyAuth, which
+// accepts a status key, and unlike sessionOnly it accepts API keys so a
+// headless caller can drive these routes.
 func (s *Server) operatorOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := s.authenticate(r)
@@ -572,13 +600,24 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 
 // certPEM serves the public server certificate for TLS clients to trust.
 func (s *Server) certPEM(w http.ResponseWriter, r *http.Request) {
+	s.serveCertificate(w, "capsulad-server.crt")
+}
+
+// caPEM serves the same self-signed certificate under the name a client uses
+// when it imports the speaker's public trust anchor as a root/CA certificate.
+// The bytes are identical; only the download name differs.
+func (s *Server) caPEM(w http.ResponseWriter, r *http.Request) {
+	s.serveCertificate(w, "capsulad-ca.crt")
+}
+
+func (s *Server) serveCertificate(w http.ResponseWriter, filename string) {
 	pem, err := os.ReadFile(s.Auth.CertPath())
 	if err != nil {
-		http.Error(w, "certificate unavailable: "+err.Error(), http.StatusNotFound)
+		http.Error(w, "certificate unavailable", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="capsulad-server.crt"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write(pem)
 }
 

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -82,6 +83,8 @@ command:
 		fmt.Printf("capsulad-cli %s (sdk %s)\n", version.Version, version.SDKVersion)
 	case "status", "doctor":
 		exit(runStatus(resolveSocket(dataDir, socket), jsonOut))
+	case "wifi":
+		exit(runWifi(args, dataDir, securityDir, jsonOut))
 	case "app":
 		exit(runApp(args, dataDir, socket, nativeLibDir))
 	case "settings":
@@ -114,6 +117,14 @@ Global flags (before the command): -data-dir DIR, -socket PATH, -security-dir DI
 Commands:
   status                         device, resources and runs
   doctor                         same as status with backend diagnostics
+  wifi status [-web-url URL]     Wi-Fi state, access point and saved networks
+  wifi scan [-web-url URL]       explicit scan for nearby networks
+  wifi connect SSID [-password PASS | -password-stdin] [-security MODE] [-web-url URL]
+                                 save and select a Wi-Fi network (-security defaults to wpa2;
+                                 use open for an open network)
+  wifi forget SSID [-web-url URL]  forget a saved network
+                                 (-web-url default: https://127.0.0.1:8443; the CLI mints
+                                 and revokes a short-lived operator key per call)
   app list                       installed applications
   app install PATH               install or atomically replace a package (dir or .tar.gz);
                                  activated immediately when capsulad is running
@@ -125,14 +136,16 @@ Commands:
   app provenance ID              computed native-binary provenance status
   deploy PATH                    apply a deployment bundle (dir or .tar.gz)
   settings show                  device settings
-  settings app APPID [k=v ...]   show or update one application's settings
+  settings app APPID [k=v ... | KEY@-]  show or update one application's settings (KEY@- reads the value from stdin)
   logs [-app ID] [-n N]          recent structured logs
   media list                     players published via the media contract
   cert init                      create the self-signed HTTPS server certificate
   cert renew                     renew the self-signed server certificate
   cert status                    show certificate fingerprint, names and expiry
-  auth init                      initialize admin password and certificate
-  auth set-password              change the admin password
+  auth init [-password PASS | -password-stdin]
+                                 initialize admin password and certificate
+  auth set-password [-password PASS | -password-stdin]
+                                 change the admin password (stdin reads one line)
   auth key create NAME           create a static API key (printed once)
                                  [--scope status|assistant|operator] (repeatable; default status)
   auth key list                  list API keys, revocation state and scopes
@@ -471,7 +484,7 @@ func runSettings(args []string, socket string, jsonOut bool) error {
 		return runAppSettings(args[1:], socket, jsonOut)
 	}
 	if len(args) == 0 || args[0] != "show" {
-		return fmt.Errorf("usage: capsulad-cli settings show\n       capsulad-cli settings app APPID [key=value ...]")
+		return fmt.Errorf("usage: capsulad-cli settings show\n       capsulad-cli settings app APPID [key=value ... | key@-]")
 	}
 	conn, err := dial(socket)
 	if err != nil {
@@ -515,15 +528,85 @@ func runSettings(args []string, socket string, jsonOut bool) error {
 	return nil
 }
 
-// runAppSettings shows or updates one application's typed settings. Values are
-// read as JSON when they parse and as strings otherwise, so
-// `timezone=Asia/Shanghai` needs no quoting.
+// stdinSettingKey recognises the secret-safe value form: `KEY@-` or `KEY=-`.
+// The value comes from stdin, never argv.
+func stdinSettingKey(pair string) (string, bool) {
+	if key, ok := strings.CutSuffix(pair, "@-"); ok {
+		return key, true
+	}
+	if key, raw, ok := strings.Cut(pair, "="); ok && raw == "-" {
+		return key, true
+	}
+	return "", false
+}
+
+// buildAppSettingChanges turns setting arguments into JSON values. `KEY=VALUE`
+// keeps the historical JSON-sniffing behaviour. `KEY@-` (or `KEY=-`) reads one
+// line and stores it as a JSON string without sniffing, and must be the only
+// setting in the invocation so a secret never shares argv with another edit.
+func buildAppSettingChanges(pairs []string, readStdin func() (string, error)) ([]*frameworkv1.AppSettingChange, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	key, fromStdin := stdinSettingKey(pairs[0])
+	if fromStdin {
+		if len(pairs) != 1 {
+			return nil, fmt.Errorf("a setting read from stdin must be the only setting in one invocation")
+		}
+		if key == "" {
+			return nil, fmt.Errorf("expected key@- or key=-, got %q", pairs[0])
+		}
+		raw, err := readStdin()
+		if err != nil {
+			if errors.Is(err, errNoStdinLine) {
+				return nil, fmt.Errorf("no value on stdin")
+			}
+			return nil, err
+		}
+		if raw == "" {
+			return nil, fmt.Errorf("value on stdin is empty")
+		}
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []*frameworkv1.AppSettingChange{{Key: key, ValueJson: string(encoded)}}, nil
+	}
+	changes := make([]*frameworkv1.AppSettingChange, 0, len(pairs))
+	for _, pair := range pairs {
+		if _, ok := stdinSettingKey(pair); ok {
+			return nil, fmt.Errorf("a setting read from stdin must be the only setting in one invocation")
+		}
+		key, raw, ok := strings.Cut(pair, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("expected key=value or key@-, got %q", pair)
+		}
+		value := raw
+		if !json.Valid([]byte(raw)) {
+			value = strconv.Quote(raw)
+		}
+		changes = append(changes, &frameworkv1.AppSettingChange{Key: key, ValueJson: value})
+	}
+	return changes, nil
+}
+
+func readSettingValue() (string, error) {
+	return readSecretFromStdin("Setting value: ")
+}
+
+// runAppSettings shows or updates one application's typed settings. `key=value`
+// values are read as JSON when they parse and as strings otherwise, so
+// `timezone=Asia/Shanghai` needs no quoting; `key@-` reads one raw line instead.
 func runAppSettings(args []string, socket string, jsonOut bool) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: capsulad-cli settings app APPID [key=value ...]")
+		return fmt.Errorf("usage: capsulad-cli settings app APPID [key=value ... | key@-]")
 	}
 	appID := args[0]
 	pairs := args[1:]
+	changes, err := buildAppSettingChanges(pairs, readSettingValue)
+	if err != nil {
+		return err
+	}
 	conn, err := dial(socket)
 	if err != nil {
 		return err
@@ -555,18 +638,6 @@ func runAppSettings(args []string, socket string, jsonOut bool) error {
 	snap, err := client.Get(ctx, &frameworkv1.GetAppConfigurationRequest{AppId: appID})
 	if err != nil {
 		return err
-	}
-	changes := make([]*frameworkv1.AppSettingChange, 0, len(pairs))
-	for _, pair := range pairs {
-		key, raw, ok := strings.Cut(pair, "=")
-		if !ok || key == "" {
-			return fmt.Errorf("expected key=value, got %q", pair)
-		}
-		value := raw
-		if !json.Valid([]byte(raw)) {
-			value = strconv.Quote(raw)
-		}
-		changes = append(changes, &frameworkv1.AppSettingChange{Key: key, ValueJson: value})
 	}
 	out, err := client.Update(ctx, &frameworkv1.UpdateAppConfigurationRequest{
 		AppId: appID, ExpectedRevision: snap.Revision, Changes: changes,
@@ -726,11 +797,16 @@ func runAuth(args []string, dataDir, securityDir string) error {
 	case "init":
 		fs := flag.NewFlagSet("auth init", flag.ContinueOnError)
 		password := fs.String("password", "", "admin password (empty generates one)")
+		passwordStdin := fs.Bool("password-stdin", false, "read the admin password from the first stdin line")
 		hostname := fs.String("hostname", "", "certificate hostname")
 		days := fs.Int("days", 0, "certificate lifetime in days")
 		var ips stringList
 		fs.Var(&ips, "ip", "additional IP SAN (repeatable)")
 		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		initPassword, err := passwordFromFlags(*password, *passwordStdin, "Admin password: ")
+		if err != nil {
 			return err
 		}
 		if _, err := store.TLSConfig(); err != nil {
@@ -741,7 +817,7 @@ func runAuth(args []string, dataDir, securityDir string) error {
 			printCert(info)
 		}
 		if !store.PasswordSet() {
-			pw := *password
+			pw := initPassword
 			generated := false
 			if pw == "" {
 				pw = randomPassword()
@@ -762,10 +838,14 @@ func runAuth(args []string, dataDir, securityDir string) error {
 	case "set-password":
 		fs := flag.NewFlagSet("auth set-password", flag.ContinueOnError)
 		password := fs.String("password", "", "new admin password (empty prompts)")
+		passwordStdin := fs.Bool("password-stdin", false, "read the new password from the first stdin line")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		pw := *password
+		pw, err := passwordFromFlags(*password, *passwordStdin, "New admin password: ")
+		if err != nil {
+			return err
+		}
 		if pw == "" {
 			if term.IsTerminal(int(os.Stdin.Fd())) {
 				first, err := readPassword("New admin password: ")
@@ -862,6 +942,55 @@ func randomPassword() string {
 		panic(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+// passwordFromFlags resolves the password flags shared by `auth init` and
+// `auth set-password`. An empty result means the caller keeps its existing
+// prompt/generate behaviour.
+func passwordFromFlags(password string, stdinFlag bool, prompt string) (string, error) {
+	if password != "" && stdinFlag {
+		return "", fmt.Errorf("use either -password or -password-stdin, not both")
+	}
+	if !stdinFlag {
+		return password, nil
+	}
+	line, err := readSecretFromStdin(prompt)
+	if err != nil {
+		if errors.Is(err, errNoStdinLine) {
+			return "", fmt.Errorf("no password on stdin")
+		}
+		return "", err
+	}
+	if line == "" {
+		return "", fmt.Errorf("password on stdin is empty")
+	}
+	return line, nil
+}
+
+// readSecretFromStdin reads one secret line. On a terminal it uses the
+// no-echo reader, so -password-stdin does not display the secret either.
+func readSecretFromStdin(prompt string) (string, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return readPassword(prompt)
+	}
+	return readStdinLine(os.Stdin)
+}
+
+// errNoStdinLine distinguishes an empty stream from an I/O failure so callers
+// can name the value they expected.
+var errNoStdinLine = errors.New("stdin has no line")
+
+// readStdinLine reads exactly one line. Scanner removes the newline; a trailing
+// carriage return from a CRLF stream is removed as well.
+func readStdinLine(r io.Reader) (string, error) {
+	sc := bufio.NewScanner(r)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return "", err
+		}
+		return "", errNoStdinLine
+	}
+	return strings.TrimSuffix(sc.Text(), "\r"), nil
 }
 
 // readPassword reads without echo on a terminal, or from stdin when piped.

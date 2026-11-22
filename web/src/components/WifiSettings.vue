@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ModalDialog from './ModalDialog.vue'
 import Icon from './Icon.vue'
 import { socket } from '../lib/ws.js'
@@ -14,6 +15,7 @@ import { WIFI_SIGNAL_ICONS } from '../lib/iconNames.js'
 // password "capsulad".
 
 const view = ref(null)
+const { t } = useI18n()
 const loadError = ref('')
 const busy = ref('')
 const scans = ref([])
@@ -35,32 +37,32 @@ const currentSsid = computed(() => view.value?.ssid || '')
 const fallbackPassword = computed(() => view.value?.apPasswordHint || 'capsulad')
 const connectedSsid = computed(() => (view.value?.state === 'connected' ? view.value.ssid || '' : ''))
 const joinTitle = computed(() =>
-  joinTarget.value ? `Connect to ${joinTarget.value}` : 'Connect to a hidden network'
+  joinTarget.value ? t('wifi.connectTo', { ssid: joinTarget.value }) : t('wifi.connectHidden')
 )
 
 function stateLabel(state) {
   return {
-    unavailable: 'No radio',
-    disconnected: 'Not connected',
-    connecting: 'Connecting',
-    connected: 'Connected',
-    ap_fallback: 'Setup access point',
-    error: 'Error'
-  }[state] || 'Unknown'
+    unavailable: t('wifi.stateNoRadio'),
+    disconnected: t('wifi.stateNotConnected'),
+    connecting: t('wifi.stateConnecting'),
+    connected: t('wifi.stateConnected'),
+    ap_fallback: t('wifi.stateApFallback'),
+    error: t('wifi.stateError')
+  }[state] || t('wifi.stateUnknown')
 }
 
 function signalLevel(dbm) {
   const value = Number(dbm)
-  if (!Number.isFinite(value) || value === 0) return { icon: WIFI_SIGNAL_ICONS.unknown, label: 'Signal strength unknown' }
-  if (value >= -55) return { icon: WIFI_SIGNAL_ICONS.strong, label: 'Strong signal' }
-  if (value >= -70) return { icon: WIFI_SIGNAL_ICONS.fair, label: 'Fair signal' }
-  if (value >= -80) return { icon: WIFI_SIGNAL_ICONS.weak, label: 'Weak signal' }
-  return { icon: WIFI_SIGNAL_ICONS.veryWeak, label: 'Very weak signal' }
+  if (!Number.isFinite(value) || value === 0) return { icon: WIFI_SIGNAL_ICONS.unknown, label: t('wifi.signalUnknown') }
+  if (value >= -55) return { icon: WIFI_SIGNAL_ICONS.strong, label: t('wifi.signalStrong') }
+  if (value >= -70) return { icon: WIFI_SIGNAL_ICONS.fair, label: t('wifi.signalFair') }
+  if (value >= -80) return { icon: WIFI_SIGNAL_ICONS.weak, label: t('wifi.signalWeak') }
+  return { icon: WIFI_SIGNAL_ICONS.veryWeak, label: t('wifi.signalVeryWeak') }
 }
 
 function securityLabel(security) {
   const value = String(security || '').toLowerCase()
-  if (!value || value === 'open') return 'Open'
+  if (!value || value === 'open') return t('wifi.openSecurity')
   if (value === 'wpa3') return 'WPA3'
   if (value === 'wpa2_wpa3') return 'WPA2/WPA3'
   if (value === 'wpa') return 'WPA'
@@ -136,13 +138,13 @@ function closeJoin() {
 
 function validateConnect() {
   const ssid = connect.ssid.trim()
-  if (!ssid) return 'Enter the network name, including for a hidden network.'
-  if (ssid.length > 32) return 'A network name is at most 32 characters.'
+  if (!ssid) return t('wifi.enterNetworkName')
+  if (ssid.length > 32) return t('wifi.nameTooLong')
   if (connect.security !== 'open') {
     const passphrase = connect.passphrase
-    if (!passphrase) return 'Enter the Wi-Fi password for this network.'
+    if (!passphrase) return t('wifi.passwordRequired')
     if (passphrase.length < 8 || passphrase.length > 63) {
-      return 'A WPA password must be 8 to 63 characters.'
+      return t('wifi.passwordLength')
     }
   }
   return ''
@@ -238,14 +240,14 @@ onUnmounted(() => {
     <div class="card-body gap-3 p-4">
       <div class="flex flex-wrap items-center gap-2">
         <Icon size="24px">wifi</Icon>
-        <h2 class="flex-grow text-lg font-semibold">Wi-Fi</h2>
+        <h2 class="flex-grow text-lg font-semibold">{{ $t('wifi.title') }}</h2>
         <button
           type="button"
           class="btn btn-sm btn-ghost"
           :disabled="!known.length"
           @click="openManage"
         >
-          Manage networks
+          {{ $t('wifi.manage') }}
         </button>
       </div>
 
@@ -255,20 +257,20 @@ onUnmounted(() => {
       </div>
 
       <div v-else-if="loadError && !data" class="alert alert-error py-2" role="alert">
-        <span class="text-sm">Wi-Fi state unavailable: {{ loadError }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Try again</button>
+        <span class="text-sm">{{ $t('wifi.unavailableState', { error: loadError }) }}</span>
+        <button type="button" class="btn btn-sm btn-ghost" @click="refresh">{{ $t('common.retry') }}</button>
       </div>
 
       <template v-else-if="data">
         <div v-if="!data.available" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3 border-2 border-neutral-300" role="status">
-          <p class="text-sm font-medium">Wi-Fi is unavailable on this speaker.</p>
-          <p class="text-xs text-base-content/60">Check that Wi-Fi is enabled on the speaker, then try again.</p>
+          <p class="text-sm font-medium">{{ $t('wifi.unavailable') }}</p>
+          <p class="text-xs text-base-content/60">{{ $t('wifi.unavailableHint') }}</p>
         </div>
 
         <div v-else-if="data.apActive" class="flex flex-col gap-1 rounded-box bg-orange-100/60 p-3 border-orange-500 border" role="status">
-          <p class="text-md font-medium">Setup access point active</p>
+          <p class="text-md font-medium">{{ $t('wifi.apActive') }}</p>
           <p class="text-sm text-base-content/60">
-            No saved network could be joined. Here you can connect to a new Wi-Fi network.
+            {{ $t('wifi.apActiveBody') }}
           </p>
         </div>
 
@@ -276,28 +278,27 @@ onUnmounted(() => {
           <details>
             <summary class="text-sm font-medium cursor-pointer">
               <Icon size="16px" class="align-text-top mr-1">wifi_off</Icon>
-              Fallback access point
+              {{ $t('wifi.fallback') }}
             </summary>
             <p class="text-sm mt-2">
-              If the device can't connect to any known network at startup, it will activate a Wi-Fi access point for you to change settings:.
+              {{ $t('wifi.fallbackBody') }}
             </p>
 
             <dl class="grid grid-cols-2 justify-self-start gap-1 my-3">
-              <dt class="text-base-content/60">Network name:</dt>
+              <dt class="text-base-content/60">{{ $t('wifi.networkName') }}</dt>
               <dd>
                 <code class="rounded bg-base-300 px-1 py-0.5 font-mono block">{{ data.apSsid }}</code>
               </dd>
 
-              <dt class="text-base-content/60">Password:</dt>
+              <dt class="text-base-content/60">{{ $t('wifi.password') }}</dt>
               <dd>
                 <code class="rounded bg-base-300 px-1 py-0.5 font-mono block">{{ fallbackPassword }}</code>
               </dd>
             </dl>
 
             <p class="text-sm">
-              Join that network, then open
-              <code class="rounded bg-base-300 px-1 py-0.5 font-mono">{{ data.apPortalUrl || 'http://192.168.4.1' }}</code>
-              in your browser.
+              {{ $t('wifi.joinPortal') }}
+              <code class="rounded bg-base-300 px-1 py-0.5 font-mono">{{ data.apPortalUrl || 'http://192.168.4.1' }}</code>.
             </p>
           </details>
         </div>
@@ -310,7 +311,7 @@ onUnmounted(() => {
             <div class="min-w-0 flex-1">
               <p class="truncate text-sm font-medium">{{ connectedSsid || stateLabel(data.state) }}</p>
               <p v-if="connectedSsid" class="truncate font-mono text-xs text-base-content/60">
-                {{ data.ipAddress || 'No address yet' }}
+                {{ data.ipAddress || $t('common.noAddressYet') }}
               </p>
             </div>
             <span
@@ -320,12 +321,12 @@ onUnmounted(() => {
             ></span>
           </div>
 
-          <p v-if="data.lastError" class="text-xs text-error">Last attempt: {{ data.lastError }}</p>
+          <p v-if="data.lastError" class="text-xs text-error">{{ $t('wifi.lastAttempt', { error: data.lastError }) }}</p>
         </template>
 
         <div v-if="data.available">
           <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-sm font-semibold">Nearby networks</h3>
+            <h3 class="text-sm font-semibold">{{ $t('wifi.nearby') }}</h3>
             <button
               type="button"
               class="btn btn-sm btn-primary"
@@ -334,21 +335,21 @@ onUnmounted(() => {
               @click="scan"
             >
               <span v-if="busy === 'scan'" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-              {{ busy === 'scan' ? 'Scanning…' : 'Scan' }}
+              {{ busy === 'scan' ? $t('wifi.scanning') : $t('wifi.scan') }}
             </button>
           </div>
 
           <p v-if="!data.scanSupported" class="text-sm text-base-content/60">
-            This adapter cannot scan for nearby networks.
+            {{ $t('wifi.cannotScan') }}
           </p>
           <p v-else-if="!scanned" class="text-sm text-base-content/60">
-            No scan yet. Press Scan to list nearby networks.
+            {{ $t('wifi.noScanYet') }}
           </p>
           <p v-else-if="!scans.length" class="text-sm text-base-content/60">
-            No networks found. Move closer to the router and scan again.
+            {{ $t('wifi.noNetworks') }}
           </p>
 
-          <ul v-else class="max-h-64 space-y-1 overflow-y-auto" aria-label="Scan results">
+          <ul v-else class="max-h-64 space-y-1 overflow-y-auto" :aria-label="$t('wifi.scanResults')">
             <li
               v-for="network in scans"
               :key="network.ssid + network.security + network.frequencyMhz"
@@ -357,7 +358,7 @@ onUnmounted(() => {
               <div class="min-w-0">
                 <p class="truncate text-sm font-medium">
                   {{ network.ssid }}
-                  <span v-if="network.ssid === currentSsid" class="badge badge-success badge-sm ml-1">current</span>
+                  <span v-if="network.ssid === currentSsid" class="badge badge-success badge-sm ml-1">{{ $t('common.current') }}</span>
                 </p>
                 <p class="flex flex-wrap items-center gap-1 text-xs text-base-content/60">
                   <span
@@ -371,7 +372,7 @@ onUnmounted(() => {
                   <span>{{ securityLabel(network.security) }}</span>
                 </p>
               </div>
-              <button type="button" class="btn btn-xs btn-ghost" @click="openJoin(network)">Connect</button>
+              <button type="button" class="btn btn-xs btn-ghost" @click="openJoin(network)">{{ $t('wifi.connect') }}</button>
             </li>
           </ul>
 
@@ -382,17 +383,17 @@ onUnmounted(() => {
             @click="openJoin()"
           >
             <Icon size="16px" aria-hidden="true">visibility_off</Icon>
-            Connect to a hidden network…
+            {{ $t('wifi.hidden') }}
           </button>
         </div>
       </template>
     </div>
 
-    <ModalDialog v-if="manageOpen" title="Saved networks" max-width="max-w-lg" @close="closeManage">
+    <ModalDialog v-if="manageOpen" :title="$t('wifi.savedNetworks')" max-width="max-w-lg" @close="closeManage">
       <p class="mb-3 text-sm text-base-content/60">
-        The active network stays protected while the console is connected; forget other saved networks here.
+        {{ $t('wifi.savedHint') }}
       </p>
-      <p v-if="!known.length" class="text-sm text-base-content/60">No saved networks yet.</p>
+      <p v-if="!known.length" class="text-sm text-base-content/60">{{ $t('wifi.noSaved') }}</p>
       <ul v-else class="max-h-72 space-y-1 overflow-y-auto">
         <li
           v-for="network in known"
@@ -402,32 +403,32 @@ onUnmounted(() => {
           <div class="min-w-0">
             <p class="truncate text-sm font-medium">
               {{ network.ssid }}
-              <span v-if="network.connected" class="badge badge-success badge-sm ml-1">connected</span>
+              <span v-if="network.connected" class="badge badge-success badge-sm ml-1">{{ $t('common.connected') }}</span>
             </p>
           </div>
           <div class="flex items-center gap-1">
             <template v-if="forgetting === network.ssid">
               <button type="button" class="btn btn-xs btn-error" :disabled="busy === 'forget'" @click="forget(network)">
-                Confirm forget
+                {{ $t('wifi.confirmForget') }}
               </button>
-              <button type="button" class="btn btn-xs btn-ghost" @click="forgetting = ''">Cancel</button>
+              <button type="button" class="btn btn-xs btn-ghost" @click="forgetting = ''">{{ $t('common.cancel') }}</button>
             </template>
             <button
               v-else
               type="button"
               class="btn btn-xs btn-outline"
               :disabled="isProtected(network) || busy === 'forget'"
-              :title="isProtected(network) ? 'The current network cannot be forgotten here' : `Forget ${network.ssid}`"
+              :title="isProtected(network) ? $t('wifi.protectedTitle') : $t('wifi.forgetTitle', { ssid: network.ssid })"
               @click="forget(network)"
             >
-              Forget
+              {{ $t('wifi.forget') }}
             </button>
           </div>
         </li>
       </ul>
 
       <template #footer>
-        <button type="button" class="btn btn-ghost" @click="closeManage">Close</button>
+        <button type="button" class="btn btn-ghost" @click="closeManage">{{ $t('common.close') }}</button>
       </template>
     </ModalDialog>
 
@@ -439,7 +440,7 @@ onUnmounted(() => {
     >
       <form id="wifi-join-form" class="flex flex-col gap-3" novalidate @submit.prevent="submitConnect">
         <label class="flex w-full flex-col gap-1 text-sm">
-          <span class="font-medium">Network name</span>
+          <span class="font-medium">{{ $t('wifi.networkNameLabel') }}</span>
           <input
             v-model="connect.ssid"
             type="text"
@@ -447,40 +448,40 @@ onUnmounted(() => {
             maxlength="32"
             autocomplete="off"
             spellcheck="false"
-            placeholder="Network name"
+            :placeholder="$t('wifi.networkNameLabel')"
           />
         </label>
 
         <label class="flex w-full flex-col gap-1 text-sm">
-          <span class="font-medium">Security</span>
+          <span class="font-medium">{{ $t('wifi.security') }}</span>
           <select v-model="connect.security" class="select select-bordered select-sm w-full">
             <option value="wpa2">WPA2</option>
             <option value="wpa2_wpa3">WPA2/WPA3</option>
             <option value="wpa3">WPA3</option>
-            <option value="open">Open (no password)</option>
+            <option value="open">{{ $t('wifi.openNoPassword') }}</option>
           </select>
         </label>
 
         <label v-if="connect.security !== 'open'" class="flex w-full flex-col gap-1 text-sm">
-          <span class="font-medium">Password</span>
+          <span class="font-medium">{{ $t('wifi.passphrase') }}</span>
           <input
             v-model="connect.passphrase"
             type="password"
             class="input input-bordered input-sm w-full"
             autocomplete="new-password"
             maxlength="63"
-            placeholder="8 to 63 characters"
+            :placeholder="$t('wifi.passphraseHint')"
           />
         </label>
 
         <p class="text-xs text-base-content/60">
-          The speaker leaves its current network only after the new one associates.
+          {{ $t('wifi.leavesAfter') }}
         </p>
       </form>
 
       <template #footer>
         <button type="button" class="btn btn-ghost" :disabled="busy === 'connect'" @click="closeJoin">
-          Cancel
+          {{ $t('common.cancel') }}
         </button>
         <button
           type="submit"
@@ -490,7 +491,7 @@ onUnmounted(() => {
           :aria-busy="busy === 'connect' ? 'true' : 'false'"
         >
           <span v-if="busy === 'connect'" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          {{ busy === 'connect' ? 'Connecting…' : 'Connect' }}
+          {{ busy === 'connect' ? $t('wifi.connecting') : $t('wifi.connect') }}
         </button>
       </template>
     </ModalDialog>

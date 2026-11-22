@@ -21,9 +21,11 @@ Two rules frame everything on this page:
 
 ## Availability and ABI
 
-The capabilities are part of ABI **1.0** (`capsulad_abi_minor()` returns `0`, version
-`1.0.0`) in this pre-release tree; their entry points are appended to the function table. A
-native app that uses any of them declares the major requirement:
+The capabilities are part of ABI **1.0** (`capsulad_abi_minor()` returns `0`, version `1.0.0`);
+their entry points are appended to the function table after `http_cancel`, in the order below,
+and the table stays append-only at ABI 1.0. C ABI negotiation, buffer ownership and the
+one-logical-reader rule are in [sdk.md](sdk.md#the-frozen-c-abi). A native app that uses any of
+the networking capabilities declares the major requirement:
 
 ```toml
 [native_sdk]
@@ -31,10 +33,8 @@ abi_major = 1
 min_minor = 0
 ```
 
-- The entry points are **appended** to the function table after `http_cancel`, in the order
-  below. A binding built against the pre-networking prefix copies its shorter table and sees
-  them as absent; the library never reorders or removes a pointer. The table stays append-only
-  at ABI 1.0 until the first external consumer or release.
+- A binding built against the pre-networking prefix copies its shorter table and sees these
+  pointers as absent; the library never reorders or removes a pointer.
 - Every entry point returns a `capsulad_status`. Handles are `uint64_t` and `0` is never valid.
   Output buffers are library-owned `capsulad_buf` values freed with `buf_free`.
 - Handles are process-local and thread-safe with **one logical reader**: one thread may be in
@@ -208,7 +208,7 @@ ports 319 (event) and 320 (general) — so the policy is deliberately narrow:
   speaks the control protocol directly could send from it. The daemon's guarantee is the
   narrow group/port/interface policy and the authenticated control channel, not a
   per-syscall filter; treat native apps as trusted code, as the sandbox section says.
-- There is still no group-join API for an arbitrary port. If a future protocol needs multicast
+- There is no group-join API for an arbitrary port. If a future protocol needs multicast
   on another port, the policy is extended deliberately, not by widening this option.
 
 ```c

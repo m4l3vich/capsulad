@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { link, navigate, route, startRouter } from './router.js'
 import { authMutationSettled, loadSession, logout, runAuthMutation, session, watchAuthSocket } from './lib/session.js'
 import { liveState } from './lib/live.js'
@@ -7,6 +8,7 @@ import { socket } from './lib/ws.js'
 import { dismissToast, notify } from './lib/toast.js'
 import ToastHost from './components/ToastHost.vue'
 import ThemeSwitch from './components/ThemeSwitch.vue'
+import LanguageSwitch from './components/LanguageSwitch.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
 import SettingsView from './views/SettingsView.vue'
@@ -14,16 +16,18 @@ import AssetsView from './views/AssetsView.vue'
 import AccessView from './views/AccessView.vue'
 import DiagnosticsView from './views/DiagnosticsView.vue'
 
+const { t } = useI18n()
+
 let offExpired = null
 let recovering = null
 
-const nav = [
-  { path: '/', label: 'Overview' },
-  { path: '/settings', label: 'Settings' },
-  { path: '/files', label: 'Files' },
-  { path: '/access', label: 'Access' },
-  { path: '/diagnostics', label: 'Diagnostics' }
-]
+const nav = computed(() => [
+  { path: '/', label: t('nav.overview') },
+  { path: '/settings', label: t('nav.settings') },
+  { path: '/files', label: t('nav.files') },
+  { path: '/access', label: t('nav.access') },
+  { path: '/diagnostics', label: t('nav.diagnostics') }
+])
 
 const views = {
   '/': OverviewView,
@@ -36,12 +40,12 @@ const views = {
 const view = computed(() => views[route.path] || null)
 
 const connection = computed(() => ({
-  open: { label: 'Connected', dot: 'bg-success' },
-  connecting: { label: 'Connecting', dot: 'bg-warning' },
-  reconnecting: { label: 'Reconnecting', dot: 'bg-warning' },
-  expired: { label: 'Session ended', dot: 'bg-error' },
-  closed: { label: 'Offline', dot: 'bg-error' }
-}[liveState.value] || { label: 'Offline', dot: 'bg-error' }))
+  open: { label: t('connection.connected'), dot: 'bg-success' },
+  connecting: { label: t('connection.connecting'), dot: 'bg-warning' },
+  reconnecting: { label: t('connection.reconnecting'), dot: 'bg-warning' },
+  expired: { label: t('connection.sessionEnded'), dot: 'bg-error' },
+  closed: { label: t('connection.offline'), dot: 'bg-error' }
+}[liveState.value] || { label: t('connection.offline'), dot: 'bg-error' }))
 
 // Connection feedback lives in the toast stack: one slot, replaced in place as
 // the socket moves between states, so it never stacks on repeated retries and
@@ -49,14 +53,14 @@ const connection = computed(() => ({
 // screen has no live connection of its own.
 const CONNECTION_TOAST_ID = 'connection-state'
 const connectionToasts = {
-  connecting: () => notify.info('Connecting to the speaker…', { id: CONNECTION_TOAST_ID }),
+  connecting: () => notify.info(t('connection.connectingToast'), { id: CONNECTION_TOAST_ID }),
   reconnecting: () => notify.warning(
-    'Connection lost. Reconnecting; the page keeps its last snapshot until the device answers.',
+    t('connection.lostToast'),
     { id: CONNECTION_TOAST_ID }
   ),
   // The page cannot act on a closed socket until it reopens, so this one stays.
   closed: () => notify.error(
-    'The realtime connection is closed. Live controls are unavailable until it reconnects.',
+    t('connection.closedToast'),
     { id: CONNECTION_TOAST_ID, timeout: 0 }
   )
 }
@@ -143,7 +147,7 @@ async function signOut() {
     class="fixed left-3 top-3 z-50 -translate-y-24 rounded bg-primary px-3 py-2 text-sm text-primary-content transition-transform focus:translate-y-0"
     href="#main"
   >
-    Skip to content
+    {{ $t('common.skipToContent') }}
   </a>
 
   <div v-if="!session.checked" class="flex min-h-screen items-center justify-center p-4">
@@ -154,7 +158,7 @@ async function signOut() {
         </div>
         <div class="skeleton h-3 w-2/3"></div>
         <div class="skeleton h-3 w-1/2"></div>
-        <span class="text-xs text-base-content/60">Checking the session…</span>
+        <span class="text-xs text-base-content/60">{{ $t('common.checkingSession') }}</span>
       </div>
     </div>
   </div>
@@ -168,10 +172,10 @@ async function signOut() {
           <a
             v-bind="link('/')"
             class="whitespace-nowrap rounded px-1 py-1 font-mono text-sm font-semibold tracking-tight text-primary"
-            title="capsulad main page"
+            :title="$t('nav.capsuladMainPage')"
           >capsulad v{{ session.version || '—' }}</a>
 
-          <nav class="order-last flex w-full items-center gap-1 overflow-x-auto pb-0.5 sm:order-none sm:w-auto sm:pb-0" aria-label="Main">
+          <nav class="order-last flex w-full items-center gap-1 overflow-x-auto pb-0.5 sm:order-none sm:w-auto sm:pb-0" :aria-label="$t('nav.main')">
             <a
               v-for="item in nav"
               :key="item.path"
@@ -188,7 +192,8 @@ async function signOut() {
               <span class="hidden sm:inline">{{ connection.label }}</span>
             </span>
             <ThemeSwitch />
-            <button type="button" class="btn btn-sm btn-outline" @click="signOut">Sign out</button>
+            <LanguageSwitch />
+            <button type="button" class="btn btn-sm btn-outline" @click="signOut">{{ $t('nav.signOut') }}</button>
           </div>
         </div>
       </div>
@@ -199,10 +204,10 @@ async function signOut() {
 
       <section v-else class="card border border-base-300 bg-base-100">
         <div class="card-body items-start gap-3">
-          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Not found</p>
-          <h1 class="text-xl font-semibold">This page does not exist</h1>
-          <p class="text-sm text-base-content/70">The console has Overview, Apps, Settings, Assets, Access and Diagnostics. Use the navigation above or return to Overview.</p>
-          <a v-bind="link('/')" class="btn btn-primary btn-sm">Go to Overview</a>
+          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">{{ $t('notFound.label') }}</p>
+          <h1 class="text-xl font-semibold">{{ $t('notFound.title') }}</h1>
+          <p class="text-sm text-base-content/70">{{ $t('notFound.body') }}</p>
+          <a v-bind="link('/')" class="btn btn-primary btn-sm">{{ $t('notFound.go') }}</a>
         </div>
       </section>
     </main>

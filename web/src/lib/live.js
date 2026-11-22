@@ -1,5 +1,6 @@
 import { onScopeDispose, ref, shallowRef } from 'vue'
 import { socket, topicNames } from './ws.js'
+import { t } from './i18n.js'
 
 // Shared live state for every page and control in this tab. The page holds one
 // WebSocket and one authoritative settings revision; views and controls only
@@ -151,7 +152,7 @@ export function useTopic(topic, appId = '', { logs = false } = {}) {
       acceptFull(view, revision)
       error.value = ''
     } catch (err) {
-      if (alive) error.value = err?.message || 'The device did not answer.'
+      if (alive) error.value = err?.message || t('errors.deviceDidNotAnswer')
     } finally {
       if (alive) loading.value = false
     }
@@ -206,7 +207,7 @@ export function useTopic(topic, appId = '', { logs = false } = {}) {
     },
     onError(err) {
       if (!alive) return
-      error.value = err?.message || 'The device did not answer.'
+      error.value = err?.message || t('errors.deviceDidNotAnswer')
       loading.value = false
     }
   })
@@ -296,7 +297,7 @@ async function resyncSettings() {
     if (settingsStale(Number(snapshot?.revision) || 0)) return
     applySettingsSnapshot(snapshot)
   } catch (err) {
-    settings.error.value = err?.message || 'Settings are unavailable.'
+    settings.error.value = err?.message || t('errors.settingsUnavailable')
   }
 }
 
@@ -350,7 +351,7 @@ async function drainQueue() {
       const [key, job] = queued.entries().next().value
       queued.delete(key)
       if (!settings.data.value) {
-        settings.error.value = 'Settings are not available yet.'
+        settings.error.value = t('errors.settingsNotReady')
         for (const resolve of job.resolvers) resolve(false)
         continue
       }
@@ -374,7 +375,7 @@ async function drainQueue() {
         settings.error.value = ''
         for (const resolve of job.resolvers) resolve(true)
       } catch (err) {
-        const message = err?.message || 'The update was rejected.'
+        const message = err?.message || t('errors.updateRejected')
         // A failed CAS means our revision is stale. Re-read instead of
         // guessing a newer local value; drafts stay where the caller owns them.
         await resyncSettings()

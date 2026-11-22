@@ -1,14 +1,16 @@
 <script setup>
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ModalDialog from './ModalDialog.vue'
 import WakewordTrainingDialog from './WakewordTrainingDialog.vue'
 import Icon from './Icon.vue'
 import { socket, topicNames } from '../lib/ws.js'
 import { useSettings, useTopic } from '../lib/live.js'
-import { dateTime, durationMs } from '../lib/format.js'
+import { dateTime, durationMs, formatNumber } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 
 const { data: wakewordData, error: wakewordError, refresh } = useTopic(topicNames.wakeword)
+const { t } = useI18n()
 const { data: settingsData, error: settingsError, pending: settingsPending, update } = useSettings()
 
 const trainingOpen = ref(false)
@@ -37,9 +39,9 @@ const micMuted = computed(() => Boolean(values.value.microphoneMuted))
 const masterVolume = computed(() => Number(values.value.masterVolume || 0))
 const micLive = computed(() => settingsReady.value && !micMuted.value && masterVolume.value > 0)
 const micReason = computed(() => {
-  if (!settingsReady.value) return 'Waiting for the microphone state from Capsula.'
-  if (micMuted.value) return 'The microphone is muted. Unmute it in Settings before recording.'
-  if (masterVolume.value <= 0) return 'The master volume is zero, so Capsula cannot play its start cue.'
+  if (!settingsReady.value) return t('wakeword.waitingState')
+  if (micMuted.value) return t('wakeword.microphoneMuted')
+  if (masterVolume.value <= 0) return t('wakeword.volumeZero')
   return ''
 })
 
@@ -59,9 +61,9 @@ const appOptions = computed(() => {
 })
 
 function appLabel(appId) {
-  if (!appId) return 'Selected assistant'
+  if (!appId) return t('wakeword.selectedAssistant')
   const found = appOptions.value.find((app) => app.id === appId)
-  return found ? found.label : `${appId} (not installed)`
+  return found ? found.label : t('wakeword.notInstalledApp', { id: appId })
 }
 
 /**
@@ -156,10 +158,10 @@ function wordLive(model) {
 }
 
 const SPLIT_LABELS = {
-  tune: 'Tuning check',
-  final_test: 'Final check',
-  auxiliary_tune: 'External speech check · tuning',
-  auxiliary_final_test: 'External speech check · final'
+  tune: 'wakeword.splitTune',
+  final_test: 'wakeword.splitFinal',
+  auxiliary_tune: 'wakeword.splitAuxTune',
+  auxiliary_final_test: 'wakeword.splitAuxFinal'
 }
 
 // The certificate recorded when a model was trained. Values come straight from
@@ -170,7 +172,7 @@ function metricsFor(model) {
     const words = Number(split.wordRecordings) || 0
     return {
       key: `${split.split || 'split'}-${index}`,
-      label: SPLIT_LABELS[split.split] || String(split.split || 'Check'),
+      label: t(SPLIT_LABELS[split.split] || 'wakeword.splitCheck'),
       words,
       detected: Number(split.detected) || 0,
       recall: words > 0 && typeof split.recall === 'number' ? `${Math.round(split.recall * 100)}%` : '—',
@@ -181,21 +183,21 @@ function metricsFor(model) {
 
 function thresholdFor(model) {
   const value = Number(model?.threshold)
-  return Number.isFinite(value) && value > 0 ? value.toFixed(2) : ''
+  return Number.isFinite(value) && value > 0 ? formatNumber(value, 2) : ''
 }
 
 function statusText(model) {
-  if (!model.available) return 'Needs attention'
-  if (!enabled.value) return 'Detection off'
-  if (!wordLive(model)) return 'Paused'
-  return 'Listening'
+  if (!model.available) return t('wakeword.needsAttention')
+  if (!enabled.value) return t('wakeword.detectionOff')
+  if (!wordLive(model)) return t('wakeword.paused')
+  return t('wakeword.listening')
 }
 
 const overallStatus = computed(() => {
-  if (!settingsReady.value) return 'Checking'
-  if (enabled.value && installedAvailable.value) return 'Detection on'
-  if (enabled.value) return 'Model needed'
-  return 'Detection off'
+  if (!settingsReady.value) return t('wakeword.checking')
+  if (enabled.value && installedAvailable.value) return t('wakeword.detectionOn')
+  if (enabled.value) return t('wakeword.modelNeeded')
+  return t('wakeword.detectionOff')
 })
 
 // Connection failures are state that repeats on every snapshot; announce a new
@@ -210,7 +212,7 @@ watch(settingsError, (message) => {
   }
   if (text === lastSettingsError) return
   lastSettingsError = text
-  notify.warning(`Settings did not update: ${text}`)
+  notify.warning(t('wakeword.settingsUpdateFailed', { error: text }))
 }, { immediate: true })
 
 let lastWakewordError = ''
@@ -223,12 +225,12 @@ watch(wakewordError, (message) => {
   }
   if (text === lastWakewordError) return
   lastWakewordError = text
-  notify.warning(`The wakeword section could not reach Capsula: ${text}`)
+  notify.warning(t('wakeword.stateUnreachable', { error: text }))
 }, { immediate: true })
 
 function labelFor(sample) {
-  if (sample.label === 'word') return 'Wakeword recording'
-  return 'Room or phrase recording'
+  if (sample.label === 'word') return t('wakeword.labelWord')
+  return t('wakeword.labelOther')
 }
 
 async function reportFalseDetection(detection) {
@@ -238,7 +240,7 @@ async function reportFalseDetection(detection) {
     await socket.request({ falseDetection: { detectionId: detection.detectionId } }, { timeout: 10000 })
     await refresh()
   } catch (err) {
-    notify.error(`Could not remove that detection: ${err.message}`)
+    notify.error(t('wakeword.falseDetectionFailed', { error: err.message }))
   } finally {
     detectionBusy.value = ''
   }
@@ -247,10 +249,10 @@ async function reportFalseDetection(detection) {
 async function apply(payload) {
   try {
     const ok = await update('assistant', payload)
-    if (ok === false) notify.error('Capsula did not accept that change.')
+    if (ok === false) notify.error(t('wakeword.changeRejected'))
     return ok
   } catch (err) {
-    notify.error(err?.message || 'The change could not be sent to Capsula.')
+    notify.error(err?.message || t('wakeword.changeFailed'))
     return false
   }
 }
@@ -285,9 +287,9 @@ async function removeModel(model) {
     await socket.request({ deleteWakeword: { modelId: model.modelId } }, { timeout: 25000 })
     confirmModelDeleteId.value = ''
     await refresh()
-    notify.success('Wakeword deleted. Its recordings were kept.')
+    notify.success(t('wakeword.deletedKept'))
   } catch (err) {
-    notify.error(`Could not delete the wakeword: ${err.message}`)
+    notify.error(t('wakeword.deleteFailed', { error: err.message }))
   } finally {
     modelDeleteBusy.value = ''
   }
@@ -312,7 +314,7 @@ async function removeTake(sample) {
     confirmDeleteId.value = ''
     await refresh()
   } catch (err) {
-    notify.error(`Could not delete the recording: ${err.message}`)
+    notify.error(t('wakeword.takeDeleteFailed', { error: err.message }))
   } finally {
     deleteBusy.value = ''
   }
@@ -364,11 +366,13 @@ async function removeAllTakes() {
       // next event if this snapshot failed.
     }
     if (failed > 0) {
-      notify.error(`${failed} of ${takes.length} recordings could not be deleted.`)
+      notify.error(t('wakeword.someDeleteFailed', { failed, total: takes.length }))
       return
     }
     deleteAllOpen.value = false
-    notify.success(takes.length === 1 ? 'Recording deleted.' : `Deleted ${takes.length} recordings.`)
+    notify.success(takes.length === 1
+      ? t('wakeword.recordingDeleted')
+      : t('wakeword.recordingsDeleted', { count: takes.length }))
   } finally {
     deleteAllBusy.value = false
   }
@@ -391,22 +395,22 @@ onUnmounted(() => {
     <div class="card-body gap-3 p-4">
     <div class="flex flex-wrap items-center gap-2">
       <Icon size="20px">record_voice_over</Icon>
-      <h2 id="wakeword-settings-title" class="flex-grow text-lg font-semibold">Wakeword</h2>
+      <h2 id="wakeword-settings-title" class="flex-grow text-lg font-semibold">{{ $t('wakeword.title') }}</h2>
       <span class="badge badge-ghost badge-sm">{{ overallStatus }}</span>
     </div>
     <p class="text-xs text-base-content/60">
-      Capsula listens and learns on the device. Your browser never records audio.
+      {{ $t('wakeword.intro') }}
     </p>
 
     <div class="grid gap-3">
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
-          <h3 class="text-base font-semibold">Enable detection</h3>
+          <h3 class="text-base font-semibold">{{ $t('wakeword.enableDetection') }}</h3>
 
           <label class="flex cursor-pointer items-start justify-between gap-4">
             <span class="min-w-0">
-              <span class="block font-medium">Wakeword detection</span>
-              <span class="mt-0.5 block text-sm text-base-content/60">Say a wakeword to start Capsula without pressing anything.</span>
+              <span class="block font-medium">{{ $t('wakeword.wakewordDetection') }}</span>
+              <span class="mt-0.5 block text-sm text-base-content/60">{{ $t('wakeword.detectionHint') }}</span>
             </span>
             <input
               type="checkbox"
@@ -419,22 +423,22 @@ onUnmounted(() => {
 
           <div v-if="!wakewordData && !wakewordError" class="flex items-center gap-2 text-sm text-base-content/60" role="status">
             <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Waiting for Capsula…
+            {{ $t('wakeword.waitingCapsula') }}
           </div>
           <div v-else-if="wakewordError" class="text-sm text-base-content/60" role="status">
-            Capsula’s wakeword state is unavailable until the connection recovers.
+            {{ $t('wakeword.stateUnavailable') }}
           </div>
           <div v-else-if="!installedAvailable" role="status">
-            <p class="text-sm font-medium">Capsula does not have a wakeword yet.</p>
+            <p class="text-sm font-medium">{{ $t('wakeword.noWakewordYet') }}</p>
             <p class="mt-1 text-xs text-base-content/60">
-              Use “Create a wakeword” below to get started. Until then, detection stays unavailable.
+              {{ $t('wakeword.noWakewordHint') }}
             </p>
           </div>
           <p v-else-if="enabled && micMuted" class="text-sm text-base-content/60">
-            The microphone is muted, so detection is suspended until it is unmuted.
+            {{ $t('wakeword.micMutedSuspended') }}
           </p>
           <p v-if="settingsError && !settingsReady" class="text-sm text-base-content/60">
-            The switch waits for the authoritative settings snapshot.
+            {{ $t('wakeword.switchWaits') }}
           </p>
         </div>
       </div>
@@ -442,16 +446,16 @@ onUnmounted(() => {
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-base font-semibold">Your wakewords</h3>
+            <h3 class="text-base font-semibold">{{ $t('wakeword.yourWakewords') }}</h3>
             <button
               type="button"
               class="btn btn-primary btn-sm"
               :disabled="applying"
               @click="openTraining()"
-            >Create a wakeword</button>
+            >{{ $t('wakeword.createWakeword') }}</button>
           </div>
           <p class="text-xs text-base-content/60">
-            Each wakeword can start its own app. A word bound to an app activates only that app; “Selected assistant” uses the assistant chosen above. A wakeword that starts an app does not reroute when that app is not running.
+            {{ $t('wakeword.wakewordsHint') }}
           </p>
 
           <div v-if="!wakewordData && !wakewordError" class="space-y-2" aria-hidden="true">
@@ -478,13 +482,13 @@ onUnmounted(() => {
                 </div>
 
                 <label class="flex items-center gap-2 text-sm">
-                  <span class="text-base-content/60">Enabled</span>
+                  <span class="text-base-content/60">{{ $t('wakeword.enabledLabel') }}</span>
                   <input
                     type="checkbox"
                     class="toggle toggle-sm"
                     :checked="bindingFor(model.modelId)?.enabled ?? false"
                     :disabled="!model.available || applying"
-                    :aria-label="`Enable ${model.displayName || model.modelId}`"
+                    :aria-label="$t('wakeword.enableAria', { name: model.displayName || model.modelId })"
                     @change="toggleModel(model, $event.target.checked)"
                   />
                 </label>
@@ -492,15 +496,15 @@ onUnmounted(() => {
 
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <label class="flex min-w-0 flex-1 items-center gap-2 text-sm">
-                  <span class="shrink-0 text-base-content/60">Starts</span>
+                  <span class="shrink-0 text-base-content/60">{{ $t('wakeword.starts') }}</span>
                   <select
                     class="select select-bordered select-sm min-w-0 flex-1"
                     :value="bindingFor(model.modelId)?.appId || model.appId || ''"
                     :disabled="!model.available || applying"
-                    :aria-label="`App started by ${model.displayName || model.modelId}`"
+                    :aria-label="$t('wakeword.startsAria', { name: model.displayName || model.modelId })"
                     @change="setBinding(model, $event.target.value)"
                   >
-                    <option value="">Selected assistant</option>
+                    <option value="">{{ $t('wakeword.selectedAssistant') }}</option>
                     <option v-for="app in appOptions" :key="app.id" :value="app.id">{{ app.label }}</option>
                   </select>
                 </label>
@@ -509,7 +513,7 @@ onUnmounted(() => {
                   class="btn btn-ghost btn-sm"
                   :disabled="!model.available || applying"
                   @click="openTraining(model)"
-                >Retrain</button>
+                >{{ $t('wakeword.retrain') }}</button>
                 <button
                   type="button"
                   class="btn btn-ghost btn-sm"
@@ -518,23 +522,23 @@ onUnmounted(() => {
                   @click="askDeleteModel(model)"
                 >
                   <span v-if="modelDeleteBusy === model.modelId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                  {{ confirmModelDeleteId === model.modelId ? 'Confirm delete' : 'Delete' }}
+                  {{ confirmModelDeleteId === model.modelId ? $t('wakeword.confirmDelete') : $t('common.delete') }}
                 </button>
               </div>
 
               <details v-if="metricsFor(model).length" class="mt-2 rounded-box bg-base-200/60">
                 <summary class="cursor-pointer px-3 py-2 text-sm font-medium">
-                  Measured quality
-                  <span v-if="thresholdFor(model)" class="badge badge-ghost badge-sm ml-1">threshold {{ thresholdFor(model) }}</span>
+                  {{ $t('wakeword.measuredQuality') }}
+                  <span v-if="thresholdFor(model)" class="badge badge-ghost badge-sm ml-1">{{ $t('wakeword.threshold', { value: thresholdFor(model) }) }}</span>
                 </summary>
                 <div class="overflow-x-auto px-2 pb-2">
                   <table class="table table-xs">
                     <thead>
                       <tr>
-                        <th>Check</th>
-                        <th>Words found</th>
-                        <th>Recall</th>
-                        <th>False activations</th>
+                        <th>{{ $t('wakeword.check') }}</th>
+                        <th>{{ $t('wakeword.wordsFound') }}</th>
+                        <th>{{ $t('wakeword.recall') }}</th>
+                        <th>{{ $t('wakeword.falseActivations') }}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -548,16 +552,16 @@ onUnmounted(() => {
                   </table>
                 </div>
                 <p class="px-3 py-2 text-xs text-base-content/60">
-                  Measured once when this wakeword was trained, on recordings held back from fitting. The external speech check uses a separate licensed corpus and is not the final certificate.
+                  {{ $t('wakeword.metricsHint') }}
                 </p>
               </details>
             </li>
           </ul>
           <div v-else-if="wakewordError" class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
-            The wakeword list is unavailable while the connection is down.
+            {{ $t('wakeword.listUnavailable') }}
           </div>
           <div v-else class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
-            No wakeword has been set up yet. Use “Create a wakeword” to get started.
+            {{ $t('wakeword.noWakewordSetUp') }}
           </div>
         </div>
       </div>
@@ -565,7 +569,7 @@ onUnmounted(() => {
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-base font-semibold">Recent detections</h3>
+            <h3 class="text-base font-semibold">{{ $t('wakeword.recentDetections') }}</h3>
             <span class="badge badge-ghost badge-sm">{{ detections.length }}</span>
           </div>
           <div v-if="!wakewordData && !wakewordError" class="skeleton h-16 w-full"></div>
@@ -576,26 +580,26 @@ onUnmounted(() => {
               class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2 text-sm"
             >
               <span class="min-w-0">
-                <span class="block font-medium">{{ detection.modelDisplayName || 'Your wakeword' }}</span>
+                <span class="block font-medium">{{ detection.modelDisplayName || $t('wakeword.yourWakeword') }}</span>
                 <span class="block text-xs text-base-content/60">{{ dateTime(detection.detectedUnixMs) }}</span>
               </span>
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
-                :aria-label="`Mark as false detection: ${detection.modelDisplayName || 'Your wakeword'} at ${dateTime(detection.detectedUnixMs)}`"
+                :aria-label="$t('wakeword.falseDetectionAria', { name: detection.modelDisplayName || $t('wakeword.yourWakeword'), time: dateTime(detection.detectedUnixMs) })"
                 :disabled="!detection.detectionId || Boolean(detectionBusy)"
                 @click="reportFalseDetection(detection)"
               >
                 <span v-if="detectionBusy === detection.detectionId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                False detection
+                {{ $t('wakeword.falseDetection') }}
               </button>
             </li>
           </ul>
           <div v-else-if="wakewordError" class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/60">
-            Detection history is unavailable while the connection is down.
+            {{ $t('wakeword.historyUnavailable') }}
           </div>
           <div v-else class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/60">
-            No wakeword detections yet.
+            {{ $t('wakeword.noDetections') }}
           </div>
         </div>
       </div>
@@ -603,7 +607,7 @@ onUnmounted(() => {
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
           <div class="flex flex-wrap items-center gap-2">
-            <h3 class="text-base font-semibold flex-grow">Recordings on Capsula</h3>
+            <h3 class="text-base font-semibold flex-grow">{{ $t('wakeword.recordingsTitle') }}</h3>
             <span class="badge badge-ghost badge-sm">{{ samples.length }}</span>
             <button
               type="button"
@@ -612,7 +616,7 @@ onUnmounted(() => {
               @click="askDeleteAll"
             >
               <span v-if="deleteAllBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-              Delete all
+              {{ $t('wakeword.deleteAll') }}
             </button>
           </div>
           <div v-if="!samplesLoaded" class="skeleton h-12 w-full" aria-hidden="true"></div>
@@ -630,15 +634,15 @@ onUnmounted(() => {
                 @click="askDelete(sample)"
               >
                 <span v-if="deleteBusy === sample.sampleId" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-                {{ confirmDeleteId === sample.sampleId ? 'Confirm delete' : 'Delete' }}
+                {{ confirmDeleteId === sample.sampleId ? $t('wakeword.confirmDelete') : $t('common.delete') }}
               </button>
             </li>
           </ul>
           <p v-else class="rounded-box bg-base-100 p-4 text-sm text-base-content/60">
-            No recordings yet. A new wakeword setup records its own takes.
+            {{ $t('wakeword.noRecordings') }}
           </p>
           <p class="text-xs text-base-content/60">
-            Recordings belong to the device, not to one wakeword: deleting a wakeword keeps them, and only recordings chosen in a new setup are used for training.
+            {{ $t('wakeword.recordingsHint') }}
           </p>
         </div>
       </div>
@@ -658,26 +662,26 @@ onUnmounted(() => {
     <ModalDialog
       v-if="deleteAllOpen"
       max-width="max-w-md"
-      title="Delete all recordings"
+      :title="$t('wakeword.deleteAllTitle')"
       :before-close="beforeDeleteAllClose"
       @close="closeDeleteAll"
     >
       <p class="text-sm">
-        Delete {{ deleteAllTotal }} {{ deleteAllTotal === 1 ? 'recording' : 'recordings' }} from Capsula?
+        {{ $t('wakeword.deleteAllBody', { count: deleteAllTotal }, deleteAllTotal) }}
       </p>
       <p class="mt-2 text-sm text-base-content/60">
-        This cannot be undone. Wakewords stay installed; only their saved recordings are removed.
+        {{ $t('wakeword.deleteAllWarning') }}
       </p>
       <p v-if="deleteAllBusy" class="mt-2 text-sm" role="status">
-        Deleting {{ deleteAllProgress }} of {{ deleteAllTotal }}…
+        {{ $t('wakeword.deletingProgress', { current: deleteAllProgress, total: deleteAllTotal }) }}
       </p>
       <template #footer>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="deleteAllBusy" @click="closeDeleteAll">
-          Cancel
+          {{ $t('common.cancel') }}
         </button>
         <button type="button" class="btn btn-error btn-sm" :disabled="deleteAllBusy" @click="removeAllTakes">
           <span v-if="deleteAllBusy" class="loading loading-spinner loading-sm"></span>
-          Delete all
+          {{ $t('wakeword.deleteAll') }}
         </button>
       </template>
     </ModalDialog>

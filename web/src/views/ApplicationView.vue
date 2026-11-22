@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
@@ -18,6 +19,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
+const { t } = useI18n()
 const { data, error: loadError, refresh } = useTopic('application', props.appId, { logs: true })
 
 const busy = ref('')
@@ -42,8 +44,8 @@ let guideController = null
 const guideDocumentBlocks = computed(() => (guide.value ? guideBlocks(guide.value.markdown) : []))
 const guideSourceLabel = computed(() => {
   if (!guide.value) return ''
-  if (guide.value.source === 'builtin') return 'built-in guide'
-  if (guide.value.source === 'package') return 'from the application package'
+  if (guide.value.source === 'builtin') return t('application.guideBuiltin')
+  if (guide.value.source === 'package') return t('application.guidePackage')
   return ''
 })
 
@@ -68,7 +70,7 @@ async function loadGuide() {
     guide.value = doc
   } catch (err) {
     if (controller.signal.aborted || props.appId !== app) return
-    guideError.value = err?.message || 'The user guide could not be loaded.'
+    guideError.value = err?.message || t('application.guideLoadFailed')
   } finally {
     if (guideController === controller) {
       guideController = null
@@ -125,19 +127,36 @@ const provenance = computed(() => data.value?.provenance || null)
 const interfaces = computed(() => data.value?.interfaces || [])
 const runs = computed(() => data.value?.runs || [])
 const defaultRoles = computed(() => (data.value?.selectedDefaultRoles || []).map((role) => ({
-  'light.ring.main': 'LED ring controller',
-  'display.segment.front': 'display controller',
-  assistant: 'voice assistant'
+  'light.ring.main': t('application.roleRing'),
+  'display.segment.front': t('application.roleDisplay'),
+  assistant: t('application.roleAssistant')
 }[role] || role)))
 const hasSettingsDocument = computed(() => !!data.value?.schema?.settingsUi?.available)
 const connected = computed(() => liveState.value === 'open')
+
+// Provenance status is a protocol string; the badge text follows the locale
+// while the colour class keeps comparing the raw normalised value.
+const PROVENANCE_STATUS_KEYS = {
+  verified: 'provenanceStatuses.verified',
+  'verification failed': 'provenanceStatuses.verificationFailed',
+  unverified: 'provenanceStatuses.unverified',
+  'unsupported runtime': 'provenanceStatuses.unsupportedRuntime',
+  'not provided': 'provenanceStatuses.notProvided',
+  unspecified: 'provenanceStatuses.unspecified'
+}
+
+function provenanceLabel(value) {
+  const key = status(value)
+  if (!key) return t('application.unreported')
+  return PROVENANCE_STATUS_KEYS[key] ? t(`application.${PROVENANCE_STATUS_KEYS[key]}`) : key
+}
 
 async function loadBoot() {
   try {
     boot.value = await getAppBoot(props.appId)
     bootError.value = ''
   } catch (err) {
-    bootError.value = err?.message || 'Could not load the boot setting.'
+    bootError.value = err?.message || t('application.bootLoadFailed')
   }
 }
 
@@ -146,9 +165,9 @@ async function changeBoot(event) {
   try {
     boot.value = await setAppBoot(props.appId, event.target.checked, boot.value.revision)
     bootError.value = ''
-    notify.success('Boot setting saved')
+    notify.success(t('application.bootSaved'))
   } catch (err) {
-    notify.error(err?.message || 'Could not save the boot setting.')
+    notify.error(err?.message || t('application.bootSaveFailed'))
     await loadBoot()
   } finally {
     bootBusy.value = false
@@ -191,7 +210,7 @@ watch(loadError, (value) => {
   }
   if (!data.value || value === lastLoadError) return
   lastLoadError = value
-  notify.warning(`The last refresh failed: ${value}`)
+  notify.warning(t('application.refreshFailed', { error: value }))
 })
 
 onUnmounted(() => {
@@ -239,7 +258,7 @@ function hasUnsavedInputs() {
 // still in flight. Nothing is discarded silently.
 function requestClose() {
   if (settingBusy.value) {
-    notify.info('Changes are still being saved. Wait for the current save to finish, then close.')
+    notify.info(t('application.savingWait'))
     return false
   }
   if (discardPrompt.value) return false
@@ -250,7 +269,7 @@ function requestClose() {
 
 function discardAndClose() {
   if (settingBusy.value) {
-    notify.info('Changes are still being saved. Wait for the current save to finish, then close.')
+    notify.info(t('application.savingWait'))
     discardPrompt.value = false
     return
   }
@@ -272,12 +291,12 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
   const app = appId
   const run = async () => {
     if (!data.value || data.value.app?.appId !== app) {
-      return { ok: false, error: 'application changed before the update was sent' }
+      return { ok: false, error: t('application.appChanged') }
     }
     if ((data.value.values || []).length === 0 && (data.value.schema?.settings || []).length) {
       await refresh()
       if (!data.value || data.value.app?.appId !== app || (data.value.values || []).length === 0) {
-        return { ok: false, error: 'settings snapshot is unavailable' }
+        return { ok: false, error: t('application.snapshotUnavailable') }
       }
     }
     const revision = Math.max(configRevision, Number(expectedRevision) || 0)
@@ -287,7 +306,7 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
       })
       const r = result?.appSettings
       if (!data.value || data.value.app?.appId !== app) {
-        return { ok: true, revision: Number(r?.revision) || 0, values: r?.values, message: 'Saved.' }
+        return { ok: true, revision: Number(r?.revision) || 0, values: r?.values, message: t('application.saved') }
       }
       configRevision = Math.max(configRevision, Number(r?.revision) || 0)
       data.value = {
@@ -297,9 +316,9 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
       }
       syncDrafts(data.value)
       updateFrameHost()
-      return { ok: true, revision: configRevision, values: data.value.values, message: r?.message || 'Saved.' }
+      return { ok: true, revision: configRevision, values: data.value.values, message: r?.message || t('application.saved') }
     } catch (err) {
-      const message = err?.message || 'The update failed.'
+      const message = err?.message || t('application.updateFailed')
       if (!data.value || data.value.app?.appId !== app) {
         return { ok: false, error: message }
       }
@@ -319,7 +338,7 @@ async function applyImmediate(key, value) {
   const result = await applyAppChanges([{ key, valueJson: JSON.stringify(value) }], configRevision)
   if (settingBusy.value === token) settingBusy.value = ''
   if (result.ok) {
-    notify.success('Setting applied')
+    notify.success(t('application.settingApplied'))
     if (!hasUnsavedInputs()) discardPrompt.value = false
   }
 }
@@ -342,18 +361,18 @@ function buildDraftChanges() {
     if (type.includes('INTEGER') || type.includes('NUMBER')) {
       const text = String(raw ?? '').trim()
       if (text === '') {
-        if (def.required) throw new Error(`${def.label} is required`)
+        if (def.required) throw new Error(t('application.required', { label: def.label }))
         continue
       }
       const number = Number(text)
-      if (!Number.isFinite(number)) throw new Error(`${def.label} must be a number`)
-      if (type.includes('INTEGER') && !Number.isInteger(number)) throw new Error(`${def.label} must be a whole number`)
-      if (def.hasMin && number < def.min) throw new Error(`${def.label} must be at least ${def.min}`)
-      if (def.hasMax && number > def.max) throw new Error(`${def.label} must be at most ${def.max}`)
+      if (!Number.isFinite(number)) throw new Error(t('application.mustBeNumber', { label: def.label }))
+      if (type.includes('INTEGER') && !Number.isInteger(number)) throw new Error(t('application.mustBeWhole', { label: def.label }))
+      if (def.hasMin && number < def.min) throw new Error(t('application.atLeast', { label: def.label, min: def.min }))
+      if (def.hasMax && number > def.max) throw new Error(t('application.atMost', { label: def.label, max: def.max }))
       changes.push({ key: def.key, valueJson: JSON.stringify(number) })
       continue
     }
-    if (def.required && String(raw ?? '') === '') throw new Error(`${def.label} is required`)
+    if (def.required && String(raw ?? '') === '') throw new Error(t('application.required', { label: def.label }))
     changes.push({ key: def.key, valueJson: JSON.stringify(String(raw ?? '')) })
   }
   return changes
@@ -368,7 +387,7 @@ async function saveConfig() {
     return
   }
   if (!changes.length) {
-    notify.info('No text or number changes to save')
+    notify.info(t('application.noChanges'))
     return
   }
   settingBusy.value = 'config'
@@ -381,7 +400,7 @@ async function saveConfig() {
       delete clearMasked[key]
     }
     syncDrafts(data.value)
-    notify.success('Configuration saved')
+    notify.success(t('application.configSaved'))
     if (!hasUnsavedInputs()) discardPrompt.value = false
   }
 }
@@ -448,7 +467,7 @@ async function maybeMountSettingsUI() {
   frameTimer = setTimeout(() => {
     frameTimer = null
     if (frameHost && !frameHost.ready) {
-      frameError.value = 'The settings document did not become ready.'
+      frameError.value = t('application.frameNotReady')
       notify.error(frameError.value)
       frameHost.dispose()
       frameHost = null
@@ -485,7 +504,7 @@ function syncLaunchArgs(view) {
 async function act(key, command, message) {
   if (busy.value) return null
   if (liveState.value !== 'open') {
-    notify.error('The speaker is not connected.')
+    notify.error(t('application.speakerNotConnected'))
     return null
   }
   busy.value = key
@@ -494,7 +513,7 @@ async function act(key, command, message) {
     if (message) notify.success(message)
     return result
   } catch (err) {
-    notify.error(err?.message || 'The device rejected the request.')
+    notify.error(err?.message || t('application.deviceRejected'))
     return null
   } finally {
     busy.value = ''
@@ -509,14 +528,14 @@ async function launch(withArguments = true) {
     const value = String(launchArgs[arg.name] || '').trim()
     if (!value) {
       if (arg.required) {
-        notify.error(`${arg.name} is required to launch this application.`)
+        notify.error(t('application.launchRequired', { argument: arg.name }))
         return
       }
       continue
     }
     args.push({ name: arg.name, value })
   }
-  const result = await act('launch', { launch: { appId: app.appId, arguments: args } }, 'Launch requested')
+  const result = await act('launch', { launch: { appId: app.appId, arguments: args } }, t('application.launchRequested'))
   if (result?.launch) {
     launchDialog.value = false
     launchDirty.value = false
@@ -540,7 +559,7 @@ async function trigger(action) {
     `action:${action.actionId}`,
     { action: { appId: props.appId, actionId: action.actionId } }
   )
-  if (result?.action) notify.info('Action sent')
+  if (result?.action) notify.info(t('application.actionSent'))
 }
 
 function documentationLines(text) {
@@ -562,9 +581,9 @@ function documentationLines(text) {
         </h2>
 
         <div class="flex flex-wrap items-center gap-1.5 mt-3">
-          <span v-if="data?.app?.systemApp" class="badge badge-outline badge-sm">built-in</span>
-          <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">default {{ role }}</span>
-          <span v-if="data?.app?.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
+          <span v-if="data?.app?.systemApp" class="badge badge-outline badge-sm">{{ $t('common.builtIn') }}</span>
+          <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">{{ $t('application.defaultRole', { role }) }}</span>
+          <span v-if="data?.app?.background" class="badge badge-success badge-outline badge-sm">{{ $t('application.runsInBackground') }}</span>
         </div>
       </div>
     </template>
@@ -576,27 +595,27 @@ function documentationLines(text) {
     </div>
 
     <div v-else-if="loadError && !data" class="alert alert-error" role="alert">
-      <span class="text-sm">Application unavailable: {{ loadError }}</span>
-      <button type="button" class="btn btn-sm btn-ghost" @click="refresh">Try again</button>
+      <span class="text-sm">{{ $t('application.providedUnavailable', { error: loadError }) }}</span>
+      <button type="button" class="btn btn-sm btn-ghost" @click="refresh">{{ $t('common.retry') }}</button>
     </div>
 
     <div v-else-if="data" class="flex flex-col gap-4">
       <div v-if="guideOpen" class="flex flex-col gap-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <button type="button" class="btn btn-sm btn-ghost" @click="closeGuide">
-            <span aria-hidden="true">←</span> Back to application
+            <span aria-hidden="true">←</span> {{ $t('application.backToApp') }}
           </button>
           <span v-if="guideSourceLabel" class="badge badge-ghost badge-sm">{{ guideSourceLabel }}</span>
         </div>
 
         <div v-if="guideLoading" class="flex items-center gap-2 py-4 text-sm" role="status" aria-live="polite">
           <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
-          Loading the user guide…
+          {{ $t('application.loadingGuide') }}
         </div>
 
         <div v-else-if="guideError" class="alert alert-warning py-2" role="alert">
           <span class="text-sm">{{ guideError }}</span>
-          <button type="button" class="btn btn-sm btn-outline" @click="loadGuide">Try again</button>
+          <button type="button" class="btn btn-sm btn-outline" @click="loadGuide">{{ $t('common.retry') }}</button>
         </div>
 
         <article v-else-if="guide" class="flex flex-col gap-3 break-words text-sm leading-relaxed">
@@ -640,25 +659,25 @@ function documentationLines(text) {
           </template>
         </article>
 
-        <p v-else class="text-sm text-base-content/60">No guide content is available.</p>
+        <p v-else class="text-sm text-base-content/60">{{ $t('application.noGuide') }}</p>
       </div>
 
       <template v-else>
       <div v-if="!connected" class="alert alert-warning py-2" role="status">
-        <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
+        <span class="text-sm">{{ $t('application.disconnectedPaused') }}</span>
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
         <template v-if="runs.length">
-          <span class="badge badge-success">Running</span>
+          <span class="badge badge-success">{{ $t('application.running') }}</span>
           <template v-for="runItem in runs" :key="runItem.runId">
             <button v-if="data.app.canStop" type="button" class="btn btn-xs btn-outline"
               :class="data.selectedDefault ? '' : 'btn-error'" :disabled="!!busy || !connected"
-              @click="stop(runItem)">{{ data.selectedDefault ? 'Restart' : 'Stop' }}<span v-if="runs.length > 1"> {{ shortId(runItem.runId) }}</span></button>
+              @click="stop(runItem)">{{ data.selectedDefault ? $t('application.restart') : $t('application.stop') }}<span v-if="runs.length > 1"> {{ shortId(runItem.runId) }}</span></button>
           </template>
-          <span v-if="!data.app.canStop" class="text-sm text-base-content/60">Managed by the speaker</span>
+          <span v-if="!data.app.canStop" class="text-sm text-base-content/60">{{ $t('application.managedBySpeaker') }}</span>
           <button v-if="data.selectedDefault" type="button" class="btn btn-ghost btn-square btn-sm"
-            aria-label="Why default apps cannot be stopped" @click="defaultInfo = true">
+            :aria-label="$t('application.whyDefaultAria')" @click="defaultInfo = true">
             <Icon size="20px" aria-hidden="true">info</Icon>
           </button>
         </template>
@@ -666,17 +685,17 @@ function documentationLines(text) {
           <button type="button" class="btn btn-primary btn-sm" :disabled="!!busy || !connected"
             @click="(data.app.launchArguments || []).some(arg => arg.required) ? launchDialog = true : launch(false)">
             <span v-if="busy === 'launch'" class="loading loading-spinner loading-xs"></span>
-            {{(data.app.launchArguments || []).some(arg => arg.required) ? 'Launch…' : 'Launch'}}
+            {{(data.app.launchArguments || []).some(arg => arg.required) ? $t('application.launchEllipsis') : $t('application.launch')}}
           </button>
           <button v-if="(data.app.launchArguments || []).length && !(data.app.launchArguments || []).some(arg => arg.required)"
-            type="button" class="btn btn-primary btn-square btn-sm" aria-label="Launch with arguments"
+            type="button" class="btn btn-primary btn-square btn-sm" :aria-label="$t('application.launchWithArguments')"
             :disabled="!!busy || !connected" @click="launchDialog = true">
             <Icon size="20px" aria-hidden="true">more_vert</Icon>
           </button>
         </template>
 
         <button type="button" class="btn btn-ghost btn-sm ml-auto" @click="openGuide">
-          <Icon size="20px" aria-hidden="true">menu_book</Icon> User guide
+          <Icon size="20px" aria-hidden="true">menu_book</Icon> {{ $t('application.userGuide') }}
         </button>
       </div>
       <div>
@@ -685,26 +704,26 @@ function documentationLines(text) {
             :checked="data.selectedDefault || !!boot?.enabled"
             :disabled="data.selectedDefault || !boot?.editable || bootBusy || !connected"
             @change="changeBoot" />
-          Start at boot
+          {{ $t('application.startAtBoot') }}
         </label>
-        <p v-if="bootError" class="mt-1 text-xs text-error">{{ bootError }} <button type="button" class="link" @click="loadBoot">Retry</button></p>
-        <p v-else-if="data.selectedDefault" class="mt-1 text-xs text-base-content/60">Selected default apps start automatically.</p>
-        <p v-else-if="boot && !boot.editable" class="mt-1 text-xs text-base-content/60">Managed by the speaker.</p>
+        <p v-if="bootError" class="mt-1 text-xs text-error">{{ bootError }} <button type="button" class="link" @click="loadBoot">{{ $t('common.retry') }}</button></p>
+        <p v-else-if="data.selectedDefault" class="mt-1 text-xs text-base-content/60">{{ $t('application.defaultsStartAutomatically') }}</p>
+        <p v-else-if="boot && !boot.editable" class="mt-1 text-xs text-base-content/60">{{ $t('application.managedBySpeaker') }}.</p>
       </div>
 
       <details v-if="schemaActions.length" class="border-y border-base-300 py-2">
-        <summary class="cursor-pointer text-sm font-semibold">Actions</summary>
+        <summary class="cursor-pointer text-sm font-semibold">{{ $t('application.actions') }}</summary>
         <div class="mt-3 flex flex-col gap-3">
           <div v-for="action in schemaActions" :key="action.actionId" class="flex flex-wrap items-center justify-between gap-2">
             <div><p class="text-sm font-medium">{{ action.label }}</p><p v-if="action.description" class="text-xs text-base-content/60">{{ action.description }}</p></div>
-            <button type="button" class="btn btn-sm btn-outline" :disabled="!!busy || !connected" @click="trigger(action)">{{ action.label || 'Run action' }}</button>
+            <button type="button" class="btn btn-sm btn-outline" :disabled="!!busy || !connected" @click="trigger(action)">{{ action.label || $t('application.runAction') }}</button>
           </div>
         </div>
       </details>
 
       <!-- Settings: the app's own document when declared, else its schema. -->
       <section v-if="hasSettingsDocument || schemaSettings.length">
-        <h3 v-if="!hasSettingsDocument" class="text-sm font-semibold">Settings</h3>
+        <h3 v-if="!hasSettingsDocument" class="text-sm font-semibold">{{ $t('application.settings') }}</h3>
 
         <div v-if="hasSettingsDocument" class="mt-2 flex flex-col gap-2">
           <iframe
@@ -714,7 +733,7 @@ function documentationLines(text) {
             sandbox="allow-scripts"
             referrerpolicy="no-referrer"
             allow="camera 'none'; microphone 'none'; geolocation 'none'"
-            :title="`${data.app.displayName} settings`"
+            :title="$t('application.settingsFrameTitle', { name: data.app.displayName })"
           ></iframe>
         </div>
 
@@ -722,7 +741,7 @@ function documentationLines(text) {
           <div v-for="def in schemaSettings" :key="def.key" class="form-control">
             <span class="label-text pb-1 text-sm font-medium">{{ def.label }}</span>
             <span v-if="def.description" class="pb-1 text-xs text-base-content/60">{{ def.description }}</span>
-            <span v-if="def.restartRequired" class="pb-1 text-xs text-warning">Restart the application to apply.</span>
+            <span v-if="def.restartRequired" class="pb-1 text-xs text-warning">{{ $t('application.restartToApply') }}</span>
 
             <template v-if="def.type.includes('TEXT_MASKED')">
               <input
@@ -730,11 +749,11 @@ function documentationLines(text) {
                 type="password"
                 autocomplete="new-password"
                 class="input input-bordered input-sm w-full"
-                :placeholder="valueMap[def.key]?.hasValue ? 'configured — leave empty to keep' : 'not set'"
+                :placeholder="valueMap[def.key]?.hasValue ? $t('application.configuredPlaceholder') : $t('application.notSetPlaceholder')"
               />
               <label class="mt-1 flex items-center gap-2 text-xs">
                 <input v-model="clearMasked[def.key]" type="checkbox" class="checkbox checkbox-sm" />
-                <span>Clear the stored value</span>
+                <span>{{ $t('application.clearStoredValue') }}</span>
               </label>
             </template>
 
@@ -746,7 +765,7 @@ function documentationLines(text) {
                 :disabled="settingBusy === `set:${def.key}` || !connected"
                 @change="applyImmediate(def.key, !!configDraft[def.key])"
               />
-              <span class="text-sm">{{ configDraft[def.key] ? 'enabled' : 'disabled' }}</span>
+              <span class="text-sm">{{ configDraft[def.key] ? $t('application.enabled') : $t('application.disabled') }}</span>
             </label>
 
             <select
@@ -782,52 +801,52 @@ function documentationLines(text) {
           <div class="flex flex-wrap items-center gap-2">
             <button type="submit" class="btn btn-primary btn-sm" :disabled="settingBusy === 'config' || !hasDrafts() || !connected">
               <span v-if="settingBusy === 'config'" class="loading loading-spinner loading-xs"></span>
-              Save text and number fields
+              {{ $t('application.saveFields') }}
             </button>
-            <span class="text-xs text-base-content/60">Toggles and choices apply as you change them. Text and number fields save with this button.</span>
+            <span class="text-xs text-base-content/60">{{ $t('application.saveFieldsHint') }}</span>
           </div>
         </form>
       </section>
 
       <section class="border-t border-base-300 pt-4">
-        <h3 class="text-sm font-semibold">Application details</h3>
+        <h3 class="text-sm font-semibold">{{ $t('application.details') }}</h3>
         <div class="pt-3">
           <dl class="grid gap-2 text-sm sm:grid-cols-2">
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Application ID</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.applicationId') }}</dt>
               <dd class="data-value">{{ data.app.appId }}</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Entrypoint</dt>
-              <dd class="data-value">{{ data.app.systemApp ? 'built into capsulad' : (data.app.entrypoint?.relativePath || '—') }}</dd>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.entrypoint') }}</dt>
+              <dd class="data-value">{{ data.app.systemApp ? $t('application.builtIntoCapsulad') : (data.app.entrypoint?.relativePath || '—') }}</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Runtime</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.runtime') }}</dt>
               <dd class="data-value">
-                {{ data.app.systemApp ? 'in-process' : [data.app.entrypoint?.runtime, data.app.entrypoint?.cpuArchitecture, data.app.entrypoint?.binaryAbi].filter(Boolean).join(' ') || '—' }}
+                {{ data.app.systemApp ? $t('application.inProcess') : [data.app.entrypoint?.runtime, data.app.entrypoint?.cpuArchitecture, data.app.entrypoint?.binaryAbi].filter(Boolean).join(' ') || '—' }}
               </dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Framework SDK</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.frameworkSdk') }}</dt>
               <dd class="data-value">{{ data.app.entrypoint?.frameworkSdkVersion || '—' }}</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Provides</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.provides') }}</dt>
               <dd class="data-value">{{ (data.app.provides || []).join(', ') || '—' }}</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Lifecycle</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.lifecycle') }}</dt>
               <dd class="text-sm">
-                {{ data.app.background ? 'background' : 'on demand' }} ·
-                {{ data.app.singleInstance ? 'single instance' : 'multi instance' }} ·
-                {{ data.app.startOnBoot ? 'manifest starts at boot' : 'manifest manual start' }} ·
-                {{ data.app.restartOnFailure ? 'restart on failure' : 'no manifest restart' }}
+                {{ data.app.background ? $t('application.background') : $t('application.onDemand') }} ·
+                {{ data.app.singleInstance ? $t('application.singleInstance') : $t('application.multiInstance') }} ·
+                {{ data.app.startOnBoot ? $t('application.manifestStartsAtBoot') : $t('application.manifestManualStart') }} ·
+                {{ data.app.restartOnFailure ? $t('application.restartOnFailure') : $t('application.noManifestRestart') }}
               </dd>
             </div>
             <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/60">Packaging</dt>
+              <dt class="text-xs uppercase tracking-wide text-base-content/60">{{ $t('application.packaging') }}</dt>
               <dd class="text-sm">
-                {{ data.app.systemApp ? 'built into capsulad; no package directory' : 'installed package' }}
+                {{ data.app.systemApp ? $t('application.noPackageDirectory') : $t('application.installedPackage') }}
               </dd>
             </div>
           </dl>
@@ -835,16 +854,16 @@ function documentationLines(text) {
       </section>
 
       <section v-if="interfaces.length" class="border-t border-base-300 pt-4">
-        <h4 class="text-sm font-semibold">Interfaces</h4>
+        <h4 class="text-sm font-semibold">{{ $t('application.interfaces') }}</h4>
         <div class="mt-2 flex flex-col gap-3">
           <div v-for="iface in interfaces" :key="iface.grpcService">
             <div class="flex flex-wrap items-center gap-2">
               <span class="data-value font-medium">{{ iface.grpcService }}</span>
               <span class="badge badge-ghost badge-sm">v{{ iface.interfaceVersion || '—' }}</span>
               <span class="badge badge-sm" :class="iface.available ? 'badge-success' : 'badge-ghost'">
-                {{ iface.available ? 'available' : 'unavailable' }}
+                {{ iface.available ? $t('application.available') : $t('application.unavailable') }}
               </span>
-              <button type="button" class="btn btn-ghost btn-square btn-sm" :aria-label="`View ${iface.grpcService} description`" @click="interfaceDialog = iface">
+              <button type="button" class="btn btn-ghost btn-square btn-sm" :aria-label="$t('application.viewDescription', { service: iface.grpcService })" @click="interfaceDialog = iface">
                 <Icon size="20px" aria-hidden="true">info</Icon>
               </button>
             </div>
@@ -854,39 +873,37 @@ function documentationLines(text) {
       </section>
 
       <section v-if="provenance && (provenance.status || provenance.detail || provenance.subjectSha256Hex || provenance.verifiedRepository)" class="border-t border-base-300 pt-4">
-        <h4 class="text-sm font-semibold">Build verification</h4>
+        <h4 class="text-sm font-semibold">{{ $t('application.buildVerification') }}</h4>
         <div class="pt-2">
           <div class="flex flex-wrap items-center gap-2">
             <span class="badge badge-sm" :class="status(provenance.status) === 'verified' ? 'badge-success' : 'badge-warning'">
-              {{ status(provenance.status) || 'unreported' }}
+              {{ provenanceLabel(provenance.status) }}
             </span>
             <span v-if="provenance.detail" class="text-xs text-base-content/70">{{ provenance.detail }}</span>
           </div>
           <dl class="mt-2 grid gap-1 text-xs">
-            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">Subject SHA-256</dt><dd class="data-value">{{ provenance.subjectSha256Hex || '—' }}</dd></div>
-            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">Repository</dt><dd class="data-value">{{ provenance.verifiedRepository || '—' }}</dd></div>
-            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">Workflow</dt><dd class="data-value">{{ provenance.verifiedWorkflow || '—' }}</dd></div>
-            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">Commit</dt><dd class="data-value">{{ provenance.verifiedCommitSha || '—' }}</dd></div>
+            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">{{ $t('application.subjectSha') }}</dt><dd class="data-value">{{ provenance.subjectSha256Hex || '—' }}</dd></div>
+            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">{{ $t('application.repository') }}</dt><dd class="data-value">{{ provenance.verifiedRepository || '—' }}</dd></div>
+            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">{{ $t('application.workflow') }}</dt><dd class="data-value">{{ provenance.verifiedWorkflow || '—' }}</dd></div>
+            <div class="flex flex-wrap gap-2"><dt class="text-base-content/60">{{ $t('application.commit') }}</dt><dd class="data-value">{{ provenance.verifiedCommitSha || '—' }}</dd></div>
           </dl>
           <p class="mt-2 text-xs text-base-content/60">
-            Verified provenance attests build origin and integrity under the configured trust policy;
-            it is not a promise that the software is safe.
+            {{ $t('application.provenanceDisclaimer') }}
           </p>
         </div>
       </section>
       </template>
     </div>
-    <ModalDialog v-if="discardPrompt" title="Discard changes?" max-width="max-w-md" @close="discardPrompt = false">
+    <ModalDialog v-if="discardPrompt" :title="$t('application.discardTitle')" max-width="max-w-md" @close="discardPrompt = false">
       <p class="text-sm">
-        This application has unsaved text or number fields. Closing now discards them; toggles and
-        choices that already applied stay applied.
+        {{ $t('application.discardBody') }}
       </p>
       <template #footer>
-        <button type="button" class="btn btn-ghost btn-sm" @click="discardPrompt = false">Keep editing</button>
-        <button type="button" class="btn btn-warning btn-sm" @click="discardAndClose">Discard changes</button>
+        <button type="button" class="btn btn-ghost btn-sm" @click="discardPrompt = false">{{ $t('application.keepEditing') }}</button>
+        <button type="button" class="btn btn-warning btn-sm" @click="discardAndClose">{{ $t('application.discardChanges') }}</button>
       </template>
     </ModalDialog>
-    <ModalDialog v-if="launchDialog" title="Launch with arguments" max-width="max-w-xl" @close="launchDialog = false">
+    <ModalDialog v-if="launchDialog" :title="$t('application.launchWithArguments')" max-width="max-w-xl" @close="launchDialog = false">
       <form class="flex flex-col gap-3" @submit.prevent="launch(true)">
         <label v-for="arg in data.app.launchArguments" :key="arg.name" class="form-control">
           <span class="label-text pb-1">{{ arg.name }} <span v-if="arg.required" class="text-error">*</span></span>
@@ -895,11 +912,11 @@ function documentationLines(text) {
             @input="launchDirty = true" />
           <span v-if="arg.description" class="mt-1 text-xs text-base-content/60">{{ arg.description }}</span>
         </label>
-        <button class="btn btn-primary btn-sm self-start" type="submit" :disabled="!!busy || !connected">Launch</button>
+        <button class="btn btn-primary btn-sm self-start" type="submit" :disabled="!!busy || !connected">{{ $t('application.launch') }}</button>
       </form>
     </ModalDialog>
-    <ModalDialog v-if="defaultInfo" title="Default application" max-width="max-w-lg" @close="defaultInfo = false">
-      <p class="text-sm">This is a default application and it cannot be stopped, it can only be restarted. Choose another app or none in Settings to stop this app permanently.</p>
+    <ModalDialog v-if="defaultInfo" :title="$t('application.defaultAppTitle')" max-width="max-w-lg" @close="defaultInfo = false">
+      <p class="text-sm">{{ $t('application.defaultAppBody') }}</p>
     </ModalDialog>
     <ModalDialog v-if="interfaceDialog" :title="interfaceDialog.grpcService" @close="interfaceDialog = null">
       <p v-if="interfaceDialog.summary" class="text-sm">{{ interfaceDialog.summary }}</p>
@@ -921,7 +938,7 @@ function documentationLines(text) {
         <pre v-if="method.requestExampleJson" class="mt-2 overflow-x-auto rounded bg-base-200 p-2 text-xs">{{ method.requestExampleJson }}</pre>
         <pre v-if="method.responseExampleJson" class="mt-2 overflow-x-auto rounded bg-base-200 p-2 text-xs">{{ method.responseExampleJson }}</pre>
       </div>
-      <p v-if="!interfaceDialog.summary && !descriptions[interfaceDialog.grpcService]" class="text-sm text-base-content/60">No description available.</p>
+      <p v-if="!interfaceDialog.summary && !descriptions[interfaceDialog.grpcService]" class="text-sm text-base-content/60">{{ $t('common.noDescription') }}</p>
     </ModalDialog>
   </ModalDialog>
 </template>

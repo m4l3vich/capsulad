@@ -58,7 +58,7 @@ The launcher injects these variables. Read them; never hard-code a path.
 | `CAPSULAD_LIBRARY_DIR` | Directory for the library's own dependency resolution. |
 | `CAPSULAD_ASSETS` | The read-only asset store: `/assets` in namespace modes, the host path otherwise. |
 | `CAPSULAD_DEVICE_SERIAL` | The SoC serial read by the daemon from the host (`/proc/cpuinfo` `Serial` on ARM), provided when known and omitted entirely when unknown. This is not a `device_id`. |
-| `CAPSULAD_CONTROL_FD` | Reserved: the inherited descriptor number of this run's control channel, normally `3`. It carries listener allocation only. Never read, write, close or reuse it; `listener_open` is the only supported use. Present whenever the supervisor could create the channel; if creation failed the run still starts without it (one `WARN` in the daemon log) and every listener call returns `UNSUPPORTED`. |
+| `CAPSULAD_CONTROL_FD` | Inherited control-channel descriptor, normally `3`; it carries listener allocation only. Present whenever the supervisor could create the channel; if creation failed the run still starts without it and every listener call returns `UNSUPPORTED`. Never read, write, close or reuse it. See [network.md](network.md#daemon-mediated-listeners). |
 | `CAPSULAD_APP_DIR` | Script hosts only (quickjs, micropython): the package root, `/app` in namespace modes and the host path otherwise. Native apps do not receive this variable. |
 | `CAPSULAD_INTERPRETER` | Script runtimes only: the engine executable that is running the script. |
 | `TZ` | The resolved device timezone, when one is configured. |

@@ -82,13 +82,14 @@ from routing to driver submission; acoustics and photons are separate, explicitl
 - **Panel keys and gestures.** Microphone mute (north), volume up (east), circle/play-pause (south),
   volume down (west), neutral centre. The panel is one `gpio-keys` node advertising `EV_SYN|EV_KEY`
   only (`EV=3`, no `EV_ABS`), so no coordinate ever exists and every gesture is inferred from
-  ordered key edges. Raw `/dev/input/event0` captures measured on the unit show that a finger swipe
-  over the whole panel emits **exactly one** press + SYN + release + SYN: full-panel up reports
-  `volume_down` (0x72), right `mic_toggle` (0xf8), down `mic_toggle` and left `volume_up` (0x73),
-  while a swipe anchored at the physical centre can report the centre key (0x2c0 or 0x246) instead.
-  A bare volume edge is therefore indistinguishable from a deliberate volume tap, so the **centre
-  key is the measured gesture evidence on a single contact**; a whole-pad crossing that reports only
-  its two end-stop edges is recognised from their order and timing.
+  ordered key edges. A finger swipe over the whole panel emits **exactly one** press + SYN + release
+  + SYN: full-panel up reports `volume_down` (0x72), right `mic_toggle` (0xf8), down `mic_toggle` and
+  left `volume_up` (0x73), while a swipe anchored at the physical centre can report the centre key
+  (0x2c0 or 0x246) instead. A bare volume edge is therefore indistinguishable from a deliberate
+  volume tap, so the **centre key is the measured gesture evidence on a single contact**; a
+  whole-pad crossing that reports only its two end-stop edges is recognised from their order and
+  timing. The hardware event shape is in [HARDWARE.md](HARDWARE.md#touch-and-keys).
+
   **No contact is ever deferred.** Every press and release resolves its own action on its own edge,
   so a lone volume tap has zero added latency and a release stops the volume ramp as before. Three
   gesture forms are recognised:
@@ -108,44 +109,31 @@ from routing to driver submission; acoustics and photons are separate, explicitl
     A crossing leaves **no volume side effect**: the volume overlay is closed rather than flashed for
     a level the gesture takes back, and the source's mirrored level never carries the transient step,
     because the mirror coalescer (450 ms) outlasts the 400 ms crossing window and only the restored
-    level is written. This is the field report "a full-panel swipe triggers the volume control on
-    both sides" turned into a rule.
+    level is written.
   - *chain*: opposite → centre → direction (`W,C,E` right; `E,C,W` left; `S,C,N` up; `N,C,S` down)
     with each press gap at most 250 ms and at most 1500 ms in total. Only the direction contact is
     suppressed — because nothing is deferred, the leading opposite edge has **already** produced
     its own volume step or media toggle by the time the gesture resolves.
-  The panel reports one key at a time, so the measured centre-anchored form is a **centre tap
-  followed by an edge inside 700 ms of the centre's release**. A whole-panel swipe that reports one
-  end-stop key per contact is the full-panel crossing above: the pair is accepted only inside the
-  400 ms press window, and its leading step is reverted rather than held back. Everything else is
-  plain keys, immediately: a bare volume edge is one step, opposite edges more than 400 ms apart are
-  two steps, and a vertical pair or a perimeter traversal without the centre keeps its individual
-  actions (the transport key's 700 ms hold still applies). The retained device log contains a real
-  centre → edge contact pair — `center p+0ms r+115ms | gap 14ms volume_down p+130ms down`, a 130 ms
-  press-to-press distance well inside the centre window — and the same log's previous heuristic
-  scored a `volume_down … gap 123ms volume_up` pair as `swipe_right`: that 123 ms pair is now the
-  full-panel crossing, with the leading step reverted. The `swipe_half.hex` capture reports one
-  gesture as `mic_toggle` (`0xf8`) and the next as the centre key (`0x2c0`), and the `swipe_full.hex`
-  capture holds no centre contact at all — a whole-panel crossing that emits only one key per
-  gesture cannot be told from two quick opposite taps by its endpoints alone, which is why the
-  400 ms window is the contract and why a lone end-stop key stays a volume tap. Circles
-  (`circle_cw`/`circle_ccw`, one closed perimeter traversal
-  from any key with each contact beginning while the previous is still down) are recognised **in
-  full capture only**; a partial capture must keep its individual contacts, so the framework never
-  turns a perimeter press into a circle. Recognition is a bounded shadow of at most five contacts:
-  a press more than 250 ms after the previous one (400 ms for the opposite volume edge of a
-  full-panel crossing), or a sixth contact, abandons it and starts fresh — except a volume edge
-  that follows a centre tap, which has the 700 ms released window —
-  and nothing is ever replayed. The shadow also carries the pre-step level of a volume contact, so
-  the full-panel revert restores exactly one leading step and is cleared with the sequence.
-  The user's map is authoritative (east volume up, west volume down) and direction is never inverted
-  from a single passive trace. Gesture windows and the 700 ms hold use the kernel event timestamp
-  converted to the daemon clock; only an invalid event older than 5 s falls back to receive time.
-  An abandoned sequence produces no gesture and suppresses nothing, while a recognised gesture
-  suppresses only its completing contact; a standalone volume tap or held ramp still works. Partial
-  capture receives `play_pause`/`center` keys and recognized swipes, with volume and microphone
-  framework-owned; full capture additionally shadow-recognizes circles while forwarding every key,
-  with all system effects suppressed. Raw coordinates are delivered only when the backend
+
+  Everything else is plain keys, immediately: a bare volume edge is one step, opposite edges more
+  than 400 ms apart are two steps, and a vertical pair or a perimeter traversal without the centre
+  keeps its individual actions (the transport key's 700 ms hold still applies). Circles
+  (`circle_cw`/`circle_ccw`, one closed perimeter traversal from any key with each contact beginning
+  while the previous is still down) are recognised **in full capture only**; a partial capture must
+  keep its individual contacts, so the framework never turns a perimeter press into a circle.
+  Recognition is a bounded shadow of at most five contacts: a press more than 250 ms after the
+  previous one (400 ms for the opposite volume edge of a full-panel crossing), or a sixth contact,
+  abandons it and starts fresh — except a volume edge that follows a centre tap, which has the
+  700 ms released window — and nothing is ever replayed. The shadow also carries the pre-step level
+  of a volume contact, so the full-panel revert restores exactly one leading step and is cleared with
+  the sequence. The user's map is authoritative (east volume up, west volume down) and direction is
+  never inverted from a single passive trace. Gesture windows and the 700 ms hold use the kernel
+  event timestamp converted to the daemon clock; only an invalid event older than 5 s falls back to
+  receive time. An abandoned sequence produces no gesture and suppresses nothing, while a recognised
+  gesture suppresses only its completing contact; a standalone volume tap or held ramp still works.
+  Partial capture receives `play_pause`/`center` keys and recognized swipes, with volume and
+  microphone framework-owned; full capture additionally shadow-recognizes circles while forwarding
+  every key, with all system effects suppressed. Raw coordinates are delivered only when the backend
   advertises them (`coordinates_available=false` on the Mini, `full_panel_available=true`).
 - **Media control.** A short circle tap toggles current media and left/right swipes skip
   previous/next. Priority after alert/turn dismissal and the stopwatch contract: a standard provider
@@ -189,10 +177,10 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   reply. This is a level endpointer, not a speech classifier: steady loud noise at or above voice
   level beginning mid-turn is bounded by the 10 s cap and cancelled, a steady hiss/tone above 2.5×
   the floor for 400 ms can be answered, and a sustained quiet vowel below that multiple is not
-  confirmed. The canonical external-music + full-level-word check recovers 1 reliable, 1 marginal
-  and 4 buried/rejected words — an accepted music/quiet-speech limitation, not an accuracy
-  benchmark. Loud music or lyrics can open or satisfy a turn, quiet speech can be missed, and there
-  is no automatic music cancellation, AEC or speaker identification.
+  confirmed. A full-level word under external music is often buried or rejected — an accepted
+  music/quiet-speech limitation, not an accuracy benchmark. Loud music or lyrics can open or satisfy
+  a turn, quiet speech can be missed, and there is no automatic music cancellation, AEC or speaker
+  identification.
 - **Audio cues.** A volume step plays the embedded volume cue at the new level; the microphone key
   plays distinct mute and unmute cues; a Bluetooth source that connects while the speaker accepts
   inbound links (speaker mode) plays the embedded connection cue (`question.wav`) once. The startup
@@ -253,11 +241,19 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   leaves the socket, its live subscriptions and its epoch intact; only a real transport failure
   closes the socket and starts the reconnect. The wakeword area shows guided training and the real
   last 20 engine detections only.
-- **Web UI appearance.** The switch beside **Sign out** offers Light, Dark, and System.
-  The choice is saved in the browser, not on the speaker. System is the default and follows
-  the OS appearance live; Light and Dark stay fixed. Custom app settings use the embedded
+- **Web UI appearance and language.** The appearance switch beside **Sign out** offers Light, Dark,
+  and System. The choice is saved in the browser, not on the speaker. System is the default and
+  follows the OS appearance live; Light and Dark stay fixed. A language switch beside it offers
+  English (United Kingdom) and Russian; the choice is saved in the browser and applies to the whole
+  console, including locale-sensitive dates and numbers. Custom app settings use the embedded
   daisyUI kit inside their isolated frame. The palette updates without reloading that frame,
   discarding edits, or interrupting a save.
+- **Web UI certificate access.** The Access page offers the server certificate
+  (`GET /api/cert.pem`) and the same self-signed certificate as a CA file
+  (`GET /api/ca.pem`, downloaded as `capsulad-ca.crt`) to import as a client trust anchor. A
+  plain-HTTP request to the HTTPS listener receives a guidance page that explains the self-signed
+  certificate, shows the HTTPS address and lists the `capsulad-cli cert`/`auth` commands, instead
+  of a bare TLS error.
 - **Web UI app guide.** An app detail page offers its user guide — the package root `README.md`, or
   an embedded document for a compiled-in app — over the session-authenticated
   `GET /api/apps/{appID}/guide`, independent of the app's run state, so a stopped app can still
@@ -298,9 +294,10 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   request, a source without a
   `MediaTransport1` carrying the A2DP sink UUID is reported with the sentence "audio link is not
   A2DP" and the daemon asks that source for its A2DP source profile (`Device1.ConnectProfile`,
-  UUID `0000110a`) once per source — it never disconnects the source to renegotiate, so a peer that
-  will not bring A2DP up keeps its link and its verdict; the same source is not asked again for two
-  minutes, and a newer connection or a disconnect cancels a pending verdict. Incoming connections
+  UUID `0000110a`) once per connection — it never disconnects the source to renegotiate, so a peer
+  that will not bring A2DP up keeps its link and its verdict; a second verdict inside the same
+  connection is refused, bounded by a two-minute window, and a newer connection or a disconnect
+  cancels a pending verdict. Incoming connections
   or discoverability are refused while the audio profile is not advertised. **Incoming connections**
   off denies new inbound BR/EDR links, including from paired devices, with the adapter and BLE radio
   still powered and existing links left alone; **Discoverable** on implies incoming connections, and
@@ -323,11 +320,9 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   becomes the framework master (phone slider → speaker), and a speaker-side change is written back to
   the source's AVRCP register so the phone's display follows. That write is a mirror, never a second
   gain stage: the framework mixer's canonical taper stays the only attenuation on the native sink,
-  and the PulseAudio fallback applies that same taper locally because it bypasses the mixer.
-  Writing the register as an additional stage attenuated the same signal twice (10 % on both ends
-  sounded near-silent) and compensating the local trim for the source's share made 5 % far too
-  loud. A report within one AVRCP step of a level written in the last 900 ms is therefore treated
-  as an echo and does not move the master.
+  and the PulseAudio fallback applies that same taper locally because it bypasses the mixer. A
+  report within one AVRCP step of a level written in the last 900 ms is therefore treated as an echo
+  and does not move the master.
 - **Built-in startup.** At boot only a needed compiled-in app starts. The clock is framework-owned
   and starts whenever the segment display capability exists, preserving timers, alarms and the
   segment baseline even when another display provider is selected. The ring built-in is a provider
@@ -389,11 +384,8 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   which wins, the run is recorded as 143 "stopped" (signal landed) or 0 "stopped" (process exited
   first). Cleanup has already completed either way; the crashed path sets `restartAfterStop`, but
   Simon declares `restart_on_failure=false` and is not a selected provider, so nothing relaunches
-  it. Recorded timings for the centre-hold exit (a press surfacing within about 20 ms mid-replay,
-  exit 0.5 ms after a 1018 ms release) and for `capsulad.clock` regaining `display.segment.front`
-  are simulator evidence from the previous segment-first build; the ring/tone build's own device
-  run — including the ring's emitted colours and the tones' acoustic output — is still a gate,
-  since frame and PCM submission is not physical output.
+  it. The ring/tone build's device run — including the ring's emitted colours and the tones'
+  acoustic output — remains a gate: frame and PCM submission is not physical output.
 - **PA announcement (`org.capsulad.pa`).** A background service that is already running; the
   trigger is a routed `Play` call carrying one streamed RIFF/WAVE file. The daemon's
   authenticated `POST /api/apps/org.capsulad.pa/play` route is a relay to that same call: an
@@ -416,19 +408,17 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   A call is held for at most the caller's own routed deadline (30 s by default, 5 minutes at
   most, enforced by the daemon as a cancel), so a second caller waits for the current clip plus
   at most the owner's remaining deadline. The `max_seconds` bound (1–60, default 30) follows the
-  stored setting — a raised or lowered value applies to the next clip (an earlier build silently
-  reset it to the default on every boot) — and a clip over it is refused before it starts, while
-  an unknown-length stream is stopped at the bound. One call is served at a time: a second caller
-  waits, and only the caller that owns the call can end it, by cancelling. At most 1 MiB of RIFF
+  stored setting — a raised or lowered value applies to the next clip — and a clip over it is
+  refused before it starts, while an unknown-length stream is stopped at the bound. One call is
+  served at a time: a second caller waits, and only the caller that owns the call can end it, by
+  cancelling. At most 1 MiB of RIFF
   chunks may precede the `data` chunk; beyond that the call ends `INVALID_ARGUMENT` with a detail
   naming the limit.
 - **Internet radio (`org.capsulad.radio`).** One native app owns the station list, the display,
   the network stream, the decoder and the standard media contract: it fetches one HTTP(S) MP3
   stream through the shared `libcapsulad` transport, strips ICY metadata, decodes it and writes
   paced PCM to the framework speaker in its own process. There is no companion app, no app-to-app
-  audio hop and therefore no cross-app push authorization; the retired MicroPython front end and
-  `org.capsulad.radio.tuner` are replaced under the same app id, and the stored `stations`,
-  `station` and `autoplay` settings survive the package replacement. The app is
+  audio hop and therefore no cross-app push authorization. The app is
   not a resident service: it is `background = false`, `start_on_boot = false` and
   `restart_on_failure = false`, so it is not started at boot and a clean self-exit
   is not relaunched; one run at most is alive. Play or a retune shows the station
@@ -760,103 +750,9 @@ Audio open/close records must agree with diagnostic active streams. These checks
 decisions and driver submission; they do **not** measure emitted photons, perceived loudness,
 microphone acoustics or firmware behavior outside the framework.
 
-## Automated verification
+## Verification
 
-Race-enabled checks cover `internal/audio`, `internal/input`, `internal/routing`,
-`internal/settings`, `internal/bluetooth`, `internal/discovery`, `internal/wakeword`, both assistant
-modules and the daemon integration scenarios: timer persistence/repetition/dismissal, countdown
-geometry and preemption, stopwatch arbitration, actual backend blanking, static-frame brightness,
-visible-indication rejection, cancelled versus finite playback, held input and intervening activation
-IDs, assistant dismissal through the circle key, restart after a lost framework connection, the
-level-fallaway endpointer with colored/steady-noise and sustained-vowel regressions, mute/OSD
-generations, timezone preservation and Bluetooth overflow recovery. The mixer is pinned to its
-contract: full-scale S16 and hot `PCM_F32LE` through the public playback API stay at or below the
-master, one app's ceiling survives extra streams, its fifth stream is `RESOURCE_EXHAUSTED`, the
-limiter holds the bus below its 0.95 threshold, the sink-pin path runs against a scripted `pactl`,
-and an architecture test fails on a `WritePCM(` call outside `mixLoop`. Bluetooth coverage includes
-the four-octet SBC capability IE, the pure object-tree session assertion with its one profile
-request per source (bounded by the two-minute window and cancelled by a newer connection), the
-acquired-transport-first volume target, `ErrNoAbsoluteVolume` reported once per session, a toggle
-direction resolved from a stale `MediaPlayer1.Status` and from the two-second command memory, the
-centre-gated panel crossing and the 400 ms full-panel crossing (one media command with only the
-completing contact suppressed, the leading full-panel step reverted through the canonical master
-path, a lone volume edge stepping immediately with zero deferral, and two deliberate volume steps
-for a slow opposite pair), the framework Bluetooth provider in the Web UI rendering one `PLAYBACK_PLAYING`
-player from a simulated connected source and no provider at all without one, and the source-volume
-rule: a report from the peer never moves the framework master while the master still reaches the
-transport. Multi-word detection is covered at the model store (legacy migration,
-per-word enablement and binding), the ensemble (score parity with the single-model engine,
-deterministic arbitration, one global cooldown) and delivery (a bound app, no rerouting when it is
-unready). Integration assertions observe asynchronous backend
-updates rather than treating a gRPC send as an acknowledgement, and the audio-gap scenario overflows
-the real assistant transport with voiced PCM so a fast consumer receiving an intact silence burst is
-not mistaken for a dropped-audio test.
-
-The frontend node tests, Vite production build, embedded daemon build, Linux arm64 crossbuild, `go
-test -race ./internal/webui`, the wakeword last-20 history test and the install/train cancellation
-tests pass; a targeted `TestTraining` run confirms only an explicit daemon precommit status proves
-the installed model unchanged. A native browser through a loopback HTTP→TLS proxy exercised the 390
-px and 849 px surfaces (login, live settings with unsaved-edit preservation, timezone search, app
-settings document, API keys, password change, certificate download, diagnostics pause/resume).
-Limits: these exercises cover no real Wi-Fi or Bluetooth peer, physical temperature, acoustics or
-full training run, and the self-signed TLS endpoint is reached through the proxy without weakening
-validation. Wakeword training writes one artifact per word: installing a word restarts detection
-for all words, retraining keeps that word's enabled state and binding, and a cancel racing the final
-atomic commit may still install that word's new model.
-
-The shipped app packages have their own host suites, run with `make test-apps`: the Simon
-contract suite drives the real `main.js` inside a fake QuickJS host (ring geometry at several
-advertised pixel counts, the colour/tone pair per side, input ordering, retry and centre
-hold/tap, no-display degradation, preemption and the release order), the PA suite exercises the
-real `main.py`'s WAV parser and protobuf helpers under CPython, and the Internet Radio and Home
-Assistant bridge suites are nested Go modules. [VERIFICATION.md](VERIFICATION.md) still carries
-the recorded runs of the earlier segment-first Simon build and of the retired two-package radio
-(its CPython suite, simulator `e2e` with a fixture tuner, and live `e2e-tuner` against a real MP3
-station); those entries are evidence about those builds, and the suites that produced them no
-longer exist. None of it is a device measurement: a radio fetch/decode run is
-host evidence, and app-package installation and runs on the unit are recorded separately with
-their own proof levels.
-
-## Rockchip speaker verification
-
-Exercises drive the real device's Linux evdev codes, not simulator admin events.
-
-| Scenario | Observed evidence |
-|---|---|
-| Countdown direction and geometry | Driver frames carry 12, 11, …, 1 orange pixels in the specified counterclockwise order. |
-| Completion and repetition | Driver segment masks `[63 63 63 63]` (00:00); eight clock playback opens in the trace; the alert stays active past ten seconds. |
-| Digital jingle output | `master.monitor` contains three repeated three-beep groups; the final half second after dismissal is all-zero PCM. Mixer output, not acoustic loudness. |
-| Physical dismissal | A one-second circle-key press dismisses the alert, stops clock audio and does not summon the assistant. |
-| Cancellation and stopwatch | Cancelling a countdown releases the ring; stopwatch start/pause/resume/reset preserve the expected elapsed-time transitions. |
-| Assistant lifecycle | Summon and hold-to-talk both use the real play/pause-key path; the summon opens real microphone capture; completed turns leave no assistant audio streams or ring ownership. |
-| Physical microphone key | GPIO 21 reads 0 after mute and 1 after unmute; no acoustic recording needed. |
-| Volume | A physical tap increases volume once and does not repeat after release; the original level is restored. |
-| Brightness submission | Ring-driver writes carry global levels 0.25 and 0.8 during mute indication; the original level is restored. |
-| Final output | A successful no-owner ring write contains twelve all-zero RGB pixels, not merely a routing-release message. |
-| Restart and restoration | A normal service restart retains provider selections and settings, the assistant ready and no active app audio; the kernel boot ID is unchanged. |
-
-Scenario results, rendered-output logs/assertions and binary hashes are kept under
-`build/speaker-audit/`.
-
-These exercises do not certify acoustic recognition thresholds, subjective LED brightness/gamma,
-long-room wakeword false-positive rates, real Bluetooth re-pairing or source-device behaviour, or
-unverified hardware variants. Bluetooth behavior is exercised with the simulator and real manager
-state-machine tests; no user pairing is touched. Gesture inference (centre-gated
-centre→edge swipes inside the 700 ms released window, the opposite→centre→direction chain,
-the 400 ms full-panel crossing of opposite volume edges with its leading-step revert,
-a slow opposite pair staying two deliberate volume steps, zero-deferral volume steps,
-full-capture-only circles, preserved sequential taps, suppression of only the completing contact),
-kernel-timestamp windows, tap/swipe media control with the
-command-memory/receipt/`Status`/transport evidence order and the `MediaControl1` fallback, the
-four-octet SBC capability IE, the session assertion with its one profile request per connection,
-`ErrNoAbsoluteVolume`, the framework Bluetooth media provider and the two-way display mirror with
-echo suppression, multi-word detection and delivery, mDNS apply idempotence and the processed-tap endpointer
-have local unit and fixture coverage, and the real daemon passes all 14 assistant scenarios; device
-and acoustic checks for the gesture, Bluetooth-profile, multi-word and endpointer changes remain
-gates. Passive device traces show event shape, not transport success or contact order. A browser
-session against a real simulator daemon observed host-name default/save/restart persistence,
-invalid-label rejection, no false mDNS advertisement claim and the **Restart** labels on Clock, Ring
-and Diagnostics; a browser run against a successful responder fixture exercised the corrected Avahi
-apply (zero setter calls for startup, GET and same-name save; one for a real change; genuine
-collision with no advertised claim; recovery). Real Avahi `.local` resolution and collision behaviour
-on the device remain gates.
+Proof levels, the device-observed speaker scenarios and the host-only evidence are recorded in
+[VERIFICATION.md](VERIFICATION.md#speaker-output-and-interaction); the current device,
+acoustic and optical gates are under [Open gates](VERIFICATION.md#open-gates). This page states
+the behavior; it does not duplicate the evidence record.

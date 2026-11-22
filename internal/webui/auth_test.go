@@ -231,6 +231,10 @@ func TestAPIKeyBoundary(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("API key certificate: %d", code)
 	}
+	code, _, _ = doJSON(t, c, http.MethodGet, env.ts.URL+"/api/ca.pem", nil, headers)
+	if code != http.StatusOK {
+		t.Fatalf("API key CA certificate: %d", code)
+	}
 	// API keys are not browser-admin authority.
 	code, _, _ = doJSON(t, c, http.MethodPost, env.ts.URL+"/api/password",
 		map[string]string{"current": "correct horse battery", "next": "abcdefgh", "confirm": "abcdefgh"},

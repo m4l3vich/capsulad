@@ -1,4 +1,5 @@
 import { ClientFrame, ServerFrame, Topic } from '../proto/web_pb.js'
+import { t } from './i18n.js'
 
 // One binary WebSocket per session. Frames are capsulad.web.v1 protobuf, every
 // request is correlated by id, subscriptions own bounded snapshots plus
@@ -77,7 +78,7 @@ class CapsuleSocket {
 
     ws.onclose = (event) => {
       this.ws = null
-      this.rejectAll(new Error('connection closed'))
+      this.rejectAll(new Error(t('errors.connectionClosed')))
       if (this.manualClose) {
         this.setState('closed')
         return
@@ -208,7 +209,7 @@ class CapsuleSocket {
   }
 
   fail(id, error) {
-    const failure = Object.assign(new Error(error.message || 'request failed'), { code: error.code })
+    const failure = Object.assign(new Error(error.message || t('errors.requestFailedPlain')), { code: error.code })
     // A per-request failure settles exactly that request (or subscription) and
     // nothing else. Transport state and its epoch belong to onclose: an RPC the
     // daemon refused must stay an inline error on the page, never a reason to
@@ -290,7 +291,7 @@ class CapsuleSocket {
         this.pending.delete(id)
         entry.onProgress = null
         entry.cleanup = null
-        finish(reject, new Error('request timed out'))
+        finish(reject, new Error(t('errors.requestTimedOut')))
         sendCancel()
       }, timeout)
       this.pending.set(id, entry)
@@ -299,7 +300,7 @@ class CapsuleSocket {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
         clearTimeout(entry.timer)
-        finish(reject, new Error('not connected to the device'))
+        finish(reject, new Error(t('errors.notConnectedDevice')))
         return
       }
       this.ws.send(ClientFrame.encode(body))
@@ -312,13 +313,13 @@ class CapsuleSocket {
       const entry = { resolve, reject }
       entry.timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error('snapshot timed out'))
+        reject(new Error(t('errors.snapshotTimedOut')))
       }, timeout)
       this.pending.set(id, entry)
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
         clearTimeout(entry.timer)
-        reject(new Error('not connected to the device'))
+        reject(new Error(t('errors.notConnectedDevice')))
         return
       }
       this.ws.send(ClientFrame.encode({ requestId: id, snapshotRequest: { topic, appId } }))
@@ -333,7 +334,7 @@ class CapsuleSocket {
       timer: setTimeout(() => {
         if (this.snapshotWaiters.get(id) !== waiter) return
         this.snapshotWaiters.delete(id)
-        this.notifySubscribe(waiter.key, new Error('subscription timed out'))
+        this.notifySubscribe(waiter.key, new Error(t('errors.subscriptionTimedOut')))
       }, 15000)
     }
     this.snapshotWaiters.set(id, waiter)
@@ -365,7 +366,7 @@ class CapsuleSocket {
 }
 
 function abortError() {
-  const err = new Error('request aborted')
+  const err = new Error(t('errors.requestAborted'))
   err.name = 'AbortError'
   return err
 }

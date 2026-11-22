@@ -1,8 +1,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { socket } from '../lib/ws.js'
 import { dateTime, durationMs } from '../lib/format.js'
 import Icon from './Icon.vue'
+
+const { t } = useI18n()
 
 const props = defineProps({
   samples: { type: Array, default: () => [] },
@@ -17,33 +20,33 @@ const STORAGE_KEY = 'capsula.wakeword.setup.v5'
 const CUE_MS = 3000
 
 const STEPS = [
-  { key: 'setup', label: 'Setup', title: 'What\'s the word?' },
-  { key: 'room', label: 'Room', title: 'Reading the room' },
-  { key: 'speech', label: 'Phrases', title: 'Talk to me' },
-  { key: 'word', label: 'Wakeword', title: 'Say the word' },
-  { key: 'review', label: 'Review', title: 'Review and training' }
+  { key: 'setup', labelKey: 'training.stepSetup', titleKey: 'training.titleSetup' },
+  { key: 'room', labelKey: 'training.stepRoom', titleKey: 'training.titleRoom' },
+  { key: 'speech', labelKey: 'training.stepSpeech', titleKey: 'training.titleSpeech' },
+  { key: 'word', labelKey: 'training.stepWord', titleKey: 'training.titleWord' },
+  { key: 'review', labelKey: 'training.stepReview', titleKey: 'training.titleReview' }
 ]
 
 const GROUPS = {
   room: {
-    title: 'Room-noise recordings',
-    short: 'room noise',
+    titleKey: 'training.groupRoom',
+    shortKey: 'training.groupRoomShort',
     durationMs: 8000,
     target: 3,
     minimum: 3,
     recordLabel: 'room'
   },
   speech: {
-    title: 'Everyday-phrase recordings',
-    short: 'a phrase',
+    titleKey: 'training.groupSpeech',
+    shortKey: 'training.groupSpeechShort',
     durationMs: 4000,
     target: 4,
     minimum: 3,
     recordLabel: 'speech'
   },
   word: {
-    title: 'Wakeword recordings',
-    short: 'the wakeword',
+    titleKey: 'training.groupWord',
+    shortKey: 'training.groupWordShort',
     durationMs: 2000,
     target: 6,
     minimum: 6,
@@ -106,37 +109,27 @@ const PHRASES = {
   ]
 }
 
-const WORD_VARIATIONS = {
-  ru: [
-    (word) => `Say «${word}» in your normal voice.`,
-    (word) => `Say «${word}» louder than usual, without shouting.`,
-    (word) => `Say «${word}» in a clear whisper.`,
-    (word) => `Say «${word}» from about two metres away.`,
-    (word) => `Say «${word}» as if calling someone by name.`,
-    (word) => `Say «${word}» softly, with your head turned slightly to one side.`
-  ],
-  en: [
-    (word) => `Say “${word}” in your normal voice.`,
-    (word) => `Say “${word}” louder than usual, without shouting.`,
-    (word) => `Say “${word}” in a clear whisper.`,
-    (word) => `Say “${word}” from about two metres away.`,
-    (word) => `Say “${word}” as if calling someone by name.`,
-    (word) => `Say “${word}” softly, with your head turned slightly to one side.`
-  ]
-}
+const WORD_VARIATION_KEYS = [
+  'training.wordVariation1',
+  'training.wordVariation2',
+  'training.wordVariation3',
+  'training.wordVariation4',
+  'training.wordVariation5',
+  'training.wordVariation6'
+]
 
 const STAGE_LABELS = {
-  load: 'Getting ready to listen',
-  validate: 'Checking the selected recordings',
-  prepare: 'Preparing recordings',
-  augment: 'Making varied copies of the recordings',
-  embed: 'Listening for speech patterns',
-  negatives: 'Studying room noise and other speech',
-  train: 'Teaching Capsula your wakeword',
-  calibrate: 'Calibrating detection sensitivity',
-  finaltest: 'Final check on held-back recordings',
-  install: 'Saving your wakeword',
-  installed: 'Wakeword ready'
+  load: 'training.stageLoad',
+  validate: 'training.stageValidate',
+  prepare: 'training.stagePrepare',
+  augment: 'training.stageAugment',
+  embed: 'training.stageEmbed',
+  negatives: 'training.stageNegatives',
+  train: 'training.stageTrain',
+  calibrate: 'training.stageCalibrate',
+  finaltest: 'training.stageFinaltest',
+  install: 'training.stageInstall',
+  installed: 'training.stageInstalled'
 }
 
 function emptySetup() {
@@ -222,11 +215,11 @@ const stepKey = computed(() => STEPS[stepIndex.value]?.key || 'setup')
 const spec = computed(() => GROUPS[stepKey.value] || null)
 const stepDescription = computed(() => {
   switch (stepKey.value) {
-    case 'setup': return 'Pick a word that will be used to summon an assistant'
-    case 'room': return 'Let Capsula hear the normal background of the room.'
-    case 'speech': return 'Capsula needs to hear ordinary speech that is not your wakeword.'
-    case 'word': return 'Record the word six times, in the variations shown.'
-    case 'review': return 'If everything\'s good, we\'ll start the training.'
+    case 'setup': return t('training.stepDescSetup')
+    case 'room': return t('training.stepDescRoom')
+    case 'speech': return t('training.stepDescSpeech')
+    case 'word': return t('training.stepDescWord')
+    case 'review': return t('training.stepDescReview')
     default: return ''
   }
 })
@@ -287,9 +280,18 @@ const readyToTrain = computed(() =>
 
 const missingForTraining = computed(() => {
   const missing = []
-  if (counts.value.word < GROUPS.word.minimum) missing.push(`${GROUPS.word.minimum - counts.value.word} more wakeword recording${GROUPS.word.minimum - counts.value.word === 1 ? '' : 's'}`)
-  if (counts.value.room < GROUPS.room.minimum) missing.push(`${GROUPS.room.minimum - counts.value.room} more room recording${GROUPS.room.minimum - counts.value.room === 1 ? '' : 's'}`)
-  if (counts.value.speech < GROUPS.speech.minimum) missing.push(`${GROUPS.speech.minimum - counts.value.speech} more phrase recording${GROUPS.speech.minimum - counts.value.speech === 1 ? '' : 's'}`)
+  if (counts.value.word < GROUPS.word.minimum) {
+    const count = GROUPS.word.minimum - counts.value.word
+    missing.push(t('training.missingWord', { count }, count))
+  }
+  if (counts.value.room < GROUPS.room.minimum) {
+    const count = GROUPS.room.minimum - counts.value.room
+    missing.push(t('training.missingRoom', { count }, count))
+  }
+  if (counts.value.speech < GROUPS.speech.minimum) {
+    const count = GROUPS.speech.minimum - counts.value.speech
+    missing.push(t('training.missingPhrase', { count }, count))
+  }
   return missing
 })
 
@@ -299,16 +301,16 @@ function sampleFor(id) {
 
 function describeSample(id) {
   const sample = sampleFor(id)
-  if (!sample) return 'Saved on the device'
+  if (!sample) return t('training.savedOnDevice')
   return `${dateTime(sample.recordedUnixMs)} · ${durationMs(sample.durationMs)}`
 }
 
 function languageName(code) {
   if (!code) return ''
   const value = String(code)
-  if (value.toLowerCase() === 'ru') return 'Russian'
-  if (value.toLowerCase() === 'en') return 'English'
-  if (value.toLowerCase() === 'any') return 'Any language'
+  if (value.toLowerCase() === 'ru') return t('training.languageRussian')
+  if (value.toLowerCase() === 'en') return t('training.languageEnglish')
+  if (value.toLowerCase() === 'any') return t('training.languageAny')
   return value
 }
 
@@ -317,20 +319,24 @@ function groupIds(group) {
 }
 
 const prompt = computed(() => {
-  if (stepKey.value === 'room') return 'Don\'t say anything yet.'
-  if (stepKey.value === 'speech') return speechPhrase.value ? `Say «${speechPhrase.value}»` : 'Say an everyday phrase.'
+  if (stepKey.value === 'room') return t('training.promptQuiet')
+  if (stepKey.value === 'speech') {
+    return speechPhrase.value
+      ? t('training.promptSay', { phrase: speechPhrase.value })
+      : t('training.promptAnyPhrase')
+  }
   if (stepKey.value === 'word') {
-    const word = (setup.word || wordDraft.value).trim() || 'your wakeword'
-    const variations = WORD_VARIATIONS[setup.language] || WORD_VARIATIONS.ru
-    return variations[counts.value.word % variations.length](word)
+    const word = (setup.word || wordDraft.value).trim() || t('training.promptWordFallback')
+    const key = WORD_VARIATION_KEYS[counts.value.word % WORD_VARIATION_KEYS.length]
+    return t(key, { word })
   }
   return ''
 })
 
 const promptHint = computed(() => {
-  if (stepKey.value === 'room') return 'Leave the room sounding normal: fan, traffic, fridge. Do not speak.'
-  if (stepKey.value === 'speech') return 'Read the phrase in a normal voice. Do not say your wakeword in this recording.'
-  if (stepKey.value === 'word') return 'Wait for the final, longer tone, then say the complete word once, about half a second later.'
+  if (stepKey.value === 'room') return t('training.hintRoom')
+  if (stepKey.value === 'speech') return t('training.hintSpeech')
+  if (stepKey.value === 'word') return t('training.hintWord')
   return ''
 })
 
@@ -351,9 +357,11 @@ const recordProgress = computed(() => {
 
 const percent = computed(() => Math.min(100, Math.max(0, Math.round((Number(training.fraction) || 0) * 100))))
 const stageLabel = computed(() => {
-  if (training.cancelling) return 'Stopping on Capsula…'
+  if (training.cancelling) return t('training.stopping')
   const stage = String(training.stage || '')
-  return STAGE_LABELS[stage] || (stage ? stage.replaceAll('_', ' ') : 'Preparing on Capsula…')
+  return STAGE_LABELS[stage]
+    ? t(STAGE_LABELS[stage])
+    : (stage ? stage.replaceAll('_', ' ') : t('training.preparing'))
 })
 
 const canAdvance = computed(() => {
@@ -382,7 +390,7 @@ function nextStep() {
     const nextLanguage = languageDraft.value
     if (nextWord !== setup.word && setup.ids.word.length) {
       setup.ids.word = []
-      takeStatus.value = 'The wakeword changed, so earlier wakeword recordings are no longer selected. Record new ones for the new word.'
+      takeStatus.value = t('training.wordChanged')
     }
     setup.word = nextWord
     const languageChanged = nextLanguage !== setup.language
@@ -414,13 +422,13 @@ function startRecordingPhase(group, replaceId = '') {
   if (group === 'speech') speechPhrase.value = phrase
   let takePrompt = ''
   if (group === 'room') {
-    takePrompt = 'Stay quiet for the whole recording.'
+    takePrompt = t('training.stayQuiet')
   } else if (group === 'speech') {
-    takePrompt = `Say «${phrase}»`
+    takePrompt = t('training.promptSay', { phrase })
   } else {
-    const word = (setup.word || wordDraft.value).trim() || 'your wakeword'
-    const variations = WORD_VARIATIONS[setup.language] || WORD_VARIATIONS.ru
-    takePrompt = variations[counts.value.word % variations.length](word)
+    const word = (setup.word || wordDraft.value).trim() || t('training.promptWordFallback')
+    const key = WORD_VARIATION_KEYS[counts.value.word % WORD_VARIATION_KEYS.length]
+    takePrompt = t(key, { word })
   }
   const active = {
     group,
@@ -446,12 +454,12 @@ function startRecordingPhase(group, replaceId = '') {
 async function recordTake(group, replaceId = '') {
   if (busy.value) return
   if (!props.micLive) {
-    takeError.value = props.micReason || 'The microphone is not ready.'
+    takeError.value = props.micReason || t('training.micNotReady')
     return
   }
   const active = startRecordingPhase(group, replaceId)
   if (!active) return
-  takeStatus.value = 'Capsula is showing the recording cue. Wait for the final tone before speaking.'
+  takeStatus.value = t('training.cueWait')
   try {
     const result = await socket.request(
       { recordSample: { label: active.label, durationMs: active.durationMs } },
@@ -470,28 +478,28 @@ async function recordTake(group, replaceId = '') {
     saveSelection()
     if (group === 'speech') speechPhrase.value = nextPhrase(active.phrase)
     takeStatus.value = replaceId
-      ? 'Replacement saved; the previous recording is no longer selected.'
-      : `Take ${setup.ids[group].length} saved on Capsula.`
+      ? t('training.replacementSaved')
+      : t('training.takeSaved', { count: setup.ids[group].length })
     if (counts.value[group] >= GROUPS[group].target) {
-      takeStatus.value = `${GROUPS[group].title} complete. Continue when ready.`
+      takeStatus.value = t('training.groupComplete', { title: t(GROUPS[group].titleKey) })
     }
     emit('refresh')
     if (replaceId) {
       try {
         await socket.request({ deleteSample: { sampleId: replaceId } }, { timeout: 10000 })
       } catch (err) {
-        takeStatus.value = `The replacement is selected, but the old recording could not be deleted: ${err.message}`
+        takeStatus.value = t('training.replacementOldFailed', { error: err.message })
       }
       emit('refresh')
     }
   } catch (err) {
     if (active.cancelled || err?.name === 'AbortError') {
-      takeStatus.value = 'Recording cancelled.'
+      takeStatus.value = t('training.recordingCancelled')
     } else {
       takeStatus.value = ''
       takeError.value = active.disconnected
-        ? 'The connection to Capsula closed before the recording finished.'
-        : `The recording failed: ${err.message}`
+        ? t('training.connectionClosedRecording')
+        : t('training.recordingFailed', { error: err.message })
     }
   } finally {
     if (timer) {
@@ -520,7 +528,7 @@ function cancelTake() {
   const active = recording.value
   if (!active) return
   active.cancelled = true
-  takeStatus.value = 'Cancelling the recording…'
+  takeStatus.value = t('training.cancellingRecording')
   try {
     active.controller.abort()
   } catch (_) { }
@@ -611,8 +619,8 @@ function handleProgress(progress) {
     training.running = false
     training.cancelling = false
     training.error = stopped
-      ? 'Training stopped. If you stopped it near the final step, refresh and check the current wakeword.'
-      : (progress.log || 'Training stopped before a new wakeword was confirmed.')
+      ? t('training.trainingStoppedCheck')
+      : (progress.log || t('training.trainingStoppedBefore'))
     training.installed = null
     cancelRequested = false
     clearCancelBackstop()
@@ -656,7 +664,7 @@ async function cancelTraining() {
   clearCancelBackstop()
   if (!training.id) {
     cancelRequested = true
-    training.logs.push('Cancellation requested; waiting for Capsula to confirm.')
+    training.logs.push(t('training.cancellationRequested'))
     return
   }
   cancelRequested = true
@@ -670,7 +678,7 @@ async function cancelTraining() {
       if (!disposed && training.cancelling) {
         training.running = false
         training.cancelling = false
-        training.error = 'Capsula did not confirm whether training stopped or finished. Close this dialog and check the current wakeword.'
+        training.error = t('training.cancelUnconfirmed')
         offTraining?.()
         offTraining = null
         emit('refresh')
@@ -680,7 +688,7 @@ async function cancelTraining() {
   } catch (err) {
     training.running = false
     training.cancelling = false
-    training.error = `Training could not be stopped from this page: ${err.message}. It may still be running or may have finished; check the current wakeword after reconnecting.`
+    training.error = t('training.cancelFailed', { error: err.message })
     cancelRequested = false
     offTraining?.()
     offTraining = null
@@ -722,7 +730,7 @@ function onSocketState(state) {
     orphanTrainingId = training.id
     training.running = false
     training.cancelling = false
-    training.error = 'The connection to Capsula closed. Training may have stopped or finished; check the current wakeword after reconnecting.'
+    training.error = t('training.connectionClosedTraining')
     clearCancelBackstop()
     offTraining?.()
     offTraining = null
@@ -825,19 +833,19 @@ onBeforeUnmount(() => {
         <div class="flex shrink-0 items-start gap-3">
           <div class="min-w-0 flex-1">
             <h2 id="wakeword-dialog-title" ref="headingEl" tabindex="-1" class="text-lg font-semibold sm:text-xl">
-              {{ STEPS[stepIndex].title }}
+              {{ $t(STEPS[stepIndex].titleKey) }}
             </h2>
             <p class="mt-1 hidden text-sm opacity-70 [@media(min-height:420px)]:block">{{ stepDescription }}</p>
           </div>
           <button
             type="button"
             class="btn btn-ghost btn-circle"
-            aria-label="Close wakeword setup"
+            :aria-label="$t('training.closeSetupAria')"
             :disabled="closing"
             @click="requestClose"
           >✕</button>
         </div>
-        <ol class="flex flex-wrap items-center gap-1 mt-1" aria-label="Setup progress">
+        <ol class="flex flex-wrap items-center gap-1 mt-1" :aria-label="$t('training.setupProgressAria')">
           <li v-for="(step, index) in STEPS" :key="step.key" class="flex-grow">
             <span class="badge badge-xs w-full h-[6px]" :class="stepClass(index)"/>
           </li>
@@ -846,7 +854,7 @@ onBeforeUnmount(() => {
 
       <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 sm:py-5">
         <div v-if="closing" class="alert alert-warning mb-4" role="status">
-          <span>{{ recording ? 'Cancelling the recording…' : 'Stopping training…' }} Capsula will confirm whether it stopped or finished.</span>
+          <span>{{ recording ? $t('training.closingRecording') : $t('training.closingTraining') }} {{ $t('training.closingConfirm') }}</span>
         </div>
         <div v-if="takeError" class="alert alert-error mb-4" role="alert">
           <span>{{ takeError }}</span>
@@ -855,45 +863,45 @@ onBeforeUnmount(() => {
         <!-- Setup -->
         <div v-if="stepKey === 'setup'" class="grid gap-4">
           <div class="rounded-box bg-base-200 p-4 text-sm">
-            <p class="font-medium text-lg">Before we begin</p>
+            <p class="font-medium text-lg">{{ $t('training.beforeBegin') }}</p>
             <p class="mt-2 opacity-80">
-              Place the device in its usual place. Before recording it will produce three short tones.
+              {{ $t('training.placementHint') }}
             </p>
             <p class="mt-2 opacity-80">
-              For the wakeword it's recommended to use a word with a fricative sound towards its end, because it's easier for algorithm to detect in a sound stream. Examples you probably know: "Крыса", "Маруся", "Алиса", "Яндекс", "Салют", "Сири", "Алекса".
+              {{ $t('training.fricativeHint') }}
             </p>
             <p class="mt-2 opacity-80">
-              If you don't like any of the takes or want to re-record a take — no big deal, you can just delete a take and record again. No pressure.
+              {{ $t('training.reRecordHint') }}
             </p>
 
-            <p class="font-medium mt-3">What will we record</p>
+            <p class="font-medium mt-3">{{ $t('training.whatRecord') }}</p>
             <ul class="mt-2 list-disc space-y-1 pl-5 opacity-80">
-              <li>Three room recordings of eight seconds each: background only.</li>
-              <li>Four everyday phrases of four seconds each: ordinary speech without your wakeword.</li>
-              <li>Six short wakeword recordings of two seconds each, in different ways of speaking.</li>
+              <li>{{ $t('training.recordRoom') }}</li>
+              <li>{{ $t('training.recordSpeech') }}</li>
+              <li>{{ $t('training.recordWord') }}</li>
             </ul>
           </div>
 
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="form-control w-full">
-              <span class="label-text font-medium">Which word should wake Capsula?</span>
+              <span class="label-text font-medium">{{ $t('training.wordLabel') }}</span>
               <input
                 v-model="wordDraft"
                 type="text"
                 class="input input-bordered mt-1 w-full"
                 maxlength="100"
                 autocomplete="off"
-                placeholder="For example, Маруся"
+                :placeholder="$t('training.wordPlaceholder')"
               />
-              <span class="label-text-alt mt-1 opacity-70">Use a distinctive word you can say naturally. Keep saying the same word throughout setup.</span>
+              <span class="label-text-alt mt-1 opacity-70">{{ $t('training.wordHint') }}</span>
             </label>
             <label class="form-control w-full">
-              <span class="label-text font-medium">Language</span>
+              <span class="label-text font-medium">{{ $t('training.languageLabel') }}</span>
               <select v-model="languageDraft" class="select select-bordered mt-1 w-full">
-                <option value="ru">Russian</option>
-                <option value="en">English</option>
+                <option value="ru">{{ $t('training.languageRussian') }}</option>
+                <option value="en">{{ $t('training.languageEnglish') }}</option>
               </select>
-              <span class="label-text-alt mt-1 opacity-70">Pick the language you will speak during the recordings.</span>
+              <span class="label-text-alt mt-1 opacity-70">{{ $t('training.languageHint') }}</span>
             </label>
           </div>
         </div>
@@ -902,11 +910,11 @@ onBeforeUnmount(() => {
         <div v-else-if="stepKey !== 'review'" class="grid gap-4">
           <div>
             <p class="text-sm font-semibold text-primary">
-              {{ spec.title }} · recording {{ Math.min(counts[stepKey] + 1, spec.target) }} of {{ spec.target }}
+              {{ $t('training.groupRecording', { title: $t(spec.titleKey), current: Math.min(counts[stepKey] + 1, spec.target), total: spec.target }) }}
             </p>
             <h3 class="mt-1 text-xl font-semibold">{{ prompt }}</h3>
             <p class="mt-2 text-sm opacity-70">{{ promptHint }}</p>
-            <p class="mt-2 text-sm opacity-70">You can record more takes than required for better detection accuracy.</p>
+            <p class="mt-2 text-sm opacity-70">{{ $t('training.moreTakes') }}</p>
 
             <div class="mt-12 mb-8 flex flex-wrap justify-center gap-2 relative">
               <div
@@ -939,7 +947,7 @@ onBeforeUnmount(() => {
 
           <div v-if="counts[stepKey]" class="rounded-box border border-base-300">
             <div class="flex items-center justify-between gap-2 px-4 py-2">
-              <p class="text-sm font-medium">Saved recordings</p>
+              <p class="text-sm font-medium">{{ $t('training.savedRecordings') }}</p>
               <span class="badge badge-sm font-bold">{{ counts[stepKey] }} / {{ spec.target }}</span>
             </div>
             <ul class="divide-y divide-base-300 border-t border-base-300">
@@ -947,7 +955,7 @@ onBeforeUnmount(() => {
                 <span class="badge badge-ghost badge-sm">{{ index + 1 }}</span>
                 <span class="opacity-75 flex-grow">{{ describeSample(id) }}</span>
                 <button class="btn btn-outline btn-error btn-xs">
-                  Delete
+                  {{ $t('common.delete') }}
                 </button>
               </li>
             </ul>
@@ -957,26 +965,26 @@ onBeforeUnmount(() => {
         <!-- Review and train -->
         <div v-else class="grid gap-4">
           <div v-if="setup.completed" class="alert alert-info" role="status">
-            <span>This setup already made a wakeword. Start a new setup with fresh recordings before training again.</span>
+            <span>{{ $t('training.alreadyMade') }}</span>
           </div>
           <div v-else-if="setup.finalTestConsumed" class="alert alert-info" role="status">
-            <span>The final check has already been used for these recordings. Start a new setup with fresh recordings; the same recordings cannot be used to check another model.</span>
+            <span>{{ $t('training.finalTestUsed') }}</span>
           </div>
           <div v-else-if="!samplesLoaded" class="alert alert-info" role="status">
-            <span>Waiting for Capsula’s saved recordings before training can start.</span>
+            <span>{{ $t('training.waitingRecordings') }}</span>
           </div>
           <div v-else-if="missingForTraining.length" class="alert alert-warning" role="status">
-            <span>Still needed: {{ missingForTraining.join(', ') }}.</span>
+            <span>{{ $t('training.stillNeeded', { items: missingForTraining.join(', ') }) }}</span>
           </div>
           <p v-if="takeStatus" class="text-sm" role="status" aria-live="polite">{{ takeStatus }}</p>
 
-          <p class="text-sm">We've recorded enough audio to begin training the wakeword model. If you want to add more for better accuracy, you can go back and do it.</p>
+          <p class="text-sm">{{ $t('training.enoughAudio') }}</p>
 
           <div class="rounded-box border border-base-300">
             <div class="flex items-center justify-between gap-2 px-4 py-2" v-for="group in ['room', 'speech', 'word']" :key="group">
-              <p class="text-sm font-medium">{{ GROUPS[group].title }}</p>
+              <p class="text-sm font-medium">{{ $t(GROUPS[group].titleKey) }}</p>
               <span class="badge badge-sm font-bold">
-                {{ counts[group] }} recorded · {{ GROUPS[group].minimum }} minimum
+                {{ $t('training.recordedMinimum', { count: counts[group], minimum: GROUPS[group].minimum }) }}
               </span>
             </div>
           </div>
@@ -984,18 +992,18 @@ onBeforeUnmount(() => {
           <div v-if="recording" class="rounded-box border border-primary/30 bg-primary/5 p-4" aria-live="polite">
             <div class="flex items-center gap-2">
               <span class="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-error" aria-hidden="true"></span>
-              <span v-if="recordingPhase === 'cue'" class="font-medium">Capsula cue — {{ cueLeft }} s</span>
-              <span v-else class="font-medium">Recording — {{ captureLeft }} s left</span>
+              <span v-if="recordingPhase === 'cue'" class="font-medium">{{ $t('training.cue', { count: cueLeft }) }}</span>
+              <span v-else class="font-medium">{{ $t('training.recordingLeft', { count: captureLeft }) }}</span>
             </div>
             <p class="mt-2 text-sm opacity-75">{{ recording.prompt }}</p>
             <progress class="progress progress-primary mt-3 w-full" :value="recordProgress" max="100"></progress>
-            <button type="button" class="btn btn-outline btn-error btn-sm mt-3" @click="cancelTake">Cancel recording</button>
+            <button type="button" class="btn btn-outline btn-error btn-sm mt-3" @click="cancelTake">{{ $t('training.cancelRecording') }}</button>
           </div>
 
           <div v-if="training.running || training.cancelling" class="rounded-box border border-primary/30 bg-base-200 p-4" aria-live="polite">
             <div class="flex items-center gap-2">
               <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
-              <h3 class="font-semibold">Training on Capsula</h3>
+              <h3 class="font-semibold">{{ $t('training.trainingOnCapsula') }}</h3>
             </div>
             <p class="mt-2 text-sm">{{ stageLabel }}</p>
             <progress class="progress progress-primary mt-3 w-full" :value="percent" max="100"></progress>
@@ -1006,28 +1014,28 @@ onBeforeUnmount(() => {
                 class="btn btn-outline btn-error btn-sm"
                 :disabled="training.cancelling"
                 @click="cancelTraining"
-              >{{ training.cancelling ? 'Stopping…' : 'Stop training' }}</button>
+              >{{ training.cancelling ? $t('training.stoppingShort') : $t('training.stopTraining') }}</button>
             </div>
             <details class="mt-3">
-              <summary class="cursor-pointer text-xs font-medium opacity-60">Training logs</summary>
-              <pre class="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-box bg-base-300/40 p-2 text-xs">{{ training.logs.length ? training.logs.join('\n') : 'Waiting for the device…' }}</pre>
+              <summary class="cursor-pointer text-xs font-medium opacity-60">{{ $t('training.trainingLogs') }}</summary>
+              <pre class="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-box bg-base-300/40 p-2 text-xs">{{ training.logs.length ? training.logs.join('\n') : $t('training.waitingDevice') }}</pre>
             </details>
           </div>
 
           <div v-else-if="training.installed" class="alert alert-success" role="status">
             <div class="min-w-0">
-              <p class="font-semibold">Your wakeword is ready on Capsula</p>
+              <p class="font-semibold">{{ $t('training.wakewordReady') }}</p>
               <p class="mt-1 text-sm">
                 {{ training.installed.displayName || setup.word }}
                 <span v-if="training.installed.language">· {{ languageName(training.installed.language) }}</span>
               </p>
-              <p class="mt-2 text-sm opacity-80">Nothing was switched on automatically. Close this dialog, then use the Wakeword section to choose this wakeword and turn detection on.</p>
+              <p class="mt-2 text-sm opacity-80">{{ $t('training.nothingSwitchedOn') }}</p>
               <details v-if="training.installed.modelId" class="mt-2">
-                <summary class="cursor-pointer text-xs opacity-70">Technical details</summary>
+                <summary class="cursor-pointer text-xs opacity-70">{{ $t('training.technicalDetails') }}</summary>
                 <p class="mt-1 break-all font-mono text-xs opacity-70">{{ training.installed.modelId }}</p>
               </details>
               <div class="mt-3 flex flex-wrap gap-2">
-                <button type="button" class="btn btn-primary btn-sm" @click="requestClose">Done</button>
+                <button type="button" class="btn btn-primary btn-sm" @click="requestClose">{{ $t('common.done') }}</button>
               </div>
             </div>
           </div>
@@ -1044,30 +1052,30 @@ onBeforeUnmount(() => {
           class="btn btn-ghost btn-sm"
           :disabled="busy || stepIndex === 0"
           @click="previousStep"
-        >Back</button>
+        >{{ $t('training.back') }}</button>
         <div class="flex items-center gap-4">
-          <span class="text-xs opacity-60">Step {{ stepNumber }} of {{ STEPS.length }}</span>
+          <span class="text-xs opacity-60">{{ $t('training.stepOf', { current: stepNumber, total: STEPS.length }) }}</span>
           <button
             v-if="stepKey !== 'review'"
             type="button"
             class="btn btn-primary btn-sm"
             :disabled="!canAdvance"
             @click="nextStep"
-          >Continue</button>
+          >{{ $t('training.continue') }}</button>
           <button
             v-else-if="!training.installed"
             type="button"
             class="btn btn-primary btn-sm"
             :disabled="!readyToTrain || training.running || training.cancelling"
             @click="startTraining"
-          >Begin training</button>
+          >{{ $t('training.beginTraining') }}</button>
           <button
             v-else
             type="button"
             class="btn btn-ghost btn-sm"
             :disabled="closing"
             @click="requestClose"
-          >Close</button>
+          >{{ $t('common.close') }}</button>
         </div>
       </footer>
     </div>

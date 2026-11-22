@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from './Icon.vue'
 import ModalDialog from './ModalDialog.vue'
 import { useSettings } from '../lib/live.js'
@@ -24,6 +25,7 @@ import {
 
 const { data, error, update } = useSettings()
 
+const { t } = useI18n()
 const RESULT_LIMIT = 40
 
 // Pin geometry is expressed in viewBox units, derived from the map width so a
@@ -175,18 +177,18 @@ async function applyZone() {
   if (saving.value) return
   const zone = draft.value
   if (!zone) {
-    notify.warning('Choose a time zone before applying.')
+    notify.warning(t('settings.timezoneRequired'))
     return
   }
   saving.value = true
   try {
     const ok = await update('timezone', { timezone: zone })
     if (ok) {
-      notify.success(`Device time zone set to ${zone}.`)
+      notify.success(t('settings.timezoneSet', { zone }))
       openPicker.value = false
       resetDialogState()
     } else {
-      notify.error(error.value || 'The device rejected that time zone. Try another.')
+      notify.error(error.value || t('settings.timezoneRejected'))
     }
   } finally {
     saving.value = false
@@ -207,22 +209,22 @@ onUnmounted(() => {
   <div class="rounded-box bg-base-200/60 p-3 sm:p-4">
     <div class="flex items-start justify-between gap-3">
       <div class="min-w-0">
-        <h3 class="text-lg font-semibold leading-tight">Timezone</h3>
+        <h3 class="text-lg font-semibold leading-tight">{{ $t('settings.timezone') }}</h3>
         <p v-if="stored" class="mt-1 break-all font-mono text-sm font-medium text-base-content">{{ stored }}</p>
-        <p v-else class="mt-1 text-sm text-base-content/70">The device uses its firmware default time zone.</p>
+        <p v-else class="mt-1 text-sm text-base-content/70">{{ $t('settings.firmwareDefaultZone') }}</p>
       </div>
       <button
         type="button"
         class="btn btn-sm btn-outline -mr-1 -mt-1"
-        aria-label="Edit time zone"
+        :aria-label="$t('settings.editTimezone')"
         @click="startEditing"
       >
-        Change
+        {{ $t('settings.change') }}
       </button>
     </div>
 
     <p v-if="stored" class="mt-2 text-sm text-base-content/70">
-      Local time <span class="font-medium text-base-content">{{ dayClockIn(stored) }}</span>
+      {{ $t('settings.localTime') }} <span class="font-medium text-base-content">{{ dayClockIn(stored) }}</span>
       <span class="mx-1 text-base-content/40" aria-hidden="true">·</span>
       <span class="font-mono">{{ offsetIn(stored) }}</span>
       <span v-if="storedEntry?.city && storedEntry.city !== stored" class="text-base-content/60">
@@ -230,12 +232,12 @@ onUnmounted(() => {
       </span>
     </p>
     <p v-else class="mt-2 text-sm text-base-content/60">
-      Nothing is stored on the device, so it follows its firmware default. Choose a time zone to override it.
+      {{ $t('settings.noStoredZone') }}
     </p>
 
     <ModalDialog
       v-if="openPicker"
-      title="Choose time zone"
+      :title="$t('settings.chooseTimezone')"
       :before-close="beforeClose"
       @close="closeDialog"
     >
@@ -247,8 +249,8 @@ onUnmounted(() => {
               v-model="query"
               type="search"
               class="grow"
-              placeholder="Search a city or time zone"
-              aria-label="Search a city or time zone"
+              :placeholder="$t('settings.searchCityZone')"
+              :aria-label="$t('settings.searchCityZone')"
               autocomplete="off"
               spellcheck="false"
             />
@@ -285,7 +287,7 @@ onUnmounted(() => {
               class="block max-h-[44vh] w-full cursor-crosshair"
               preserveAspectRatio="xMidYMid meet"
               role="img"
-              aria-label="World map of time zones. Click near your location to select the nearest city, or choose a city from the list below."
+              :aria-label="$t('settings.mapAria')"
               @click="pickOnMap"
             >
               <rect :width="MAP_WIDTH" :height="MAP_HEIGHT" class="fill-base-100" />
@@ -323,7 +325,7 @@ onUnmounted(() => {
             </svg>
           </div>
           <p class="border-t border-base-300 px-2 py-1 text-[11px] leading-snug text-base-content/50">
-            Time zone boundaries © timezone-boundary-builder contributors (ODbL 1.0) · Base map Natural Earth (public domain)
+            {{ $t('settings.mapAttribution') }}
           </p>
         </div>
       </div>
@@ -337,10 +339,10 @@ onUnmounted(() => {
             <span aria-hidden="true">·</span>
             <span>{{ clockIn(draft) }}</span>
           </template>
-          <span v-else>Click the map near your location, or search for a city.</span>
+          <span v-else>{{ $t('settings.mapHint') }}</span>
         </p>
 
-        <button type="button" class="btn btn-ghost" :disabled="saving" @click="closeDialog">Cancel</button>
+        <button type="button" class="btn btn-ghost" :disabled="saving" @click="closeDialog">{{ $t('common.cancel') }}</button>
         <button
           type="button"
           class="btn btn-primary"
@@ -348,7 +350,7 @@ onUnmounted(() => {
           :aria-busy="saving ? 'true' : 'false'"
           @click="applyZone"
         >
-          Apply
+          {{ $t('common.apply') }}
         </button>
       </template>
     </ModalDialog>

@@ -1,3 +1,5 @@
+import { t } from '../lib/i18n.js'
+
 // Header status for the Bluetooth speaker card.
 //
 // The daemon reports one row per paired device and marks the link with an
@@ -6,14 +8,11 @@
 // rows alone: an absent, malformed or empty `pairedDevices` list means "no
 // badge", never a guess.
 
-export const CONNECTED_BADGE_LABEL = 'connected'
-export const UNKNOWN_DEVICE_NAME = 'Unknown device'
-
 function deviceName(device) {
   const name = String(device?.name || '').trim()
   if (name) return name
   const id = String(device?.deviceId || '').trim()
-  return id || UNKNOWN_DEVICE_NAME
+  return id || t('common.unknownDevice')
 }
 
 /** Paired devices the snapshot says are connected, in snapshot order. */
@@ -29,7 +28,7 @@ export function connectedDevices(pairedDevices) {
 export function connectedBadgeTitle(names) {
   const list = (Array.isArray(names) ? names : []).map(String).filter((name) => name.trim())
   if (!list.length) return ''
-  return `Connected: ${list.join(', ')}`
+  return t('overview.connectedBadge', { names: list.join(', ') })
 }
 
 /**
@@ -41,5 +40,5 @@ export function connectedBadge(pairedDevices) {
   const devices = connectedDevices(pairedDevices)
   if (!devices.length) return null
   const names = devices.map(deviceName)
-  return { label: CONNECTED_BADGE_LABEL, names, title: connectedBadgeTitle(names) }
+  return { label: t('common.connected'), names, title: connectedBadgeTitle(names) }
 }

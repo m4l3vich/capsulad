@@ -1,5 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import WifiSettings from '../components/WifiSettings.vue'
 import WakewordSettings from '../components/WakewordSettings.vue'
 import VolumeControl from '../components/VolumeControl.vue'
@@ -22,6 +23,7 @@ const TimezonePicker = defineAsyncComponent(() => import('../components/Timezone
 // only mirrors it and never rewrites a preference the user did not touch.
 
 const { data, error, update } = useSettings()
+const { t } = useI18n()
 const {
   data: overviewData,
   error: overviewError,
@@ -87,9 +89,9 @@ const namingUnsupported = computed(() => Boolean(data.value?.discovery) && !data
 // they are not entitlements. A saved app is never replaced or hidden: when it
 // is not eligible (or no longer installed) it stays as the selected option.
 const PROVIDER_ROLE = {
-  voice_assistant: 'voice assistant',
-  segment_display_provider: 'display',
-  led_ring_controller: 'ring'
+  voice_assistant: 'settings.roleVoiceAssistant',
+  segment_display_provider: 'settings.roleDisplay',
+  led_ring_controller: 'settings.roleRing'
 }
 
 function hasProvide(app, token) {
@@ -101,7 +103,7 @@ function providerApps(token) {
 }
 
 function providerLabel(app) {
-  return `${app.displayName || app.appId}${app.systemApp ? ' (built-in)' : ''}`
+  return `${app.displayName || app.appId}${app.systemApp ? ` (${t('common.builtIn')})` : ''}`
 }
 
 function providerToken(kind) {
@@ -112,9 +114,9 @@ function savedProvider(token, savedId) {
   if (!savedId) return null
   if (providerApps(token).some((app) => app.appId === savedId)) return null
   const app = apps.value.find((entry) => entry.appId === savedId)
-  const role = PROVIDER_ROLE[token] || 'provider'
-  const label = app ? providerLabel(app) : `${savedId} (not installed)`
-  return { appId: savedId, label: `${label} — saved; not a ${role} provider` }
+  const role = t(PROVIDER_ROLE[token] || 'settings.roleProvider')
+  const label = app ? providerLabel(app) : t('common.notInstalled', { id: savedId })
+  return { appId: savedId, label: t('settings.savedProvider', { label, role }) }
 }
 
 let hashHandled = false
@@ -171,9 +173,11 @@ function delayLabel(delayMs) {
   if (seconds >= 60) {
     const minutes = Math.floor(seconds / 60)
     const rest = seconds % 60
-    return rest ? `${minutes} min ${rest} s` : `${minutes} min`
+    return rest
+      ? t('settings.delayMinSec', { minutes, seconds: rest })
+      : t('settings.delayMin', { minutes })
   }
-  return `${seconds} s`
+  return t('settings.delaySec', { seconds })
 }
 
 function resourceOwned(kind, field) {
@@ -221,7 +225,7 @@ function send(group, payload) {
 
 async function apply(group, payload) {
   const ok = await send(group, payload)
-  if (!ok) notify.error(error.value || 'The speaker rejected that change.')
+  if (!ok) notify.error(error.value || t('settings.changeRejected'))
   return ok
 }
 
@@ -274,7 +278,7 @@ async function flushResource(kind) {
   if (!resourcePending[kind].size) return
   const fields = [...resourcePending[kind]]
   resourcePending[kind].clear()
-  await sendResource(kind, fields, 'Brightness was not applied.')
+  await sendResource(kind, fields, t('settings.brightnessFailed'))
   // A slider still moving accumulates the next patch; send it after the
   // bounded interval rather than blocking on every pixel of travel.
   if (resourcePending[kind].size) scheduleResource(kind)
@@ -298,7 +302,7 @@ function markResource(kind, fields) {
 // user-owned until the request settles, so an unrelated push cannot revert it.
 function applyResourceNow(kind, fields) {
   if (!data.value?.[kind]) return
-  sendResource(kind, fields, 'That choice was not applied.')
+  sendResource(kind, fields, t('settings.choiceFailed'))
 }
 
 function beginDrag(kind) {
@@ -336,19 +340,19 @@ function applyAssistant(fields) {
 
 const indicatorOptions = computed(() => {
   const options = [
-    { value: 'none', label: 'Never (keep the light visible)' },
-    { value: '60', label: 'After 1 minute' },
-    { value: '600', label: 'After 10 minutes' },
-    { value: '1800', label: 'After 30 minutes' }
+    { value: 'none', label: t('settings.never') },
+    { value: '60', label: t('settings.after1') },
+    { value: '600', label: t('settings.after10') },
+    { value: '1800', label: t('settings.after30') }
   ]
   const indicator = values.value.mutedMicrophoneIndicator
   if (ui.indicator === 'immediate') {
-    options.push({ value: 'immediate', label: 'Immediately (current setting)' })
+    options.push({ value: 'immediate', label: t('settings.immediately') })
   }
   if (ui.indicator === 'custom') {
     options.push({
       value: 'custom',
-      label: `${delayLabel(indicator?.delayMs)} (current setting)`
+      label: t('settings.currentSetting', { delay: delayLabel(indicator?.delayMs) })
     })
   }
   return options
@@ -399,7 +403,7 @@ function toggleIncoming(event) {
   bluetoothCommand(
     'setIncomingConnections',
     { incomingConnections: ui.bluetooth.incoming },
-    'Speaker mode was not changed.'
+    t('settings.speakerModeFailed')
   )
 }
 
@@ -408,7 +412,7 @@ function toggleDiscoverable(event) {
   bluetoothCommand(
     'setDiscoverable',
     { discoverable: ui.bluetooth.discoverable },
-    'Pair new devices was not changed.'
+    t('settings.pairNewFailed')
   )
 }
 
@@ -432,7 +436,7 @@ async function confirmUnpair() {
     unpairTarget.value = null
     await refreshOverview()
   } catch (err) {
-    notify.error(err.message || 'The device could not be unpaired.')
+    notify.error(err.message || t('settings.unpairFailed'))
   } finally {
     busy.value = ''
   }
@@ -455,7 +459,7 @@ async function saveAdapterName() {
   if (adapterNameSaving.value) return
   const name = adapterNameDraft.value.trim()
   if (!adapterNameValid.value) {
-    adapterNameError.value = `Use 1 to ${ADAPTER_NAME_MAX_BYTES} bytes with no control characters.`
+    adapterNameError.value = t('settings.adapterNameInvalid', { max: ADAPTER_NAME_MAX_BYTES })
     return
   }
   adapterNameSaving.value = true
@@ -469,10 +473,10 @@ async function saveAdapterName() {
     const shown = result?.bluetooth?.status?.name || name
     adapterNameOpen.value = false
     adapterNameDraft.value = ''
-    notify.success(`Device name changed to ${shown}.`)
+    notify.success(t('settings.adapterNameChanged', { name: shown }))
   } catch (err) {
     // Keep the dialog open so the administrator can correct the name.
-    adapterNameError.value = err.message || 'The device name was not changed.'
+    adapterNameError.value = err.message || t('settings.adapterNameFailed')
     notify.error(adapterNameError.value)
   } finally {
     adapterNameSaving.value = false
@@ -492,7 +496,7 @@ const HOSTNAME = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
 async function saveHostname() {
   const hostname = drafts.hostname.trim()
   if (!HOSTNAME.test(hostname)) {
-    notify.error('Use up to 63 letters, numbers or hyphens, starting and ending with a letter or number.')
+    notify.error(t('settings.hostnameInvalid'))
     return
   }
   const ok = await apply('hostname', { hostname })
@@ -506,57 +510,57 @@ onUnmounted(() => {
 
 // ---- Section filtering ----------------------------------------------------
 
-const sections = [
+const sections = computed(() => [
   {
     id: 'voice-assistant',
     icon: SETTINGS_SECTION_ICONS.voiceAssistant,
-    title: 'Voice assistant',
+    title: t('settings.voiceAssistant'),
     keywords: ['voice', 'assistant', 'summon', 'talk', 'touch']
   },
   {
     id: 'wakeword',
     icon: SETTINGS_SECTION_ICONS.wakeword,
-    title: 'Wakeword',
+    title: t('settings.wakeword'),
     keywords: ['wakeword', 'wake word', 'detection', 'training', 'recordings', 'model']
   },
   {
     id: 'display-ring',
     icon: SETTINGS_SECTION_ICONS.displayRing,
-    title: 'Display & ring',
+    title: t('settings.displayRing'),
     keywords: ['display', 'ring', 'led', 'segment', 'brightness', 'ambient', 'auto', 'default app']
   },
   {
     id: 'microphone',
     icon: SETTINGS_SECTION_ICONS.microphone,
-    title: 'Microphone',
+    title: t('settings.microphone'),
     keywords: ['microphone', 'mic', 'mute', 'hide', 'delay', 'indicator', 'privacy']
   },
   {
     id: 'bluetooth',
     icon: SETTINGS_SECTION_ICONS.bluetooth,
-    title: 'Bluetooth',
+    title: t('settings.bluetooth'),
     keywords: ['bluetooth', 'pair', 'unpair', 'discoverable', 'incoming', 'speaker', 'name', 'rename']
   },
   {
     id: 'wifi',
     icon: SETTINGS_SECTION_ICONS.wifi,
-    title: 'Wi-Fi',
+    title: t('settings.wifi'),
     keywords: ['wifi', 'wi-fi', 'network', 'ssid', 'password', 'scan', 'portal', 'wireless']
   },
   {
     id: 'device',
     icon: SETTINGS_SECTION_ICONS.device,
-    title: 'Time & device',
+    title: t('settings.device'),
     keywords: ['device', 'timezone', 'time', 'zone', 'clock', 'hostname', 'name', 'volume', 'sound', 'startup']
   }
-]
+])
 
 const query = ref('')
 
 const visible = computed(() => {
   const tokens = query.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
   const map = {}
-  for (const section of sections) {
+  for (const section of sections.value) {
     const haystack = `${section.title} ${section.keywords.join(' ')}`.toLowerCase()
     map[section.id] = !tokens.length || tokens.every((token) => haystack.includes(token))
   }
@@ -603,7 +607,7 @@ function jumpTo(id) {
   <div class="mx-auto w-full max-w-2xl flex flex-col gap-5">
     <div class="flex flex-wrap items-end justify-between gap-2">
       <h1 class="my-2 flex items-center gap-2 text-xl font-semibold leading-tight">
-        Settings
+        {{ $t('settings.title') }}
       </h1>
       <label class="input input-sm input-bordered flex w-full items-center gap-2 sm:w-64">
         <Icon size="16px">search</Icon>
@@ -611,14 +615,14 @@ function jumpTo(id) {
           v-model="query"
           type="search"
           class="grow text-sm"
-          placeholder="Filter settings"
-          aria-label="Filter settings sections"
+          :placeholder="$t('settings.filterPlaceholder')"
+          :aria-label="$t('settings.filterAria')"
           autocomplete="off"
         />
       </label>
     </div>
 
-    <nav class="flex flex-wrap items-center gap-x-4 gap-y-1" aria-label="Settings sections">
+    <nav class="flex flex-wrap items-center gap-x-4 gap-y-1" :aria-label="$t('settings.sectionsAria')">
       <button
         v-for="section in sections"
         :key="section.id"
@@ -644,15 +648,15 @@ function jumpTo(id) {
 
     <div v-else-if="!data" class="alert alert-error" role="alert">
       <span class="text-sm">
-        <strong>Settings unavailable.</strong>
-        {{ error }} The web UI reconnects automatically when the device is reachable.
+        <strong>{{ $t('settings.unavailable') }}</strong>
+        {{ error }} {{ $t('settings.unavailableHint') }}
       </span>
     </div>
 
     <template v-else>
       <div v-show="!visibleCount" class="alert py-2" role="status">
-        <span class="text-sm">No settings match “{{ query }}”.</span>
-        <button type="button" class="btn btn-sm btn-ghost" @click="clearSearch">Clear filter</button>
+        <span class="text-sm">{{ $t('settings.noMatch', { query }) }}</span>
+        <button type="button" class="btn btn-sm btn-ghost" @click="clearSearch">{{ $t('settings.clearFilter') }}</button>
       </div>
 
       <section
@@ -663,20 +667,20 @@ function jumpTo(id) {
         <div class="flex flex-col gap-3 p-4 sm:p-5">
           <div class="flex items-center gap-2">
             <Icon size="20px" class="text-base-content/60">record_voice_over</Icon>
-            <h2 class="text-lg font-semibold">Voice assistant</h2>
+            <h2 class="text-lg font-semibold">{{ $t('settings.voiceAssistant') }}</h2>
           </div>
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="flex flex-col gap-1 text-sm">
               <div class="alert flex-grow">
-                Choose an app that will launch when you hold the assistant button on the speaker.
+                {{ $t('settings.chooseAssistantAlert') }}
               </div>
-              <span class="font-medium mt-2">Default assistant app</span>
+              <span class="font-medium mt-2">{{ $t('settings.defaultAssistant') }}</span>
               <select
                 v-model="ui.assistant.app"
                 class="select select-bordered select-sm w-full"
                 @change="applyAssistant(['default_assistant_app'])"
               >
-                <option value="">— none —</option>
+                <option value="">{{ $t('common.noneOption') }}</option>
                 <option
                   v-if="savedProvider('voice_assistant', ui.assistant.app)"
                   :value="ui.assistant.app"
@@ -691,25 +695,25 @@ function jumpTo(id) {
             <label class="flex flex-col gap-1 text-sm">
               <div class="alert flex-grow">
                 <template v-if="ui.assistant.touch === 'summon'">
-                  "Hold to summon" — hold the button, the assistant activates, you release it — assistant continues to listen.
+                  {{ $t('settings.holdToSummon') }}
                 </template>
                 <template v-if="ui.assistant.touch === 'talk'">
-                  "Hold to talk" — hold the button, the assistant activates, you release it — assistant stops listening.
+                  {{ $t('settings.holdToTalk') }}
                 </template>
               </div>
-              <span class="font-medium mt-2">Touch and hold</span>
+              <span class="font-medium mt-2">{{ $t('settings.touchHold') }}</span>
               <select
                 v-model="ui.assistant.touch"
                 class="select select-bordered select-sm w-full"
                 @change="applyAssistant(['touch_hold_mode'])"
               >
-                <option value="summon">Hold to summon</option>
-                <option value="talk">Hold to talk</option>
+                <option value="summon">{{ $t('settings.holdToSummonShort') }}</option>
+                <option value="talk">{{ $t('settings.holdToTalkShort') }}</option>
               </select>
             </label>
           </div>
           <p v-if="!providerApps('voice_assistant').length" class="text-xs text-base-content/60">
-            No installed app provides a voice assistant.
+            {{ $t('settings.noAssistant') }}
           </p>
         </div>
       </section>
@@ -726,7 +730,7 @@ function jumpTo(id) {
         <div class="flex flex-col gap-4 p-4 sm:p-5">
           <div class="flex items-center gap-2">
             <Icon size="20px" class="text-base-content/60">display_settings</Icon>
-            <h2 class="text-lg font-semibold">Display &amp; ring</h2>
+            <h2 class="text-lg font-semibold">{{ $t('settings.displayRing') }}</h2>
           </div>
 
           <div
@@ -736,20 +740,20 @@ function jumpTo(id) {
           >
             <div class="flex items-center gap-2">
               <h3 class="flex-grow text-base font-semibold">
-                {{ kind === 'display' ? 'Segment display' : 'LED ring' }}
+                {{ kind === 'display' ? $t('settings.segmentDisplay') : $t('settings.ledRing') }}
               </h3>
-              <span v-if="!data[kind]" class="text-xs text-base-content/60">not reported</span>
+              <span v-if="!data[kind]" class="text-xs text-base-content/60">{{ $t('settings.notReportedShort') }}</span>
             </div>
 
             <template v-if="data[kind]">
               <label class="flex flex-col gap-1.5 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                <span class="font-medium">Default application</span>
+                <span class="font-medium">{{ $t('settings.defaultApplication') }}</span>
                 <select
                   v-model="ui[kind].app"
                   class="select select-bordered select-sm w-full sm:w-64"
                   @change="applyResourceNow(kind, ['default_app'])"
                 >
-                  <option value="">— none —</option>
+                  <option value="">{{ $t('common.noneOption') }}</option>
                   <option
                     v-if="savedProvider(providerToken(kind), ui[kind].app)"
                     :value="ui[kind].app"
@@ -764,9 +768,9 @@ function jumpTo(id) {
 
               <div class="flex flex-col gap-2">
                 <div class="flex items-center justify-between gap-2">
-                  <span class="text-sm font-medium">Brightness</span>
+                  <span class="text-sm font-medium">{{ $t('settings.brightness') }}</span>
                   <span class="text-sm tabular-nums text-base-content/60">
-                    {{ ui[kind].mode === 'auto' ? 'auto' : `${ui[kind].brightness}%` }}
+                    {{ ui[kind].mode === 'auto' ? $t('settings.auto') : `${ui[kind].brightness}%` }}
                   </span>
                 </div>
                 <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
@@ -778,7 +782,7 @@ function jumpTo(id) {
                     step="1"
                     class="range range-primary range-sm w-full sm:flex-1"
                     :disabled="ui[kind].mode === 'auto'"
-                    :aria-label="`${kind === 'display' ? 'Segment display' : 'LED ring'} constant brightness`"
+                    :aria-label="$t('settings.constantBrightness', { device: kind === 'display' ? $t('settings.segmentDisplay') : $t('settings.ledRing') })"
                     @pointerdown="beginDrag(kind)"
                     @pointerup="endDrag(kind)"
                     @change="endDrag(kind)"
@@ -788,24 +792,24 @@ function jumpTo(id) {
                     <input
                       type="checkbox"
                       class="checkbox checkbox-sm"
-                      aria-label="Automatic brightness"
+                      :aria-label="$t('settings.automaticBrightness')"
                       :checked="ui[kind].mode === 'auto'"
                       :disabled="!ambient && ui[kind].mode !== 'auto'"
                       @change="toggleAuto(kind, $event)"
                     />
-                    <span class="text-sm">Automatic</span>
+                    <span class="text-sm">{{ $t('settings.automatic') }}</span>
                   </label>
                 </div>
                 <p v-if="!ambient" class="text-xs text-warning">
-                  No room-light sensor: your brightness is used.
+                  {{ $t('settings.noSensor') }}
                 </p>
                 <p v-else-if="ui[kind].mode === 'auto'" class="text-xs text-base-content/60">
-                  The slider is off while automatic adjustment is on.
+                  {{ $t('settings.autoOn') }}
                 </p>
               </div>
             </template>
             <p v-if="!providerApps(providerToken(kind)).length" class="text-xs text-base-content/60">
-              No installed app provides this output.
+              {{ $t('settings.noOutput') }}
             </p>
           </div>
         </div>
@@ -819,12 +823,12 @@ function jumpTo(id) {
         <div class="flex flex-col gap-3 p-4 sm:p-5">
           <div class="flex items-center gap-2">
             <Icon size="20px" class="text-base-content/60">mic</Icon>
-            <h2 class="text-lg font-semibold">Microphone</h2>
+            <h2 class="text-lg font-semibold">{{ $t('settings.microphone') }}</h2>
           </div>
           <div class="flex flex-col gap-3">
             <MicrophoneControl class="[&>label]:flex-row-reverse [&>label]:justify-between" />
             <label class="flex flex-col gap-1.5 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-              <span class="font-medium">Hide the muted light</span>
+              <span class="font-medium">{{ $t('settings.hideMuted') }}</span>
               <select
                 v-model="ui.indicator"
                 class="select select-bordered select-sm w-full sm:w-64"
@@ -837,7 +841,7 @@ function jumpTo(id) {
             </label>
           </div>
           <p class="text-xs text-base-content/60">
-            “Never” keeps the muted light visible until you unmute; changing this never changes the saved delay.
+            {{ $t('settings.neverHint') }}
           </p>
         </div>
       </section>
@@ -851,10 +855,10 @@ function jumpTo(id) {
           <div class="flex flex-col gap-1">
             <div class="flex items-center gap-2">
               <Icon size="20px" class="text-base-content/60">bluetooth</Icon>
-              <h2 class="text-lg font-semibold">Bluetooth</h2>
+              <h2 class="text-lg font-semibold">{{ $t('settings.bluetooth') }}</h2>
             </div>
             <div class="flex items-center justify-between gap-2">
-              <span class="text-sm font-medium">Device name</span>
+              <span class="text-sm font-medium">{{ $t('settings.deviceName') }}</span>
               <span class="flex min-w-0 items-center gap-1">
                 <span class="truncate font-mono text-xs text-base-content/60">
                   {{ btStatus?.name || '—' }}
@@ -862,7 +866,7 @@ function jumpTo(id) {
                 <button
                   type="button"
                   class="btn btn-ghost btn-sm btn-square"
-                  aria-label="Change Bluetooth device name"
+                  :aria-label="$t('settings.changeNameAria')"
                   :disabled="!btStatus?.present || !!busy"
                   @click="openAdapterName"
                 >
@@ -875,9 +879,9 @@ function jumpTo(id) {
           <div class="flex flex-col gap-3">
             <label class="flex cursor-pointer items-start justify-between gap-3">
               <span class="min-w-0">
-                <span class="block text-sm font-medium">Speaker mode</span>
+                <span class="block text-sm font-medium">{{ $t('settings.speakerMode') }}</span>
                 <span class="mt-0.5 block text-xs text-base-content/60">
-                  Accept audio from already-paired devices. Turning this off keeps a connected device connected.
+                  {{ $t('settings.speakerModeHint') }}
                 </span>
               </span>
               <input
@@ -890,8 +894,8 @@ function jumpTo(id) {
             </label>
             <label class="flex cursor-pointer items-start justify-between gap-3">
               <span class="min-w-0">
-                <span class="block text-sm font-medium">Pair new devices</span>
-                <span class="mt-0.5 block text-xs text-base-content/60">Let nearby devices find and pair with this speaker.</span>
+                <span class="block text-sm font-medium">{{ $t('settings.pairNew') }}</span>
+                <span class="mt-0.5 block text-xs text-base-content/60">{{ $t('settings.pairNewHint') }}</span>
               </span>
               <input
                 type="checkbox"
@@ -905,16 +909,16 @@ function jumpTo(id) {
 
           <div class="flex flex-col gap-2">
             <div class="flex items-center gap-2">
-              <h3 class="flex-grow text-sm font-semibold">Paired devices</h3>
+              <h3 class="flex-grow text-sm font-semibold">{{ $t('settings.pairedDevices') }}</h3>
               <button type="button" class="btn btn-ghost btn-xs" :disabled="!overviewData" @click="reloadOverview">
-                Refresh
+                {{ $t('settings.refresh') }}
               </button>
             </div>
             <p v-if="!overviewData && overviewError" class="text-xs text-base-content/60" role="status">
-              Paired devices are unavailable.
+              {{ $t('settings.pairedUnavailable') }}
             </p>
-            <p v-else-if="!overviewData" class="text-xs text-base-content/60">Loading paired devices…</p>
-            <p v-else-if="!pairedDevices.length" class="text-xs text-base-content/60">No paired devices.</p>
+            <p v-else-if="!overviewData" class="text-xs text-base-content/60">{{ $t('settings.loadingPaired') }}</p>
+            <p v-else-if="!pairedDevices.length" class="text-xs text-base-content/60">{{ $t('settings.noPaired') }}</p>
             <ul v-else class="divide-y divide-base-300">
               <li
                 v-for="device in pairedDevices"
@@ -922,8 +926,8 @@ function jumpTo(id) {
                 class="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
               >
                 <p class="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium">
-                  {{ device.name || 'Unnamed device' }}
-                  <span v-if="device.connected" class="badge badge-success badge-sm">connected</span>
+                  {{ device.name || $t('common.unnamedDevice') }}
+                  <span v-if="device.connected" class="badge badge-success badge-sm">{{ $t('common.connected') }}</span>
                 </p>
                 <button
                   type="button"
@@ -931,7 +935,7 @@ function jumpTo(id) {
                   :disabled="busy === 'unpair'"
                   @click="askUnpair(device)"
                 >
-                  Unpair
+                  {{ $t('settings.unpair') }}
                 </button>
               </li>
             </ul>
@@ -951,14 +955,14 @@ function jumpTo(id) {
         <div class="flex flex-col gap-4 p-4 sm:p-5">
           <div class="flex items-center gap-2">
             <Icon size="20px" class="text-base-content/60">schedule</Icon>
-            <h2 class="text-lg font-semibold">Time &amp; device</h2>
+            <h2 class="text-lg font-semibold">{{ $t('settings.device') }}</h2>
           </div>
 
           <div class="flex flex-col gap-4">
             <TimezonePicker class="w-full" />
 
             <div class="flex flex-col gap-2 rounded-box bg-base-200/60 p-3 sm:p-4">
-              <h3 class="text-base font-semibold">Speaker name</h3>
+              <h3 class="text-base font-semibold">{{ $t('settings.speakerName') }}</h3>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <input
                   v-model="drafts.hostname"
@@ -967,7 +971,7 @@ function jumpTo(id) {
                   maxlength="63"
                   autocomplete="off"
                   spellcheck="false"
-                  aria-label="Speaker name on your network"
+                  :aria-label="$t('settings.speakerNameAria')"
                   @input="dirty.hostname = true"
                 />
                 <button
@@ -976,28 +980,28 @@ function jumpTo(id) {
                   :disabled="!dirty.hostname"
                   @click="saveHostname"
                 >
-                  Save name
+                  {{ $t('settings.saveName') }}
                 </button>
               </div>
               <p v-if="namingUnsupported" class="text-xs text-base-content/60">
-                The speaker name is saved as
+                {{ $t('settings.namingUnsupported') }}
                 <code class="font-mono">{{ advertisedName }}</code>
-                and will be advertised when network naming is available.
+                {{ $t('settings.namingUnsupported2') }}
               </p>
               <p v-else class="text-xs text-base-content/60">
-                The speaker can be discovered as
+                {{ $t('settings.namingAvailable') }}
                 <code class="font-mono">{{ advertisedName }}</code>
-                on the network.
+                {{ $t('settings.namingAvailable2') }}
               </p>
             </div>
 
             <div class="flex flex-col gap-3 rounded-box bg-base-200/60 p-3 sm:p-4">
-              <h3 class="text-base font-semibold">Sound and boot</h3>
+              <h3 class="text-base font-semibold">{{ $t('settings.soundBoot') }}</h3>
               <VolumeControl />
               <label class="flex cursor-pointer items-start justify-between gap-3">
                 <span class="min-w-0">
-                  <span class="block text-sm font-medium">Startup sound</span>
-                  <span class="block text-xs text-base-content/60">Play the chime on every boot.</span>
+                  <span class="block text-sm font-medium">{{ $t('settings.startupSound') }}</span>
+                  <span class="block text-xs text-base-content/60">{{ $t('settings.startupHint') }}</span>
                 </span>
                 <input
                   type="checkbox"
@@ -1014,13 +1018,13 @@ function jumpTo(id) {
 
     <ModalDialog
       v-if="adapterNameOpen"
-      title="Change device name"
+      :title="$t('settings.changeDeviceName')"
       max-width="max-w-md"
       @close="closeAdapterName"
     >
       <form class="flex flex-col gap-3" @submit.prevent="saveAdapterName">
         <label class="flex flex-col gap-1.5 text-sm">
-          <span class="font-medium">Device name</span>
+          <span class="font-medium">{{ $t('settings.deviceName') }}</span>
           <input
             v-model="adapterNameDraft"
             type="text"
@@ -1029,18 +1033,18 @@ function jumpTo(id) {
             autocomplete="off"
             spellcheck="false"
             autofocus
-            aria-label="Bluetooth device name"
+            :aria-label="$t('settings.bluetoothDeviceNameAria')"
             aria-describedby="bluetooth-name-help"
             :aria-invalid="adapterNameError ? 'true' : 'false'"
           />
         </label>
         <p id="bluetooth-name-help" class="text-xs text-base-content/60">
-          Shown to nearby devices when pairing and in their Bluetooth menu.
-          <span class="tabular-nums">{{ adapterNameBytes }} / {{ ADAPTER_NAME_MAX_BYTES }} bytes</span>
+          {{ $t('settings.nameShown') }}
+          <span class="tabular-nums">{{ $t('settings.bytes', { current: adapterNameBytes, max: ADAPTER_NAME_MAX_BYTES }) }}</span>
         </p>
         <p v-if="adapterNameError" class="text-sm text-error" role="alert">{{ adapterNameError }}</p>
         <div class="modal-action m-0">
-          <button type="button" class="btn btn-ghost" @click="closeAdapterName">Cancel</button>
+          <button type="button" class="btn btn-ghost" @click="closeAdapterName">{{ $t('common.cancel') }}</button>
           <button
             type="submit"
             class="btn btn-primary"
@@ -1048,19 +1052,18 @@ function jumpTo(id) {
             :aria-busy="adapterNameSaving ? 'true' : 'false'"
           >
             <span v-if="adapterNameSaving" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            Save
+            {{ $t('common.save') }}
           </button>
         </div>
       </form>
     </ModalDialog>
 
-    <ModalDialog v-if="unpairTarget" title="Unpair device" @close="unpairTarget = null">
+    <ModalDialog v-if="unpairTarget" :title="$t('settings.unpairTitle')" @close="unpairTarget = null">
       <p class="text-sm">
-        Unpair <strong>{{ unpairTarget.name || 'Unnamed device' }}</strong>? It will be forgotten by
-        Bluetooth and must pair again to reconnect.
+        {{ $t('settings.unpairBody', { name: unpairTarget.name || $t('common.unnamedDevice') }) }}
       </p>
       <template #footer>
-        <button type="button" class="btn btn-ghost" @click="unpairTarget = null">Cancel</button>
+        <button type="button" class="btn btn-ghost" @click="unpairTarget = null">{{ $t('common.cancel') }}</button>
         <button
           type="button"
           class="btn btn-error"
@@ -1069,7 +1072,7 @@ function jumpTo(id) {
           @click="confirmUnpair"
         >
           <span v-if="busy === 'unpair'" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          Unpair
+          {{ $t('settings.unpair') }}
         </button>
       </template>
     </ModalDialog>

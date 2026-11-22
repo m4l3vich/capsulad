@@ -1,3 +1,5 @@
+import { t } from './i18n.js'
+
 // Parent side of the application settings bridge.
 //
 // The child is an untrusted, opaque-origin iframe. Every message is accepted
@@ -60,68 +62,68 @@ function byteLength(text) {
  * `settingKeys` is the declared setting-key allowlist for this app.
  */
 export function validateChildMessage(raw, { token, appId, settingKeys }) {
-  if (!isPlainObject(raw)) return { error: 'message is not an object' }
-  if (typeof raw.type !== 'string' || !raw.type.startsWith(BRIDGE_PREFIX)) return { error: 'unknown message type' }
+  if (!isPlainObject(raw)) return { error: t('bridge.messageNotObject') }
+  if (typeof raw.type !== 'string' || !raw.type.startsWith(BRIDGE_PREFIX)) return { error: t('bridge.unknownMessage') }
   let encoded
   try {
     encoded = JSON.stringify(raw)
   } catch (_) {
-    return { error: 'message is not serializable' }
+    return { error: t('bridge.notSerializable') }
   }
-  if (byteLength(encoded) > MAX_CHILD_MESSAGE_BYTES) return { error: 'message exceeds the frame limit' }
+  if (byteLength(encoded) > MAX_CHILD_MESSAGE_BYTES) return { error: t('bridge.exceedsLimit') }
   if (typeof raw.channel !== 'string' || !HEX32.test(raw.channel) || raw.channel !== token) {
-    return { error: 'channel does not match this frame' }
+    return { error: t('bridge.channelMismatch') }
   }
-  if (raw.appId !== undefined && raw.appId !== appId) return { error: 'message names a different application' }
+  if (raw.appId !== undefined && raw.appId !== appId) return { error: t('bridge.differentApplication') }
 
   const kind = raw.type.slice(BRIDGE_PREFIX.length)
   if (kind === 'ready') return { kind: 'ready' }
 
   if (kind === 'resize') {
     const height = raw.height
-    if (!Number.isInteger(height) || height < 20 || height > 4000) return { error: 'invalid frame height' }
+    if (!Number.isInteger(height) || height < 20 || height > 4000) return { error: t('bridge.invalidHeight') }
     return { kind: 'resize', height }
   }
 
   if (kind === 'patch') {
     if (!Number.isInteger(raw.requestId) || raw.requestId < 1 || raw.requestId > 1e9) {
-      return { error: 'patch needs a request id' }
+      return { error: t('bridge.patchNeedsId') }
     }
     if (!Array.isArray(raw.changes) || raw.changes.length === 0 || raw.changes.length > MAX_PATCH_CHANGES) {
-      return { error: 'patch needs 1 to ' + MAX_PATCH_CHANGES + ' changes' }
+      return { error: t('bridge.patchNeedsChanges', { max: MAX_PATCH_CHANGES }) }
     }
     let total = 0
     const changes = []
     for (const change of raw.changes) {
-      if (!isPlainObject(change)) return { error: 'change is not an object' }
+      if (!isPlainObject(change)) return { error: t('bridge.changeNotObject') }
       const key = change.key
       if (typeof key !== 'string' || !settingKeys.has(key)) {
-        return { error: 'change names an undeclared setting' }
+        return { error: t('bridge.undeclaredSetting') }
       }
       const hasValue = typeof change.valueJson === 'string'
       const clear = change.clear === true
       if (hasValue === clear) {
-        return { error: 'change needs exactly one of valueJson or clear' }
+        return { error: t('bridge.exactlyOne') }
       }
       if (hasValue) {
-        if (byteLength(change.valueJson) > MAX_PATCH_VALUE_BYTES) return { error: 'setting value is too large' }
+        if (byteLength(change.valueJson) > MAX_PATCH_VALUE_BYTES) return { error: t('bridge.valueTooLarge') }
         try {
           JSON.parse(change.valueJson)
         } catch (_) {
-          return { error: 'setting value is not valid JSON' }
+          return { error: t('bridge.invalidJson') }
         }
         total += byteLength(change.valueJson)
         changes.push({ key, valueJson: change.valueJson })
       } else {
-        if (change.clear !== true) return { error: 'clear must be true' }
+        if (change.clear !== true) return { error: t('bridge.clearTrue') }
         changes.push({ key, clear: true })
       }
     }
-    if (total > MAX_PATCH_TOTAL_BYTES) return { error: 'patch is too large' }
+    if (total > MAX_PATCH_TOTAL_BYTES) return { error: t('bridge.patchTooLarge') }
     return { kind: 'patch', requestId: raw.requestId, changes }
   }
 
-  return { error: 'unknown message type' }
+  return { error: t('bridge.unknownMessage') }
 }
 
 function normalizeValues(values) {
@@ -184,7 +186,7 @@ export class SettingsFrameHost {
       if (this.pendingURL) {
         this.iframe.src = this.pendingURL
       } else {
-        this.onStatus?.({ error: 'The settings document URL is unavailable.' })
+        this.onStatus?.({ error: t('bridge.urlUnavailable') })
       }
       return
     }
@@ -195,7 +197,7 @@ export class SettingsFrameHost {
       this.violated = true
       this.ready = false
       this.queue = []
-      this.onStatus?.({ error: 'The settings frame navigated away; reload this application page.' })
+      this.onStatus?.({ error: t('bridge.navigatedAway') })
       try { this.iframe.src = 'about:blank' } catch (_) { /* frame detached */ }
       return
     }
@@ -244,11 +246,11 @@ export class SettingsFrameHost {
     }
     if (result.kind === 'patch') {
       if (!this.ready) {
-        this.sendResult(result.requestId, { ok: false, error: 'frame is not ready' })
+        this.sendResult(result.requestId, { ok: false, error: t('bridge.frameNotReady') })
         return
       }
       if (this.queue.length >= MAX_QUEUE) {
-        this.sendResult(result.requestId, { ok: false, error: 'too many pending updates; retry after the next state' })
+        this.sendResult(result.requestId, { ok: false, error: t('bridge.tooManyPending') })
         return
       }
       this.queue.push(result)
@@ -269,7 +271,7 @@ export class SettingsFrameHost {
         this.sendResult(next.requestId, {
           ok: true,
           revision: this.revision,
-          message: result.message || 'Saved.'
+          message: result.message || t('bridge.saved')
         })
         this.sendState()
       } else {
@@ -280,13 +282,13 @@ export class SettingsFrameHost {
         this.sendResult(next.requestId, {
           ok: false,
           revision: this.revision,
-          error: result?.error || 'The settings update was rejected.'
+          error: result?.error || t('bridge.updateRejected')
         })
         this.sendState()
       }
     } catch (err) {
       if (this.mounted) {
-        this.sendResult(next.requestId, { ok: false, error: err?.message || 'The settings update failed.' })
+        this.sendResult(next.requestId, { ok: false, error: err?.message || t('bridge.updateFailed') })
       }
     } finally {
       this.inflight = false
