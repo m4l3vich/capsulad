@@ -69,7 +69,7 @@ func (m *model) View() string {
 		body += "\n\n" + warnStyle.Render(cleanLine(m.status))
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Center,
-		titleStyle.Render("CAPSULA MINI INSTALLER"),
+		titleStyle.Render("capsulad installer"),
 		subtitleStyle.Render("  "+m.footerVersion()),
 	)
 	return "\n" + header + "\n" + subtitleStyle.Render(strings.Repeat("─", min(width, 88))) + "\n\n" + body + "\n"

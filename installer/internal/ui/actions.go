@@ -60,7 +60,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.status = ""
 		case "enter":
 			if m.deviceIx == 0 {
-				m.status = "The original Capsula is not supported by this installer: no maintained firmware image exists."
+				m.status = "The original Capsula is not yet supported by capsulad."
 				return true, nil
 			}
 			m.screen = screenFirmware
