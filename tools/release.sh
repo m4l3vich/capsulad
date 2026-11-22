@@ -115,11 +115,20 @@ core)
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/capsulad-core.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT HUP INT TERM
     mkdir -p "$tmp/bundle/lib" "$tmp/bundle/apps" "$tmp/bundle/boot"
+    # The build jobs upload a directory artifact, and the artifact service does
+    # not preserve the executable bit. The bundle is the installer's deployment
+    # input, so stage its modes explicitly instead of trusting the download.
     cp "$SRC/bin/capsulad" "$tmp/bundle/capsulad"
     cp "$SRC/bin/capsulad-cli" "$tmp/bundle/capsulad-cli"
+    chmod 0755 "$tmp/bundle/capsulad" "$tmp/bundle/capsulad-cli"
     for f in "$SRC"/lib/*; do
         if [ -f "$f" ] && [ ! -L "$f" ]; then
-            cp "$f" "$tmp/bundle/lib/"
+            dest="$tmp/bundle/lib/$(basename "$f")"
+            cp "$f" "$dest"
+            case "$(basename "$f")" in
+            capsulad-quickjs | capsulad-micropython | libcapsulad.so.*) chmod 0755 "$dest" ;;
+            *) chmod 0644 "$dest" ;;
+            esac
         fi
     done
     if [ -d "$SRC/include/capsulad" ]; then
@@ -128,6 +137,7 @@ core)
     fi
     hook=$(boot_hook "$PLATFORM")
     cp "$ROOT/$hook" "$tmp/bundle/boot/$(basename "$hook")"
+    chmod 0755 "$tmp/bundle/boot/$(basename "$hook")"
     (cd "$tmp/bundle" && COPYFILE_DISABLE=1 tar -czf "$tmp/deploy-bundle.tar.gz" .)
 
     run_stage stage-release \
@@ -193,6 +203,9 @@ installer)
             else
                 tmp=$(mktemp -d "${TMPDIR:-/tmp}/capsulad-installer.XXXXXX")
                 cp "$bin" "$tmp/capsulad-installer"
+                # The artifact service does not preserve the executable bit;
+                # the released archive must contain a runnable installer.
+                chmod 0755 "$tmp/capsulad-installer"
                 tar -C "$tmp" -czf "$OUT/capsulad-installer_${VERSION}_${os}_${arch}.tar.gz" capsulad-installer
                 rm -rf "$tmp"
             fi
