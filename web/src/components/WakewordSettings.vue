@@ -27,7 +27,6 @@ const detections = computed(() => [...(wakewordData.value?.detections || [])]
 
 const values = computed(() => settingsData.value?.values || {})
 const enabled = computed(() => Boolean(values.value.wakewordEnabled))
-const assistantSelected = computed(() => Boolean(values.value.defaultAssistantAppId))
 const settingsReady = computed(() => Boolean(settingsData.value))
 const micMuted = computed(() => Boolean(values.value.microphoneMuted))
 const masterVolume = computed(() => Number(values.value.masterVolume || 0))

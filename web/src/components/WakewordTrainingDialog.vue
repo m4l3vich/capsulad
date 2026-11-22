@@ -206,7 +206,6 @@ const training = reactive({
 })
 
 const closing = ref(false)
-const resetArmed = ref(false)
 const speechPhrase = ref('')
 
 let timer = null
@@ -217,7 +216,6 @@ let orphanTrainingId = ''
 let cancelRequested = false
 let cancelAcknowledged = false
 let cancelBackstop = null
-let resetTimer = null
 let closeBackstop = null
 
 const stepKey = computed(() => STEPS[stepIndex.value]?.key || 'setup')
@@ -366,20 +364,6 @@ const canAdvance = computed(() => {
   if (stepKey.value === 'word') return counts.value.word >= GROUPS.word.minimum
   return false
 })
-
-const selectedRows = computed(() => {
-  const rows = []
-  for (const group of ['room', 'speech', 'word']) {
-    setup.ids[group].forEach((id, index) => {
-      rows.push({ group, id, index, sample: sampleFor(id) })
-    })
-  }
-  return rows
-})
-
-function rowsFor(group) {
-  return selectedRows.value.filter((row) => row.group === group)
-}
 
 function stepClass(index) {
   if (index === stepIndex.value) return 'badge-primary'
@@ -543,19 +527,6 @@ function cancelTake() {
   if (closing.value) {
     clearCloseBackstop()
     closeBackstop = setTimeout(() => closeDialog(), 12000)
-  }
-}
-
-async function deleteSelected(row) {
-  if (busy.value) return
-  try {
-    await socket.request({ deleteSample: { sampleId: row.id } }, { timeout: 10000 })
-    setup.ids[row.group] = setup.ids[row.group].filter((id) => id !== row.id)
-    saveSelection()
-    takeStatus.value = 'Recording removed from this setup.'
-    emit('refresh')
-  } catch (err) {
-    takeError.value = `Could not remove the recording: ${err.message}`
   }
 }
 
@@ -788,30 +759,6 @@ function onCancel(event) {
   requestClose()
 }
 
-function startNewSetup() {
-  if (busy.value) return
-  if (!resetArmed.value) {
-    resetArmed.value = true
-    clearTimeout(resetTimer)
-    resetTimer = setTimeout(() => { resetArmed.value = false }, 5000)
-    return
-  }
-  resetArmed.value = false
-  clearTimeout(resetTimer)
-  resetTrainingState()
-  setup.completed = false
-  setup.finalTestConsumed = false
-  setup.ids = { room: [], speech: [], word: [] }
-  wordDraft.value = setup.word
-  languageDraft.value = setup.language
-  stepIndex.value = 0
-  speechPhrase.value = nextPhrase()
-  takeStatus.value = ''
-  takeError.value = ''
-  saveSetup()
-  focusHeading()
-}
-
 function pruneSelection() {
   if (!props.samplesLoaded) return
   const present = new Set(props.samples.map((sample) => sample.sampleId))
@@ -846,7 +793,6 @@ onBeforeUnmount(() => {
   }
   clearCancelBackstop()
   clearCloseBackstop()
-  clearTimeout(resetTimer)
   if (recording.value) {
     recording.value.cancelled = true
     try {

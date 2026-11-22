@@ -270,6 +270,43 @@ func TestAssetRemoveDeletesRegularFilesOnly(t *testing.T) {
 	}
 }
 
+func TestAssetCreateDirAndOpenFile(t *testing.T) {
+	c, root := newCatalog(t)
+	if _, err := c.CreateDir("audio/voices"); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "audio", "voices")); err != nil || !info.IsDir() {
+		t.Fatalf("created directory = %v, %v", info, err)
+	}
+	if _, err := c.CreateDir("audio/voices"); err != nil {
+		t.Fatalf("existing directory: %v", err)
+	}
+
+	writeFile(t, root, "audio/voices/hello.wav", []byte("hello"))
+	file, info, err := c.Open("audio/voices/hello.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if info.ID != "audio/voices/hello.wav" || info.MediaType != "audio/wav" || info.Size != 5 {
+		t.Fatalf("open info = %+v", info)
+	}
+	body, err := io.ReadAll(file)
+	if err != nil || string(body) != "hello" {
+		t.Fatalf("read = %q, %v", body, err)
+	}
+
+	if _, _, err := c.Open("audio/voices"); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("open directory error = %v, want ErrInvalidPath", err)
+	}
+	if _, err := c.CreateDir("../escape"); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("traversal mkdir error = %v, want ErrInvalidPath", err)
+	}
+	if _, err := c.CreateDir("audio/voices/hello.wav/child"); err == nil {
+		t.Fatal("mkdir below a regular file succeeded")
+	}
+}
+
 func TestAssetMediaTypeTable(t *testing.T) {
 	cases := map[string]string{
 		"a.wav": "audio/wav", "a.mp3": "audio/mpeg", "a.ogg": "audio/ogg", "a.flac": "audio/flac",

@@ -139,6 +139,21 @@ func readRootDisk() (total, free uint64, ok bool) {
 	return st.Blocks * blockSize, st.Bavail * blockSize, true
 }
 
+// diskFreeAt reports the unprivileged free space of the filesystem holding
+// path. The asset page uses the store root so its figure matches the partition
+// that will actually accept an upload.
+func diskFreeAt(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	blockSize := uint64(st.Bsize)
+	if blockSize == 0 || st.Bavail == 0 {
+		return 0, false
+	}
+	return st.Bavail * blockSize, true
+}
+
 func readSoCTemperature() (float64, bool) {
 	zones, err := filepath.Glob("/sys/class/thermal/thermal_zone*")
 	if err != nil {

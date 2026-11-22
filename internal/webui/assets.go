@@ -2,9 +2,12 @@ package webui
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"path"
 	"syscall"
+	"time"
 
 	"capsulad/internal/assets"
 )
@@ -27,10 +30,60 @@ func (s *Server) apiAssets(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range list {
 		total += entry.Size
 	}
+	free, freeAvailable := diskFreeAt(s.Assets.Root())
 	writeJSONValue(w, http.StatusOK, map[string]any{
-		"assets":      list,
-		"total_bytes": total,
+		"assets":         list,
+		"total_bytes":    total,
+		"free_bytes":     free,
+		"free_available": freeAvailable,
 	})
+}
+
+// downloadAsset streams one published file. Directory and symlink access is
+// refused by Catalog.Open, and the media type comes from the store's table
+// rather than the request.
+func (s *Server) downloadAsset(w http.ResponseWriter, r *http.Request) {
+	if s.Assets == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "asset store is unavailable")
+		return
+	}
+	target, ok := assetPathParam(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, `exactly one "path" query parameter is required`)
+		return
+	}
+	file, info, err := s.Assets.Open(target)
+	if err != nil {
+		s.writeAssetError(w, err)
+		return
+	}
+	defer file.Close()
+	name := path.Base(info.ID)
+	w.Header().Set("Content-Type", info.MediaType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, name, time.Time{}, file)
+}
+
+// createAssetFolder creates one directory in the store. Uploads already create
+// missing parents, so this route exists for an empty folder the administrator
+// wants in the tree.
+func (s *Server) createAssetFolder(w http.ResponseWriter, r *http.Request) {
+	if s.Assets == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "asset store is unavailable")
+		return
+	}
+	target, ok := assetPathParam(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, `exactly one "path" query parameter is required`)
+		return
+	}
+	id, err := s.Assets.CreateDir(target)
+	if err != nil {
+		s.writeAssetError(w, err)
+		return
+	}
+	writeJSONValue(w, http.StatusOK, map[string]any{"folder": id})
 }
 
 // uploadAsset writes one raw body under ?path=<store-relative path>. The store

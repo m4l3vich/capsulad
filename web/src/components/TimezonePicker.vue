@@ -71,7 +71,6 @@ const listEntries = computed(() => {
 })
 
 const visibleEntries = computed(() => listEntries.value.slice(0, RESULT_LIMIT))
-const resultTotal = computed(() => listEntries.value.length)
 
 // Formatters are built once per zone/kind; the dialog re-renders the visible
 // list every tick and on every keystroke, so constructing them per call is

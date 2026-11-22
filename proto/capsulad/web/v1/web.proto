@@ -584,8 +584,11 @@ message ApplicationView {
   RingView ring = 13;
   string ring_error = 14;
   bool selected_default = 15;
-  // Plain text supplied by the app manifest; empty when no guide is declared.
-  string user_guide = 16;
+  // The user guide is the package root README.md served by the guide route,
+  // not a snapshot field. Field 16 remains reserved for the retired
+  // manifest-defined guide.
+  reserved 16;
+  reserved "user_guide";
   // "assistant" and the resource IDs for which this app is selected.
   repeated string selected_default_roles = 17;
 }

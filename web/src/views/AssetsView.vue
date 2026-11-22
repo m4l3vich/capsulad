@@ -4,8 +4,9 @@ import ModalDialog from '../components/ModalDialog.vue'
 import { notify } from '../lib/toast.js'
 import {
   assetPathError,
-  defaultTarget,
+  createFolder,
   deleteAsset,
+  downloadURL,
   listAssets,
   MAX_ASSET_BYTES,
   shortHash,
@@ -22,6 +23,8 @@ const ROOT = '/assets/'
 const folder = ref(ROOT)
 const assets = ref([])
 const totalBytes = ref(0)
+const freeBytes = ref(0)
+const freeAvailable = ref(false)
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
@@ -51,7 +54,6 @@ const visibleAssets = computed(() => {
       continue
     }
 
-
     result.push(asset)
   }
 
@@ -67,9 +69,11 @@ async function load() {
   loading.value = true
   loadError.value = ''
   try {
-    const { assets: next, totalBytes: total } = await listAssets()
+    const { assets: next, totalBytes: total, freeBytes: free, freeAvailable: hasFree } = await listAssets()
     assets.value = next
     totalBytes.value = total
+    freeBytes.value = free
+    freeAvailable.value = hasFree
     loaded.value = true
   } catch (err) {
     // The first load has no list to fall back on, so it stays inline; later
@@ -78,6 +82,8 @@ async function load() {
       loadError.value = err.message
       assets.value = []
       totalBytes.value = 0
+      freeBytes.value = 0
+      freeAvailable.value = false
     } else {
       notify.warning(`Refresh failed: ${err.message}`)
     }
@@ -135,6 +141,51 @@ function onDrop(event) {
 function startDrag(event) {
   event.preventDefault()
   dragging.value = true
+}
+
+// --- folders, copy and download --------------------------------------------
+
+const createFolderTarget = computed(() => folder.value.substring(ROOT.length) + createFolderName.value.trim())
+const createFolderIssue = computed(() => {
+  const name = createFolderName.value.trim()
+  if (!name) return 'Enter a folder name.'
+  if (name.includes('/')) return 'Create one level at a time: open the parent folder first.'
+  return assetPathError(createFolderTarget.value)
+})
+
+async function confirmCreateFolder() {
+  if (createFolderIssue.value) return
+  createFolderBusy.value = true
+  try {
+    const id = await createFolder(createFolderTarget.value)
+    createFolderModal.value = false
+    createFolderName.value = ''
+    notify.success(`Created /assets/${id}.`)
+    await load()
+  } catch (err) {
+    notify.error(err.message)
+  } finally {
+    createFolderBusy.value = false
+  }
+}
+
+async function copyPath(entry) {
+  try {
+    await navigator.clipboard.writeText(`/assets/${entry.id}`)
+    notify.success(`Copied /assets/${entry.id}.`)
+  } catch (_) {
+    notify.error('Could not copy the path; your browser refused clipboard access.')
+  }
+}
+
+function downloadEntry(entry) {
+  const link = document.createElement('a')
+  link.href = downloadURL(entry.id)
+  link.download = entry.path
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
 // --- delete -----------------------------------------------------------------
@@ -218,11 +269,11 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
         <div class="flex flex-wrap items-baseline gap-4">
           <h2 class="card-title text-base flex-grow" v-text="folder"/>
           <span class="text-xs text-base-content/60">
-            <!-- TODO: display free bytes on disk -->
-            {{ formatBytes(totalBytes) }} used · {{ 'TODO' }} free
+            {{ formatBytes(totalBytes) }} used ·
+            <template v-if="freeAvailable">{{ formatBytes(freeBytes) }} free</template>
+            <template v-else>free space unavailable</template>
           </span>
 
-          <!-- TODO: ability to create folder -->
           <button class="btn btn-sm btn-primary btn-outline" @click="createFolderModal = true">
             Create a folder
           </button>
@@ -295,29 +346,31 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
                 <td class="whitespace-nowrap font-mono text-xs" :title="entry.sha256">{{ shortHash(entry.sha256) }}</td>
                 <td>
                   <div class="flex justify-end items-center gap-2">
-                    <!-- TODO: tooltips for the icon buttons. actual daisyUI tooltips, not just title attribute -->
-                    <!-- TODO: actually copy the path -->
                     <button
                       v-if="entry.media_type !== 'folder'"
                       type="button"
-                      class="btn btn-xs btn-ghost btn-square"
+                      class="btn btn-xs btn-ghost btn-square tooltip"
+                      data-tip="Copy path"
                       aria-label="Copy file path"
+                      @click="copyPath(entry)"
                     >
                       <Icon size="16px" class="text-primary">file_copy</Icon>
                     </button>
-                    <!-- TODO: ability to download a file -->
                     <button
                       v-if="entry.media_type !== 'folder'"
                       type="button"
-                      class="btn btn-primary btn-xs btn-ghost btn-ghost"
+                      class="btn btn-primary btn-xs btn-ghost tooltip"
+                      data-tip="Download"
                       :aria-label="`Download ${entry.path}`"
+                      @click="downloadEntry(entry)"
                     >
                       <Icon size="20px" class="text-primary">download</Icon>
                     </button>
                     <button
                       v-if="entry.media_type !== 'folder'"
                       type="button"
-                      class="btn btn-error btn-xs btn-outline"
+                      class="btn btn-error btn-xs btn-outline tooltip"
+                      data-tip="Delete"
                       :aria-label="`Delete ${entry.path}`"
                       @click="askDelete(entry)"
                     >
@@ -345,16 +398,18 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
           class="grow text-sm"
           placeholder="New Folder (1)"
           autocomplete="off"
+          @keydown.enter.prevent="confirmCreateFolder"
         />
       </label>
+      <p v-if="createFolderIssue && createFolderName" class="mt-2 text-xs text-error">{{ createFolderIssue }}</p>
       <template #footer>
         <button type="button" class="btn btn-ghost" :disabled="createFolderBusy" @click="createFolderModal = false">Cancel</button>
         <button
           type="button"
           class="btn btn-primary"
-          :disabled="createFolderBusy"
+          :disabled="createFolderBusy || !!createFolderIssue"
           :aria-busy="createFolderBusy ? 'true' : 'false'"
-          @click="confirmDelete"
+          @click="confirmCreateFolder"
         >
           <span v-if="createFolderBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
           Create

@@ -112,7 +112,6 @@ type Manifest struct {
 	Name              string             `toml:"name"`
 	Version           string             `toml:"version"`
 	Description       string             `toml:"description"`
-	UserGuide         string             `toml:"user_guide"`
 	Background        bool               `toml:"background"`
 	StartOnBoot       bool               `toml:"start_on_boot"`
 	RestartOnFailure  bool               `toml:"restart_on_failure"`

@@ -136,7 +136,6 @@ const revokeTarget = ref(null)
 const revokeBusy = ref(false)
 
 const keys = computed(() => data.value?.keys || [])
-const activeKeyCount = computed(() => keys.value.filter((key) => !key.revoked && hasValidKeyScopes(key.scopes)).length)
 
 function askRevoke(key) {
   revokeTarget.value = key
@@ -478,9 +477,9 @@ onUnmounted(() => {
             No automation keys yet. Create a status key here only if a script needs to read device status.
           </p>
 
-          <!-- TODO: actually remove keys from the list 7d after revocation -->
           <p class="text-xs text-base-content/60">
-            Revoking a key cannot be undone. The entry stays in this list for 7 days so you can see it was revoked.
+            Revoking a key cannot be undone. The entry stays in this list for 7 days after revocation,
+            then it is removed.
           </p>
         </div>
       </section>

@@ -165,6 +165,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/apps/{appID}", s.sessionOnly(s.removeApp))
 	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
 	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))
+	mux.HandleFunc("POST /api/assets/folder", s.sessionOnly(s.createAssetFolder))
+	mux.HandleFunc("GET /api/assets/file", s.sessionOnly(s.downloadAsset))
 	mux.HandleFunc("DELETE /api/assets", s.sessionOnly(s.deleteAsset))
 	mux.HandleFunc("GET /ws", s.sessionOnly(s.serveWS))
 	// The MCP frontend is an API-key surface, not a browser session: it does

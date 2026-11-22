@@ -503,6 +503,75 @@ func (c *Catalog) releaseReservationLocked(id string, reserve int64) {
 	delete(c.generations, id)
 }
 
+// Open returns one published regular file for streaming to an administrator.
+// Directories, symlinks and missing files are refused with the same path rules
+// Remove uses.
+func (c *Catalog) Open(rel string) (*os.File, Info, error) {
+	id, full, err := c.resolve(rel)
+	if err != nil {
+		return nil, Info{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkParents(id); err != nil {
+		return nil, Info{}, err
+	}
+	stat, err := os.Lstat(full)
+	if err != nil {
+		return nil, Info{}, err
+	}
+	if stat.Mode()&os.ModeSymlink != 0 {
+		return nil, Info{}, fmt.Errorf("%w: %s is a symlink", ErrInvalidPath, id)
+	}
+	if !stat.Mode().IsRegular() {
+		return nil, Info{}, fmt.Errorf("%w: %s is not a regular file", ErrInvalidPath, id)
+	}
+	file, err := os.Open(full)
+	if err != nil {
+		return nil, Info{}, err
+	}
+	return file, Info{ID: id, Path: CanonicalRoot + "/" + id, MediaType: MediaType(id), Size: stat.Size()}, nil
+}
+
+// CreateDir creates one empty directory (and any missing parents) in the
+// store. Existing directories are accepted; a file, symlink or reserved name
+// on the way is refused.
+func (c *Catalog) CreateDir(rel string) (string, error) {
+	id, _, err := c.resolve(rel)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.root
+	for _, part := range strings.Split(id, "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("%w: path component %q is a symlink", ErrInvalidPath, part)
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("%w: path component %q is not a directory", ErrInvalidPath, part)
+			}
+			continue
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if err := os.Mkdir(current, dirMode); err != nil {
+			if !errors.Is(err, fs.ErrExist) {
+				return "", err
+			}
+			continue
+		}
+		if err := os.Chmod(current, dirMode); err != nil {
+			return "", err
+		}
+	}
+	return id, nil
+}
+
 // Remove deletes one regular file. A directory (and therefore a directory
 // tree) is never removed here, and a symlink is never followed.
 func (c *Catalog) Remove(rel string) error {

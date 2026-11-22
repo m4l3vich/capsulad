@@ -828,34 +828,30 @@ func TestOverviewListingCarriesAppActions(t *testing.T) {
 	}
 }
 
-func TestApplicationSnapshotGuideAndSelectedRoles(t *testing.T) {
+func TestApplicationSnapshotSelectedRoles(t *testing.T) {
 	env := newTestEnv(t)
 	reg, err := registry.Open(t.TempDir(), env.srv.Logs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.RegisterBuiltin(&registry.App{Manifest: &manifest.Manifest{
-		ID: "capsula.clock", Name: "Clock", Version: "1.0.0",
+		ID: "capsulad.clock", Name: "Clock", Version: "1.0.0",
 		Entrypoint: manifest.Entrypoint{Runtime: manifest.RuntimeBuiltin},
-		UserGuide: "Press the button.\nHold to reset.",
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	env.srv.Apps = reg
 	env.back.mu.Lock()
-	env.back.settings.Values.DefaultAssistantAppId = "capsula.clock"
-	env.back.settings.Values.DefaultAppByResource["light.ring.main"] = "capsula.clock"
+	env.back.settings.Values.DefaultAssistantAppId = "capsulad.clock"
+	env.back.settings.Values.DefaultAppByResource["light.ring.main"] = "capsulad.clock"
 	env.back.settings.Values.DefaultAppByResource["other"] = "org.example.player"
 	env.back.mu.Unlock()
 
 	conn, _, _ := connectSession(t, env)
 	conn.send(&webv1.ClientFrame{RequestId: 32, Body: &webv1.ClientFrame_SnapshotRequest{
-		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_APPLICATION, AppId: "capsula.clock"},
+		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_APPLICATION, AppId: "capsulad.clock"},
 	}})
 	view := conn.waitSnapshot(t, 32).GetApplication()
-	if view.GetUserGuide() != "Press the button.\nHold to reset." {
-		t.Fatalf("guide = %q", view.GetUserGuide())
-	}
 	if !view.GetSelectedDefault() || strings.Join(view.GetSelectedDefaultRoles(), ",") != "assistant,display.segment.front,light.ring.main" {
 		t.Fatalf("selected default = %v, roles = %v", view.GetSelectedDefault(), view.GetSelectedDefaultRoles())
 	}
@@ -864,7 +860,7 @@ func TestApplicationSnapshotGuideAndSelectedRoles(t *testing.T) {
 		SnapshotRequest: &webv1.SnapshotRequest{Topic: webv1.Topic_TOPIC_APPLICATION, AppId: "org.example.idle"},
 	}})
 	view = conn.waitSnapshot(t, 33).GetApplication()
-	if view.GetUserGuide() != "" || view.GetSelectedDefault() || len(view.GetSelectedDefaultRoles()) != 0 {
+	if view.GetSelectedDefault() || len(view.GetSelectedDefaultRoles()) != 0 {
 		t.Fatalf("unselected app snapshot = %v", view)
 	}
 }

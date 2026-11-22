@@ -115,6 +115,48 @@ func TestPasswordAndAPIKeys(t *testing.T) {
 	}
 }
 
+func TestRevokedAPIKeysLeaveTheListAfterSevenDays(t *testing.T) {
+	dir := t.TempDir()
+	store := Open(dir, DefaultOptions())
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"fresh", "expired"} {
+		if _, _, err := store.CreateAPIKey(name); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RevokeAPIKey(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	for i := range store.doc.APIKeys {
+		switch store.doc.APIKeys[i].Name {
+		case "fresh":
+			at := now.Add(-6 * 24 * time.Hour)
+			store.doc.APIKeys[i].RevokedAt = &at
+		case "expired":
+			at := now.Add(-8 * 24 * time.Hour)
+			store.doc.APIKeys[i].RevokedAt = &at
+		}
+	}
+	store.mu.Unlock()
+
+	keys := store.ListAPIKeys()
+	if len(keys) != 1 || keys[0].Name != "fresh" {
+		t.Fatalf("listed keys = %+v, want only the fresh revocation", keys)
+	}
+
+	reloaded := Open(dir, DefaultOptions())
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if keys := reloaded.ListAPIKeys(); len(keys) != 1 || keys[0].Name != "fresh" {
+		t.Fatalf("pruned key persisted: %+v", keys)
+	}
+}
+
 func TestAPIKeyScopeIssuanceAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	store := Open(dir, DefaultOptions())

@@ -405,11 +405,32 @@ func (s *Store) APIKeyScopes(token string) (APIKeyInfo, []string, bool) {
 	return APIKeyInfo{}, nil, false
 }
 
+// Revoked keys stay visible for a grace period so an administrator can see
+// that a credential was revoked, then they are removed from the store. Keeping
+// them forever would eventually exhaust maxAPIKeys with unusable records.
+const revokedKeyRetention = 7 * 24 * time.Hour
+
 func (s *Store) ListAPIKeys() []APIKeyInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]APIKeyInfo, 0, len(s.doc.APIKeys))
+	now := time.Now().UTC()
+	kept := s.doc.APIKeys[:0]
+	pruned := false
 	for _, rec := range s.doc.APIKeys {
+		if rec.RevokedAt != nil && now.Sub(*rec.RevokedAt) >= revokedKeyRetention {
+			pruned = true
+			continue
+		}
+		kept = append(kept, rec)
+	}
+	if pruned {
+		s.doc.APIKeys = kept
+		// A failed rewrite leaves the hidden records on disk; the next listing
+		// retries. The catalog must still render without an I/O error path.
+		_ = s.persistLocked()
+	}
+	out := make([]APIKeyInfo, 0, len(kept))
+	for _, rec := range kept {
 		out = append(out, infoFromRecord(rec))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

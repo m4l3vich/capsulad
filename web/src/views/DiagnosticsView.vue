@@ -58,15 +58,6 @@ function appLabel(appId) {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Unknown app'
 }
 
-function backendBadge(value) {
-  const text = status(value)
-  if (!text) return 'badge-neutral'
-  if (text.includes('available')) return 'badge-success'
-  if (text.includes('unverified') || text.includes('degraded') || text.includes('partial')) return 'badge-warning'
-  if (text.includes('unavailable') || text.includes('error') || text.includes('failed') || text.includes('missing')) return 'badge-error'
-  return 'badge-neutral'
-}
-
 // --- metrics ----------------------------------------------------------------
 
 const metrics = computed(() => data.value?.metrics || null)
@@ -570,8 +561,7 @@ onUnmounted(() => {
             </div>
           </div>
           <p v-if="uptimeAvailable" class="text-sm text-base-content/60 mt-4 mx-2">
-            <!-- TODO: clarify if this is capsulad uptime or speaker (hardware/Linux) uptime -->
-            capsulad is up for {{ formatUptime(metrics.uptimeSeconds) }}
+            Speaker has been running for {{ formatUptime(metrics.uptimeSeconds) }}
           </p>
         </template>
         <div v-else class="rounded-lg border bg-base-100 border-base-300 p-4 text-sm">

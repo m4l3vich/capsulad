@@ -304,11 +304,6 @@ func (s *Server) applicationView(ctx context.Context, appID string) (*webv1.Appl
 		return nil, status.Errorf(codes.NotFound, "application %q is not installed", appID)
 	}
 	view := &webv1.ApplicationView{App: s.appListing(app)}
-	if s.Apps != nil {
-		if installed, ok := s.Apps.Get(appID); ok && installed.Manifest != nil {
-			view.UserGuide = installed.Manifest.UserGuide
-		}
-	}
 	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
 		values := settings.GetValues()
 		if values.GetDefaultAssistantAppId() == appID {
@@ -836,8 +831,8 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 			player := &webv1.MediaPlayerView{
 				PlayerId: p.GetPlayerId(), PlaybackState: p.GetPlaybackState().String(),
 				SupportedActions: mediaActions(p.GetSupportedActions()),
-				AppName: p.GetAppName(),
-				Title: p.GetTitle(), Artist: p.GetArtist(), Album: p.GetAlbum(),
+				AppName:          p.GetAppName(),
+				Title:            p.GetTitle(), Artist: p.GetArtist(), Album: p.GetAlbum(),
 				DurationMs: p.GetDurationMs(), PositionMs: p.GetPositionMs(), Revision: p.GetRevision(),
 			}
 			// A bare configured radio URL can be the source/media name.

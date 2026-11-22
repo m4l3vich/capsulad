@@ -281,8 +281,8 @@ For an `assistant` key:
   application's custom settings document (`/api/apps/{appID}/settings-ui`) is browser-only
   — it is untrusted HTML rendered in an opaque-origin iframe — and `get_state` with
   `topic: "application"` carries the machine-readable schema and values for operators only.
-- **No live asset invalidations.** Asset writes have no browser invalidation topic, so an
-  Assets page that is already open shows an MCP upload or delete after a reload or
+- **No live asset invalidations.** Asset writes have no browser invalidation topic, so a
+  Files page that is already open shows an MCP upload or delete after a reload or
   navigation (use `list_assets` for the authoritative view). Settings, apps, Bluetooth
   and API-key changes do publish the topics the Web UI subscribes to, so those mutations
   reach an open browser immediately.

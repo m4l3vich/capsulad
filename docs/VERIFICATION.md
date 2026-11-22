@@ -1659,6 +1659,12 @@ not the speaker; read the level stated in each part.
   selected clock showed its display-controller badge, running/restart controls, disabled boot
   checkbox, embedded settings document and nested default-provider and interface dialogs.
   Launch-argument and boot-preference changes have not been exercised on a physical speaker.
+- The boot-preference JSON route, asset folder creation, asset file download, directory/symlink
+  path rules and the 7-day revoked-key retention are covered by host tests
+  (`internal/webui/boot_test.go`, `internal/assets`, `internal/websecurity`). `free_bytes` is
+  read from `statfs` on Linux and reports unavailable on this darwin host. Clipboard copy,
+  browser download prompts and the folder/free-space figures in a real device browser remain
+  unverified.
 - Wi-Fi manager logic: stock `wpa_supplicant.conf` import, priority-ordered association,
   previous-network recovery, scan capability and token expiry against fixtures; captive
   portal host/origin/token/subnet behavior against `httptest`.

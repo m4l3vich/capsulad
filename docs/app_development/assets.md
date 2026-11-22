@@ -119,8 +119,10 @@ for any asset route — a `status` key is limited to `GET /api/status` and the p
 
 | Method | Route | Behavior |
 |---|---|---|
-| `GET` | `/api/assets` | `{assets:[…], total_bytes}` for the whole store. |
+| `GET` | `/api/assets` | `{assets:[…], total_bytes, free_bytes, free_available}` for the whole store. `free_bytes` is the unprivileged space on the filesystem holding the store; `free_available` is false when the host does not report it. |
 | `POST` | `/api/assets?path=<asset-id>` | Raw request body written to that asset ID. Creates parent directories, replaces an existing regular file atomically through a staging file and rename. |
+| `POST` | `/api/assets/folder?path=<folder-id>` | Creates one empty directory and any missing parents. Returns `{"folder": "<id>"}`; an existing directory is accepted. |
+| `GET` | `/api/assets/file?path=<asset-id>` | Streams one published regular file as an attachment with the store's media type. Directories and symlinks are refused. |
 | `DELETE` | `/api/assets?path=<asset-id>` | Removes one regular file. Directories and symlinks are never removed. |
 
 `POST` returns `{"asset": {…}}` with the published catalog entry. Errors are explicit:

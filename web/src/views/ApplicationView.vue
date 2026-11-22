@@ -3,10 +3,15 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { socket } from '../lib/ws.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { SettingsFrameHost } from '../lib/appSettingsBridge.js'
+import { theme as appearance } from '../lib/theme.js'
+import { readGuide } from '../lib/apps.js'
+import { guideBlocks } from '../lib/guide.js'
 import { getAppBoot, setAppBoot } from '../lib/appBoot.js'
 import { safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
+import ThemeSwitch from '../components/ThemeSwitch.vue'
+import Icon from '../components/Icon.vue'
 
 const props = defineProps({
   appId: { type: String, required: true }
@@ -20,12 +25,69 @@ const busy = ref('')
 const settingBusy = ref('')
 const discardPrompt = ref(false)
 const launchDialog = ref(false)
-const guideDialog = ref(false)
 const interfaceDialog = ref(null)
 const defaultInfo = ref(false)
 const boot = ref(null)
 const bootBusy = ref(false)
 const bootError = ref('')
+
+// The user guide is inert text fetched over the authenticated same-origin API.
+// It is deliberately independent of the run state: a stopped app can still
+// explain its controls, launch and recovery before anyone starts it.
+const guideOpen = ref(false)
+const guide = ref(null)
+const guideError = ref('')
+const guideLoading = ref(false)
+let guideController = null
+
+const guideDocumentBlocks = computed(() => (guide.value ? guideBlocks(guide.value.markdown) : []))
+const guideSourceLabel = computed(() => {
+  if (!guide.value) return ''
+  if (guide.value.source === 'builtin') return 'built-in guide'
+  if (guide.value.source === 'package') return 'from the application package'
+  return ''
+})
+
+function abortGuideLoad() {
+  if (!guideController) return
+  guideController.abort()
+  guideController = null
+  guideLoading.value = false
+}
+
+async function loadGuide() {
+  const app = props.appId
+  if (!app) return
+  abortGuideLoad()
+  const controller = new AbortController()
+  guideController = controller
+  guideLoading.value = true
+  guideError.value = ''
+  try {
+    const doc = await readGuide(app, { signal: controller.signal })
+    if (controller.signal.aborted || props.appId !== app) return
+    guide.value = doc
+  } catch (err) {
+    if (controller.signal.aborted || props.appId !== app) return
+    guideError.value = err?.message || 'The user guide could not be loaded.'
+  } finally {
+    if (guideController === controller) {
+      guideController = null
+      guideLoading.value = false
+    }
+  }
+}
+
+function openGuide() {
+  guideOpen.value = true
+  if (!guide.value || guide.value.appId !== props.appId) loadGuide()
+}
+
+function closeGuide() {
+  abortGuideLoad()
+  guideOpen.value = false
+  guideError.value = ''
+}
 
 // Launch drafts stay local until submitted; closing the form preserves them.
 // Running default providers restart on stop and retain their selected role.
@@ -99,6 +161,12 @@ loadBoot()
 function syncSettingsState() {
   const view = data.value
   if (!view) return
+  // A reopened detail for another app starts with no guide from the previous
+  // application, even if the fetched document arrives late.
+  if (guide.value && guide.value.appId !== props.appId) {
+    closeGuide()
+    guide.value = null
+  }
   configRevision = Math.max(configRevision, Number(view.configRevision) || 0)
   syncDrafts(view)
   maybeMountSettingsUI()
@@ -354,6 +422,7 @@ async function maybeMountSettingsUI() {
     schema: data.value.schema,
     revision: configRevision,
     values: data.value.values,
+    theme: appearance.resolved,
     applyChanges: (changes, expectedRevision) => applyAppChanges(changes, expectedRevision, app),
     onStatus: (next) => {
       if (next?.error) {
@@ -392,6 +461,16 @@ function updateFrameHost() {
   if (!frameHost || !data.value) return
   frameHost.updateState({ revision: configRevision, values: data.value.values })
 }
+
+// A Light/Dark/System change reaches an already-open settings document as one
+// attribute update. It deliberately does not remount the frame or resend
+// init/state, so in-progress drafts, pending patches, focus and scroll stay.
+watch(
+  () => appearance.resolved,
+  (value) => {
+    frameHost?.setTheme(value)
+  }
+)
 
 // --- lifecycle, launch and actions ----------------------------------------
 
@@ -476,6 +555,12 @@ function documentationLines(text) {
 
 <template>
   <ModalDialog :title="title" :before-close="requestClose" @close="emit('close')">
+    <!-- A dialog is in the top layer, so the shell's header switch cannot be
+         reached while an app detail is open. Keep appearance available beside
+         the live controls; System still follows the OS. -->
+    <template #actions>
+      <ThemeSwitch />
+    </template>
     <template #header="{ titleId }">
       <div class="flex flex-col">
         <h2 :id="titleId" class="text-lg font-semibold leading-tight">
@@ -503,17 +588,71 @@ function documentationLines(text) {
     </div>
 
     <div v-else-if="data" class="flex flex-col gap-4">
-      <div v-if="!connected" class="alert alert-warning py-2" role="status">
-        <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
+      <div v-if="guideOpen" class="flex flex-col gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <button type="button" class="btn btn-sm btn-ghost" @click="closeGuide">
+            <span aria-hidden="true">←</span> Back to application
+          </button>
+          <span v-if="guideSourceLabel" class="badge badge-ghost badge-sm">{{ guideSourceLabel }}</span>
+        </div>
+
+        <div v-if="guideLoading" class="flex items-center gap-2 py-4 text-sm" role="status" aria-live="polite">
+          <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
+          Loading the user guide…
+        </div>
+
+        <div v-else-if="guideError" class="alert alert-warning py-2" role="alert">
+          <span class="text-sm">{{ guideError }}</span>
+          <button type="button" class="btn btn-sm btn-outline" @click="loadGuide">Try again</button>
+        </div>
+
+        <article v-else-if="guide" class="flex flex-col gap-3 break-words text-sm leading-relaxed">
+          <template v-for="(block, index) in guideDocumentBlocks" :key="index">
+            <component
+              :is="`h${Math.min(block.level + 2, 6)}`"
+              v-if="block.type === 'heading'"
+              class="mt-2 font-semibold tracking-tight"
+              :class="block.level <= 2 ? 'text-base' : 'text-sm'"
+            >{{ block.text }}</component>
+
+            <p v-else-if="block.type === 'paragraph'" class="text-base-content/80">{{ block.text }}</p>
+
+            <ul v-else-if="block.type === 'list' && block.kind === 'ul'" class="list-disc space-y-1 pl-5 text-base-content/80">
+              <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+            </ul>
+
+            <ol v-else-if="block.type === 'list'" class="list-decimal space-y-1 pl-5 text-base-content/80">
+              <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+            </ol>
+
+            <pre
+              v-else-if="block.type === 'code'"
+              class="overflow-x-auto rounded bg-base-200 p-3 font-mono text-xs leading-relaxed"
+            >{{ block.text }}</pre>
+
+            <div v-else-if="block.type === 'table'" class="overflow-x-auto rounded border border-base-300">
+              <table class="table table-xs">
+                <thead>
+                  <tr>
+                    <th v-for="(header, headerIndex) in block.headers" :key="headerIndex" scope="col">{{ header }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+                    <td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </article>
+
+        <p v-else class="text-sm text-base-content/60">No guide content is available.</p>
       </div>
 
-      <!-- TODO: make this a modal that opens when trying to close the application view -->
-      <div v-if="discardPrompt" class="alert alert-warning py-2" role="alert">
-        <span class="text-sm">You have unsaved changes.</span>
-        <div class="flex gap-1">
-          <button type="button" class="btn btn-sm" @click="discardPrompt = false">Keep editing</button>
-          <button type="button" class="btn btn-sm btn-warning" @click="discardAndClose">Discard changes</button>
-        </div>
+      <template v-else>
+      <div v-if="!connected" class="alert alert-warning py-2" role="status">
+        <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -527,7 +666,7 @@ function documentationLines(text) {
           <span v-if="!data.app.canStop" class="text-sm text-base-content/60">Managed by the speaker</span>
           <button v-if="data.selectedDefault" type="button" class="btn btn-ghost btn-square btn-sm"
             aria-label="Why default apps cannot be stopped" @click="defaultInfo = true">
-            <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">info</span>
+            <Icon size="20px" aria-hidden="true">info</Icon>
           </button>
         </template>
         <template v-else>
@@ -539,12 +678,12 @@ function documentationLines(text) {
           <button v-if="(data.app.launchArguments || []).length && !(data.app.launchArguments || []).some(arg => arg.required)"
             type="button" class="btn btn-primary btn-square btn-sm" aria-label="Launch with arguments"
             :disabled="!!busy || !connected" @click="launchDialog = true">
-            <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">more_vert</span>
+            <Icon size="20px" aria-hidden="true">more_vert</Icon>
           </button>
         </template>
 
-        <button v-if="data.userGuide" type="button" class="btn btn-ghost btn-sm ml-auto" @click="guideDialog = true">
-          <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">menu_book</span> User guide
+        <button type="button" class="btn btn-ghost btn-sm ml-auto" @click="openGuide">
+          <Icon size="20px" aria-hidden="true">menu_book</Icon> User guide
         </button>
       </div>
       <div>
@@ -555,7 +694,6 @@ function documentationLines(text) {
             @change="changeBoot" />
           Start at boot
         </label>
-        <!-- FIXME: does not work. Returns "doctype is not valid JSON" -->
         <p v-if="bootError" class="mt-1 text-xs text-error">{{ bootError }} <button type="button" class="link" @click="loadBoot">Retry</button></p>
         <p v-else-if="data.selectedDefault" class="mt-1 text-xs text-base-content/60">Selected default apps start automatically.</p>
         <p v-else-if="boot && !boot.editable" class="mt-1 text-xs text-base-content/60">Managed by the speaker.</p>
@@ -714,7 +852,7 @@ function documentationLines(text) {
                 {{ iface.available ? 'available' : 'unavailable' }}
               </span>
               <button type="button" class="btn btn-ghost btn-square btn-sm" :aria-label="`View ${iface.grpcService} description`" @click="interfaceDialog = iface">
-                <span class="material-symbols-outlined" aria-hidden="true">info</span>
+                <Icon size="20px" aria-hidden="true">info</Icon>
               </button>
             </div>
             <p v-if="iface.summary" class="mt-1 text-sm text-base-content/70">{{ iface.summary }}</p>
@@ -743,7 +881,18 @@ function documentationLines(text) {
           </p>
         </div>
       </section>
+      </template>
     </div>
+    <ModalDialog v-if="discardPrompt" title="Discard changes?" max-width="max-w-md" @close="discardPrompt = false">
+      <p class="text-sm">
+        This application has unsaved text or number fields. Closing now discards them; toggles and
+        choices that already applied stay applied.
+      </p>
+      <template #footer>
+        <button type="button" class="btn btn-ghost btn-sm" @click="discardPrompt = false">Keep editing</button>
+        <button type="button" class="btn btn-warning btn-sm" @click="discardAndClose">Discard changes</button>
+      </template>
+    </ModalDialog>
     <ModalDialog v-if="launchDialog" title="Launch with arguments" max-width="max-w-xl" @close="launchDialog = false">
       <form class="flex flex-col gap-3" @submit.prevent="launch(true)">
         <label v-for="arg in data.app.launchArguments" :key="arg.name" class="form-control">
@@ -758,9 +907,6 @@ function documentationLines(text) {
     </ModalDialog>
     <ModalDialog v-if="defaultInfo" title="Default application" max-width="max-w-lg" @close="defaultInfo = false">
       <p class="text-sm">The speaker automatically restarts its selected default apps. Choose another app or none in Settings to stop this app permanently.</p>
-    </ModalDialog>
-    <ModalDialog v-if="guideDialog" title="User guide" @close="guideDialog = false">
-      <p class="whitespace-pre-wrap text-sm">{{ data.userGuide }}</p>
     </ModalDialog>
     <ModalDialog v-if="interfaceDialog" :title="interfaceDialog.grpcService" @close="interfaceDialog = null">
       <p v-if="interfaceDialog.summary" class="text-sm">{{ interfaceDialog.summary }}</p>

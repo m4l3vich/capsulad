@@ -48,7 +48,7 @@ async function readError(resp) {
   }
 }
 
-/** List the catalog. Returns { assets, totalBytes }. */
+/** List the catalog. Returns { assets, totalBytes, freeBytes, freeAvailable }. */
 export async function listAssets() {
   const resp = await fetch('/api/assets', {
     credentials: 'same-origin',
@@ -58,8 +58,27 @@ export async function listAssets() {
   const body = await resp.json()
   return {
     assets: Array.isArray(body.assets) ? body.assets : [],
-    totalBytes: Number(body.total_bytes) || 0
+    totalBytes: Number(body.total_bytes) || 0,
+    freeBytes: Number(body.free_bytes) || 0,
+    freeAvailable: Boolean(body.free_available)
   }
+}
+
+/** Create one folder in the store. Existing directories are accepted. */
+export async function createFolder(target) {
+  const resp = await fetch(`/api/assets/folder?path=${encodeURIComponent(target)}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json', 'X-Capsulad-CSRF': session.csrf }
+  })
+  if (!resp.ok) throw new Error(await readError(resp))
+  const body = await resp.json()
+  return String(body.folder || target)
+}
+
+/** Same-origin download URL for one published file. */
+export function downloadURL(target) {
+  return `/api/assets/file?path=${encodeURIComponent(target)}`
 }
 
 /**
