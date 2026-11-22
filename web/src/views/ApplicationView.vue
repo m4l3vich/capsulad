@@ -242,7 +242,7 @@ function applyAppChanges(changes, expectedRevision, appId = props.appId) {
     }
   }
   const promise = patchChain.then(run, run)
-  patchChain = promise.catch(() => {})
+  patchChain = promise.catch(() => { })
   return promise
 }
 
@@ -476,6 +476,21 @@ function documentationLines(text) {
 
 <template>
   <ModalDialog :title="title" :before-close="requestClose" @close="emit('close')">
+    <template #header="{ titleId }">
+      <div class="flex flex-col">
+        <h2 :id="titleId" class="text-lg font-semibold leading-tight">
+          {{ title }}
+          <span class="badge badge-ghost">v{{ data.app.version || '—' }}</span>
+        </h2>
+
+        <div class="flex flex-wrap items-center gap-1.5 mt-3">
+          <span v-if="data.app.systemApp" class="badge badge-outline badge-sm">built-in</span>
+          <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">default {{ role }}</span>
+          <span v-if="data.app.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
+        </div>
+      </div>
+    </template>
+
     <div v-if="!data && !loadError" class="flex flex-col gap-3" aria-busy="true">
       <div class="skeleton h-4 w-2/3"></div>
       <div class="skeleton h-4 w-1/3"></div>
@@ -491,16 +506,8 @@ function documentationLines(text) {
       <div v-if="!connected" class="alert alert-warning py-2" role="status">
         <span class="text-sm">Disconnected: changes are paused until the connection returns.</span>
       </div>
-      <div class="flex flex-wrap items-center gap-1.5">
-        <span class="badge badge-ghost badge-sm">v{{ data.app.version || '—' }}</span>
-        <span v-if="data.app.systemApp" class="badge badge-outline badge-sm">built-in</span>
-        <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">default {{ role }}</span>
-        <span v-if="data.app.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
-        <button v-if="data.userGuide" type="button" class="btn btn-ghost btn-sm ml-auto" @click="guideDialog = true">
-          <span class="material-symbols-outlined" aria-hidden="true">menu_book</span> User guide
-        </button>
-      </div>
 
+      <!-- TODO: make this a modal that opens when trying to close the application view -->
       <div v-if="discardPrompt" class="alert alert-warning py-2" role="alert">
         <span class="text-sm">You have unsaved changes.</span>
         <div class="flex gap-1">
@@ -513,28 +520,32 @@ function documentationLines(text) {
         <template v-if="runs.length">
           <span class="badge badge-success">Running</span>
           <template v-for="runItem in runs" :key="runItem.runId">
-            <button v-if="data.app.canStop" type="button" class="btn btn-sm btn-outline"
+            <button v-if="data.app.canStop" type="button" class="btn btn-xs btn-outline"
               :class="data.selectedDefault ? '' : 'btn-error'" :disabled="!!busy || !connected"
               @click="stop(runItem)">{{ data.selectedDefault ? 'Restart' : 'Stop' }}<span v-if="runs.length > 1"> {{ shortId(runItem.runId) }}</span></button>
           </template>
           <span v-if="!data.app.canStop" class="text-sm text-base-content/60">Managed by the speaker</span>
           <button v-if="data.selectedDefault" type="button" class="btn btn-ghost btn-square btn-sm"
             aria-label="Why default apps cannot be stopped" @click="defaultInfo = true">
-            <span class="material-symbols-outlined" aria-hidden="true">info</span>
+            <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">info</span>
           </button>
         </template>
         <template v-else>
           <button type="button" class="btn btn-primary btn-sm" :disabled="!!busy || !connected"
             @click="(data.app.launchArguments || []).some(arg => arg.required) ? launchDialog = true : launch(false)">
             <span v-if="busy === 'launch'" class="loading loading-spinner loading-xs"></span>
-            {{ (data.app.launchArguments || []).some(arg => arg.required) ? 'Launch…' : 'Launch' }}
+            {{(data.app.launchArguments || []).some(arg => arg.required) ? 'Launch…' : 'Launch'}}
           </button>
           <button v-if="(data.app.launchArguments || []).length && !(data.app.launchArguments || []).some(arg => arg.required)"
             type="button" class="btn btn-primary btn-square btn-sm" aria-label="Launch with arguments"
             :disabled="!!busy || !connected" @click="launchDialog = true">
-            <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+            <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">more_vert</span>
           </button>
         </template>
+
+        <button v-if="data.userGuide" type="button" class="btn btn-ghost btn-sm ml-auto" @click="guideDialog = true">
+          <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 20px">menu_book</span> User guide
+        </button>
       </div>
       <div>
         <label class="flex items-center gap-2 text-sm">
@@ -544,6 +555,7 @@ function documentationLines(text) {
             @change="changeBoot" />
           Start at boot
         </label>
+        <!-- FIXME: does not work. Returns "doctype is not valid JSON" -->
         <p v-if="bootError" class="mt-1 text-xs text-error">{{ bootError }} <button type="button" class="link" @click="loadBoot">Retry</button></p>
         <p v-else-if="data.selectedDefault" class="mt-1 text-xs text-base-content/60">Selected default apps start automatically.</p>
         <p v-else-if="boot && !boot.editable" class="mt-1 text-xs text-base-content/60">Managed by the speaker.</p>
@@ -646,7 +658,6 @@ function documentationLines(text) {
         </form>
       </section>
 
-
       <section class="border-t border-base-300 pt-4">
         <h3 class="text-sm font-semibold">Application details</h3>
         <div class="pt-3">
@@ -692,7 +703,7 @@ function documentationLines(text) {
         </div>
       </section>
 
-      <section v-if="interfaces.length">
+      <section v-if="interfaces.length" class="border-t border-base-300 pt-4">
         <h4 class="text-sm font-semibold">Interfaces</h4>
         <div class="mt-2 flex flex-col gap-3">
           <div v-for="iface in interfaces" :key="iface.grpcService">
@@ -711,7 +722,7 @@ function documentationLines(text) {
         </div>
       </section>
 
-      <section v-if="provenance && (provenance.status || provenance.detail || provenance.subjectSha256Hex || provenance.verifiedRepository)">
+      <section v-if="provenance && (provenance.status || provenance.detail || provenance.subjectSha256Hex || provenance.verifiedRepository)" class="border-t border-base-300 pt-4">
         <h4 class="text-sm font-semibold">Build verification</h4>
         <div class="pt-2">
           <div class="flex flex-wrap items-center gap-2">

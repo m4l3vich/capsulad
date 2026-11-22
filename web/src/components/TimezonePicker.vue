@@ -148,6 +148,7 @@ function beforeClose() {
 
 function choose(zone) {
   draft.value = zone
+  document.activeElement.blur()
 }
 
 /**
@@ -213,11 +214,11 @@ onUnmounted(() => {
       </div>
       <button
         type="button"
-        class="btn btn-sm btn-ghost btn-square -mr-1 -mt-1"
+        class="btn btn-sm btn-outline -mr-1 -mt-1"
         aria-label="Edit time zone"
         @click="startEditing"
       >
-        <Icon size="18px">edit</Icon>
+        Change
       </button>
     </div>
 
@@ -240,18 +241,43 @@ onUnmounted(() => {
       @close="closeDialog"
     >
       <div class="space-y-3">
-        <label class="input input-bordered flex items-center gap-2">
-          <Icon size="18px" class="text-base-content/60">search</Icon>
-          <input
-            v-model="query"
-            type="search"
-            class="grow"
-            placeholder="Search a city or time zone"
-            aria-label="Search a city or time zone"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
+        <div class="dropdown w-full">
+          <label class="input input-bordered flex items-center gap-2">
+            <Icon size="18px" class="text-base-content/60">search</Icon>
+            <input
+              v-model="query"
+              type="search"
+              class="grow"
+              placeholder="Search a city or time zone"
+              aria-label="Search a city or time zone"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+
+          <ul v-if="visibleEntries.length" class="dropdown-content menu bg-base-100 rounded-box z-1 p-2 shadow-sm w-full max-h-56 overflow-y-auto flex-nowrap">
+            <li v-for="entry in visibleEntries" :key="entry.zone" class="border-b border-base-300 last:border-b-0 w-full">
+              <button
+                type="button"
+                class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200"
+                :class="draft === entry.zone ? 'bg-base-300' : ''"
+                :aria-pressed="draft === entry.zone ? 'true' : 'false'"
+                @click="choose(entry.zone)"
+              >
+                <span class="min-w-0">
+                  <span class="block truncate font-mono text-sm">{{ entry.zone }}</span>
+                  <span class="block truncate text-xs text-base-content/60">
+                    {{ entry.city }}<template v-if="entry.country"> · {{ entry.country }}</template>
+                  </span>
+                </span>
+                <span class="shrink-0 text-right text-xs text-base-content/60">
+                  <span class="block font-mono">{{ offsetIn(entry.zone) }}</span>
+                  <span class="block">{{ clockIn(entry.zone) }}</span>
+                </span>
+              </button>
+            </li>
+          </ul>
+        </div>
 
         <div class="overflow-hidden rounded-box border border-base-300">
           <div class="bg-base-100">
@@ -297,67 +323,24 @@ onUnmounted(() => {
               </g>
             </svg>
           </div>
-          <p class="flex min-h-[1.75rem] flex-wrap items-center gap-x-1 border-t border-base-300 px-2 py-1 text-xs text-base-content/70">
-            <template v-if="draft">
-              <span class="font-mono text-base-content">{{ draft }}</span>
-              <span aria-hidden="true">·</span>
-              <span>{{ offsetIn(draft) }}</span>
-              <span aria-hidden="true">·</span>
-              <span>{{ clockIn(draft) }}</span>
-            </template>
-            <span v-else>Click the map near your location, or search for a city.</span>
-          </p>
           <p class="border-t border-base-300 px-2 py-1 text-[11px] leading-snug text-base-content/50">
             Time zone boundaries © timezone-boundary-builder contributors (ODbL 1.0) · Base map Natural Earth (public domain)
           </p>
         </div>
-
-        <div class="overflow-hidden rounded-box border border-base-300">
-          <p class="flex items-center justify-between gap-2 border-b border-base-300 bg-base-200/60 px-3 py-1.5 text-xs font-medium text-base-content/60">
-            <span>{{ needle ? 'Matches' : 'Cities' }}</span>
-            <span>Showing {{ visibleEntries.length }} of {{ resultTotal }}</span>
-          </p>
-          <ul v-if="visibleEntries.length" class="max-h-56 overflow-y-auto">
-            <li v-for="entry in visibleEntries" :key="entry.zone" class="border-b border-base-300 last:border-b-0">
-              <button
-                type="button"
-                class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200"
-                :class="draft === entry.zone ? 'bg-base-300' : ''"
-                :aria-pressed="draft === entry.zone ? 'true' : 'false'"
-                @click="choose(entry.zone)"
-              >
-                <span class="min-w-0">
-                  <span class="block truncate font-mono text-sm">{{ entry.zone }}</span>
-                  <span class="block truncate text-xs text-base-content/60">
-                    {{ entry.city }}<template v-if="entry.country"> · {{ entry.country }}</template>
-                  </span>
-                </span>
-                <span class="shrink-0 text-right text-xs text-base-content/60">
-                  <span class="block font-mono">{{ offsetIn(entry.zone) }}</span>
-                  <span class="block">{{ clockIn(entry.zone) }}</span>
-                </span>
-              </button>
-            </li>
-          </ul>
-          <p v-else class="px-3 py-4 text-sm text-base-content/60">
-            No time zones match “{{ query }}”. Try a city like Berlin or a region like Asia.
-          </p>
-        </div>
-
-        <div class="rounded-box bg-base-200/60 px-3 py-2">
-          <template v-if="draftEntry">
-            <p class="break-all font-mono text-sm font-medium">{{ draftEntry.zone }}</p>
-            <p class="text-xs text-base-content/60">
-              {{ draftEntry.city }}<template v-if="draftEntry.country"> · {{ draftEntry.country }}</template>
-              <span class="mx-1" aria-hidden="true">·</span>{{ offsetIn(draft) }}
-              <span class="mx-1" aria-hidden="true">·</span>{{ dayClockIn(draft) }}
-            </p>
-          </template>
-          <p v-else class="text-sm text-base-content/60">Choose a time zone to preview it.</p>
-        </div>
       </div>
 
       <template #footer>
+        <p class="flex min-h-[1.75rem] flex-wrap flex-grow items-center gap-x-1 text-sm text-base-content/70">
+          <template v-if="draft">
+            <span class="font-mono text-base-content">{{ draft }}</span>
+            <span aria-hidden="true">·</span>
+            <span>{{ offsetIn(draft) }}</span>
+            <span aria-hidden="true">·</span>
+            <span>{{ clockIn(draft) }}</span>
+          </template>
+          <span v-else>Click the map near your location, or search for a city.</span>
+        </p>
+
         <button type="button" class="btn btn-ghost" :disabled="saving" @click="closeDialog">Cancel</button>
         <button
           type="button"

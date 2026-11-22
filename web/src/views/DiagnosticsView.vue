@@ -431,18 +431,10 @@ onUnmounted(() => {
   <div class="mx-auto w-full max-w-6xl space-y-6">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <p class="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">System</p>
         <h1 class="text-2xl font-semibold tracking-tight">Diagnostics</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          Check how the speaker is doing, which apps are running, and what it has been doing recently.
+          System info, stats, running apps and live logs.
         </p>
-      </div>
-      <div class="flex items-center gap-2">
-        <span class="badge badge-sm" :class="live ? 'badge-success' : 'badge-warning'">{{ live ? 'live' : 'not connected' }}</span>
-        <button type="button" class="btn btn-sm btn-ghost" :disabled="loading" @click="refresh">
-          <span v-if="loading" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-          Refresh
-        </button>
       </div>
     </header>
 
@@ -478,156 +470,115 @@ onUnmounted(() => {
               <dd class="mt-0.5">{{ shown(device?.model) }}</dd>
             </div>
             <div>
-              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Software version</dt>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">capsulad version</dt>
               <dd class="mt-0.5">{{ shown(device?.daemonVersion) }}</dd>
             </div>
             <div>
               <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Platform</dt>
               <dd class="mt-0.5">{{ plainPlatform(device?.targetPlatform) }}</dd>
             </div>
-          </dl>
-
-          <details class="rounded border border-base-300 p-3">
-            <summary class="cursor-pointer text-sm font-medium">Technical details</summary>
-
-            <dl class="mt-3 grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">SoC</dt>
-                <dd class="mt-0.5">{{ shown(device?.soc) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Board revision</dt>
-                <dd class="mt-0.5">{{ shown(device?.boardRevision) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Kernel</dt>
-                <dd class="mt-0.5 break-words font-mono text-xs">{{ shown(device?.kernel) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Firmware</dt>
-                <dd class="mt-0.5">{{ shown(device?.firmware) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Platform ID</dt>
-                <dd class="mt-0.5 font-mono text-xs">{{ shown(device?.targetPlatform) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Device ID</dt>
-                <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.deviceId) }}</dd>
-              </div>
-              <div>
-                <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Boot ID</dt>
-                <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.bootId) }}</dd>
-              </div>
-            </dl>
-
-            <h3 class="mt-4 text-xs font-semibold uppercase tracking-wide text-base-content/60">Hardware drivers</h3>
-            <div v-if="backends.length" class="mt-2 overflow-x-auto">
-              <table class="table table-sm">
-                <thead>
-                  <tr class="text-xs uppercase tracking-wide text-base-content/60">
-                    <th scope="col">Subsystem</th>
-                    <th scope="col">Driver</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="backend in backends" :key="backend.subsystem">
-                    <td class="whitespace-nowrap text-sm">{{ shown(backend.subsystem) }}</td>
-                    <td class="font-mono text-xs">{{ shown(backend.backendId) }}</td>
-                    <td>
-                      <span class="badge badge-sm" :class="backendBadge(backend.status)">{{ status(backend.status) || 'unknown' }}</span>
-                    </td>
-                    <td class="text-xs text-base-content/70">{{ shown(backend.detail) }}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Chip</dt>
+              <dd class="mt-0.5">{{ shown(device?.soc) }}</dd>
             </div>
-            <p v-else class="mt-2 text-sm text-base-content/70">No driver status reported.</p>
-          </details>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Board revision</dt>
+              <dd class="mt-0.5">{{ shown(device?.boardRevision) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Kernel</dt>
+              <dd class="mt-0.5 break-words font-mono text-xs">{{ shown(device?.kernel) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Firmware</dt>
+              <dd class="mt-0.5">{{ shown(device?.firmware) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Platform ID</dt>
+              <dd class="mt-0.5 font-mono text-xs">{{ shown(device?.targetPlatform) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Device ID</dt>
+              <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.deviceId) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Boot ID</dt>
+              <dd class="mt-0.5 break-all font-mono text-xs">{{ shown(device?.bootId) }}</dd>
+            </div>
+          </dl>
         </div>
       </section>
 
       <!-- metrics -->
-      <section class="card border border-base-300 bg-base-100">
-        <div class="card-body gap-4 p-5">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <h2 class="card-title text-base">Health at a glance</h2>
-            <span v-if="metricsAvailable && uptimeAvailable" class="text-xs text-base-content/60">
-              On for {{ formatUptime(metrics.uptimeSeconds) }}
-            </span>
-          </div>
-
-          <template v-if="metricsAvailable">
-            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div class="rounded-lg border border-base-300 p-4">
-                <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Processor</h3>
-                <p class="mt-2 text-2xl font-semibold tabular-nums">
-                  {{ metrics?.cpuAvailable && cpuPercent !== null ? formatPercent(cpuPercent) : 'Unavailable' }}
-                </p>
-                <progress
-                  v-if="metrics?.cpuAvailable && cpuPercent !== null"
-                  class="progress progress-primary mt-3 h-1.5"
-                  :value="cpuPercent"
-                  max="100"
-                ></progress>
-                <p class="mt-2 text-xs text-base-content/60">{{ cpuCaption }}</p>
-              </div>
-
-              <div class="rounded-lg border border-base-300 p-4">
-                <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Memory</h3>
-                <p class="mt-2 text-2xl font-semibold tabular-nums">
-                  {{ memoryAvailable ? formatBytes(memoryUsed) : 'Unavailable' }}
-                </p>
-                <progress
-                  v-if="memoryAvailable"
-                  class="progress progress-primary mt-3 h-1.5"
-                  :value="memoryPercent"
-                  max="100"
-                ></progress>
-                <p class="mt-2 text-xs text-base-content/60">
-                  {{ memoryAvailable ? `used of ${formatBytes(memoryTotal)} (${formatPercent(memoryPercent)})` : 'Not reported on this platform' }}
-                </p>
-              </div>
-
-              <div class="rounded-lg border border-base-300 p-4">
-                <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Storage</h3>
-                <p class="mt-2 text-2xl font-semibold tabular-nums">
-                  {{ diskAvailable ? formatBytes(diskFree) : 'Unavailable' }}
-                </p>
-                <progress
-                  v-if="diskAvailable"
-                  class="progress progress-primary mt-3 h-1.5"
-                  :value="diskUsedPercent"
-                  max="100"
-                ></progress>
-                <p class="mt-2 text-xs text-base-content/60">
-                  {{ diskAvailable ? `free of ${formatBytes(diskTotal)} (${formatPercent(diskUsedPercent)} used)` : 'Not reported on this platform' }}
-                </p>
-              </div>
-
-              <div class="rounded-lg border border-base-300 p-4">
-                <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Temperature</h3>
-                <p class="mt-2 text-2xl font-semibold tabular-nums">
-                  {{ temperatureAvailable && temperature !== null ? `${temperature.toFixed(1)} °C` : 'Unavailable' }}
-                </p>
-                <p class="mt-3 text-xs text-base-content/60">
-                  {{ temperatureAvailable && temperature !== null ? 'Device temperature' : 'Not reported on this platform' }}
-                </p>
-              </div>
+      <section>
+        <template v-if="metricsAvailable">
+          <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-lg border border-base-300 bg-base-100 p-4">
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Processor</h3>
+              <p class="mt-2 text-2xl font-semibold tabular-nums">
+                {{ metrics?.cpuAvailable && cpuPercent !== null ? formatPercent(cpuPercent) : 'Unavailable' }}
+              </p>
+              <progress
+                v-if="metrics?.cpuAvailable && cpuPercent !== null"
+                class="progress progress-primary mt-3 h-1.5"
+                :value="cpuPercent"
+                max="100"
+              ></progress>
+              <p class="mt-2 text-xs text-base-content/60">{{ cpuCaption }}</p>
             </div>
-            <p v-if="metrics?.detail" class="text-xs text-base-content/60">{{ metrics.detail }}</p>
-            <p class="text-xs text-base-content/60">
-              Readings update automatically while this page is open.
-            </p>
-          </template>
-          <div v-else class="rounded-lg border border-base-300 p-4 text-sm">
-            <p class="font-medium">Health readings unavailable</p>
-            <p class="mt-1 text-base-content/70">
-              {{ metrics?.detail || 'This device does not report processor, memory, storage or temperature readings.' }}
-            </p>
+
+            <div class="rounded-lg border border-base-300 bg-base-100 p-4">
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Memory</h3>
+              <p class="mt-2 text-2xl font-semibold tabular-nums">
+                {{ memoryAvailable ? formatBytes(memoryUsed) : 'Unavailable' }}
+              </p>
+              <progress
+                v-if="memoryAvailable"
+                class="progress progress-primary mt-3 h-1.5"
+                :value="memoryPercent"
+                max="100"
+              ></progress>
+              <p class="mt-2 text-xs text-base-content/60">
+                {{ memoryAvailable ? `used of ${formatBytes(memoryTotal)} (${formatPercent(memoryPercent)})` : 'Not reported on this platform' }}
+              </p>
+            </div>
+
+            <div class="rounded-lg border border-base-300 bg-base-100 p-4">
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Storage</h3>
+              <p class="mt-2 text-2xl font-semibold tabular-nums">
+                {{ diskAvailable ? formatBytes(diskFree) : 'Unavailable' }}
+              </p>
+              <progress
+                v-if="diskAvailable"
+                class="progress progress-primary mt-3 h-1.5"
+                :value="diskUsedPercent"
+                max="100"
+              ></progress>
+              <p class="mt-2 text-xs text-base-content/60">
+                {{ diskAvailable ? `free of ${formatBytes(diskTotal)} (${formatPercent(diskUsedPercent)} used)` : 'Not reported on this platform' }}
+              </p>
+            </div>
+
+            <div class="rounded-lg border border-base-300 bg-base-100 p-4">
+              <h3 class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Temperature</h3>
+              <p class="mt-2 text-2xl font-semibold tabular-nums">
+                {{ temperatureAvailable && temperature !== null ? `${temperature.toFixed(1)} °C` : 'Unavailable' }}
+              </p>
+              <p class="mt-3 text-xs text-base-content/60">
+                {{ temperatureAvailable && temperature !== null ? 'Device temperature' : 'Not reported on this platform' }}
+              </p>
+            </div>
           </div>
+          <p v-if="uptimeAvailable" class="text-sm text-base-content/60 mt-4 mx-2">
+            <!-- TODO: clarify if this is capsulad uptime or speaker (hardware/Linux) uptime -->
+            capsulad is up for {{ formatUptime(metrics.uptimeSeconds) }}
+          </p>
+        </template>
+        <div v-else class="rounded-lg border bg-base-100 border-base-300 p-4 text-sm">
+          <p class="font-medium">Health readings unavailable</p>
+          <p class="mt-1 text-base-content/70">
+            {{ metrics?.detail || 'This device does not report processor, memory, storage or temperature readings.' }}
+          </p>
         </div>
       </section>
 
@@ -700,7 +651,7 @@ onUnmounted(() => {
         <div class="card-body gap-3 p-5">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-2">
-              <h2 class="card-title text-base">Recent activity</h2>
+              <h2 class="card-title text-base">Logs</h2>
               <span class="badge badge-sm" :class="paused ? 'badge-warning' : live ? 'badge-success' : 'badge-neutral'">
                 {{ paused ? 'Paused' : live ? 'Running' : 'Offline' }}
               </span>

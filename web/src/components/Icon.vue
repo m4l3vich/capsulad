@@ -1,6 +1,6 @@
 <script setup>
 import 'material-symbols'
-defineProps({ size: Number })
+defineProps({ size: String })
 </script>
 
 <template>

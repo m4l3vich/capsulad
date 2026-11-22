@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, useTemplateRef } from 'vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import { notify } from '../lib/toast.js'
 import {
@@ -12,16 +12,56 @@ import {
   shortHash,
   uploadAsset
 } from '../lib/assets.js'
+import Icon from '../components/Icon.vue'
 
 // Assets manages the shared read-only store. Every app sandbox mounts the same
 // directory at /assets, so this page is the only writer; uploads reuse the
 // session cookie and CSRF token from the shell.
 
+const ROOT = '/assets/'
+const folder = ref(ROOT)
 const assets = ref([])
 const totalBytes = ref(0)
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
+
+const createFolderName = ref('')
+const createFolderBusy = ref(false)
+const createFolderModal = ref(false)
+
+const visibleAssets = computed(() => {
+  const result = []
+
+  for (let asset of assets.value) {
+    asset = { ...asset }
+    if (!asset.path.startsWith(folder.value)) continue
+
+    asset.path = asset.path.replace(folder.value, '')
+
+    if (asset.path.includes('/')) {
+      const subfolderName = asset.path.split('/')[0]
+      if (result.some(e => e.path === subfolderName && e.media_type === 'folder')) continue
+
+      result.push({
+        id: subfolderName,
+        path: subfolderName,
+        media_type: 'folder'
+      })
+      continue
+    }
+
+
+    result.push(asset)
+  }
+
+  return result.toSorted((a, b) => {
+    if (a.media_type === b.media_type === 'folder') return a.path.localeCompare(b.path)
+    if (a.media_type === 'folder') return -1
+    if (b.media_type === 'folder') return 1
+    return a.path.localeCompare(b.path)
+  })
+})
 
 async function load() {
   loading.value = true
@@ -49,89 +89,52 @@ async function load() {
 onMounted(load)
 
 // --- upload -----------------------------------------------------------------
-
-const pickedFile = ref(null)
-const target = ref('')
-const targetTouched = ref(false)
-const targetAttempted = ref(false)
 const dragging = ref(false)
 const uploading = ref(false)
 const progress = ref(0)
-const fileInput = ref(null)
+const pickedFile = ref(null)
+const fileInput = useTemplateRef('fileInput')
 
-const targetIssue = computed(() => {
-  if (!pickedFile.value && !targetTouched.value) return ''
-  return assetPathError(target.value)
-})
-const showTargetIssue = computed(() => Boolean(targetIssue.value) && (targetAttempted.value || targetTouched.value))
-const canUpload = computed(() => Boolean(pickedFile.value) && !assetPathError(target.value) && !uploading.value)
-
-const pickedLabel = computed(() => {
-  if (!pickedFile.value) return 'No file chosen'
-  return `${pickedFile.value.name} · ${formatBytes(pickedFile.value.size)}`
-})
-
-function chooseFile(file) {
+async function uploadFile(file) {
   if (!file) return
-  pickedFile.value = file
-  if (!targetTouched.value) target.value = defaultTarget(file.name)
   if (file.size > MAX_ASSET_BYTES) {
     notify.error(`“${file.name}” is ${formatBytes(file.size)}; the store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`)
   }
-}
 
-function onPick(event) {
-  chooseFile(event.target.files?.[0])
-  // Allow re-picking the same file after a failed upload.
-  if (event.target) event.target.value = ''
-}
-
-function onDrop(event) {
-  dragging.value = false
-  chooseFile(event.dataTransfer?.files?.[0])
-}
-
-function startDrag(event) {
-  event.preventDefault()
-  dragging.value = true
-}
-
-function onTargetInput() {
-  targetTouched.value = true
-}
-
-function resetDraft() {
-  pickedFile.value = null
-  target.value = ''
-  targetTouched.value = false
-  targetAttempted.value = false
-  progress.value = 0
-}
-
-async function submitUpload() {
-  targetAttempted.value = true
-  if (!canUpload.value) return
-  if (pickedFile.value.size > MAX_ASSET_BYTES) {
-    notify.error(`The store accepts at most ${formatBytes(MAX_ASSET_BYTES)} per file.`)
-    return
-  }
+  pickedFile.value = file
   uploading.value = true
   progress.value = 0
   try {
-    const entry = await uploadAsset(pickedFile.value, target.value.trim(), {
+    const entry = await uploadAsset(file, folder.value.substring(ROOT.length) + file.name, {
       onProgress(value) {
         progress.value = value
       }
     })
     progress.value = 1
     notify.success(`Saved /assets/${entry.id} (${formatBytes(entry.size_bytes)}).`)
-    resetDraft()
     await load()
   } catch (err) {
     notify.error(err.message)
   } finally {
+    pickedFile.value = null
     uploading.value = false
   }
+}
+
+function onPick(event) {
+  uploadFile(event.target.files?.[0])
+  // Allow re-picking the same file after a failed upload.
+  if (event.target) event.target.value = ''
+}
+
+function onDrop(event) {
+  dragging.value = false
+  uploadFile(event.dataTransfer?.files?.[0])
+}
+
+function startDrag(event) {
+  event.preventDefault()
+  dragging.value = true
 }
 
 // --- delete -----------------------------------------------------------------
@@ -167,101 +170,66 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
   <div class="space-y-4">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <p class="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">Media</p>
-        <h1 class="text-2xl font-semibold tracking-tight">Assets</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">Files</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-          Sounds, images and data that apps read from the shared store. Every app sandbox sees this
-          same directory read-only at <code class="font-mono text-xs">/assets</code>; only this page writes to it.
+          This is a shared store for files that apps can use. Apps can access it (read-only) at <code class="font-mono text-xs">/assets/</code>
+        </p>
+        <p class="mt-1 max-w-3xl text-sm text-base-content/70">
+          You can drop a file into the folder view below to upload it there.
         </p>
       </div>
-      <button type="button" class="btn btn-sm btn-ghost" :disabled="loading" @click="load">
-        <span v-if="loading" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-        Refresh
-      </button>
     </header>
 
-    <section class="card border border-base-300 bg-base-100">
-      <div class="card-body gap-4 p-5">
-        <div>
-          <h2 class="card-title text-base">Upload an asset</h2>
-          <p class="mt-1 text-sm text-base-content/70">
-            The selected file is sent as the raw request body, up to {{ formatBytes(MAX_ASSET_BYTES) }}.
-            Subdirectories in the destination path are created; an existing file is replaced atomically.
-          </p>
-        </div>
+    <input
+      ref="fileInput"
+      type="file"
+      class="hidden"
+      @change="onPick"
+    />
 
-        <div
-          class="rounded-xl border-2 border-dashed p-4 transition-colors"
-          :class="dragging ? 'border-primary bg-base-200' : 'border-base-300'"
-          @dragenter="startDrag"
-          @dragover="startDrag"
-          @dragleave.prevent="dragging = false"
-          @drop.prevent="onDrop"
-        >
-          <input
-            ref="fileInput"
-            type="file"
-            class="file-input file-input-bordered w-full"
-            aria-label="Choose a file to upload"
-            :disabled="uploading"
-            @change="onPick"
+    <section
+      class="card border border-base-300 bg-base-100 relative"
+      :class="dragging ? 'border-primary bg-base-200' : 'border-base-300'"
+      @dragenter="startDrag"
+      @dragover="startDrag"
+      @dragleave.prevent="dragging = false"
+      @drop.prevent="onDrop"
+    >
+      <div v-if="uploading" class="card-body absolute pointer-events-none bg-base-200/75 w-full h-full z-10 flex flex-col justify-center items-center">
+        <Icon size="48px" class="text-primary">cloud_upload</Icon>
+        <span class="text-primary font-bold">Uploading "{{ pickedFile.name }}" ({{ formatBytes(pickedFile.size) }})</span>
+        <div class="flex gap-4 items-center">
+          <progress
+            class="progress progress-primary w-[300px]"
+            :value="Math.round(progress * 100)"
+            max="100"
+            aria-label="Upload progress"
           />
-          <p class="mt-2 text-xs text-base-content/60">…or drop a file onto this area.</p>
-          <p class="mt-1 break-all text-xs text-base-content/70">{{ pickedLabel }}</p>
+          <span class="text-sm font-mono" v-text="(progress * 100).toFixed(2) + '%'"/>
         </div>
-
-        <label class="block">
-          <span class="mb-1 block text-sm font-medium">Destination path</span>
-          <input
-            v-model="target"
-            type="text"
-            class="input input-bordered w-full font-mono text-sm"
-            :class="{ 'input-error': showTargetIssue }"
-            placeholder="audio/replies/hello.wav"
-            autocomplete="off"
-            spellcheck="false"
-            :disabled="uploading"
-            :aria-invalid="showTargetIssue ? 'true' : undefined"
-            aria-describedby="asset-target-hint"
-            @input="onTargetInput"
-          />
-          <p id="asset-target-hint" class="mt-1 text-xs" :class="showTargetIssue ? 'text-error' : 'text-base-content/60'">
-            {{ showTargetIssue ? targetIssue : 'Relative to the store, using / separators. Defaults to the file name.' }}
-          </p>
-        </label>
-
-        <div class="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            class="btn btn-primary btn-sm"
-            :disabled="!canUpload"
-            :aria-busy="uploading ? 'true' : 'false'"
-            @click="submitUpload"
-          >
-            <span v-if="uploading" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-            {{ uploading ? 'Uploading…' : 'Upload' }}
-          </button>
-          <span v-if="uploading" class="text-xs text-base-content/70" role="status">Sending the file to the speaker…</span>
-          <button v-else-if="pickedFile" type="button" class="btn btn-ghost btn-sm" @click="resetDraft">Clear</button>
-        </div>
-
-        <progress
-          v-if="uploading"
-          class="progress progress-primary w-full"
-          :value="Math.round(progress * 100)"
-          max="100"
-          aria-label="Upload progress"
-        ></progress>
       </div>
-    </section>
 
-    <section class="card border border-base-300 bg-base-100">
+      <div v-if="dragging" class="card-body absolute pointer-events-none bg-base-200/75 w-full h-full z-10 flex flex-col justify-center items-center">
+        <Icon size="48px" class="text-primary">cloud_upload</Icon>
+        <span class="text-primary font-bold">Drop to upload this file into {{ folder }}</span>
+      </div>
+
       <div class="card-body gap-3 p-5">
-        <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 class="card-title text-base">Stored assets</h2>
-          <p class="text-xs text-base-content/60">
-            {{ assets.length }} {{ assets.length === 1 ? 'file' : 'files' }} · {{ formatBytes(totalBytes) }}
-          </p>
+        <div class="flex flex-wrap items-baseline gap-4">
+          <h2 class="card-title text-base flex-grow" v-text="folder"/>
+          <span class="text-xs text-base-content/60">
+            <!-- TODO: display free bytes on disk -->
+            {{ formatBytes(totalBytes) }} used · {{ 'TODO' }} free
+          </span>
+
+          <!-- TODO: ability to create folder -->
+          <button class="btn btn-sm btn-primary btn-outline" @click="createFolderModal = true">
+            Create a folder
+          </button>
+
+          <button class="btn btn-sm btn-primary" @click="() => fileInput.click()">
+            Upload
+          </button>
         </div>
 
         <div v-if="loadError" role="alert" class="alert alert-error py-2 text-sm">
@@ -298,20 +266,65 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
               </tr>
             </thead>
             <tbody>
-              <tr v-for="entry in assets" :key="entry.id">
+              <tr v-if="folder !== ROOT">
                 <td class="max-w-[22rem]">
-                  <span class="block break-all font-mono text-xs">{{ entry.path }}</span>
+                  <a
+                    class="block link link-primary break-all font-mono text-xs"
+                    @click="() => folder = folder.replace(/[^\/]+\/$/, '')"
+                  >..</a>
+                </td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+              </tr>
+              <tr v-for="entry in visibleAssets" :key="entry.id">
+                <td class="max-w-[22rem]">
+                  <a
+                    v-if="entry.media_type === 'folder'"
+                    class="block link link-primary break-all font-mono text-xs"
+                    @click="() => folder += entry.path + '/'"
+                  >{{ entry.path }}</a>
+                  <span class="block break-all font-mono text-xs" v-else>{{ entry.path }}</span>
                 </td>
                 <td class="whitespace-nowrap text-xs">{{ entry.media_type }}</td>
-                <td class="whitespace-nowrap text-right text-xs">{{ formatBytes(entry.size_bytes) }}</td>
+                <td class="whitespace-nowrap text-right text-xs">
+                  <template v-if="entry.size_bytes">{{ formatBytes(entry.size_bytes) }}</template>
+                  <template v-else>—</template>
+                </td>
                 <td class="whitespace-nowrap font-mono text-xs" :title="entry.sha256">{{ shortHash(entry.sha256) }}</td>
-                <td class="text-right">
-                  <button
-                    type="button"
-                    class="btn btn-error btn-xs btn-outline"
-                    :aria-label="`Delete ${entry.path}`"
-                    @click="askDelete(entry)"
-                  >Delete</button>
+                <td>
+                  <div class="flex justify-end items-center gap-2">
+                    <!-- TODO: tooltips for the icon buttons. actual daisyUI tooltips, not just title attribute -->
+                    <!-- TODO: actually copy the path -->
+                    <button
+                      v-if="entry.media_type !== 'folder'"
+                      type="button"
+                      class="btn btn-xs btn-ghost btn-square"
+                      aria-label="Copy file path"
+                    >
+                      <Icon size="16px" class="text-primary">file_copy</Icon>
+                    </button>
+                    <!-- TODO: ability to download a file -->
+                    <button
+                      v-if="entry.media_type !== 'folder'"
+                      type="button"
+                      class="btn btn-primary btn-xs btn-ghost btn-ghost"
+                      :aria-label="`Download ${entry.path}`"
+                    >
+                      <Icon size="20px" class="text-primary">download</Icon>
+                    </button>
+                    <button
+                      v-if="entry.media_type !== 'folder'"
+                      type="button"
+                      class="btn btn-error btn-xs btn-outline"
+                      :aria-label="`Delete ${entry.path}`"
+                      @click="askDelete(entry)"
+                    >
+                      <Icon size="16px">delete</Icon>
+                      Delete
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -320,10 +333,38 @@ const empty = computed(() => loaded.value && !loading.value && assets.value.leng
       </div>
     </section>
 
-    <ModalDialog v-if="deleteTarget" title="Delete asset" @close="deleteTarget = null">
+    <ModalDialog v-if="createFolderModal" title="Create a new folder" @close="createFolderModal = false" max-width="max-h-sm">
+      <div class="text-sm">
+        Enter a name for the folder that will be created in <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">{{ folder }}</code>:
+      </div>
+      <label class="input input-sm input-bordered flex w-full items-center gap-2 w-full mt-2">
+        <Icon size="16px" class="text-primary">folder_open</Icon>
+        <input
+          v-model="createFolderName"
+          type="search"
+          class="grow text-sm"
+          placeholder="New Folder (1)"
+          autocomplete="off"
+        />
+      </label>
+      <template #footer>
+        <button type="button" class="btn btn-ghost" :disabled="createFolderBusy" @click="createFolderModal = false">Cancel</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          :disabled="createFolderBusy"
+          :aria-busy="createFolderBusy ? 'true' : 'false'"
+          @click="confirmDelete"
+        >
+          <span v-if="createFolderBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+          Create
+        </button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog v-if="deleteTarget" title="Delete asset" @close="deleteTarget = null" max-width="max-h-sm">
       <p class="text-sm">
-        Delete <code class="break-all font-mono text-xs">{{ deleteTarget.path }}</code> from the shared store?
-        Apps that read it will fail until another file takes its place. This cannot be undone.
+        Delete <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-primary">/assets/{{ deleteTarget.id }}</code> from the shared store? This cannot be undone.
       </p>
       <template #footer>
         <button type="button" class="btn btn-ghost" :disabled="deleteBusy" @click="deleteTarget = null">Cancel</button>

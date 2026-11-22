@@ -206,21 +206,11 @@ onUnmounted(() => {
   <div class="mx-auto w-full max-w-6xl space-y-6">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <p class="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">Security</p>
         <h1 class="text-2xl font-semibold tracking-tight">Access</h1>
         <p class="mt-1 max-w-3xl text-sm text-base-content/70">
           Manage the administrator password and the keys that scripts use to read device status.
         </p>
       </div>
-      <button
-        type="button"
-        class="btn btn-sm btn-ghost"
-        :disabled="loading"
-        @click="refresh"
-      >
-        <span v-if="loading" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
-        Refresh
-      </button>
     </header>
 
     <div v-if="!data && loadError" role="alert" class="alert alert-error">
@@ -315,11 +305,14 @@ onUnmounted(() => {
                   <span v-if="passwordBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
                   Change password
                 </button>
-                <span class="text-xs text-base-content/60">Forgot it? Recovery is only possible on the speaker itself.</span>
               </div>
               <details class="text-xs text-base-content/60">
-                <summary class="cursor-pointer">Local recovery command</summary>
-                <code class="mt-1 block break-all font-mono">capsulad-cli auth set-password</code>
+                <summary class="cursor-pointer">Password recovery</summary>
+                <div>
+                  Run
+                  <code class="mt-1 inline-block break-all font-mono border rounded px-1 bg-base-200 select-all">capsulad-cli auth set-password</code>
+                  in speaker's shell
+                </div>
               </details>
             </form>
           </div>
@@ -349,7 +342,7 @@ onUnmounted(() => {
               </div>
 
               <details class="rounded border border-base-300 p-3">
-                <summary class="cursor-pointer text-sm font-medium">Technical certificate details</summary>
+                <summary class="cursor-pointer text-sm font-medium">Certificate details</summary>
                 <dl class="mt-3 space-y-3 text-sm">
                   <div>
                     <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/60">SHA-256 fingerprint</dt>
@@ -370,36 +363,6 @@ onUnmounted(() => {
               </details>
             </div>
           </section>
-
-          <section class="card border border-base-300 bg-base-100">
-            <div class="card-body gap-3 p-5">
-              <h2 class="card-title text-base">Status</h2>
-              <ul class="space-y-2 text-sm">
-                <li class="flex items-center justify-between gap-3">
-                  <span class="text-base-content/70">Secure connection</span>
-                  <span class="badge badge-sm" :class="status?.httpsEnabled ? 'badge-success' : 'badge-neutral'">
-                    {{ status?.httpsEnabled ? 'on' : 'off' }}
-                  </span>
-                </li>
-                <li class="flex items-center justify-between gap-3">
-                  <span class="text-base-content/70">Admin password</span>
-                  <span class="badge badge-sm" :class="status?.adminPasswordSet ? 'badge-success' : 'badge-warning'">
-                    {{ status?.adminPasswordSet ? 'set' : 'not set' }}
-                  </span>
-                </li>
-                <li class="flex items-center justify-between gap-3">
-                  <span class="text-base-content/70">Initial setup</span>
-                  <span class="badge badge-sm" :class="status?.bootstrapComplete ? 'badge-success' : 'badge-warning'">
-                    {{ status?.bootstrapComplete ? 'complete' : 'needs attention' }}
-                  </span>
-                </li>
-                <li class="flex items-center justify-between gap-3">
-                  <span class="text-base-content/70">Automation keys</span>
-                  <span class="font-mono text-sm">{{ activeKeyCount }} active</span>
-                </li>
-              </ul>
-            </div>
-          </section>
         </div>
       </div>
 
@@ -408,13 +371,12 @@ onUnmounted(() => {
         <div class="card-body gap-4 p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 class="card-title text-base">Automation keys</h2>
+              <h2 class="card-title text-base">Static API keys</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/70">
-                For scripts and monitoring tools. These keys can only read basic device status — they cannot sign
-                in here, change settings, or control the speaker. Name a key after the place that will use it.
+                <!-- TODO: link to github -->
+                You can read the API docs <a class="link link-primary">here</a>
               </p>
             </div>
-            <span class="badge badge-outline">{{ activeKeyCount }} active</span>
           </div>
 
           <form class="flex flex-col gap-2 sm:flex-row sm:items-start" novalidate @submit.prevent="createKey">
@@ -501,8 +463,9 @@ onUnmounted(() => {
             No automation keys yet. Create one only if a script needs to read status.
           </p>
 
+          <!-- TODO: actually remove keys from the list 7d after revocation -->
           <p class="text-xs text-base-content/60">
-            Revoking a key cannot be undone. The entry stays in this list so you can see it was revoked.
+            Revoking a key cannot be undone. The entry stays in this list for 7 days so you can see it was revoked.
           </p>
         </div>
       </section>

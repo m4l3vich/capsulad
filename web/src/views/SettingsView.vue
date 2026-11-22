@@ -710,7 +710,7 @@ function jumpTo(id) {
                 </div>
                 <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                   <input
-                    v-model.number="ui[kind].brightness"
+                    :value="ui[kind].mode === 'auto' ? 0 : ui[kind].brightness"
                     type="range"
                     min="0"
                     max="100"
@@ -737,9 +737,6 @@ function jumpTo(id) {
                 </div>
                 <p v-if="!ambient" class="text-xs text-warning">
                   No room-light sensor: your brightness is used.
-                </p>
-                <p v-else-if="ui[kind].mode === 'auto'" class="text-xs text-base-content/60">
-                  The slider is off while automatic adjustment is on.
                 </p>
               </div>
             </template>
@@ -792,7 +789,10 @@ function jumpTo(id) {
               <Icon size="20px" class="text-base-content/60">bluetooth</Icon>
               <h2 class="text-lg font-semibold">Bluetooth</h2>
             </div>
-            <p v-if="btStatus?.name" class="truncate font-mono text-xs text-base-content/60">{{ btStatus.name }}</p>
+            <p v-if="btStatus.name" class="text-sm my-2">
+              Device name: <code class="rounded bg-base-200 px-1 py-0.5 font-mono">{{ btStatus.name }}</code>
+            </p>
+            <hr/>
           </div>
 
           <div class="flex flex-col gap-3">
@@ -826,19 +826,18 @@ function jumpTo(id) {
             </label>
           </div>
 
+          <hr/>
+
           <div class="flex flex-col gap-2">
             <div class="flex items-center gap-2">
               <h3 class="flex-grow text-sm font-semibold">Paired devices</h3>
-              <button type="button" class="btn btn-ghost btn-xs" :disabled="!overviewData" @click="reloadOverview">
-                Refresh
-              </button>
             </div>
             <p v-if="!overviewData && overviewError" class="text-xs text-base-content/60" role="status">
               Paired devices are unavailable.
             </p>
             <p v-else-if="!overviewData" class="text-xs text-base-content/60">Loading paired devices…</p>
             <p v-else-if="!pairedDevices.length" class="text-xs text-base-content/60">No paired devices.</p>
-            <ul v-else class="divide-y divide-base-300">
+            <ul v-else class="divide-y divide-base-300 mt-2">
               <li
                 v-for="device in pairedDevices"
                 :key="device.deviceId"
@@ -881,7 +880,7 @@ function jumpTo(id) {
             <TimezonePicker class="w-full" />
 
             <div class="flex flex-col gap-2 rounded-box bg-base-200/60 p-3 sm:p-4">
-              <h3 class="text-base font-semibold">Speaker name</h3>
+              <h3 class="text-base font-semibold">Speaker name (mDNS)</h3>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <input
                   v-model="drafts.hostname"

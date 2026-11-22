@@ -70,7 +70,7 @@ async function submit() {
 
         <p class="text-xs leading-relaxed text-base-content/60">
           The certificate is self-signed; compare its fingerprint with
-          <code class="rounded bg-base-200 px-1 py-0.5 font-mono">capsulad-cli cert status</code>.
+          <code class="rounded bg-base-200 px-1 py-0.5 font-mono select-all">capsulad-cli cert status</code>.
         </p>
       </div>
     </main>

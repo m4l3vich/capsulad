@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+input[type="range"][disabled]::-webkit-slider-thumb {
+  display: none;
+}
+
 @layer base {
   :root {
     color-scheme: light;

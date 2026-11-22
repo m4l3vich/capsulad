@@ -36,7 +36,9 @@ function close() {
       :class="maxWidth"
     >
       <div class="flex shrink-0 items-start justify-between gap-3 border-b border-base-300 p-4 pb-3">
-        <h2 :id="titleId" class="text-lg font-semibold leading-tight">{{ title }}</h2>
+        <slot name="header" :title-id="titleId">
+          <h2 :id="titleId" class="text-lg font-semibold leading-tight">{{ title }}</h2>
+        </slot>
         <button type="button" class="btn btn-sm btn-ghost btn-square -mr-1 -mt-1" aria-label="Close dialog" @click="close">
           <svg aria-hidden="true" viewBox="0 0 20 20" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M5 5l10 10M15 5L5 15" stroke-linecap="round" />
