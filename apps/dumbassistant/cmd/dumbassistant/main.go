@@ -882,14 +882,24 @@ func (t *speechTracker) active() bool { return t.speaking }
 // from expiring: a rejected noise hypothesis must not extend a turn.
 func (t *speechTracker) confirmedSpeech() bool { return t.confirmed }
 
-// reset forgets the stream and any hypothesis but keeps the learned floor: a
-// capture gap is not evidence that the room changed, and relearning the floor
-// from the first 160 ms after a gap could absorb a voice already in progress.
-// Filters and the modulation window are cleared so no audio is spliced across
-// the gap.
+// reset forgets the stream and any hypothesis but keeps the learned floor and
+// an in-progress pre-roll calibration: a capture gap is not evidence that the
+// room changed, and relearning the floor from the first 160 ms after a gap
+// could absorb a voice already in progress. The filters are rebuilt at the
+// same rate (a zero rate would make the next chunk cold-start and discard the
+// pre-roll calibration) and the modulation window is cleared, so no audio is
+// spliced across the gap.
 func (t *speechTracker) reset() {
+	rate := t.rate
 	floor, armed, cold, coldOnset := t.floor, t.armed, t.cold, t.coldOnset
-	*t = speechTracker{floor: floor, armed: armed, cold: cold, coldOnset: coldOnset}
+	calValues, calCount, calNext := t.calValues, t.calCount, t.calNext
+	if rate > 0 {
+		t.configure(rate)
+	} else {
+		*t = speechTracker{}
+	}
+	t.floor, t.armed, t.cold, t.coldOnset = floor, armed, cold, coldOnset
+	t.calValues, t.calCount, t.calNext = calValues, calCount, calNext
 }
 
 // resetDetection ends the current hypothesis but keeps the learned floor and the
