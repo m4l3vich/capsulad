@@ -71,12 +71,19 @@ type RingCaps struct {
 }
 
 // SegmentFrame is a fully mapped hardware frame: one mask per digit cell,
-// a colon flag and the global brightness the framework has already resolved.
+// separate colon dots and the global brightness the framework has already
+// resolved. Colon lights both dots; ColonTop and ColonBottom light one dot
+// each, so a frame can exercise the two dots independently.
 type SegmentFrame struct {
-	Cells      []uint16 // bit i = segment i within that digit
-	Colon      bool
-	Brightness float64 // [0,1], applied after content selection
+	Cells       []uint16 // bit i = segment i within that digit
+	Colon       bool
+	ColonTop    bool
+	ColonBottom bool
+	Brightness  float64 // [0,1], applied after content selection
 }
+
+func (f SegmentFrame) TopColonOn() bool    { return f.Colon || f.ColonTop }
+func (f SegmentFrame) BottomColonOn() bool { return f.Colon || f.ColonBottom }
 
 type RingFrame struct {
 	Pixels     []RGB

@@ -5,16 +5,16 @@ daemon. It is not an application: it has no app id, no manifest, no package and 
 sandbox. It lives inside the daemon and is served by the same HTTPS listener as the Web
 UI, at `https://<host>:8443/mcp`.
 
-The MCP frontend exposes the **same operations as the Web UI** — the browser's own
-session-management routes (`login`, `logout`, `session`, `password`) are the deliberate
-exception, listed under [Deliberately not exposed](#deliberately-not-exposed). It does not
-create a second control plane and has no private endpoints: every tool either dispatches one
+The MCP frontend exposes **allowlisted operations from the Web UI**. The `operator` scope
+gets administrative tools, never browser-session management. The `assistant` scope gets
+only [speaker controls](#tools) and reduced snapshots; `status` gets two reads. MCP does
+not create a second control plane and has no private endpoints: every tool either dispatches one
 typed `capsulad.web.v1.Command` through the daemon's allowlisted operation layer, or
 performs one administrative file/read operation the browser performs over its own
 routes. The shared boundary is documented in the source as `opSink`
 (`internal/webui/ops.go`): the WebSocket frontend encodes the outcome as protobuf
 frames and the MCP frontend collects it into a tool-call reply, but both drive the same
-`dispatch`, the same snapshot builders and the same validation.
+`dispatch` and operation validation, with separate scope checks before dispatch.
 
 Related reading: [README.md](../README.md) for the architecture,
 [docs/DEVELOPMENT.md](DEVELOPMENT.md) for builds and fixtures,
@@ -29,17 +29,19 @@ when the Web UI listener exists, which requires initialized credentials:
 capsulad-cli -data-dir /var/lib/capsulad auth init -hostname capsula.local -ip 192.168.1.20
 ```
 
-API keys are scoped. **A key minted without an explicit scope is a status key and can
-never execute an administration tool.** Existing keys — those created before scopes
-existed and those created by the Access page in the browser — keep exactly their old
-grant (`status`) and are not promoted by reaching MCP.
+API keys are scoped. **A key minted without a scope argument records an explicit `status`
+grant.** This does not grant speaker controls or administration. A credential record
+without explicit scopes does not authenticate; an administrator must issue a new key.
 
 ```sh
 # Read-only key: status + certificate only (this is also the default).
 capsulad-cli auth key create probe --scope status
 
-# Operator key: the full MCP tool set, including mutations.
-capsulad-cli auth key create agent --scope operator
+# Assistant key: speaker controls without administration.
+capsulad-cli auth key create agent --scope assistant
+
+# Operator key: the full MCP tool set, including administration.
+capsulad-cli auth key create admin-automation --scope operator
 
 capsulad-cli auth key list      # shows each key's scopes and revocation state
 capsulad-cli auth key revoke agent
@@ -49,13 +51,12 @@ The plaintext key is printed once; only its SHA-256 hash is persisted. An operat
 client can also mint keys with the `create_api_key` tool:
 
 ```json
-{"name": "agent", "scopes": ["operator"]}
+{"name": "agent", "scopes": ["assistant"]}
 ```
 
 That is deliberate delegation, not a default: only an `operator` key may call
-`create_api_key`, and the operator scope has to be named explicitly. `auth init` and the
-browser Access page keep minting status-only keys, so administration is granted only by a
-call that asks for it.
+`create_api_key`, and the `assistant` and `operator` grants must be named explicitly.
+`auth init` and the browser Access page keep minting status-only keys.
 
 Key edits are picked up live: the daemon watches `credentials.json`, so a revocation or
 a new key applies without a restart. Revocation is effective for every frontend
@@ -65,8 +66,9 @@ Scopes:
 
 | Scope | Grants |
 |---|---|
-| `status` | `GET /api/status`, `GET /api/cert.pem`, and the MCP read tools `get_status` and `get_certificate`. The implicit and only scope of a legacy key. |
-| `operator` | Full daemon administration: every mutating tool plus the read tools a status key gets. Implies every other scope. |
+| `status` | `GET /api/status`, `GET /api/cert.pem`, and the MCP tools `get_status` and `get_certificate`. Default for new keys. |
+| `assistant` | Everything in `status`, plus a bounded set of MCP speaker controls and state reads. No administrative HTTP routes or browser-session privileges. |
+| `operator` | Every MCP tool and full MCP snapshots, plus the operator-only PA Speaker HTTP relay. An API key still cannot obtain a browser session or change the administrator password. |
 
 ## Protocol
 
@@ -98,7 +100,7 @@ JSON-RPC errors:
 | `-32602` | Invalid params, unknown tool, malformed tool arguments. |
 | `-32603` | Internal encoding/daemon failure. |
 | `-32001` | Missing, unknown or revoked API key (`401`, with `WWW-Authenticate`). |
-| `-32002` | The key is valid but lacks the scope the tool requires. |
+| `-32002` | The key is valid but does not permit the tool, requested field, or snapshot topic. |
 | `-32003` | A session-scoped resource is unavailable right now (a staged-upload slot, an ended session). |
 
 A **tool that ran and failed** is not a protocol error: it returns
@@ -133,8 +135,10 @@ A **tool that ran and failed** is not a protocol error: it returns
 
 ## Tools
 
-`tools/list` is scope-filtered: a `status` key sees the first two tools only, an
-`operator` key sees all of them.
+`tools/list` shows the exact variants usable with the caller's key. A `status` key sees
+only the first two tools; an `assistant` key sees those plus the bounded entries below;
+an `operator` key sees the full catalogue. Direct `tools/call` requests enforce the
+same scope, fields and topics independently of listing.
 
 Command tools accept exactly one `capsulad.web.v1` command payload as their argument
 object. **The input schema is generated from the protobuf descriptor**, so it cannot
@@ -146,21 +150,22 @@ the fields the daemon enforces (for example `expected_revision` on `update_setti
 `oneOf` of its members' `required` lists. A message with several oneofs therefore gets one
 constraint per group instead of a single flattened one, so "exactly one of" is
 machine-checkable rather than prose. The hand-written schemas (the reads and the staged
-uploads) are just as strict and also set `additionalProperties: false`.
+uploads) also set `additionalProperties: false`. Assistant command schemas project the
+same descriptors through a positive allowlist, including nested fields and oneof members.
 
 | Tool | Scope | Shared operation |
 |---|---|---|
 | `get_status` | status | `DeviceService.GetInfo`/`ListResources`, `ApplicationService.ListRuns`, `SystemService.GetStatus` (the `/api/status` read). |
 | `get_certificate` | status | `/api/cert.pem`. |
-| `get_state` | operator | one Web UI snapshot: `overview`, `settings`, `application` (+ `app_id`), `diagnostics`, `wakeword`, `access`, `wifi`. The `overview` topic is the Now Playing projection: only `PLAYBACK_PLAYING` players, with providers that have none omitted. |
+| `get_state` | assistant (limited), operator | A snapshot of `overview`, `settings` or `application` (+ `app_id`); operator also gets `diagnostics`, `wakeword`, `access`, `wifi` and unfiltered topic views. |
 | `list_assets` | operator | the shared asset catalog, optionally filtered by `prefix`. |
 | `list_api_keys` | operator | key names, prefixes, creation times, revocation state and scopes. |
-| `update_settings` | operator | `Command.settings`; requires `expected_revision`. |
-| `launch_app` | operator | `Command.launch` (declared launch arguments only). |
-| `stop_run` | operator | `Command.stop` (the run must belong to that app). |
-| `trigger_action` | operator | `Command.action`. |
+| `update_settings` | assistant (limited), operator | `Command.settings`; requires `expected_revision`. Assistant may set master volume, display brightness/mode, startup sound and timezone only. |
+| `launch_app` | assistant (limited), operator | `Command.launch`. Assistant can name only an installed app by `app_id`; operator can also submit declared launch arguments. |
+| `stop_run` | assistant, operator | `Command.stop` (the run must belong to that app). |
+| `trigger_action` | operator | `Command.action`, including actions that may enroll an app or change where credentials are sent. A declared action is not a safety grant. |
 | `update_app_settings` | operator | `Command.app_settings`; requires `expected_revision` and declared keys. |
-| `media_command` | operator | `Command.media`; the explicit control surface for app providers and the framework Bluetooth provider, including paused or idle ones. |
+| `media_command` | assistant, operator | `Command.media`; play, pause, next and previous for app providers and the framework Bluetooth provider, including paused or idle ones. |
 | `bluetooth_command` | operator | `Command.bluetooth`; discoverable, incoming connections, unpair, adapter name. |
 | `wifi_command` | operator | `Command.wifi`; scan, connect, forget. |
 | `record_sample` | operator | `Command.record_sample`; microphone indication gate applies. |
@@ -169,7 +174,7 @@ uploads) are just as strict and also set `additionalProperties: false`.
 | `cancel_training` | operator | `Command.cancel_training`. |
 | `delete_wakeword` | operator | `Command.delete_wakeword`. |
 | `dismiss_detection` | operator | `Command.false_detection`. |
-| `clock_command` | operator | `Command.clock` (`app_id` must be `capsulad.clock`). |
+| `clock_command` | assistant, operator | Stopwatch, timers, alarms and active-alert dismissal through `Command.clock` (`app_id` must be `capsulad.clock`). |
 | `create_api_key` | operator | `websecurity.Store.CreateAPIKeyWithScopes`; returns the secret once. |
 | `revoke_api_key` | operator | `Command.revoke_api_key`. |
 | `install_app` | operator | the same `InstallApplication` stream as `POST /api/apps` (one-call form, archive in a single POST). |
@@ -181,10 +186,39 @@ uploads) are just as strict and also set `additionalProperties: false`.
 | `abort_upload` | operator | discards the staged upload (idempotent). |
 | `delete_asset` | operator | `DELETE /api/assets?path=...`. |
 
+For an `assistant` key:
+
+- `overview` shows master volume, installed app identity, run identity/state and Now
+  Playing transport and track metadata. Only `PLAYBACK_PLAYING` players are shown; the
+  projection omits arbitrary source/media names (which can contain a configured radio
+  URL or Bluetooth peer name), adapter and pairing state, and diagnostic details.
+- `settings` shows the revision, volume, brightness and mode, startup sound, timezone,
+  and display/ring resource information. `update_settings` changes only those writable
+  preferences. Reuse `expected_revision` as returned by `get_state` (a decimal string);
+  a JSON integer is also accepted. A `display` patch requires a nonempty `update_fields`
+  list of `brightness` and/or `brightness_mode` and an explicit value for each field
+  named in it. An omitted or empty mask would otherwise also write the default provider.
+  Hostname, provider selections, microphone/privacy
+  settings and assistant/wakeword configuration remain operator-only.
+- `application` shows app identity and runs and the built-in clock/ring state when
+  applicable. Clock state includes local time, timers, stopwatch, alarms and active
+  alerts. App setting values and definitions, logs, interface descriptions and
+  provenance are not returned. The launch tool does not accept any launch arguments,
+  even when a manifest declares them; an app requiring an argument will reject a bare launch.
+  An accepted launch runs the app's usual startup behavior with any existing settings.
+- Generic app configuration and actions remain operator-only: declaration and type checks
+  cannot say whether they enroll a client, change a credential destination or perform an
+  unrelated operation. Use `media_command` and `clock_command` for explicit controls.
+  `media_command` reports acceptance or a typed error without provider-authored text,
+  which can contain a configured stream URL.
+  Bluetooth adapter and Wi-Fi administration, training/samples/detections, diagnostics,
+  keys, package installation/removal, and every asset or staged-upload operation are
+  operator-only. The PA raw-WAV relay is restricted to operator keys and browser sessions.
+
 ## State, streams and files
 
-- **Reads are snapshots.** There is no live event stream in MCP. `get_state` reads the
-  same snapshot the browser subscribes to; call it again to observe change. A mutation
+- **Reads are snapshots.** There is no live event stream in MCP. `get_state` returns a
+  snapshot (restricted for assistant keys); call it again to observe change. A mutation
   event the browser receives (for example a new settings view) is not pushed to MCP.
 - **Wakeword training is the only streaming operation.** `train_wakeword` returns a
   `training_id` immediately. With `wait_seconds > 0` (clamped to 300 seconds) the call
@@ -246,7 +280,7 @@ uploads) are just as strict and also set `additionalProperties: false`.
   and size but does not serve asset bytes. Package archives are never downloadable. An
   application's custom settings document (`/api/apps/{appID}/settings-ui`) is browser-only
   — it is untrusted HTML rendered in an opaque-origin iframe — and `get_state` with
-  `topic: "application"` carries the machine-readable schema and values instead.
+  `topic: "application"` carries the machine-readable schema and values for operators only.
 - **No live asset invalidations.** Asset writes have no browser invalidation topic, so an
   Assets page that is already open shows an MCP upload or delete after a reload or
   navigation (use `list_assets` for the authoritative view). Settings, apps, Bluetooth
@@ -257,31 +291,27 @@ uploads) are just as strict and also set `additionalProperties: false`.
 
 ## Deliberately not exposed
 
-Everything the browser can do to the appliance is available: the whole `webv1.Command`
-allowlist, every snapshot topic, package install/remove, asset upload/delete and the
-certificate. The exclusions are session-management surfaces that exist *for the browser*
-and that a static key must not be able to use:
+Operator keys have the whole `webv1.Command` allowlist, all snapshot topics, package
+install/remove, asset upload/delete and the certificate. Browser presentation and
+session-management surfaces are deliberately not MCP tools:
 
 | Browser route | Why MCP does not expose it |
 |---|---|
 | `POST /api/login`, `POST /api/logout`, `GET /api/session` | MCP has no browser session. It authenticates every request with the key itself, never a cookie, so it cannot mint or impersonate one. |
 | `POST /api/password` | A static key must never be able to change the administrator password: key compromise would become account takeover. Use an authenticated browser session or `capsulad-cli auth set-password`. |
-| `GET /api/apps/{appID}/settings-ui` | Untrusted HTML rendered in an opaque-origin iframe; it is browser presentation, not data. `get_state` topic `application` carries the machine-readable schema and values. |
-| `/ws` event stream | MCP is request/response by design; `get_state` reads the same snapshots and there is no server-initiated stream (`GET /mcp` is `405`). |
+| `GET /api/apps/{appID}/settings-ui` | Untrusted HTML rendered in an opaque-origin iframe; it is browser presentation, not data. An operator can read machine-readable schema and values via `get_state` topic `application`. |
+| `/ws` event stream | MCP is request/response by design; `get_state` reads snapshots and there is no server-initiated stream (`GET /mcp` is `405`). |
 | asset bytes | The Web UI does not serve asset contents either; both list metadata (id, path, media type, SHA-256, size). |
 
-The two frontends therefore differ in exactly one authority: **a browser session may
-change the administrator password; an API key may not, not even an `operator` key.**
-Everything else an administrator can do — every settings, app, media, Bluetooth, Wi-Fi,
-wakeword, clock, asset and package operation — is available to an operator key. MCP is
-stricter here on purpose: a key is a long-lived credential stored where a script can read
-it, while a password is only ever known to a person.
+Only an administrator browser session (or the local CLI) can change the administrator
+password. Even an operator API key cannot impersonate or obtain a browser session.
+The app-specific PA Speaker raw audio route remains HTTP-only and is not an MCP tool.
 
 ## Worked example
 
 ```sh
-# 1. create an operator key on the device (prints the secret once)
-capsulad-cli auth key create agent --scope operator
+# 1. create an assistant key on the device (prints the secret once)
+capsulad-cli auth key create agent --scope assistant
 
 # 2. initialize; keep the returned Mcp-Session-Id
 curl -sk https://capsula.local:8443/mcp \
@@ -308,6 +338,12 @@ curl -sk https://capsula.local:8443/mcp \
 curl -sk -X DELETE https://capsula.local:8443/mcp \
   -H 'Authorization: Bearer capsulad_…' -H 'Mcp-Session-Id: <session>'
 ```
+
+For a self-hosted Cadence server, a Cadence administrator registers this endpoint as a
+[`mcp-http` provider](https://git.shino.boo/devilreef/cadence/-/blob/9a6b257fd6e21b8f0e725461af332489fb11e383/deploy/server/README.md#L1301-L1339)
+with an `Authorization: Bearer <assistant-key>` header, adds the provider to the server's
+`mcp` list, and explicitly enables the desired tools for the device. A Cadence device-link
+token does not register providers, and the speaker client does not register one on enrollment.
 
 ## Proof level and limits
 
@@ -344,9 +380,9 @@ Host evidence only; no device was accessed or deployed for this change.
   training-slot lifecycle, staged-upload teardown, request cancellation and revocation
   (direct reconcile and the access-topic watcher), including the daemon-side effect of a
   cancelled run or recording.
-- `go test ./internal/websecurity -run TestAPIKeyScopes` covers explicit scopes,
-  operator-implies-status, rejection of unknown scopes, and the on-disk legacy
-  (no-scope) key staying read-only across a reload.
+- `go test ./internal/websecurity -run TestAPIKey` selects scope regressions for
+  explicit status defaults, scope inheritance and fail-closed handling of missing or
+  unknown recorded grants.
 - Not verified: an MCP conformance suite, third-party MCP clients, and a maximum-size
   (32 MiB asset / 65 MiB package) staged upload on the real 240 MiB board — the streaming
   path is exercised with multi-chunk transfers on the host, and the size limits are the

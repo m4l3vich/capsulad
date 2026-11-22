@@ -59,6 +59,10 @@ const (
 // serialises concurrent launches of the same app, so a burst of launches with
 // no live run yields one process and queued invocations, never a second one.
 func (d *Daemon) Launch(appID string, args map[string]string) (runID, invocationID string, spawned bool, err error) {
+	if d.cfg.SingleApp != "" && appID != d.cfg.SingleApp {
+		return "", "", false, status.Errorf(codes.FailedPrecondition,
+			"daemon is restricted to application %s", d.cfg.SingleApp)
+	}
 	d.pkgMu.Lock()
 	defer d.pkgMu.Unlock()
 	app, ok := d.reg.Get(appID)
@@ -503,6 +507,11 @@ func (d *Daemon) isSelectedDefault(appID string) bool {
 	if appID == "" {
 		return false
 	}
+	// Single-app mode has no other provider to recover, and denying the
+	// predicate also suppresses manifest restarts of unlaunchable apps.
+	if d.cfg.SingleApp != "" && appID != d.cfg.SingleApp {
+		return false
+	}
 	app, ok := d.reg.Get(appID)
 	if !ok {
 		return false
@@ -582,6 +591,11 @@ func (d *Daemon) reconcileProviderRuns(prev *settings.UserSettings, next setting
 		if appID == "" || now[appID] {
 			continue
 		}
+		// The single app runs by deployment policy, not by selection, so a
+		// provider change must not stop it; an explicit Stop still does.
+		if d.cfg.SingleApp != "" && appID == d.cfg.SingleApp {
+			continue
+		}
 		app, ok := d.reg.Get(appID)
 		if !ok {
 			continue
@@ -655,6 +669,9 @@ func (d *Daemon) ensureRunning(appID string) {
 	if appID == "" {
 		return
 	}
+	if d.cfg.SingleApp != "" && appID != d.cfg.SingleApp {
+		return
+	}
 	if _, ok := d.reg.Get(appID); !ok {
 		return
 	}
@@ -667,6 +684,10 @@ func (d *Daemon) ensureRunning(appID string) {
 }
 
 func (d *Daemon) startBootApps() {
+	if d.cfg.SingleApp != "" {
+		d.ensureRunning(d.cfg.SingleApp)
+		return
+	}
 	for _, app := range d.reg.List() {
 		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
 			continue // built-in start policy is handled by startSystemApps

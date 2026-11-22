@@ -98,9 +98,9 @@ version.
   daemon as normal registry identities with run lifecycle, settings, routing ownership
   and app-bus endpoints. Their functionality is published as the public contracts
   `capsulad.contracts.clock.v1.ClockService` and `capsulad.contracts.ring.v1.RingService`.
-  The clock always runs because it owns the timers, alarms and stopwatch; the ring runs
-  only while it is the selected ring/display provider, and neither manifest boot flag nor a
-  restart overrides that rule.
+  The clock runs at every normal boot because it owns the timers, alarms and stopwatch; the ring
+  runs only while it is the selected ring/display provider, and neither manifest boot flag nor a
+  restart overrides that rule. `-single-app` is the one mode that starts neither unless it names it.
 - **Bluetooth media source, no bundled app.** The Web UI "Now playing" panel lists the
   connected AVRCP source from the framework's public `BluetoothMediaService` on the same
   socket — no system app and no reserved app id — and its transport buttons call that
@@ -111,16 +111,14 @@ version.
   though it stays discoverable and controllable through the same service.
 - **HTTPS Web UI.** An embedded Vue SPA served by the daemon, authenticated with an
   Argon2id admin password and server-side sessions; static API keys carry explicit scopes
-  (`status` is read-only; `operator` is full daemon administration, including the MCP tools
-  and the PA Speaker's `POST /api/apps/org.capsulad.pa/play` relay),
-  and the Access page now shows each key's grant. Browser traffic uses the binary protobuf
-  `/ws` protocol.
+  (`status` reads status and the certificate, `assistant` controls the speaker through MCP,
+  and `operator` also administers the daemon and can use the PA Speaker raw-WAV relay).
+  The Access page shows each key's grant; browser traffic uses the binary protobuf `/ws` protocol.
 - **MCP frontend.** The daemon also serves a Model Context Protocol server at `/mcp` on the
-  same HTTPS listener — no app, no extra port or process. It is an API-key surface that
-  exposes the same allowlisted operations and snapshots as the browser, through one shared
-  frontend operation boundary, not a second control plane. Keys carry explicit scopes:
-  `status` keeps the legacy read-only grant and `operator` is full administration; a key
-  minted before scopes existed is never promoted.
+  same HTTPS listener — no app, no extra port or process. It uses API keys, not browser
+  sessions. An `assistant` key is a deliberately limited grant for common speaker controls;
+  operators use the same shared operation boundary for administration. A new key defaults to
+  explicit `status`; credential records without scopes are not accepted.
 - **Boot ownership.** On the stock Rockchip image one removable hook,
   `/etc/init.d/S99btctl.sh`, prepares state, starts and health-gates the daemon, and
   manages the vendor assistant scripts.
@@ -142,6 +140,10 @@ version.
   exception and always runs, because its timers, alarms and stopwatch are its own state, and
   its output still follows the selected baseline. A stopped built-in can be launched on
   demand and keeps its single stable `builtin:<app_id>` run.
+- **Single-app deployment:** `capsulad -single-app <app-id>` starts only that app and refuses
+  launches of every other app; the clock, ring and other boot apps stay stopped, and the Web UI
+  and MCP listener keep their normal defaults unless `-web-addr` is empty. An unknown ID fails
+  startup instead of serving an empty device.
 - **Packaging:** a pinned `.tar.gz` artifact built and packaged on the build host, with
   `manifest.toml` at the root, regular files and directories only, deterministic bytes. Install
   and update are atomic; a live run must be stopped before its package is replaced.
@@ -200,8 +202,11 @@ version.
   exactly like a detection. The delivery target is always reported in
   `AssistantActivation.app_id`. See [docs/WAKEWORD.md](docs/WAKEWORD.md#multiple-wakewords-and-app-binding).
 - **Shipped app packages:** optional first-party apps are built and packaged on the build host
-  (`make simon`, `make pa`, `make radio`, `make homeassistant`, `make airplay`) and installed
-  like any other package. `org.capsulad.simon` is a QuickJS colour-and-tone memory game that
+  (`make simon`, `make soundboard`, `make hardwaretest`, `make pa`, `make radio`,
+  `make homeassistant`, `make airplay`) and installed like any other package. `org.capsulad.soundboard`
+  is a QuickJS soundboard that plays shared `/assets` WAVs on the centre key and switches them
+  with panel swipes; `org.capsulad.hardwaretest` is a native foreground test of the segment
+  colon dots, ring chase, microphone tone check and full-panel keys. `org.capsulad.simon` is a QuickJS colour-and-tone memory game that
   owns the LED ring, an optional score display, a full-panel capture and one speaker stream
   while it runs; `org.capsulad.pa` is a background MicroPython
   service that plays one streamed WAV per routed `Play` call (or per authenticated
@@ -254,12 +259,13 @@ version.
   green `connected` chip beside the speaker-mode toggle when any `pairedDevices` row has
   `connected === true`; its tooltip and `aria-label` read `Connected: <names>`, and the chip
   disappears when no device is connected. This is snapshot state, not a Bluetooth-policy cache.
-  The Access page labels each static key "status only" or "full administration".
+  The Access page labels explicit grants "status only", "assistant controls" or "full administration".
 - **MCP:** one Streamable HTTP JSON-RPC endpoint at `https://HOST:8443/mcp` with
-  `initialize`/`tools/list`/`tools/call`/`DELETE` sessions, scope-filtered tools and the same
-  operations as the Web UI (settings, apps, media, Bluetooth, Wi-Fi, wakeword training, clock,
-  assets and package install/remove). Input schemas are generated from the protobuf
-  descriptors. See [docs/MCP.md](docs/MCP.md).
+  `initialize`/`tools/list`/`tools/call`/`DELETE` sessions. Assistant keys can read limited
+  speaker state, control media and the built-in clock, launch installed apps without arguments,
+  stop their runs, and set volume, display brightness/mode, startup sound and timezone. The
+  caller's scope selects both the input schema and the direct-call restrictions.
+  See [docs/MCP.md](docs/MCP.md).
 - **Operations:** in-place daemon upgrade through the boot service with a health gate,
   a 512 KiB rotating log, bounded storage guard, and deployment bundles applied by
   `capsulad-cli deploy`.
@@ -393,17 +399,16 @@ before the next turn.
   and drained. Missing output, zero volume, mute, a blank indication or an undeliverable cue
   deny capture rather than record quietly.
 - **Web UI and MCP boundary.** Sessions use a self-signed HTTPS certificate, an Argon2id
-  password and CSRF/origin checks. Static API keys carry explicit scopes: `status` reaches
-  only `GET /api/status`, the public certificate and the two matching MCP read tools;
-  `operator` reaches the MCP administration tools and the PA Speaker play relay
-  (`POST /api/apps/org.capsulad.pa/play`). The browser's Access page mints
-  `status` keys, and a key created before scopes existed stays read-only. MCP accepts only an
-  API key (never a session cookie) and checks Origin. The Access page lists every key with its
-  scope, so a status key and an administration key can be told apart; the page itself mints
-  status-only keys, and an `operator` key is created on the device with
-  `capsulad-cli auth key create NAME --scope operator`. There is no generic AppBus, capture,
-  audio or asset proxy for either frontend; the PA route is the one app-specific relay and the
-  daemon never owns its playback stream.
+  password and CSRF/origin checks. `status` keys reach only `GET /api/status`,
+  `GET /api/cert.pem` and the matching MCP reads. `assistant` keys add limited speaker
+  state and controls, not administrative settings, app actions/configuration, files,
+  diagnostics, key management or network administration. `operator` keys reach the full MCP
+  catalogue and `POST /api/apps/org.capsulad.pa/play`, but only a browser session or the local
+  CLI can change the administrator password. Issue an assistant key deliberately with
+  `capsulad-cli auth key create NAME --scope assistant` or the operator-only MCP `create_api_key`
+  tool; the browser Access page mints status-only keys. MCP checks Origin and never accepts
+  a session cookie. There is no generic AppBus, capture, audio or asset proxy for either
+  frontend; the PA route is the one app-specific relay and the daemon never owns its playback stream.
 - **Asset store.** `<data-dir>/assets` is a plain directory catalog: every regular,
   non-symlink file below the root is an asset, addressed by its slash-relative path and
   visible read-only at `/assets`. Only the session-authenticated admin API writes it.
@@ -652,7 +657,7 @@ before the next turn.
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
 | `apps/devtools`, `apps/dumbassistant`, `apps/marusia`, `apps/cadence` | development apps and the three optional assistants (Cadence Client included) |
-| `apps/simon`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party product app packages: Simon Says (QuickJS), PA Speaker (MicroPython), Internet Radio (native, single package), the Home Assistant integration, and the AirPlay 2 receiver. Each package root `README.md` is also the app's packaged user guide |
+| `apps/simon`, `apps/soundboard`, `apps/hardwaretest`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party app packages: Simon Says (QuickJS), Soundboard (QuickJS), Hardware Test (native), PA Speaker (MicroPython), Internet Radio (native, single package), the Home Assistant integration, and the AirPlay 2 receiver. Each package root `README.md` is also the app's packaged user guide |
 | `deploy/rockchip-stock` | the single boot hook and bring-up scripts |
 | `proto` | framework and standard contract schemas (media, clock, ring, web) |
 | `docs` | application manual, development, verification, hardware, behavior, wakeword and glossary |
@@ -672,7 +677,7 @@ before the next turn.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Capsula Mini rev 4 hardware evidence and firmware findings |
 | [docs/WAKEWORD.md](docs/WAKEWORD.md) | detection, enrollment, training and model evidence |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | project terms as this codebase uses them |
-| [apps/radio/README.md](apps/radio/README.md), [apps/simon/README.md](apps/simon/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md), [apps/airplay/README.md](apps/airplay/README.md), [apps/airplay/docs/media.md](apps/airplay/docs/media.md) | each first-party app's own manual, which is also the guide packaged with it: the internet radio's station list, named picker, controls, display states, streaming limits and the migration off the retired tuner companion; Simon Says' colour/tone mapping, score and exit; the Home Assistant integration's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, HTTP relay, rejections and limits; the AirPlay 2 receiver's supported sender flows, its advertisement records, its explicit AAC/FairPlay/PTP gaps, settings and the unproven device gate; and the media players they provide |
+| [apps/radio/README.md](apps/radio/README.md), [apps/simon/README.md](apps/simon/README.md), [apps/soundboard/README.md](apps/soundboard/README.md), [apps/hardwaretest/README.md](apps/hardwaretest/README.md), [apps/homeassistant/README.md](apps/homeassistant/README.md), [apps/pa/README.md](apps/pa/README.md), [apps/pa/docs/speaker.md](apps/pa/docs/speaker.md), [apps/airplay/README.md](apps/airplay/README.md), [apps/airplay/docs/media.md](apps/airplay/docs/media.md) | each first-party app's own manual, which is also the guide packaged with it: the internet radio's station list, named picker, controls, display states, streaming limits and the migration off the retired tuner companion; Simon Says' colour/tone mapping, score and exit; the Home Assistant integration's entities, settings and known gaps; the PA Speaker's `Play` contract, request framing, HTTP relay, rejections and limits; the AirPlay 2 receiver's supported sender flows, its advertisement records, its explicit AAC/FairPlay/PTP gaps, settings and the unproven device gate; and the media players they provide |
 | [AGENTS.md](AGENTS.md) | repository working rules, lifecycle invariants and verification gates |
 
 ## Attribution

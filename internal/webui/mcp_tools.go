@@ -43,10 +43,12 @@ import (
 type mcpTool struct {
 	Name        string
 	Description string
-	// Scope is the API-key scope the caller must hold. Every mutation is
-	// ScopeOperator; the two read tools keep the legacy ScopeStatus grant.
-	Scope  string
-	Schema map[string]any
+	// Scope is the grant for this variant; assistant is a restricted variant
+	// of an operator tool, present only for explicitly delegated tools.
+	Scope     string
+	Schema    map[string]any
+	assistant *mcpTool
+	fields    mcpAssistantFields
 	// args is a template protobuf message for the tool's argument object. When
 	// set, the schema is generated from its descriptor, the call's arguments are
 	// decoded into a fresh instance, and command() maps them onto the shared
@@ -57,6 +59,16 @@ type mcpTool struct {
 	handle func(ctx context.Context, s *Server, sess *mcpSession, args json.RawMessage) (*mcpToolResult, *mcpError)
 }
 
+func (t *mcpTool) permitted(scopes []string) *mcpTool {
+	if websecurity.ScopesAllow(scopes, t.Scope) {
+		return t
+	}
+	if t.assistant != nil && websecurity.ScopesAllow(scopes, t.assistant.Scope) {
+		return t.assistant
+	}
+	return nil
+}
+
 func (t *mcpTool) serve(ctx context.Context, s *Server, sess *mcpSession, args json.RawMessage) (*mcpToolResult, *mcpError) {
 	if t.handle != nil {
 		if len(args) == 0 {
@@ -64,26 +76,29 @@ func (t *mcpTool) serve(ctx context.Context, s *Server, sess *mcpSession, args j
 		}
 		return t.handle(ctx, s, sess, args)
 	}
+	if t.fields != nil {
+		if err := t.fields.check(args, t.args.ProtoReflect().Descriptor()); err != nil {
+			return nil, err
+		}
+	}
 	fresh := t.args.ProtoReflect().Type().New().Interface()
 	if len(args) > 0 {
 		if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(args, fresh); err != nil {
 			return nil, mcpInvalidParams(err)
 		}
 	}
-	return s.mcpDispatch(ctx, sess, t.command(fresh))
+	return s.mcpDispatch(ctx, sess, t.command(fresh), t.Scope == websecurity.ScopeAssistant)
 }
 
-// mcpToolsList advertises the tools the presented key may call. A status key
-// sees only the read-only pair, which is exactly its Web UI grant.
+// mcpToolsList advertises only the tool variants callable with this key.
 func (s *Server) mcpToolsList(auth mcpAuth) map[string]any {
 	tools := make([]map[string]any, 0, len(mcpToolCatalogue))
-	for _, tool := range mcpToolCatalogue {
-		if !websecurity.ScopesAllow(auth.scopes, tool.Scope) {
-			continue
+	for i := range mcpToolCatalogue {
+		if tool := mcpToolCatalogue[i].permitted(auth.scopes); tool != nil {
+			tools = append(tools, map[string]any{
+				"name": tool.Name, "description": tool.Description, "inputSchema": tool.Schema,
+			})
 		}
-		tools = append(tools, map[string]any{
-			"name": tool.Name, "description": tool.Description, "inputSchema": tool.Schema,
-		})
 	}
 	return map[string]any{"tools": tools}
 }
@@ -111,12 +126,11 @@ func (s *Server) mcpToolsCall(ctx context.Context, auth mcpAuth, sess *mcpSessio
 	if tool == nil {
 		return nil, &mcpError{Code: mcpCodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", call.Name)}
 	}
-	if !websecurity.ScopesAllow(auth.scopes, tool.Scope) {
+	if tool = tool.permitted(auth.scopes); tool == nil {
 		return nil, &mcpError{Code: mcpCodeForbidden, Message: fmt.Sprintf(
-			"the API key lacks the %q scope required by tool %q", tool.Scope, tool.Name)}
+			"the API key does not permit tool %q", call.Name)}
 	}
-	// An MCP mutation is an administrator action with no browser session; the
-	// daemon log records which key asked for what.
+	// Record which API key requested the operation, not the secret or arguments.
 	if s.Logs != nil {
 		s.Logs.Infof("mcp", "", "tool %s called by API key %q", tool.Name, auth.info.Name)
 	}
@@ -193,19 +207,45 @@ func mcpSchemaForMessage(msg proto.Message) map[string]any {
 }
 
 func mcpMessageSchema(md protoreflect.MessageDescriptor, depth int) map[string]any {
+	return mcpScopedMessageSchema(md, depth, nil)
+}
+
+func mcpScopedMessageSchema(md protoreflect.MessageDescriptor, depth int, allowed mcpAssistantFields) map[string]any {
 	if md == nil || depth > mcpSchemaDepth {
 		return map[string]any{"type": "object"}
 	}
 	props := map[string]any{}
+	var required []string
+	var groups []map[string]any
 	fields := md.Fields()
 	for i := range fields.Len() {
 		fd := fields.Get(i)
-		props[string(fd.Name())] = mcpFieldSchema(fd, depth)
+		name := string(fd.Name())
+		if allowed == nil {
+			props[name] = mcpFieldSchema(fd, depth)
+			continue
+		}
+		if field, ok := allowed[name]; ok && field.permits(fd) {
+			props[name] = field.schema(fd, depth)
+			if field.required {
+				required = append(required, name)
+			}
+			for _, entry := range field.mask {
+				groups = append(groups, map[string]any{
+					"if": map[string]any{"properties": map[string]any{
+						name: map[string]any{"contains": map[string]any{"const": entry}},
+					}},
+					"then": map[string]any{"required": []string{entry}},
+				})
+			}
+		}
 	}
 	// Unknown field names are rejected by the server's decoder (protojson with
 	// DiscardUnknown false), so the schema says so.
 	schema := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
-	var groups []map[string]any
+	if len(required) > 0 {
+		schema["required"] = required
+	}
 	var prose []string
 	oneofs := md.Oneofs()
 	for i := range oneofs.Len() {
@@ -217,8 +257,14 @@ func mcpMessageSchema(md protoreflect.MessageDescriptor, depth int) map[string]a
 		alternatives := make([]map[string]any, 0, oneof.Fields().Len())
 		for j := range oneof.Fields().Len() {
 			name := string(oneof.Fields().Get(j).Name())
+			if _, ok := props[name]; !ok {
+				continue
+			}
 			names = append(names, name)
 			alternatives = append(alternatives, map[string]any{"required": []string{name}})
+		}
+		if len(alternatives) == 0 {
+			continue
 		}
 		// A proto3 oneof is either unset or exactly one member, and every oneof
 		// in the command vocabulary is required, so each group is its own
@@ -228,8 +274,10 @@ func mcpMessageSchema(md protoreflect.MessageDescriptor, depth int) map[string]a
 		groups = append(groups, map[string]any{"oneOf": alternatives})
 		prose = append(prose, strings.Join(names, " | "))
 	}
-	if len(groups) > 0 {
+	if len(prose) > 0 {
 		schema["description"] = "exactly one of: " + strings.Join(prose, "; ")
+	}
+	if len(groups) > 0 {
 		schema["allOf"] = groups
 	}
 	return schema
@@ -301,18 +349,7 @@ var mcpToolCatalogue = []mcpTool{
 		"Return the daemon's self-signed HTTPS certificate in PEM form, to trust the listener. "+
 			"Equivalent to the Web UI's GET /api/cert.pem.",
 		objectSchema(map[string]any{}), mcpGetCertificate),
-	readTool("get_state", websecurity.ScopeOperator,
-		"Read one live snapshot the Web UI subscribes to. Topics: overview (device, audio, apps, runs, "+
-			"and the Now Playing media projection: only players that report PLAYBACK_PLAYING, with "+
-			"idle/paused/stopped providers omitted), settings, application (needs app_id), diagnostics "+
-			"(logs and metrics), wakeword, access (the listener/credential status and the API-key list "+
-			"with its scopes) and wifi. Use "+
-			"this to observe state that a mutation "+
-			"streams to the Web UI, for example wakeword training progress.",
-		objectSchema(map[string]any{
-			"topic":  strEnumProp("which snapshot to read", "overview", "settings", "application", "diagnostics", "wakeword", "access", "wifi"),
-			"app_id": strProp("application id, required when topic is application"),
-		}, "topic"), mcpGetState),
+	mcpStateTool(),
 	readTool("list_assets", websecurity.ScopeOperator,
 		"List the shared asset store: every regular file below <data-dir>/assets with its relative id, "+
 			"sandbox path, media type, size and SHA-256.",
@@ -323,25 +360,25 @@ var mcpToolCatalogue = []mcpTool{
 			"Secret values are never stored and never returned.",
 		objectSchema(map[string]any{}), mcpListAPIKeys),
 
-	commandTool("update_settings", websecurity.ScopeOperator,
+	assistantSettingsTool(commandTool("update_settings", websecurity.ScopeOperator,
 		"Patch one settings group (display, assistant, microphone, muted_indicator, volume, startup_sound, "+
 			"timezone or hostname). expected_revision is mandatory: read it from get_state topic settings and "+
 			"the update is rejected if another client changed the store meanwhile.",
 		[]string{"expected_revision"}, settingsUpdate, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_Settings{Settings: m.(*webv1.SettingsUpdate)}}
-		}),
-	commandTool("launch_app", websecurity.ScopeOperator,
+		})),
+	assistantLaunchTool(commandTool("launch_app", websecurity.ScopeOperator,
 		"Launch an installed application. Only launch arguments declared by the application's manifest "+
 			"are accepted.",
 		[]string{"app_id"}, launchApp, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_Launch{Launch: m.(*webv1.LaunchApp)}}
-		}),
-	commandTool("stop_run", websecurity.ScopeOperator,
+		})),
+	assistantStopTool(commandTool("stop_run", websecurity.ScopeOperator,
 		"Stop one run of one application. The run must belong to that application; stopping a selected "+
 			"provider restarts it, and the result says so.",
 		[]string{"app_id", "run_id"}, stopRun, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_Stop{Stop: m.(*webv1.StopRun)}}
-		}),
+		})),
 	commandTool("trigger_action", websecurity.ScopeOperator,
 		"Trigger one action declared by an installed application's manifest.",
 		[]string{"app_id", "action_id"}, triggerAction, func(m proto.Message) *webv1.Command {
@@ -353,13 +390,13 @@ var mcpToolCatalogue = []mcpTool{
 		[]string{"app_id", "expected_revision", "changes"}, appSettings, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_AppSettings{AppSettings: m.(*webv1.AppSettingsUpdate)}}
 		}),
-	commandTool("media_command", websecurity.ScopeOperator,
+	assistantMediaTool(commandTool("media_command", websecurity.ScopeOperator,
 		"Send PLAY, PAUSE, NEXT or PREVIOUS to a media provider. Set kind to "+
 			"MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA for the daemon's own Bluetooth source "+
 			"(then player_id must be \"bluetooth\"); otherwise app_id and player_id address an app provider.",
 		[]string{"player_id", "action"}, mediaCommand, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_Media{Media: m.(*webv1.MediaCommand)}}
-		}),
+		})),
 	commandTool("bluetooth_command", websecurity.ScopeOperator,
 		"Administer the Bluetooth adapter: set_discoverable, set_incoming_connections, unpair (by the "+
 			"opaque device_id from get_state, never a raw address) or set_adapter_name (administrator only).",
@@ -419,16 +456,17 @@ var mcpToolCatalogue = []mcpTool{
 		[]string{"detection_id"}, falseDetect, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_FalseDetection{FalseDetection: m.(*webv1.FalseDetection)}}
 		}),
-	commandTool("clock_command", websecurity.ScopeOperator,
+	assistantClockTool(commandTool("clock_command", websecurity.ScopeOperator,
 		"Control the built-in clock: the stopwatch, timers, alarms and active alerts. app_id must be "+
 			"capsulad.clock.",
 		[]string{"app_id"}, clockCommand, func(m proto.Message) *webv1.Command {
 			return &webv1.Command{Op: &webv1.Command_Clock{Clock: m.(*webv1.ClockCommand)}}
-		}),
+		})),
 	readTool("create_api_key", websecurity.ScopeOperator,
 		"Create a static API key. The secret is returned exactly once and only its hash is stored. "+
-			"scopes selects the grant: [\"status\"] (read-only, the default) or [\"operator\"] (full "+
-			"administration). Request operator explicitly; nothing is ever promoted implicitly.",
+			"scopes selects the grant: [\"status\"] (status and certificate, the default), "+
+			"[\"assistant\"] (limited speaker controls) or [\"operator\"] (full administration). "+
+			"Request assistant or operator explicitly; nothing is promoted implicitly.",
 		objectSchema(map[string]any{
 			"name":   strProp("key name, 1..64 characters of [A-Za-z0-9_.-]"),
 			"scopes": strArrayProp("scopes to grant; default [\"status\"]"),
@@ -529,37 +567,6 @@ func mcpGetCertificate(_ context.Context, s *Server, _ *mcpSession, _ json.RawMe
 	}, nil
 }
 
-var mcpTopics = map[string]webv1.Topic{
-	"overview":    webv1.Topic_TOPIC_OVERVIEW,
-	"settings":    webv1.Topic_TOPIC_SETTINGS,
-	"application": webv1.Topic_TOPIC_APPLICATION,
-	"diagnostics": webv1.Topic_TOPIC_DIAGNOSTICS,
-	"wakeword":    webv1.Topic_TOPIC_WAKEWORD,
-	"access":      webv1.Topic_TOPIC_ACCESS,
-	"wifi":        webv1.Topic_TOPIC_WIFI,
-}
-
-func mcpGetState(ctx context.Context, s *Server, _ *mcpSession, args json.RawMessage) (*mcpToolResult, *mcpError) {
-	var in struct {
-		Topic string `json:"topic"`
-		AppID string `json:"app_id"`
-	}
-	if err := strictJSON(args, &in); err != nil {
-		return nil, mcpInvalidParams(err)
-	}
-	topic, ok := mcpTopics[strings.TrimSpace(in.Topic)]
-	if !ok {
-		return nil, &mcpError{Code: mcpCodeInvalidParams, Message: fmt.Sprintf("unknown topic %q", in.Topic)}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	snap, err := s.snapshot(ctx, topic, strings.TrimSpace(in.AppID))
-	if err != nil {
-		return nil, mcpRPCCallError(err)
-	}
-	return mcpProtoResult(snap)
-}
-
 func mcpListAssets(_ context.Context, s *Server, _ *mcpSession, args json.RawMessage) (*mcpToolResult, *mcpError) {
 	if s.Assets == nil {
 		return mcpToolFailure(errUnavailable, "asset store is unavailable")
@@ -600,9 +607,8 @@ func mcpListAPIKeys(_ context.Context, s *Server, _ *mcpSession, _ json.RawMessa
 
 // --- file and key handlers -------------------------------------------------
 
-// mcpCreateAPIKey mints a key with an explicit grant. It is the only remote way
-// to provision an operator-scoped key; the browser's own create_api_key
-// operation keeps minting status-only keys.
+// Only an operator MCP key may mint an assistant or operator key. The
+// browser's own create_api_key operation keeps minting status-only keys.
 func mcpCreateAPIKey(_ context.Context, s *Server, _ *mcpSession, args json.RawMessage) (*mcpToolResult, *mcpError) {
 	var in struct {
 		Name   string   `json:"name"`

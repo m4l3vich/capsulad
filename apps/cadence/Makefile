@@ -75,15 +75,21 @@ all: package
 
 # build is deliberately phony: the Go command owns incremental rebuilds and
 # correctly tracks replace-module SDK sources, compiler flags, cgo headers and
-# generated files. The package carries the binary, the manifest and the
-# operator-facing README.md user guide; there are no runtime assets.
+# generated files. The package carries the binary, the manifest, the app-owned
+# settings document and the operator-facing README.md user guide; there are no
+# other runtime assets.
 # build may run on the host for inspection; only package insists on Linux.
 build:
+	@test -f ui/settings.html || { \
+		echo "error: ui/settings.html is missing" >&2; \
+		exit 1; \
+	}
 	rm -rf $(OUT)/$(APP_ID)
-	mkdir -p $(OUT)/$(APP_ID)
+	mkdir -p $(OUT)/$(APP_ID)/ui
 	$(GOBUILD) -o $(OUT)/$(APP_ID)/cadence ./cmd/cadence
 	@sed -E 's/^abi = "[^"]*"$$/abi = "$(TARGET_ABI)"/' manifest.toml > $(OUT)/$(APP_ID)/manifest.toml
 	cp README.md $(OUT)/$(APP_ID)/README.md
+	cp -R ui/. $(OUT)/$(APP_ID)/ui/
 	@grep -q '^abi = "$(TARGET_ABI)"$$' $(OUT)/$(APP_ID)/manifest.toml || { \
 		echo "error: manifest.toml has no single entrypoint abi line to set to $(TARGET_ABI)" >&2; \
 		exit 1; \

@@ -223,6 +223,37 @@ Rules:
   daemon, but it must not leave the user without feedback: send `AppActionResult` when the
   outcome is known.
 
+### Shipped assistant setup actions
+
+Marusia and Cadence Client both ship a `[settings_ui]` document, so their setup panels
+are app-owned pages rendered inside the application detail, not sections of the system
+Settings page. The document is the only settings surface an operator needs; declared actions
+remain in the application's **Actions** list below it, and the document must name them instead
+of trying to invoke them.
+
+- **Marusia** (`[settings_ui] html = "ui/settings.html"`) shows an always-empty password field
+  for a VK access token or full OAuth redirect URL. Submitting it writes only the masked
+  `vk_access_token` setting; the app detects a token that changed after its initial snapshot,
+  runs the same validated exchange as `reauth`, stores `session_id`/`session_secret`, clears
+  the one-shot token and writes a short non-secret `last_auth_status`. The page derives the
+  session, pending-token and session-file state from redacted snapshot flags, never from the
+  stored secret, and offers a clear-pending control. Every other declared setting is generated
+  from `CapsuladUI.schema` inside a collapsed `<details>` area.
+- **Cadence Client** (`[settings_ui] html = "ui/settings.html"`) walks an unenrolled device
+  through server URL, a TLS CA asset path when the URL is `https://` (default
+  `/assets/cadence/ca.pem`), the `test_connection` action, the one-time enrollment code, live
+  enrollment confirmation and MCP setup advice. `test_connection` resolves DNS, opens TCP and
+  performs TLS with the app's `ca_pem` trust roots, logs `test_ok` or `test_failed`, and writes
+  the same non-secret outcome to `last_test_status` for the page. Once a device token is
+  present the page shows the server/status plus live `board`, `hold_release_tail_ms` and
+  `follow_up` controls and a confirm-then-reset that clears every declared setting on the
+  speaker without touching the Cadence server.
+
+Neither document can call an action, read logs, fetch, use storage or reach the app bus: the
+bridge exposes only the schema, revision, redacted values, theme, `onState`, `onResult`,
+`patch` and `resize`. That is why test and retry controls stay as manifest actions and the app
+writes its own status text.
+
 ## Custom settings UI
 
 An app may replace the generated form with one self-contained HTML document.

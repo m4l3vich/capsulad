@@ -106,20 +106,51 @@ func main() {
 	}
 }
 
+// settingsCaller is the app-configuration surface this app needs. The SDK
+// client is the production implementation; tests substitute a fake to exercise
+// the compare-and-swap paths without a daemon.
+type settingsCaller interface {
+	CallJSON(ctx context.Context, targetAppID, service, rpc string, request, response any, timeout time.Duration) error
+}
+
 // app is the process-wide state: last good settings, one protocol client, one
 // active turn and the activation queue.
 type app struct {
 	ctx    context.Context
 	client *capsulad.Client
-	fetch  *media.Fetch
+	// settingsCaller overrides client for app-configuration calls in tests.
+	settingsCaller settingsCaller
+	fetch          *media.Fetch
+	// env is the framework launch identity. Reauthorization persists the
+	// session through the app-configuration service, which requires app_id.
+	env capsulad.Env
 
 	// fallback is the identity used while the serial and device_id settings
 	// are empty. It is resolved once, at startup, and never persisted.
 	fallback settings.Fallback
 
-	mu           sync.Mutex
-	values       settings.Values
-	cfg          settings.Config
+	mu       sync.Mutex
+	values   settings.Values
+	cfg      settings.Config
+	revision uint64
+	// lastStatusWrite is the normalized status this process last stored. It
+	// suppresses duplicate turn-attach status writes while the settings event
+	// is still in flight.
+	lastStatusWrite string
+	// settingsWait bounds how long a stale session retry waits for the pushed
+	// settings event to reach the authoritative revision.
+	settingsWait time.Duration
+	// settingsSeen distinguishes the initial snapshot from a later edit. A
+	// token present at startup is deliberately not exchanged: only a token
+	// that changes after the process has seen settings is a new submission.
+	settingsSeen bool
+	lastVKToken  string
+	// autoExchange runs a newly submitted token. It is a field so the
+	// detection can be tested without a network exchange.
+	autoExchange func(string)
+	// reauthMu serializes the action and the automatic exchange, so two
+	// compare-and-swap writers cannot race over the same pending token.
+	reauthMu     sync.Mutex
 	protocol     *vkclient.Client
 	protocolKey  protocolKey
 	active       *activeTurn
@@ -162,6 +193,16 @@ func (a *app) logSession(session vkclient.Session) {
 			"unprovisioned attach); account=%s; configure session_id/session_secret if that changes",
 			redact.Account(session.AccountID))
 	})
+	// A turn's attach is an auth outcome too; keep the settings page's status
+	// in step without blocking the turn on a settings write. Skip this while a
+	// one-shot token is pending: its exchange owns the compare-and-swap and
+	// writes its own status.
+	a.mu.Lock()
+	tokenPending := strings.TrimSpace(a.values.VKAccessToken) != ""
+	a.mu.Unlock()
+	if !tokenPending {
+		go a.recordAuthStatus(true, "session attach succeeded")
+	}
 }
 
 type activeTurn struct {
@@ -203,12 +244,17 @@ func (a *app) logPlaintextWarning(config settings.Config) {
 
 func newApp(ctx context.Context, client *capsulad.Client) *app {
 	a := &app{
-		ctx:      ctx,
-		client:   client,
-		fetch:    media.NewFetch(),
-		fallback: loadIdentity(ctx, client),
-		values:   settings.Default(),
-		queue:    make(chan activationJob, 1),
+		ctx:          ctx,
+		client:       client,
+		fetch:        media.NewFetch(),
+		env:          capsulad.FromEnv(),
+		fallback:     loadIdentity(ctx, client),
+		values:       settings.Default(),
+		queue:        make(chan activationJob, 1),
+		settingsWait: 2 * time.Second,
+	}
+	a.autoExchange = func(token string) {
+		go a.autoReauth(token)
 	}
 	config, warnings, err := settings.Build(a.values, a.fallback)
 	if err != nil {
@@ -359,6 +405,17 @@ func (a *app) releaseInput(released *capsulad.InputReleased) {
 }
 
 func (a *app) applySettings(changed *capsulad.SettingsChanged) {
+	if changed != nil && changed.Revision != 0 {
+		a.mu.Lock()
+		current := a.revision
+		stale := changed.Revision < current
+		a.mu.Unlock()
+		if stale {
+			log.Printf("marusia: settings revision=%d ignored; current revision is %d",
+				changed.Revision, current)
+			return
+		}
+	}
 	values, err := settings.Read(changed)
 	if err != nil {
 		log.Printf("marusia: settings rejected: %v", err)
@@ -375,10 +432,34 @@ func (a *app) applySettings(changed *capsulad.SettingsChanged) {
 	a.mu.Lock()
 	a.values = values
 	a.cfg = config
+	if a.lastStatusWrite != "" && a.lastStatusWrite != strings.TrimSpace(values.LastAuthStatus) {
+		a.lastStatusWrite = ""
+	}
+	if changed != nil && changed.Revision != 0 {
+		a.revision = changed.Revision
+	}
+	pendingToken := strings.TrimSpace(values.VKAccessToken)
+	previousToken := a.lastVKToken
+	firstSnapshot := !a.settingsSeen
+	if changed != nil {
+		a.settingsSeen = true
+		a.lastVKToken = pendingToken
+	}
 	a.mu.Unlock()
 	a.logSerialSource(config)
 	a.logPlaintextWarning(config)
 	log.Printf("marusia: settings applied; %s", a.summary())
+
+	// A token present at startup is an existing pending value, not a new
+	// submission: only an edit after the first snapshot starts the exchange.
+	// A settings event produced by an outcome write carries the same token
+	// (or none), so it cannot retrigger this.
+	if changed != nil && !firstSnapshot && pendingToken != "" && pendingToken != previousToken {
+		log.Printf("marusia: a new VK access token is pending; exchanging it for a session")
+		if a.autoExchange != nil {
+			a.autoExchange(pendingToken)
+		}
+	}
 }
 
 func (a *app) action(action *capsulad.ActionInvoked) {
@@ -419,9 +500,19 @@ func (a *app) dismiss() {
 
 // reauth runs the attach handshake with the current settings and reports the
 // outcome through the action result. It uses its own short-lived client so it
-// can never close the channel an active turn is using.
+// can never close the channel an active turn is using. The action and the
+// automatic exchange of a newly submitted token are serialized, so only one
+// compare-and-swap can spend the pending token at a time.
 func (a *app) reauth(action *capsulad.ActionInvoked) {
-	config := a.config()
+	a.reauthMu.Lock()
+	defer a.reauthMu.Unlock()
+
+	config, token := a.pendingToken()
+	if token != "" {
+		detail, err := a.reauthWithToken(config, token)
+		_ = a.client.NotifyActionResult(action.ID, err == nil, detail)
+		return
+	}
 	resolved, source, resolveErr := resolveSession(config)
 	config = resolved
 	if resolveErr != nil {
@@ -438,6 +529,7 @@ func (a *app) reauth(action *capsulad.ActionInvoked) {
 	})
 	if err != nil {
 		log.Printf("marusia: reauth: %v", err)
+		a.recordAuthStatus(false, err.Error())
 		_ = a.client.NotifyActionResult(action.ID, false, err.Error())
 		return
 	}
@@ -449,23 +541,59 @@ func (a *app) reauth(action *capsulad.ActionInvoked) {
 		// A configured session is validated, never replaced by an attach: the
 		// attach needs a manufacturing credential this device does not hold.
 		if err := protocol.Authorize(ctx); err != nil {
-			log.Printf("marusia: reauth failed: %s", describeReauth(err))
-			_ = a.client.NotifyActionResult(action.ID, false, describeReauth(err))
+			detail := describeReauth(err)
+			log.Printf("marusia: reauth failed: %s", detail)
+			a.recordAuthStatus(false, detail)
+			_ = a.client.NotifyActionResult(action.ID, false, detail)
 			return
 		}
+		detail := "session accepted from " + source
 		logReauthSuccess("the session from "+source, session)
-		_ = a.client.NotifyActionResult(action.ID, true, "session accepted from "+source)
+		a.recordAuthStatus(true, detail)
+		_ = a.client.NotifyActionResult(action.ID, true, detail)
 		return
 	}
 
 	attached, err := protocol.Attach(ctx)
 	if err != nil {
-		log.Printf("marusia: reauth failed: %s", describeReauth(err))
-		_ = a.client.NotifyActionResult(action.ID, false, describeReauth(err))
+		detail := describeReauth(err)
+		log.Printf("marusia: reauth failed: %s", detail)
+		a.recordAuthStatus(false, detail)
+		_ = a.client.NotifyActionResult(action.ID, false, detail)
 		return
 	}
 	logReauthSuccess("the provisioning attach", attached)
+	a.recordAuthStatus(true, "session attach succeeded")
 	_ = a.client.NotifyActionResult(action.ID, true, "session attach succeeded")
+}
+
+// autoReauth exchanges a token that changed after the initial settings
+// snapshot. It is the same validated exchange as the reauth action; it has no
+// action invocation to answer, so its outcome reaches the operator through
+// last_auth_status and the log.
+func (a *app) autoReauth(token string) {
+	a.reauthMu.Lock()
+	defer a.reauthMu.Unlock()
+
+	// The token may have been cleared or replaced while this waited for the
+	// action path, in which case this exchange is stale and must not run.
+	latest, current := a.pendingToken()
+	if current == "" || current != token {
+		return
+	}
+	detail, err := a.reauthWithToken(latest, token)
+	if err != nil {
+		log.Printf("marusia: automatic reauth failed: %s", detail)
+		return
+	}
+	log.Printf("marusia: automatic reauth: %s", detail)
+}
+
+// pendingToken reads the live configuration and the current one-shot token.
+func (a *app) pendingToken() (settings.Config, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg, strings.TrimSpace(a.values.VKAccessToken)
 }
 
 // logReauthSuccess is the one line for a successful reauth. It names the source

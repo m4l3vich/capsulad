@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { topicNames, socket } from '../lib/ws.js'
 import { useTopic } from '../lib/live.js'
 import { changePassword, runAuthMutation } from '../lib/session.js'
-import { dateTime, keyScopes } from '../lib/format.js'
+import { dateTime, hasValidKeyScopes, keyScopes } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 
 // Access is the only page that changes credentials. Password changes revoke
@@ -136,7 +136,7 @@ const revokeTarget = ref(null)
 const revokeBusy = ref(false)
 
 const keys = computed(() => data.value?.keys || [])
-const activeKeyCount = computed(() => keys.value.filter((key) => !key.revoked).length)
+const activeKeyCount = computed(() => keys.value.filter((key) => !key.revoked && hasValidKeyScopes(key.scopes)).length)
 
 function askRevoke(key) {
   revokeTarget.value = key
@@ -411,8 +411,8 @@ onUnmounted(() => {
               <h2 class="card-title text-base">Automation keys</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/70">
                 For scripts, monitoring tools and MCP clients. This page mints status keys, which can only read device
-                status and the server certificate; an administration key has to be created on the device with
-                <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-xs">capsulad-cli auth key create NAME --scope operator</code>.
+                status and the server certificate. For speaker controls, use
+                <code class="rounded bg-base-200 px-1 py-0.5 font-mono text-xs">capsulad-cli auth key create NAME --scope assistant</code>.
                 No key can sign in here or change the administrator password. Name a key after the place that will use it.
               </p>
             </div>
@@ -484,13 +484,13 @@ onUnmounted(() => {
                   <td class="whitespace-nowrap">
                     <span
                       class="badge badge-sm"
-                      :class="key.scopes?.includes('operator') ? 'badge-warning' : 'badge-ghost'"
+                      :class="hasValidKeyScopes(key.scopes) && key.scopes.includes('operator') ? 'badge-warning' : 'badge-ghost'"
                     >{{ keyScopes(key.scopes) }}</span>
                   </td>
                   <td class="whitespace-nowrap text-xs">{{ dateTime(key.createdUnixMs) }}</td>
                   <td>
-                    <span class="badge badge-sm" :class="key.revoked ? 'badge-neutral' : 'badge-success'">
-                      {{ key.revoked ? 'revoked' : 'active' }}
+                    <span class="badge badge-sm" :class="key.revoked || !hasValidKeyScopes(key.scopes) ? 'badge-neutral' : 'badge-success'">
+                      {{ key.revoked ? 'revoked' : hasValidKeyScopes(key.scopes) ? 'active' : 'inactive' }}
                     </span>
                   </td>
                   <td class="text-right">
@@ -507,8 +507,7 @@ onUnmounted(() => {
             </table>
           </div>
           <p v-else class="rounded border border-base-300 p-4 text-sm text-base-content/70">
-            No automation keys yet. Create one only if a script needs to read status; administration keys are minted on
-            the device.
+            No automation keys yet. Create a status key here only if a script needs to read device status.
           </p>
 
           <p class="text-xs text-base-content/60">

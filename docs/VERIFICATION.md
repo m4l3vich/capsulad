@@ -725,6 +725,27 @@ settings values are unchanged; revision 4203 -> 4205 is the two selection writes
   authorize. No announcement, TTS, microphone capture, acoustic or optical measurement was
   made. The temporary deselection is observable as the settings revision advance.
 
+### Assistant API-key scope: Rockchip deployment
+
+- **Installed stack.** A detached `capsulad-cli deploy` over ADB installed only the
+  daemon (SHA-256 `08eea4c9…`) and CLI (`cb6850f7…`); the native runtime, application
+  packages and boot hook were not replaced. The first attempt stopped at the data-space
+  preflight; archiving closed diagnostics reclaimed 620 KiB with operator approval.
+  `/data` had 8,343 KiB free before the retry and 8,179 KiB after verification.
+- **Readiness.** The daemon health gate passed, but the first restart left four apps
+  unable to traverse their mounted runtime paths. Restarting through `S99btctl.sh`
+  with `umask 022` restored READY for clock, AirPlay, Home Assistant, PA Speaker and
+  Cadence Client. Global settings and other app settings matched the baseline.
+  AirPlay's own startup advanced its app-settings revision from 138 to 140 before
+  the tool probe; its app-managed identity state was not compared.
+- **Live HTTPS/API state.** A temporary `assistant` key reached `/api/status`,
+  listed eight allowed tools, read the built-in clock, started a test timer and
+  canceled that same timer by ID. `create_api_key`, `install_app`, `delete_asset`
+  and a microphone-settings write were denied (`-32002`). Reuse of the revoked test
+  key then returned HTTP 401 on `/api/status` and `/mcp` (MCP `-32001`).
+  No Cadence MCP registration, assistant voice turn, or acoustic/optical measurement
+  was performed.
+
 ## 2026-11-18 current-change evidence: AirPlay advertisement, Simon 1.1.0, radio and app guides
 
 This section records evidence for the current working tree only. It is not a deployment record,
@@ -1387,6 +1408,14 @@ not the speaker; read the level stated in each part.
 
 ## Verified only on the simulator or host
 
+- **Assistant API-key scope (host).** Focused Go tests with the race detector passed for
+  API-key storage and CLI issuance, then for MCP, HTTP authorization, package/asset and PA
+  boundaries. After independent review, targeted MCP tests also passed for direct denial,
+  the restricted settings schema/mask, redacted media replies and scope enforcement.
+  The production Web UI build passed; its web tests reported 83 pass and one font-tooling
+  skip. In Chromium against the host daemon, the Access page displayed a CLI-issued
+  `assistant` key as **assistant controls**. This is HTTP/API state and browser evidence,
+  not a Cadence session or physical-output test.
 - Complete virtual backend (segment display, RGB ring, contacts, keys and audio). The Go
   suites for this tree were run here: `make test` and `make test-race` reported 33 packages
   ok, with the single known `internal/daemon`
@@ -3138,6 +3167,14 @@ document stays stable.
     ignored, `WDIOC_SETOPTIONS` → `ENOTTY`, no `/sys/class/watchdog`); they only choose the wording
     of the no-descriptor release path now, because the supervisor hands any transferable descriptor
     to a feeder regardless, so a different result does not change the handoff decision.
+33. **Single-app launch mode.** `capsulad -single-app <app-id>` starts only that application
+    (even without `start_on_boot`/`background`), refuses launches of every other app, keeps the
+    Web UI and MCP listener unless `-web-addr` is empty, and fails startup for an unknown ID.
+    Host regression coverage lives in `internal/daemon/single_app_test.go`; no unit or simulator
+    session with the flag is recorded here. Confirm on a dedicated deployment that exactly one
+    run reaches `APP_READY` while the clock, ring and other boot apps stay stopped, another
+    app's `Launch` is refused, Stop keeps the selected-provider restart rule, and the Web UI
+    still serves.
 
 No device evidence exists for the networking surface described in
 [app_development/network.md](app_development/network.md): outbound streams, UDP, listener

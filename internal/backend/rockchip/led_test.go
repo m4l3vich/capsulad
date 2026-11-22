@@ -66,7 +66,7 @@ func TestEncodeMultiCtrlFrame(t *testing.T) {
 	// Segment a of the first digit, segment g of the fourth, and both colon
 	// dots, each of which must reach its calibrated channel.
 	cells := []uint16{1 << 0, 0, 0, 1 << 6}
-	records := encodeMultiCtrlFrame(cells, true, 0.5, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
+	records := encodeMultiCtrlFrame(cells, true, true, 0.5, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
 	if len(records) != DefaultConfig().LEDMultiCtrlChannels {
 		t.Fatalf("len = %d", len(records))
 	}
@@ -91,7 +91,7 @@ func TestEncodeMultiCtrlFrame(t *testing.T) {
 	}
 	// The auto-darkness floor must survive 8-bit quantization: 5 % is 13/255,
 	// not zero, so an enabled automatic display stays visibly lit.
-	floor := encodeMultiCtrlFrame(cells, true, 0.05, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
+	floor := encodeMultiCtrlFrame(cells, true, true, 0.05, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
 	for i, record := range floor {
 		if want[i] != 0 && record.Brightness == 0 {
 			t.Fatalf("channel %d quantized the 5%% floor to zero", i)
@@ -109,7 +109,7 @@ func TestEncodeMultiCtrlFrameClockPattern(t *testing.T) {
 		three = 0b1001111 // a b c d g
 		four  = 0b1100110 // b c f g
 	)
-	records := encodeMultiCtrlFrame([]uint16{one, two, three, four}, true, 1, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
+	records := encodeMultiCtrlFrame([]uint16{one, two, three, four}, true, true, 1, DefaultConfig().LEDMultiCtrlChannels, DefaultConfig().LEDSegmentDigits, DefaultConfig().LEDSegmentsPerDigit)
 	want := map[int]bool{
 		28: true, 21: true, // digit 1: b, c
 		26: true, 25: true, 18: true, 23: true, 20: true, // digit 2: a b d e g

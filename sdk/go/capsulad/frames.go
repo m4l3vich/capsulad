@@ -12,8 +12,10 @@ type segmentCell struct {
 }
 
 type segmentFrame struct {
-	Cells []segmentCell `json:"cells,omitempty"`
-	Colon bool          `json:"colon,omitempty"`
+	Cells       []segmentCell `json:"cells,omitempty"`
+	Colon       bool          `json:"colon,omitempty"`
+	ColonTop    bool          `json:"colonTop,omitempty"`
+	ColonBottom bool          `json:"colonBottom,omitempty"`
 }
 
 type ringFrame struct {

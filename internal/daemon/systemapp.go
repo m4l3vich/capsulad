@@ -115,7 +115,10 @@ func (d *Daemon) startSystemApps() {
 	d.systemMu.Unlock()
 	sort.Strings(list)
 	for _, id := range list {
-		if !d.builtinNeededAtBoot(id) {
+		if d.cfg.SingleApp != "" && id != d.cfg.SingleApp {
+			continue
+		}
+		if d.cfg.SingleApp == "" && !d.builtinNeededAtBoot(id) {
 			d.logs.Infof("daemon", id, "not selected and not framework-owned; leaving it stopped")
 			continue
 		}
@@ -144,6 +147,10 @@ func (d *Daemon) builtinNeededAtBoot(appID string) bool {
 // its stable run ID. It is used at boot and by ApplicationService.Launch after
 // an explicit Stop.
 func (d *Daemon) startSystemApp(appID string) (string, error) {
+	if d.cfg.SingleApp != "" && appID != d.cfg.SingleApp {
+		return "", status.Errorf(codes.FailedPrecondition,
+			"daemon is restricted to application %s", d.cfg.SingleApp)
+	}
 	d.systemRunMu.Lock()
 	defer d.systemRunMu.Unlock()
 	app, ok := d.systemApp(appID)

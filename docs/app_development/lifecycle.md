@@ -284,6 +284,14 @@ already running is not started twice.
 For installed apps, `background = true` therefore has two effects: the app is started at boot, and
 deselecting it does not stop it. `start_on_boot = true` gives the same protection from deselection.
 
+An operator can start the daemon with `-single-app <app-id>`, which replaces the boot set above:
+only that application is started (whether or not it declares `start_on_boot` or `background`) and
+no other application, compiled-in helper or selected provider starts. The mode is a deployment
+policy, not a manifest field: `Launch` of any other app is refused, an unknown ID fails startup,
+and Stop keeps the normal selected-provider restart rule. An app's own
+`restart_on_failure` contract and the normal Web UI remain in effect unless the operator also
+disables the UI with an empty `-web-addr`.
+
 ## Graceful shutdown: what an app must do
 
 Every terminal path — stop request, lost connection, crash — must leave the framework able to

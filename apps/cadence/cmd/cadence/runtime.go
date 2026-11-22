@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -60,6 +62,12 @@ type runtime struct {
 	model    string
 	assets   string
 	runCtx   context.Context
+	// settingsWait bounds how long a stale enrollment retry waits for the
+	// pushed settings event to reach the authoritative revision.
+	settingsWait time.Duration
+	// startEnrollment launches one planned exchange. It is a test seam; the
+	// production path starts a goroutine.
+	startEnrollment func(*enrollment)
 	// validateCA is the SDK's trust-root parser, bound to env. It is a seam so
 	// the rejection path can be tested without loading the native library.
 	validateCA func([]byte) error
@@ -106,7 +114,8 @@ func newRuntime(ctx context.Context, client *capsulad.Client, env capsulad.Env, 
 	r := &runtime{
 		caller: client, env: env, log: logger, redactor: redactor,
 		link: linkClient, model: model, assets: assets, runCtx: ctx,
-		validateCA: func(pem []byte) error { return validateTrustRoots(env, pem) },
+		settingsWait: 2 * time.Second,
+		validateCA:   func(pem []byte) error { return validateTrustRoots(env, pem) },
 	}
 	r.current.Store(&settings.Config{HoldTail: time.Second, FollowUp: true})
 	return r
@@ -158,6 +167,21 @@ func enrollmentKey(cfg settings.Config, board string) string {
 	return cfg.BaseURL + "\x00" + board + "\x00" + cfg.EnrollCode + "\x00" + hex.EncodeToString(sum[:])
 }
 
+// sameRuntimeConfig reports whether two parsed snapshots describe the same
+// link, enrollment and turn configuration. Status-only updates parse to the
+// same Config; they must not republish (and wake) the link or invalidate an
+// in-flight enrollment's compare-and-swap revision.
+func sameRuntimeConfig(a, b settings.Config) bool {
+	return a.BaseURL == b.BaseURL &&
+		a.Token == b.Token &&
+		a.EnrollCode == b.EnrollCode &&
+		a.Board == b.Board &&
+		a.HoldTail == b.HoldTail &&
+		a.FollowUp == b.FollowUp &&
+		a.Configured == b.Configured &&
+		bytes.Equal(a.CAPEM, b.CAPEM)
+}
+
 // applySettings validates one app-private settings snapshot and installs it.
 // A malformed value keeps the previous configuration and logs why; the token
 // and the enrollment code are never logged.
@@ -203,6 +227,24 @@ func (r *runtime) applySettings(sc *capsulad.SettingsChanged) {
 
 	r.mu.Lock()
 	next, r.held = mergeHeldToken(next, r.held)
+	if r.publishedRev != 0 && sameRuntimeConfig(*r.current.Load(), next) {
+		if sc.Revision != 0 && sc.Revision > r.publishedRev {
+			r.publishedRev = sc.Revision
+		}
+		r.mu.Unlock()
+		// The config is unchanged, but a re-saved enrollment code must still
+		// retry a failed exchange. planEnrollment is a no-op for a same-key
+		// live attempt and starts a fresh one when none is running.
+		start, cancelOld := r.planEnrollment(next, sc.Revision)
+		if cancelOld != nil {
+			cancelOld()
+		}
+		if start != nil {
+			r.launchEnrollment(start)
+		}
+		r.log.Printf("settings applied: no runtime change")
+		return
+	}
 	published := r.publishLocked(next, sc.Revision)
 	r.mu.Unlock()
 	if !published {
@@ -225,8 +267,21 @@ func (r *runtime) applySettings(sc *capsulad.SettingsChanged) {
 		cancelOld()
 	}
 	if start != nil {
-		go r.runEnrollment(start)
+		r.launchEnrollment(start)
 	}
+}
+
+// launchEnrollment starts one planned exchange. Tests substitute startEnrollment
+// to observe the planned attempt without contacting a server.
+func (r *runtime) launchEnrollment(e *enrollment) {
+	if e == nil {
+		return
+	}
+	if r.startEnrollment != nil {
+		r.startEnrollment(e)
+		return
+	}
+	go r.runEnrollment(e)
 }
 
 // planEnrollment keeps one exchange per server/board/code/CA. A settings
@@ -310,9 +365,9 @@ func (r *runtime) runEnrollment(e *enrollment) {
 }
 
 // finishEnrollment checks the exchange still owns the live inputs, then commits
-// the token and the spent-code clear in one CAS. A stale revision means the
-// settings changed while the request was in flight: the answer is dropped
-// rather than writing one server's token into another server's configuration.
+// the token and the spent-code clear. A stale revision caused by a status-only
+// write is retried against the fresh revision; a changed enrollment input
+// aborts, so one server's token is never written into another's configuration.
 func (r *runtime) finishEnrollment(e *enrollment, creds enroll.Credentials) {
 	r.mu.Lock()
 	if r.enroll != e || e.ctx.Err() != nil {
@@ -329,13 +384,13 @@ func (r *runtime) finishEnrollment(e *enrollment, creds enroll.Credentials) {
 	e.committing = true
 	r.mu.Unlock()
 
-	err := r.commitEnrollment(e.ctx, creds.Token, revision)
+	nextRevision, err := r.commitEnrollment(e.ctx, e, creds.Token, revision)
 	r.mu.Lock()
 	e.committing = false
 	r.mu.Unlock()
 	if err != nil {
 		if e.ctx.Err() == nil {
-			if staleRevision(err) {
+			if errors.Is(err, errEnrollmentSuperseded) || staleRevision(err) {
 				r.log.Printf("enroll_superseded: settings changed during enrollment; the token was not stored and the spent code needs a new one")
 			} else {
 				r.log.Printf("enroll_warning: the token could not be stored (%v); it is not used", err)
@@ -359,7 +414,7 @@ func (r *runtime) finishEnrollment(e *enrollment, creds enroll.Credentials) {
 		return
 	}
 	current = *r.current.Load()
-	if enrollmentKey(current, e.board) != e.key {
+	if enrollmentKey(current, e.board) != e.key || current.Token != e.cfg.Token {
 		r.enroll = nil
 		r.mu.Unlock()
 		return
@@ -369,7 +424,8 @@ func (r *runtime) finishEnrollment(e *enrollment, creds enroll.Credentials) {
 	next.EnrollCode = ""
 	next.Configured = true
 	r.held = heldToken{token: creds.Token, code: e.cfg.EnrollCode, base: e.cfg.BaseURL}
-	r.publishLocked(next, e.revision)
+	r.storeRevision(nextRevision)
+	r.publishLocked(next, nextRevision)
 	r.enroll = nil
 	r.mu.Unlock()
 }
@@ -403,26 +459,235 @@ func (r *runtime) endAttempt(e *enrollment) {
 	r.mu.Unlock()
 }
 
+// errEnrollmentSuperseded means the settings inputs changed while the
+// enrollment retry was running. The obtained token is not stored into a
+// different configuration.
+var errEnrollmentSuperseded = errors.New("enrollment superseded by a newer settings change")
+
 // commitEnrollment is the single compare-and-swap that stores the token and
 // clears the code that produced it. The revision is the one from the settings
-// snapshot whose inputs the exchange used; any intervening change makes the
-// update stale and it is discarded.
-func (r *runtime) commitEnrollment(ctx context.Context, token string, revision uint64) error {
+// snapshot whose inputs the exchange used; a concurrent settings write
+// (including last_test_status) makes that update stale, so the already-obtained
+// token is retried against the fresh revision rather than re-spending the code.
+func (r *runtime) commitEnrollment(ctx context.Context, e *enrollment, token string, revision uint64) (uint64, error) {
 	if r.env.AppID == "" {
-		return errors.New("no framework application identity")
+		return 0, errors.New("no framework application identity")
 	}
 	if revision == 0 {
-		return errors.New("no settings revision")
+		return 0, errors.New("no settings revision")
 	}
 	tokenJSON, err := json.Marshal(token)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = r.update(ctx, revision, []any{
+	changes := []any{
 		map[string]any{"key": settings.KeyDeviceToken, "valueJson": string(tokenJSON)},
 		map[string]any{"key": settings.KeyEnrollCode, "clear": true},
-	})
-	return err
+	}
+	var lastErr error
+	for attempt := range 4 {
+		if attempt > 0 {
+			snapshot, err := r.settingsRevision(ctx)
+			if err != nil {
+				return 0, err
+			}
+			revision = snapshot.revision
+			// Never CAS a masked input the process has not observed. Wait for
+			// the pushed settings event to reach this revision; a replaced
+			// enroll_code is only visible in the local app-private snapshot.
+			if !r.waitForAppliedRevision(ctx, revision) {
+				return 0, errEnrollmentSuperseded
+			}
+			r.mu.Lock()
+			local := *r.current.Load()
+			ours := r.enroll == e && e.ctx.Err() == nil &&
+				local.BaseURL == e.cfg.BaseURL &&
+				local.Board == e.cfg.Board &&
+				local.EnrollCode == e.cfg.EnrollCode &&
+				local.Token == e.cfg.Token &&
+				bytes.Equal(local.CAPEM, e.cfg.CAPEM)
+			r.mu.Unlock()
+			// The authoritative snapshot, not just the lagging local copy,
+			// decides whether this enrollment still describes the stored
+			// inputs. A concurrent admin edit must not be clobbered by the
+			// retry. The local check catches a masked change whose app-private
+			// event has now arrived.
+			if !ours || !r.enrollmentInputsMatch(e, snapshot) {
+				return 0, errEnrollmentSuperseded
+			}
+		}
+		newRevision, err := r.update(ctx, revision, changes)
+		if err == nil {
+			return newRevision, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || !staleRevision(err) {
+			return 0, err
+		}
+	}
+	return 0, lastErr
+}
+
+// waitForAppliedRevision waits, bounded, for the pushed settings event at
+// revision to be applied locally. publishedRev only advances after the snapshot
+// has been parsed and installed (or accepted as a no-runtime-change update).
+func (r *runtime) waitForAppliedRevision(ctx context.Context, revision uint64) bool {
+	if revision == 0 {
+		return false
+	}
+	wait := r.settingsWait
+	if wait <= 0 {
+		wait = 2 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		r.mu.Lock()
+		applied := r.publishedRev
+		r.mu.Unlock()
+		if applied >= revision {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		pause := 25 * time.Millisecond
+		if remaining < pause {
+			pause = remaining
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+type snapshotValue struct {
+	valueJSON string
+	hasValue  bool
+}
+
+// settingsSnapshot is the authoritative app-settings read. The Get contract
+// redacts masked values, so enroll_code and device_token are represented by
+// presence; the non-masked inputs are exact.
+type settingsSnapshot struct {
+	revision uint64
+	values   map[string]snapshotValue
+}
+
+func (s settingsSnapshot) text(key string) string {
+	entry, ok := s.values[key]
+	if !ok || entry.valueJSON == "" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal([]byte(entry.valueJSON), &text); err != nil {
+		return ""
+	}
+	return text
+}
+
+func (s settingsSnapshot) has(key string) bool {
+	entry, ok := s.values[key]
+	return ok && entry.hasValue
+}
+
+// settingsRevision reads the authoritative app-settings revision and values so
+// a stale enrollment commit can be retried only when its inputs are unchanged.
+func (r *runtime) settingsRevision(ctx context.Context) (settingsSnapshot, error) {
+	if r.env.AppID == "" {
+		return settingsSnapshot{}, errors.New("no framework application identity")
+	}
+	request := map[string]any{"appId": r.env.AppID}
+	var response map[string]any
+	callCtx, cancel := context.WithTimeout(ctx, settingsCallTimeout)
+	defer cancel()
+	if err := r.caller.CallJSON(callCtx, "", configService, "Get", request, &response, settingsCallTimeout); err != nil {
+		return settingsSnapshot{}, err
+	}
+	revision, ok := revisionOf(response["revision"])
+	if !ok || revision == 0 {
+		return settingsSnapshot{}, errors.New("settings snapshot has no revision")
+	}
+	snapshot := settingsSnapshot{revision: revision, values: map[string]snapshotValue{}}
+	if values, ok := response["values"].([]any); ok {
+		for _, raw := range values {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			key, _ := entry["key"].(string)
+			if key == "" {
+				continue
+			}
+			valueJSON, _ := entry["valueJson"].(string)
+			hasValue, _ := entry["hasValue"].(bool)
+			snapshot.values[key] = snapshotValue{valueJSON: valueJSON, hasValue: hasValue}
+		}
+	}
+	return snapshot, nil
+}
+
+// enrollmentInputsMatch compares the authoritative snapshot to the configuration
+// that started the exchange. Masked code/token values are compared by presence
+// because Get redacts them; server, board and CA are compared by value.
+func (r *runtime) enrollmentInputsMatch(e *enrollment, snapshot settingsSnapshot) bool {
+	if normalizedServerURL(snapshot.text(settings.KeyServerURL)) != e.cfg.BaseURL {
+		return false
+	}
+	board := strings.TrimSpace(snapshot.text(settings.KeyBoard))
+	if board == "" {
+		board = settings.BoardAuto
+	}
+	if board != e.cfg.Board {
+		return false
+	}
+	if !r.sameCA(e.cfg.CAPEM, snapshot.text(settings.KeyCAPEM)) {
+		return false
+	}
+	if snapshot.has(settings.KeyEnrollCode) != (e.cfg.EnrollCode != "") {
+		return false
+	}
+	tokenPresent := snapshot.has(settings.KeyDeviceToken) ||
+		strings.TrimSpace(snapshot.text(settings.KeyDeviceTokenFile)) != ""
+	return tokenPresent == (e.cfg.Token != "")
+}
+
+func normalizedServerURL(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+	u, err := url.Parse(text)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "\x00invalid"
+	}
+	return u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/")
+}
+
+func (r *runtime) sameCA(current []byte, raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return len(current) == 0
+	}
+	if strings.Contains(raw, "-----BEGIN") {
+		return bytes.Equal([]byte(raw), current)
+	}
+	rel, err := settings.NormalizeAssetPath(raw)
+	if err != nil {
+		return false
+	}
+	pemBytes, err := settings.ReadAssetFile(r.assets, rel)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(pemBytes, current)
 }
 
 // update performs one compare-and-swap update and returns the new revision.
@@ -471,4 +736,125 @@ func staleRevision(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "stale") || strings.Contains(text, "aborted")
+}
+
+// testConnection checks DNS, TCP and TLS to the configured server without a
+// device token. It is the pre-enrollment step: it proves the URL and the CA
+// trust roots work before a one-time code is spent. The test itself opens no
+// device link; the non-secret outcome is also written to last_test_status for
+// the app's own settings page.
+func (r *runtime) testConnection(ctx context.Context) error {
+	err := r.probeConnection(ctx)
+	r.writeTestStatus(err)
+	return err
+}
+
+func (r *runtime) probeConnection(ctx context.Context) error {
+	cfg := r.config()
+	if cfg.BaseURL == "" {
+		err := errors.New("no Cadence server URL configured")
+		r.log.Printf("test_failed: %v", err)
+		return err
+	}
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || u.Hostname() == "" {
+		err = errors.New("the Cadence server URL is not valid")
+		r.log.Printf("test_failed server=%s: %v", redact.URL(cfg.BaseURL), err)
+		return err
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		err = errors.New("the Cadence server URL has an invalid port")
+		r.log.Printf("test_failed server=%s: %v", redact.URL(cfg.BaseURL), err)
+		return err
+	}
+	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	stream, err := capsulad.OpenTCP(testCtx, r.env, u.Hostname(), uint16(portNumber), capsulad.TCPOptions{
+		TLS:        u.Scheme == "https",
+		Roots:      "system",
+		CAPEM:      cfg.CAPEM,
+		ServerName: u.Hostname(),
+	})
+	if err != nil {
+		r.log.Printf("test_failed server=%s: %v", redact.URL(cfg.BaseURL), err)
+		return err
+	}
+	_ = stream.Close()
+	r.log.Printf("test_ok server=%s", redact.URL(cfg.BaseURL))
+	return nil
+}
+
+// writeTestStatus persists the last connection-test outcome. It is a separate
+// non-secret setting so the settings page can show the result without reading
+// the app log; a stale revision is retried, and a persistent failure is logged
+// rather than overwriting a newer revision. The stored text never carries a
+// token or an enrollment code.
+func (r *runtime) writeTestStatus(probeErr error) {
+	if r.env.AppID == "" {
+		return
+	}
+	status := "test_ok"
+	if probeErr != nil {
+		reason := strings.Join(strings.Fields(r.redactor.Error(probeErr)), " ")
+		if reason == "" {
+			reason = "connection failed"
+		}
+		if runes := []rune(reason); len(runes) > 240 {
+			reason = string(runes[:240]) + "…"
+		}
+		status = "test_failed: " + reason
+	}
+	valueJSON, err := json.Marshal(status)
+	if err != nil {
+		return
+	}
+	base := r.runCtx
+	if base == nil {
+		base = context.Background()
+	}
+	revision := r.revision.Load()
+	for range 2 {
+		if revision == 0 {
+			return
+		}
+		newRevision, updateErr := r.putTestStatus(base, revision, valueJSON)
+		if updateErr == nil {
+			r.storeRevision(newRevision)
+			return
+		}
+		if base.Err() != nil || !staleRevision(updateErr) {
+			r.log.Printf("test_status: the result could not be stored: %v", r.redactor.Error(updateErr))
+			return
+		}
+		snapshot, err := r.settingsRevision(base)
+		if err != nil {
+			r.log.Printf("test_status: could not read the fresh settings revision: %v", r.redactor.Error(err))
+			return
+		}
+		revision = snapshot.revision
+	}
+	r.log.Printf("test_status: the result could not be stored; a newer settings revision won")
+}
+
+func (r *runtime) putTestStatus(base context.Context, revision uint64, valueJSON []byte) (uint64, error) {
+	ctx, cancel := context.WithTimeout(base, settingsCallTimeout)
+	defer cancel()
+	return r.update(ctx, revision, []any{
+		map[string]any{"key": settings.KeyLastTestStatus, "valueJson": string(valueJSON)},
+	})
+}
+
+func (r *runtime) storeRevision(revision uint64) {
+	if revision > r.revision.Load() {
+		r.revision.Store(revision)
+	}
 }

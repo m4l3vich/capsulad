@@ -496,7 +496,7 @@ if !authorized {
 
 | Helper | Purpose |
 |---|---|
-| `OpenPresentation(ctx, resourceID)` → `*Presentation` | publish output; `Segment`, `Ring`, `Effect`, `Face`, `Blank`, `Close`, `ID`, `Visible` |
+| `OpenPresentation(ctx, resourceID)` → `*Presentation` | publish output; `Segment`, `SegmentDots`, `Ring`, `Effect`, `Face`, `Blank`, `Close`, `ID`, `Visible` |
 | `ListPresets(ctx, resourceID)` | built-in effects and faces with typed parameters |
 | `OpenCapture(ctx, resourceID, presentationID, mode)` → `*Capture` | routing capture; `Events()`, `Info()`, `Close()` |
 | `WatchInput(ctx, captureID)` → `*InputStream` | touch/gesture stream; `Events()`, `Done()`, `Close()` |
@@ -1018,10 +1018,17 @@ Limits and environment:
 
 - 64 MiB JS heap, 1 MiB stack, script file at most 8 MiB.
 - No timers (`setTimeout`/`setInterval`), no threads, no `require`, and no general filesystem
-  API. The only file access is `capsulad.readPackageFile(path)`: it reads one regular file
-  below `capsulad.env.appDir`, using a slash-relative path with no empty, `.` or `..`
-  components, up to 8 MiB. It returns a `Uint8Array` and throws a catchable `Error` for a bad
-  path, a missing file or a non-regular file. There is no directory listing and no write.
+  API. File access is limited to two bounded readers:
+  - `capsulad.readPackageFile(path)` reads one regular file below `capsulad.env.appDir`,
+    using a slash-relative path with no empty, `.` or `..` components, up to 8 MiB.
+  - `capsulad.readAssetFile(path)` reads one regular file from the shared asset store, using
+    the canonical app path `/assets/<asset-id>` (no host path), up to 32 MiB. The store root
+    is taken from `CAPSULAD_ASSETS`; a target outside that root, a symlinked path component or
+    a non-regular file is refused. The host opens each component with `O_NOFOLLOW` and reads
+    the same descriptor it validated.
+
+  Both return a `Uint8Array` and throw a catchable `Error` for a bad path, a missing file, a
+  non-regular file or an oversized file. There is no directory listing and no write.
   `Date.now()` and plain computation work. A script that has to animate spins on `Date.now()`
   and can poll a stream with `Call.tryRecv`, which waits for a bounded slice and reports "no
   message yet" as `undefined`; that keeps the panel responsive while the animation runs. A
@@ -1064,6 +1071,7 @@ var wav = capsulad.readPackageFile("audio/ding.wav");
 | `capsulad.notifyAction(id, succeeded, detail?)` | — | Reports an action outcome. |
 | `capsulad.registerDescriptors(bytes)` | — | Enables the JSON path for your own messages. |
 | `capsulad.readPackageFile(path)` | → `Uint8Array` | Reads one regular file below `capsulad.env.appDir`; slash-relative path, no `..`, at most 8 MiB. Throws a catchable `Error` on failure. |
+| `capsulad.readAssetFile(path)` | → `Uint8Array` | Reads one regular file from the shared store by canonical `/assets/<asset-id>` path; at most 32 MiB, no host path or escape. Throws a catchable `Error` on failure. |
 | `capsulad.info()`, `capsulad.handleInfo(handle)` | → object | Diagnostics. |
 | `capsulad.state()`, `.ready()`, `.connected()`, `.disconnected()` | — | Bus state. |
 | `capsulad.env` | object | `{socket, runId, appId, sdk, library, appDir}`. |

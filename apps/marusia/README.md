@@ -7,9 +7,13 @@ sends microphone audio to the configured vendor endpoint and plays the returned
 TTS reply. The rest of this page documents the implementation, wire protocol and
 recovered evidence for maintainers.
 
-- **Before selecting it:** provision a valid vendor session or `xtoken_id`, and
-  check the *Service endpoint*. **Test 2** and a custom `http://` base send the
-  session and microphone audio without TLS; use them only on a trusted LAN.
+- **Before selecting it:** open **Apps → Marusia → Details** and use the app's own
+  **Settings** page. Paste a fresh VK access token or OAuth redirect URL into the always-empty
+  field; the app exchanges it automatically for a session. The page also shows the current
+  authorization state and the last result without ever displaying the stored secret. Provision
+  a valid vendor session or `xtoken_id`, and check the *Service endpoint*. **Test 2** and a
+  custom `http://` base send the session and microphone audio without TLS; use them only on a
+  trusted LAN.
 - **Select it:** open **Settings → Voice assistant** and choose Marusia.
   Selection starts the app. Choosing another assistant, or **none**, leaves it
   stopped.
@@ -63,6 +67,7 @@ A turn sends the following to the configured vendor endpoint:
 | Device id: the `device_id` setting, else the framework's `DeviceService.GetInfo` `device_id`, else a per-process UUID | gRPC `x-device-id` | the identity the vendor expects |
 | Client version (`44.91` by default) | gRPC `x-device-ver`, `DeviceInfo.version` | client identity |
 | `xtoken_id` (the configured value, possibly empty) | attach body `{"serial", "with_secret", "xtoken_id"}` | provisioning credential; only used when no session is configured or readable |
+| `vk_access_token`, when set for reauthorization | VK `users.get` and the configured vendor `/registration/by_vk` and `/registration/get_session` endpoints | exchanges the one-shot token for a session; never logged and cleared after use |
 | Session id and session secret from the `session_id`/`session_secret` settings, else the vendor session file, else the attach reply | gRPC metadata (`x-session-id`, `authorization: Bearer …`) | runtime credential, held in memory only |
 | A fresh request UUID | gRPC `x-client-request-id` on every RPC | request correlation |
 | Client capability payload: the `capabilities_json` setting, default `{"capabilities_hex":"31c0255a004201d1408a235de880400000"}` | `SpeechRequestInit.client_options.capabilities.json` | the device capability token the shipped firmware advertised on `/connect`; the field the previous build omitted |
@@ -133,14 +138,28 @@ refreshed settings push or a refreshed file is picked up. The `reauth` action
 validates the configured session (or attaches when there is none) and reports one
 line.
 
+When `vk_access_token` changes to a new non-empty value (including a redirect URL
+that carries one), the app automatically exchanges it with VK and this
+deployment's `/registration/by_vk` and `/registration/get_session` endpoints,
+validates the returned session against the configured endpoint, stores
+`session_id` and `session_secret`, and clears the one-shot token. The token is
+masked, never logged, never read back by the settings page and never included in
+an error. It is deliberately not exchanged when it was already present in the
+initial settings snapshot; the app's **Re-run device attach** action is the
+retry path, and it keeps working. A failed exchange leaves the token pending,
+writes a short credential-free `last_auth_status`, and does not retry silently.
+
 ### What expires
 
 The vendor session is a bearer credential tied to the vendor account. It ends when
 the vendor revokes it: a password/account change, a "log out of all devices", or
 the session's own lifetime. When that happens the service answers `UNAUTHENTICATED`
 and the app logs one line telling the operator to reload the session. Recovery is
-always an operator action — there is nothing on the device that can mint a new
-session, and `xtoken_id` is a manufacturing credential this unit does not hold.
+an operator action: paste a fresh VK access token or redirect URL in Marusia's own
+**Settings** page (**Apps → Marusia → Details**) and submit it, or run
+**Re-run device attach** in the Actions list, or set `session_id` and
+`session_secret` directly. `xtoken_id` is a manufacturing credential this unit
+does not hold.
 
 ## Settings
 
@@ -148,9 +167,11 @@ session, and `xtoken_id` is a manufacturing credential this unit does not hold.
 |---|---|---|
 | `endpoint` | `prod` | one of the five recovered deployments; `test2` is plaintext `http://` and triggers the startup warning |
 | `endpoint_custom` | empty | overrides `endpoint`; `http(s)://host[:port]` with no path; an `http://` base triggers the same warning |
+| `vk_access_token` | empty | one-shot VK access token or OAuth redirect URL; a newly submitted value is exchanged automatically (or by `reauth`), masked, never logged, and cleared after the session is stored |
 | `session_id` | empty | vendor session id; masked. Must be supplied together with `session_secret` |
 | `session_secret` | empty | vendor bearer secret; masked, never logged |
 | `session_file` | `/data/voice-agent/session.json` | best-effort fallback source; the sibling `device_settings.json` supplies `general.id` |
+| `last_auth_status` | empty | written by the app after an exchange or attach: `ok: …` or `failed: …` with a short credential-free reason; non-secret, never used as input |
 | `xtoken_id` | empty | manufacturing/provisioning credential, masked; only used by the attach path, i.e. when no session exists |
 | `serial` | empty | optional override for the SoC serial; an explicit value wins over `CAPSULAD_DEVICE_SERIAL`, framework `hardware_serial`, and `/proc/cpuinfo`. If none is available, `x-device-sn` is empty and the vendor rejects the turn with a message naming this setting |
 | `device_id` | empty | stable `x-device-id`, masked; also the HTTP identity |
@@ -347,6 +368,9 @@ make marusia        # package beside build/apps/org.capsulad.marusia/ as an arch
 make test-marusia   # the module's tests from the repository root
 ```
 
+The package stages `ui/settings.html` beside the binary, manifest and guide; the
+packager validates that document (`.html`, regular file, valid UTF-8, at most
+512 KiB, with at least one declared setting).
 `make marusia` needs `capsulad-cli` (the target builds the host copy when
 cross-compiling). No test contacts an external host: the protocol tests use
 in-process TLS listeners on loopback, and the turn tests use fake streams and
@@ -521,6 +545,10 @@ payload is known.
 
 Unproven, and therefore not claimed by the app:
 
+- **Live VK reauthorization.** The `vk_access_token` exchange mirrors the
+  reference setup script's `users.get`, `registration/by_vk` and
+  `registration/get_session` calls. No live vendor registration was run from
+  this tree.
 - **Opus TTS.** The stock log's `tts` command carried `encoder:"opus"`; the
   2026-11-21 result used `encoder:null` and `/stream` returned `audio/l16`. This
   build plays WAV and `audio/l16`; an Opus body remains undecoded and fails with

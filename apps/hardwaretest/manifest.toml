@@ -1,0 +1,20 @@
+id = "org.capsulad.hardwaretest"
+name = "Hardware Test"
+version = "0.1.0"
+description = "Foreground hardware test for Capsula Mini: 12:34 with independent upper/lower colon blinks, a clockwise rainbow ring chase, a 20% 440 Hz tone checked through the microphone with a red ring failure flash, and a full-panel touch capture that shows 1-5 for the held key. See README.md."
+# The test runs until the app is stopped. It is not a boot app and a clean exit
+# must not be relaunched.
+background = false
+start_on_boot = false
+restart_on_failure = false
+
+[entrypoint]
+runtime = "native"
+path = "bin/hardwaretest"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+[native_sdk]
+abi_major = 1
+min_minor = 0

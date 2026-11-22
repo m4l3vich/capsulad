@@ -202,6 +202,15 @@ func TestPresentationRequestEnvelopes(t *testing.T) {
 	if !strings.Contains(string(frame), `"frame":{"segment":{"cells":[{"mask":1}],"colon":true}}`) {
 		t.Fatalf("frame envelope = %s", frame)
 	}
+	dots, err := marshalProtoJSON(presentationRequest{Frame: &presentationFrame{
+		Segment: &segmentFrame{Cells: []segmentCell{{Mask: 1}}, ColonTop: true},
+	}})
+	if err != nil {
+		t.Fatalf("dots: %v", err)
+	}
+	if !strings.Contains(string(dots), `"frame":{"segment":{"cells":[{"mask":1}],"colonTop":true}}`) {
+		t.Fatalf("dot frame envelope = %s", dots)
+	}
 	closeRequest, err := marshalProtoJSON(presentationRequest{Close: &blankFrame{}})
 	if err != nil {
 		t.Fatalf("close: %v", err)

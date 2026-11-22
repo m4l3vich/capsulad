@@ -45,7 +45,8 @@ type lastWrite struct {
 	pixels       []backend.RGB
 	blankCells   []uint16
 	blankPixels  []backend.RGB
-	colon        bool
+	colonTop     bool
+	colonBottom  bool
 	brightness   float64
 	presentation string
 	capture      string
@@ -108,24 +109,29 @@ func (d *Daemon) outputLoop() {
 			brightnessChanged := !lw.valid || lw.brightness != b
 			if seg != nil {
 				var cells []uint16
-				var colon, rendered bool
+				var colonTop, colonBottom, rendered bool
 				if p != nil {
-					cells, colon, rendered = p.RenderSegment(seg.Caps())
+					cells, colonTop, colonBottom, rendered = p.RenderSegment(seg.Caps())
 				}
 				if !rendered {
 					if lw.blankCells == nil {
 						lw.blankCells = make([]uint16, seg.Caps().DigitCount)
 					}
-					cells, colon = lw.blankCells, false
+					cells, colonTop, colonBottom = lw.blankCells, false, false
 				}
-				if !ownershipChanged && !brightnessChanged && colon == lw.colon && slices.Equal(cells, lw.cells) {
+				if !ownershipChanged && !brightnessChanged &&
+					colonTop == lw.colonTop && colonBottom == lw.colonBottom &&
+					slices.Equal(cells, lw.cells) {
 					continue
 				}
-				if err := seg.WriteSegment(backend.SegmentFrame{Cells: cells, Colon: colon, Brightness: b}); err != nil {
+				if err := seg.WriteSegment(backend.SegmentFrame{
+					Cells: cells, Colon: colonTop && colonBottom,
+					ColonTop: colonTop, ColonBottom: colonBottom, Brightness: b,
+				}); err != nil {
 					d.logWriteError(lw, info.ResourceId, err)
 					continue
 				}
-				lw.cells, lw.colon = cells, colon
+				lw.cells, lw.colonTop, lw.colonBottom = cells, colonTop, colonBottom
 			}
 			if ring != nil {
 				var pixels []backend.RGB
@@ -162,8 +168,8 @@ func (d *Daemon) outputLoop() {
 						key, emptyDash(sel.SelectedPresentation), emptyDash(sel.SelectedCaptureID), b, lw.pixels)
 				} else {
 					d.logs.Infof("output", sel.SelectedAppID,
-						"%s wrote presentation=%s capture=%s brightness=%.4f cells=%v colon=%v",
-						key, emptyDash(sel.SelectedPresentation), emptyDash(sel.SelectedCaptureID), b, lw.cells, lw.colon)
+						"%s wrote presentation=%s capture=%s brightness=%.4f cells=%v colon_top=%v colon_bottom=%v",
+						key, emptyDash(sel.SelectedPresentation), emptyDash(sel.SelectedCaptureID), b, lw.cells, lw.colonTop, lw.colonBottom)
 				}
 			}
 		}
@@ -225,9 +231,9 @@ func (d *Daemon) indicationActive(appID string) bool {
 				}
 			}
 		} else if d.dev.Segment() != nil {
-			cells, colon, rendered := p.RenderSegment(d.dev.Segment().Caps())
+			cells, colonTop, colonBottom, rendered := p.RenderSegment(d.dev.Segment().Caps())
 			if rendered {
-				if colon {
+				if colonTop || colonBottom {
 					return true
 				}
 				for _, cell := range cells {

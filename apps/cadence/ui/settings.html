@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cadence Client</title>
+</head>
+<body>
+<main class="capsulad-ui p-3">
+  <div class="flex flex-col gap-3">
+    <div class="alert" id="notice" role="status" aria-live="polite" hidden></div>
+
+    <section id="not-enrolled" class="flex flex-col gap-3" hidden>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body gap-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h2 class="card-title">Set up Cadence Client</h2>
+              <p class="text-sm text-base-content/60">Enroll this speaker with a self-hosted Cadence server. The server URL, trust roots and one-time code are checked in order; enrollment stores a device token and clears the code.</p>
+            </div>
+            <span class="badge badge-ghost shrink-0">Not enrolled</span>
+          </div>
+
+          <div class="alert" id="setup-status" role="status" aria-live="polite" hidden></div>
+
+          <div class="flex flex-col gap-3">
+            <label class="form-control">
+              <span class="label-text">1. Cadence server URL</span>
+              <input id="server-url" type="text" class="input input-bordered w-full font-mono" spellcheck="false" placeholder="https://cadence.example.com">
+              <span class="label-text-alt">The device link is opened at &lt;server_url&gt;/v2/device. A path prefix is allowed.</span>
+            </label>
+
+            <div class="form-control" id="ca-step" hidden>
+              <span class="label-text">2. TLS CA certificate (asset path or pasted PEM)</span>
+              <input id="ca-pem" type="text" class="input input-bordered w-full font-mono" spellcheck="false" placeholder="/assets/cadence/ca.pem">
+              <span class="label-text-alt">Upload the server's CA to the Assets page as <span class="font-mono">cadence/ca.pem</span>. The default is <span class="font-mono">/assets/cadence/ca.pem</span>; leave empty to trust the system store only.</span>
+            </div>
+
+            <div class="alert alert-warning" id="plaintext-warning" hidden>This URL uses plain <span class="font-mono">http://</span>. The device token, enrollment code and microphone audio will travel unencrypted on this network.</div>
+
+            <div class="form-control">
+              <span class="label-text">3. Test the connection</span>
+              <p class="text-sm text-base-content/60">Save the server URL and CA first, then run <span class="font-mono" id="test-action-label">Test connection</span> in the Actions list below this document. It checks DNS, TCP and TLS without spending the enrollment code.</p>
+              <div class="flex flex-wrap items-center gap-2 mt-1">
+                <button id="save-connection" type="button" class="btn btn-ghost btn-sm">Save server URL and CA</button>
+              </div>
+              <div class="alert mt-1" id="test-status" role="status" hidden></div>
+            </div>
+
+            <div class="form-control">
+              <span class="label-text">4. Enrollment code</span>
+              <input id="enroll-code" type="password" class="input input-bordered w-full font-mono" autocomplete="new-password" spellcheck="false" placeholder="One-time code from the Cadence dashboard">
+              <span class="label-text-alt">Single use and expires after 30 minutes. The app exchanges it, stores the device token and clears this code. It is never shown again.</span>
+              <div class="flex flex-wrap items-center gap-2 mt-1">
+                <button id="save-enroll" type="button" class="btn btn-primary btn-sm">Save and enroll</button>
+                <button id="clear-enroll" type="button" class="btn btn-ghost btn-sm" hidden>Clear pending code</button>
+                <span class="text-xs text-base-content/60" id="enroll-hint"></span>
+              </div>
+            </div>
+
+            <div class="form-control">
+              <span class="label-text">5. Enrollment status</span>
+              <div class="alert mt-1" id="enroll-status" role="status" aria-live="polite" hidden></div>
+            </div>
+
+            <div class="card bg-base-200 border border-base-300">
+              <div class="card-body gap-2 p-3">
+                <h3 class="font-semibold">6. Connect an MCP client</h3>
+                <p class="text-sm text-base-content/60">In the Cadence dashboard, create an API key. Copy capsulad's CA certificate into the cadence-server deployment's <span class="font-mono">./data/ca-certs/</span>, then add the MCP server in the dashboard with that key and the server's CA.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="enrolled" class="flex flex-col gap-3" hidden>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body gap-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h2 class="card-title">Cadence connection</h2>
+              <p class="text-sm text-base-content/60">This speaker has a stored device credential. The controls below take effect live; the token itself is never shown.</p>
+            </div>
+            <span class="badge badge-success shrink-0">Enrolled</span>
+          </div>
+
+          <div class="alert" id="enrolled-status" role="status" hidden></div>
+          <div id="enrolled-rows" class="grid grid-cols-1 gap-2 sm:grid-cols-2"></div>
+
+          <div class="divider"></div>
+
+          <div class="form-control">
+            <span class="label-text">Cadence board</span>
+            <select id="board" class="select select-bordered select-sm w-full"></select>
+            <span class="label-text-alt">Automatic reports VK Capsula Mini on the speaker and Simulator on the simulator. Match the dashboard's choice if a speaker was enrolled as Simulator.</span>
+          </div>
+
+          <div class="form-control">
+            <span class="label-text">Hold-release silence tail</span>
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="hold-tail" type="range" class="range range-primary range-sm w-full" min="0" max="5000" step="1">
+              <span class="badge badge-ghost" id="hold-tail-value">1000 ms</span>
+            </div>
+            <span class="label-text-alt">After a hold-to-talk release the client streams this much silence so the server closes the utterance. It is heard as latency.</span>
+          </div>
+
+          <label class="label cursor-pointer justify-start gap-3">
+            <input id="follow-up" type="checkbox" class="toggle toggle-primary toggle-sm">
+            <span class="label-text">Follow-up windows</span>
+          </label>
+          <span class="label-text-alt">Keep the microphone and indication open after a complete reply when the server offers a follow-up.</span>
+
+          <div class="alert" id="control-status" role="status" aria-live="polite" hidden></div>
+        </div>
+      </div>
+
+      <div class="card bg-base-100 border border-error">
+        <div class="card-body gap-3">
+          <h3 class="card-title">Reset this app</h3>
+          <p class="text-sm text-base-content/60">Clears every setting declared by Cadence Client on this speaker, including the masked token and enrollment code and the last test result. It does not contact or change the Cadence server, its enrollment records or its certificates.</p>
+          <div id="reset-confirm" hidden>
+            <div class="alert alert-warning">This cannot be undone on the speaker. Enroll again afterwards to reconnect.</div>
+            <div class="flex flex-wrap items-center gap-2 mt-2">
+              <button id="reset-cancel" type="button" class="btn btn-ghost btn-sm">Cancel</button>
+              <button id="reset-confirm-button" type="button" class="btn btn-error btn-sm">Yes, clear all settings</button>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="reset" type="button" class="btn btn-error btn-sm">Reset everything</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  var UI = window.CapsuladUI;
+  if (!UI) {
+    var notice = document.getElementById('notice');
+    notice.textContent = 'The settings bridge is unavailable.';
+    notice.hidden = false;
+    return;
+  }
+
+  var noticeEl = document.getElementById('notice');
+  var notEnrolledView = document.getElementById('not-enrolled');
+  var enrolledView = document.getElementById('enrolled');
+  var setupStatus = document.getElementById('setup-status');
+  var serverInput = document.getElementById('server-url');
+  var caStep = document.getElementById('ca-step');
+  var caInput = document.getElementById('ca-pem');
+  var plaintextWarning = document.getElementById('plaintext-warning');
+  var testStatus = document.getElementById('test-status');
+  var testActionLabel = document.getElementById('test-action-label');
+  var saveConnection = document.getElementById('save-connection');
+  var enrollInput = document.getElementById('enroll-code');
+  var saveEnroll = document.getElementById('save-enroll');
+  var clearEnroll = document.getElementById('clear-enroll');
+  var enrollHint = document.getElementById('enroll-hint');
+  var enrollStatus = document.getElementById('enroll-status');
+  var enrolledStatus = document.getElementById('enrolled-status');
+  var enrolledRows = document.getElementById('enrolled-rows');
+  var boardSelect = document.getElementById('board');
+  var holdTail = document.getElementById('hold-tail');
+  var holdTailValue = document.getElementById('hold-tail-value');
+  var followUp = document.getElementById('follow-up');
+  var controlStatus = document.getElementById('control-status');
+  var resetButton = document.getElementById('reset');
+  var resetConfirm = document.getElementById('reset-confirm');
+  var resetCancel = document.getElementById('reset-cancel');
+  var resetConfirmButton = document.getElementById('reset-confirm-button');
+
+  var schema = { settings: [], actions: [] };
+  var values = {};
+  var pendingPatches = {};
+  var sawPendingCode = false;
+  var enrollmentConfirmed = false;
+  var suppressEnrollError = false;
+  var enrollWaitStart = 0;
+  var waitTimer = 0;
+  var caTouched = false;
+  var lastSecureURL = false;
+  var controlsBuilt = false;
+
+  function setAlert(element, text, kind) {
+    element.textContent = text || '';
+    element.hidden = !text;
+    if (kind === 'ok') element.className = 'alert alert-success';
+    else if (kind === 'err') element.className = 'alert alert-error';
+    else if (kind === 'warn') element.className = 'alert alert-warning';
+    else if (kind === 'info') element.className = 'alert alert-info';
+    else element.className = 'alert';
+  }
+
+  function readValues(state) {
+    var map = {};
+    (state.values || []).forEach(function (entry) {
+      if (entry && entry.key) {
+        map[entry.key] = {
+          valueJson: typeof entry.valueJson === 'string' ? entry.valueJson : '',
+          hasValue: Boolean(entry.hasValue)
+        };
+      }
+    });
+    return map;
+  }
+
+  function storedText(entry) {
+    if (!entry || entry.valueJson === '') return '';
+    try {
+      var parsed = JSON.parse(entry.valueJson);
+      return typeof parsed === 'string' ? parsed : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function parsedValue(def, entry, fallback) {
+    if (entry && entry.hasValue) {
+      try { return JSON.parse(entry.valueJson); } catch (_) { /* fall through */ }
+    }
+    if (def && typeof def.defaultValueJson === 'string' && def.defaultValueJson !== '') {
+      try { return JSON.parse(def.defaultValueJson); } catch (_) { /* fall through */ }
+    }
+    return fallback;
+  }
+
+  function settingDef(key) {
+    var found = null;
+    (schema.settings || []).forEach(function (def) {
+      if (def && def.key === key) found = def;
+    });
+    return found;
+  }
+
+  function sendPatch(changes, kind) {
+    var id = UI.patch(changes);
+    if (!id) {
+      var target = kind === 'control' ? controlStatus : (kind === 'reset' ? noticeEl : setupStatus);
+      setAlert(target, 'The settings host ignored the change; reload this page.', 'err');
+      return 0;
+    }
+    if (id) pendingPatches[id] = { kind: kind };
+    return id;
+  }
+
+  function infoRow(label, value, badgeClass) {
+    var row = document.createElement('div');
+    row.className = 'flex flex-col gap-1 rounded border border-base-300 p-2';
+    var title = document.createElement('span');
+    title.className = 'text-xs uppercase tracking-wide text-base-content/60';
+    title.textContent = label;
+    row.appendChild(title);
+    if (badgeClass) {
+      var badge = document.createElement('span');
+      badge.className = badgeClass;
+      badge.textContent = value;
+      row.appendChild(badge);
+    } else {
+      var text = document.createElement('span');
+      text.className = 'text-sm break-words font-mono';
+      text.textContent = value;
+      row.appendChild(text);
+    }
+    return row;
+  }
+
+  function isSecureURL(url) {
+    return String(url || '').trim().toLowerCase().indexOf('https://') === 0;
+  }
+
+  function looksLikeURL(url) {
+    return /^https?:\/\/[^\s/?#]+/i.test(String(url || '').trim());
+  }
+
+  function updateConnectionWarning() {
+    var url = String(serverInput.value || '').trim();
+    var secure = isSecureURL(url);
+    caStep.hidden = !secure;
+    plaintextWarning.hidden = secure || url === '';
+    if (secure && !lastSecureURL && !caTouched && caInput.value === '') {
+      caInput.value = '/assets/cadence/ca.pem';
+    }
+    lastSecureURL = secure;
+  }
+
+  function renderTestStatus() {
+    var text = storedText(values.last_test_status);
+    if (!text) {
+      setAlert(testStatus, '', '');
+      return;
+    }
+    if (text.indexOf('test_ok') === 0) {
+      setAlert(testStatus, 'Connection test passed (test_ok).', 'ok');
+    } else if (text.indexOf('test_failed') === 0) {
+      setAlert(testStatus, text, 'err');
+    } else {
+      setAlert(testStatus, text, '');
+    }
+  }
+
+  function startWaitClock() {
+    if (enrollWaitStart === 0) enrollWaitStart = Date.now();
+    if (waitTimer !== 0) return;
+    waitTimer = window.setTimeout(function () {
+      waitTimer = 0;
+      renderEnrollmentStatus();
+    }, 16000);
+  }
+
+  function renderEnrollmentStatus() {
+    var pending = Boolean(values.enroll_code && values.enroll_code.hasValue);
+    var token = Boolean(values.device_token && values.device_token.hasValue);
+    var tokenFile = storedText(values.device_token_file).trim();
+    var enrolled = token || tokenFile !== '';
+
+    if (pending) {
+      sawPendingCode = true;
+      startWaitClock();
+    } else {
+      enrollWaitStart = 0;
+      if (waitTimer !== 0) {
+        window.clearTimeout(waitTimer);
+        waitTimer = 0;
+      }
+    }
+
+    clearEnroll.hidden = !pending;
+    enrollHint.textContent = pending ? 'A code is pending; the app is exchanging it.' : '';
+
+    if (enrolled) {
+      if (sawPendingCode && token) {
+        enrollmentConfirmed = true;
+        sawPendingCode = false;
+      }
+      if (enrollmentConfirmed) {
+        setAlert(enrollStatus, 'Enrollment confirmed. The device token is stored and the code was cleared.', 'ok');
+        setAlert(enrolledStatus, 'Enrollment confirmed. The device token is stored.', 'ok');
+        setAlert(setupStatus, '', '');
+      } else {
+        setAlert(enrollStatus, '', '');
+        setAlert(enrolledStatus, '', '');
+      }
+      return;
+    }
+
+    if (pending) {
+      enrollmentConfirmed = false;
+      var waiting = Date.now() - enrollWaitStart > 15000;
+      if (waiting) {
+        setAlert(enrollStatus, 'Still waiting for the server to accept the code. It is single-use and expires after 30 minutes; if it was refused, the app log names the reason. Create a new dashboard code if this one was spent.', 'warn');
+      } else {
+        setAlert(enrollStatus, 'Waiting for the app to exchange the code for a device token…', 'info');
+      }
+      return;
+    }
+
+    if (sawPendingCode && !suppressEnrollError) {
+      setAlert(enrollStatus, 'The enrollment code was cleared without a device token appearing. The app log has the reason; create a new code and try again.', 'err');
+    } else {
+      setAlert(enrollStatus, '', '');
+    }
+    setAlert(enrolledStatus, '', '');
+  }
+
+  function buildBoardChoices() {
+    var def = settingDef('board');
+    var choices = (def && def.choices) || [];
+    if (!choices.length) {
+      choices = [
+        { value: 'auto', label: 'Automatic' },
+        { value: 'vk-capsula-mini', label: 'VK Capsula Mini' },
+        { value: 'sim', label: 'Simulator' }
+      ];
+    }
+    boardSelect.replaceChildren();
+    choices.forEach(function (choice) {
+      var option = document.createElement('option');
+      option.value = choice.value;
+      option.textContent = choice.label || choice.value;
+      boardSelect.appendChild(option);
+    });
+  }
+
+  function buildEnrolledControls() {
+    buildBoardChoices();
+    var holdDef = settingDef('hold_release_tail_ms');
+    if (holdDef) {
+      if (holdDef.hasMin) holdTail.min = String(holdDef.min);
+      if (holdDef.hasMax) holdTail.max = String(holdDef.max);
+    }
+    controlsBuilt = true;
+  }
+
+  function renderEnrolled() {
+    var token = Boolean(values.device_token && values.device_token.hasValue);
+    var tokenFile = storedText(values.device_token_file).trim();
+    var server = storedText(values.server_url);
+    var boardDef = settingDef('board');
+    var boardValue = String(parsedValue(boardDef, values.board, 'auto'));
+    var holdDef = settingDef('hold_release_tail_ms');
+    var hold = Number(parsedValue(holdDef, values.hold_release_tail_ms, 1000));
+    if (!Number.isFinite(hold)) hold = 1000;
+    hold = Math.max(0, Math.min(5000, Math.round(hold)));
+    var follow = parsedValue(settingDef('follow_up'), values.follow_up, true) === true;
+
+    if (!controlsBuilt) buildEnrolledControls();
+
+    var known = false;
+    for (var index = 0; index < boardSelect.options.length; index++) {
+      if (boardSelect.options[index].value === boardValue) {
+        known = true;
+        break;
+      }
+    }
+    if (!known && boardValue !== '') {
+      var extra = document.createElement('option');
+      extra.value = boardValue;
+      extra.textContent = boardValue + ' (not a declared choice)';
+      boardSelect.appendChild(extra);
+    }
+    boardSelect.value = boardValue;
+    holdTail.value = String(hold);
+    holdTailValue.textContent = hold + ' ms';
+    followUp.checked = follow;
+
+    enrolledRows.replaceChildren();
+    enrolledRows.appendChild(infoRow('Server', server || 'not set', ''));
+    enrolledRows.appendChild(infoRow('Device credential',
+      tokenFile !== '' ? 'token file: ' + tokenFile : (token ? 'device token stored' : 'not set'),
+      'badge badge-sm badge-success'));
+    enrolledRows.appendChild(infoRow('Board', boardSelect.options[boardSelect.selectedIndex] ? boardSelect.options[boardSelect.selectedIndex].textContent : boardValue, ''));
+  }
+
+  function applyState(state) {
+    if (!state) return;
+    values = readValues(state);
+    if (state.schema && Array.isArray(state.schema.settings)) {
+      schema = state.schema;
+    } else if (UI.schema && Array.isArray(UI.schema.settings)) {
+      schema = UI.schema;
+    }
+
+    var server = storedText(values.server_url);
+    if (document.activeElement !== serverInput) serverInput.value = server;
+
+    var ca = storedText(values.ca_pem);
+    if (document.activeElement !== caInput && !caTouched) {
+      caInput.value = ca;
+    }
+    updateConnectionWarning();
+
+    var testAction = null;
+    (schema.actions || []).forEach(function (action) {
+      if (action && action.actionId === 'test_connection') testAction = action;
+    });
+    testActionLabel.textContent = testAction && testAction.label ? testAction.label : 'Test connection';
+
+    renderTestStatus();
+    renderEnrollmentStatus();
+
+    var token = Boolean(values.device_token && values.device_token.hasValue);
+    var tokenFile = storedText(values.device_token_file).trim();
+    var enrolled = token || tokenFile !== '';
+    if (enrolled) {
+      notEnrolledView.hidden = true;
+      enrolledView.hidden = false;
+      renderEnrolled();
+    } else {
+      enrolledView.hidden = true;
+      notEnrolledView.hidden = false;
+      if (!controlsBuilt) buildEnrolledControls();
+    }
+    UI.resize();
+  }
+
+  serverInput.addEventListener('input', updateConnectionWarning);
+  serverInput.addEventListener('change', updateConnectionWarning);
+  caInput.addEventListener('input', function () {
+    caTouched = true;
+  });
+
+  saveConnection.addEventListener('click', function () {
+    var url = String(serverInput.value || '').trim();
+    if (!looksLikeURL(url)) {
+      setAlert(setupStatus, 'Enter an http:// or https:// server URL with a host.', 'err');
+      return;
+    }
+    var changes = [{ key: 'server_url', valueJson: JSON.stringify(url) }];
+    if (isSecureURL(url)) {
+      var ca = String(caInput.value || '').trim();
+      if (ca === '') changes.push({ key: 'ca_pem', clear: true });
+      else changes.push({ key: 'ca_pem', valueJson: JSON.stringify(ca) });
+    }
+    setAlert(setupStatus, 'Saving the server URL and trust roots…', '');
+    sendPatch(changes, 'connection');
+  });
+
+  saveEnroll.addEventListener('click', function () {
+    var code = String(enrollInput.value || '').trim();
+    if (!code) {
+      setAlert(setupStatus, 'Paste the enrollment code first.', 'err');
+      return;
+    }
+    if (!storedText(values.server_url)) {
+      setAlert(setupStatus, 'Save the server URL before the enrollment code.', 'err');
+      return;
+    }
+    enrollInput.value = '';
+    suppressEnrollError = false;
+    enrollWaitStart = 0;
+    setAlert(setupStatus, 'Code saved. The app is exchanging it for a device token…', '');
+    sendPatch([{ key: 'enroll_code', valueJson: JSON.stringify(code) }], 'enroll');
+  });
+
+  clearEnroll.addEventListener('click', function () {
+    suppressEnrollError = true;
+    sendPatch([{ key: 'enroll_code', clear: true }], 'clear-code');
+  });
+
+  boardSelect.addEventListener('change', function () {
+    sendPatch([{ key: 'board', valueJson: JSON.stringify(boardSelect.value) }], 'control');
+  });
+
+  holdTail.addEventListener('input', function () {
+    holdTailValue.textContent = String(holdTail.value) + ' ms';
+  });
+  holdTail.addEventListener('change', function () {
+    sendPatch([{ key: 'hold_release_tail_ms', valueJson: String(Number(holdTail.value)) }], 'control');
+  });
+
+  followUp.addEventListener('change', function () {
+    sendPatch([{ key: 'follow_up', valueJson: String(followUp.checked) }], 'control');
+  });
+
+  resetButton.addEventListener('click', function () {
+    resetButton.hidden = true;
+    resetConfirm.hidden = false;
+  });
+  resetCancel.addEventListener('click', function () {
+    resetConfirm.hidden = true;
+    resetButton.hidden = false;
+  });
+  resetConfirmButton.addEventListener('click', function () {
+    var changes = [];
+    (schema.settings || []).forEach(function (def) {
+      if (def && def.key) changes.push({ key: def.key, clear: true });
+    });
+    if (!changes.length) {
+      setAlert(noticeEl, 'No declared settings were found to clear.', 'err');
+      return;
+    }
+    resetConfirm.hidden = true;
+    resetButton.hidden = false;
+    setAlert(noticeEl, 'Clearing every declared setting on this speaker…', '');
+    sendPatch(changes, 'reset');
+  });
+
+  UI.onResult(function (result) {
+    var requestId = Number(result.requestId) || 0;
+    var pending = pendingPatches[requestId];
+    if (pending) delete pendingPatches[requestId];
+    var kind = pending ? pending.kind : '';
+
+    if (!result.ok) {
+      var message = result.error || result.message || 'The change was rejected.';
+      if (kind === 'connection' || kind === 'enroll' || kind === 'clear-code') setAlert(setupStatus, message, 'err');
+      else if (kind === 'control') setAlert(controlStatus, message, 'err');
+      else if (kind === 'reset') setAlert(noticeEl, message, 'err');
+      else setAlert(setupStatus, message, 'err');
+      return;
+    }
+
+    if (kind === 'connection') {
+      caTouched = false;
+      setAlert(setupStatus, 'Saved. Run the connection test from Actions below.', 'ok');
+    } else if (kind === 'enroll') {
+      setAlert(setupStatus, 'Code saved. Waiting for the app to exchange it…', '');
+    } else if (kind === 'clear-code') {
+      setAlert(setupStatus, 'Pending enrollment code cleared.', 'ok');
+    } else if (kind === 'control') {
+      setAlert(controlStatus, 'Saved.', 'ok');
+    } else if (kind === 'reset') {
+      setAlert(noticeEl, 'All declared settings were cleared on this speaker. The Cadence server was not changed.', 'ok');
+    }
+    UI.resize();
+  });
+
+  UI.onState(applyState);
+  if (UI.schema && Array.isArray(UI.schema.settings)) schema = UI.schema;
+  UI.resize();
+})();
+</script>
+</body>
+</html>

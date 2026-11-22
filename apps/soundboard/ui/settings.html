@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soundboard</title>
+</head>
+<body>
+<main class="capsulad-ui p-3">
+  <div class="card bg-base-100 border border-base-300">
+    <div class="card-body gap-4">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h2 class="card-title">Sounds</h2>
+          <p class="text-sm text-base-content/60">A sound plays from the shared <span class="font-mono">/assets</span> store when the unmarked centre key is pressed. Swipe left or right to switch the active sound; its name appears briefly on the segment display.</p>
+        </div>
+        <span class="badge badge-ghost shrink-0" id="count">0</span>
+      </div>
+
+      <template id="color-field-template">
+        <input type="color" class="input input-bordered input-sm h-9 w-16 p-1" aria-label="Ring colour picker">
+      </template>
+
+      <div id="editor" class="flex flex-col gap-3"></div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <button id="add" type="button" class="btn btn-ghost btn-sm">Add sound</button>
+        <button id="save" type="button" class="btn btn-primary btn-sm">Save sounds</button>
+        <span class="text-xs text-base-content/60">Up to 16 sounds. Names allow 0-9, A B C D E F G H I J L N O P Q R S T U Y and -.</span>
+      </div>
+
+      <div class="alert" id="status" role="status" aria-live="polite" hidden></div>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+  if (!window.CapsuladUI) {
+    var fallback = document.getElementById('status');
+    fallback.textContent = 'The settings bridge is unavailable.';
+    fallback.hidden = false;
+    return;
+  }
+
+  var editor = document.getElementById('editor');
+  var colorFieldTemplate = document.getElementById('color-field-template');
+  var addButton = document.getElementById('add');
+  var saveButton = document.getElementById('save');
+  var status = document.getElementById('status');
+  var count = document.getElementById('count');
+
+  var GLYPHS = {
+    '0': true, '1': true, '2': true, '3': true, '4': true,
+    '5': true, '6': true, '7': true, '8': true, '9': true,
+    'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
+    'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
+    'L': true, 'N': true, 'O': true, 'P': true, 'Q': true,
+    'R': true, 'S': true, 'T': true, 'U': true, 'Y': true,
+    '-': true
+  };
+  var PRESETS = [
+    { label: 'Red', value: '#ff3b30' },
+    { label: 'Orange', value: '#ff9500' },
+    { label: 'Yellow', value: '#ffd60a' },
+    { label: 'Green', value: '#30d158' },
+    { label: 'Cyan', value: '#40c8e0' },
+    { label: 'Blue', value: '#0a84ff' },
+    { label: 'Purple', value: '#bf5af2' },
+    { label: 'White', value: '#ffffff' }
+  ];
+  var MAX_SOUNDS = 16;
+
+  var current = { values: {}, schema: { settings: [] }, revision: '0' };
+  var draftDirty = false;
+  var pendingSave = null;
+  var lastPatchId = 0;
+  var draft = [];
+
+  function setStatus(text, kind) {
+    status.textContent = text || '';
+    status.hidden = !text;
+    if (kind === 'ok') status.className = 'alert alert-success';
+    else if (kind === 'err') status.className = 'alert alert-error';
+    else status.className = 'alert';
+  }
+
+  function updateCount() {
+    count.textContent = draft.length + ' / ' + MAX_SOUNDS;
+    count.className = draft.length >= MAX_SOUNDS ? 'badge badge-warning shrink-0' : 'badge badge-ghost shrink-0';
+    addButton.disabled = draft.length >= MAX_SOUNDS;
+  }
+
+  function settingValue(key, fallback) {
+    var entry = current.values[key];
+    if (entry === undefined || entry === null) return fallback;
+    try { return JSON.parse(entry); } catch (_) { return fallback; }
+  }
+
+  function normalizeName(value) {
+    var name = String(value || '').trim().toUpperCase();
+    if (name.length < 1 || name.length > 4) return '';
+    for (var i = 0; i < name.length; i++) {
+      if (!GLYPHS[name.charAt(i)]) return '';
+    }
+    return name;
+  }
+
+  function validAsset(value) {
+    var path = String(value || '').trim();
+    if (path.indexOf('/assets/') !== 0) return '';
+    if (path.indexOf('\\') >= 0 || !/\.wav$/i.test(path)) return '';
+    var parts = path.substring('/assets/'.length).split('/');
+    if (!parts.length) return '';
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === '' || parts[i] === '.' || parts[i] === '..') return '';
+    }
+    return path;
+  }
+
+  function validColor(value) {
+    return value === 'random' || /^#[0-9a-f]{6}$/.test(String(value || ''));
+  }
+
+  function parseDraft(text) {
+    if (typeof text !== 'string' || text === '') return [];
+    var parsed;
+    try { parsed = JSON.parse(text); } catch (_) { return []; }
+    if (!Array.isArray(parsed)) return [];
+    var out = [];
+    parsed.forEach(function (entry) {
+      if (!entry || typeof entry !== 'object') return;
+      var name = normalizeName(entry.name);
+      var asset = validAsset(entry.asset);
+      if (!name || !asset) return;
+      var color = typeof entry.color === 'string' ? entry.color.toLowerCase() : 'random';
+      if (!validColor(color)) color = 'random';
+      out.push({ name: name, asset: asset, color: color });
+    });
+    return out.slice(0, MAX_SOUNDS);
+  }
+
+  function colorFor(entry) {
+    if (entry.color === 'random') return PRESETS[4].value;
+    return entry.color;
+  }
+
+  function makeCard(entry, index) {
+    var card = document.createElement('div');
+    card.className = 'card bg-base-200 border border-base-300';
+    var body = document.createElement('div');
+    body.className = 'card-body gap-3 p-3';
+
+    var head = document.createElement('div');
+    head.className = 'flex items-start justify-between gap-2';
+    var title = document.createElement('span');
+    title.className = 'badge badge-ghost';
+    title.textContent = String(index + 1);
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-ghost btn-xs';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', function () {
+      draft.splice(index, 1);
+      draftDirty = true;
+      render();
+      CapsuladUI.resize();
+    });
+    head.appendChild(title);
+    head.appendChild(remove);
+
+    var grid = document.createElement('div');
+    grid.className = 'grid grid-cols-1 gap-3 sm:grid-cols-2';
+
+    var nameField = document.createElement('label');
+    nameField.className = 'form-control';
+    var nameLabel = document.createElement('span');
+    nameLabel.className = 'label-text';
+    nameLabel.textContent = 'Name (1-4 characters)';
+    var name = document.createElement('input');
+    name.type = 'text';
+    name.maxLength = 4;
+    name.className = 'input input-bordered input-sm w-full font-mono uppercase';
+    name.value = entry.name;
+    name.placeholder = 'BEEP';
+    name.addEventListener('input', function () {
+      draftDirty = true;
+      draft[index].name = name.value;
+    });
+    nameField.appendChild(nameLabel);
+    nameField.appendChild(name);
+
+    var assetField = document.createElement('label');
+    assetField.className = 'form-control';
+    var assetLabel = document.createElement('span');
+    assetLabel.className = 'label-text';
+    assetLabel.textContent = 'Asset path';
+    var asset = document.createElement('input');
+    asset.type = 'text';
+    asset.className = 'input input-bordered input-sm w-full font-mono';
+    asset.value = entry.asset;
+    asset.placeholder = '/assets/beep.wav';
+    asset.addEventListener('input', function () {
+      draftDirty = true;
+      draft[index].asset = asset.value;
+    });
+    assetField.appendChild(assetLabel);
+    assetField.appendChild(asset);
+
+    var colorField = document.createElement('div');
+    colorField.className = 'form-control sm:col-span-2';
+    var colorLabel = document.createElement('span');
+    colorLabel.className = 'label-text';
+    colorLabel.textContent = 'Ring colour';
+    var colorRow = document.createElement('div');
+    colorRow.className = 'flex flex-wrap items-center gap-2';
+
+    var randomLabel = document.createElement('label');
+    randomLabel.className = 'label cursor-pointer justify-start gap-2';
+    var random = document.createElement('input');
+    random.type = 'checkbox';
+    random.className = 'checkbox checkbox-sm';
+    random.checked = entry.color === 'random';
+    var randomText = document.createElement('span');
+    randomText.className = 'label-text';
+    randomText.textContent = 'Random';
+    randomLabel.appendChild(random);
+    randomLabel.appendChild(randomText);
+
+    var picker = colorFieldTemplate.content.firstElementChild.cloneNode(true);
+    picker.value = colorFor(entry);
+    picker.disabled = random.checked;
+
+    random.addEventListener('change', function () {
+      draftDirty = true;
+      picker.disabled = random.checked;
+      draft[index].color = random.checked ? 'random' : picker.value.toLowerCase();
+    });
+    picker.addEventListener('input', function () {
+      draftDirty = true;
+      if (!random.checked) draft[index].color = picker.value.toLowerCase();
+    });
+
+    colorRow.appendChild(randomLabel);
+    colorRow.appendChild(picker);
+
+    PRESETS.forEach(function (preset) {
+      var swatch = document.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'btn btn-xs btn-circle';
+      swatch.style.backgroundColor = preset.value;
+      swatch.style.borderColor = preset.value;
+      swatch.title = preset.label;
+      swatch.setAttribute('aria-label', preset.label);
+      swatch.addEventListener('click', function () {
+        draftDirty = true;
+        random.checked = false;
+        picker.disabled = false;
+        picker.value = preset.value;
+        draft[index].color = preset.value;
+      });
+      colorRow.appendChild(swatch);
+    });
+
+    colorField.appendChild(colorLabel);
+    colorField.appendChild(colorRow);
+
+    grid.appendChild(nameField);
+    grid.appendChild(assetField);
+    grid.appendChild(colorField);
+    body.appendChild(head);
+    body.appendChild(grid);
+    card.appendChild(body);
+    return card;
+  }
+
+  function render() {
+    editor.replaceChildren();
+    if (draft.length === 0) {
+      var empty = document.createElement('p');
+      empty.className = 'text-sm text-base-content/60';
+      empty.textContent = 'No sounds yet. Add one, upload its WAV under /assets in the Assets page, then save.';
+      editor.appendChild(empty);
+    } else {
+      draft.forEach(function (entry, index) {
+        editor.appendChild(makeCard(entry, index));
+      });
+    }
+    updateCount();
+    CapsuladUI.resize();
+  }
+
+  function applyState(state) {
+    current = state || current;
+    var values = {};
+    (state.values || []).forEach(function (item) {
+      if (item && item.key) values[item.key] = item.valueJson;
+    });
+    current.values = values;
+    if (!draftDirty) {
+      draft = parseDraft(settingValue('sounds', '[]'));
+      render();
+    }
+  }
+
+  function submittedDraft() {
+    var out = [];
+    for (var i = 0; i < draft.length; i++) {
+      var name = normalizeName(draft[i].name);
+      var asset = validAsset(draft[i].asset);
+      var color = String(draft[i].color || 'random').toLowerCase();
+      if (!validColor(color)) color = 'random';
+      if (!name) {
+        setStatus('Sound ' + (i + 1) + ': name must be 1-4 displayable characters.', 'err');
+        return null;
+      }
+      if (!asset) {
+        setStatus('Sound ' + (i + 1) + ': asset must be /assets/*.wav.', 'err');
+        return null;
+      }
+      out.push({ name: name, asset: asset, color: color });
+    }
+    return out;
+  }
+
+  addButton.addEventListener('click', function () {
+    if (draft.length >= MAX_SOUNDS) return;
+    draftDirty = true;
+    draft.push({ name: '', asset: '', color: 'random' });
+    render();
+  });
+
+  saveButton.addEventListener('click', function () {
+    var list = submittedDraft();
+    if (list === null) return;
+    setStatus('Saving…', '');
+    var id = CapsuladUI.patch([{ key: 'sounds', valueJson: JSON.stringify(JSON.stringify(list)) }]);
+    if (id) {
+      lastPatchId = id;
+      pendingSave = { id: id, json: JSON.stringify(list) };
+    }
+  });
+
+  CapsuladUI.onState(applyState);
+  CapsuladUI.onResult(function (result) {
+    if (pendingSave && result.requestId === pendingSave.id) {
+      var acknowledged = pendingSave;
+      pendingSave = null;
+      if (result.ok) {
+        if (JSON.stringify(submittedDraft()) === acknowledged.json) draftDirty = false;
+        setStatus(result.ok ? 'Saved.' : (result.error || result.message || 'The change was rejected.'),
+          result.ok ? 'ok' : 'err');
+      } else {
+        setStatus(result.error || result.message || 'The change was rejected.', 'err');
+      }
+    } else if (!pendingSave && result.requestId === lastPatchId) {
+      setStatus(result.ok ? 'Saved.' : (result.error || result.message || 'The change was rejected.'),
+        result.ok ? 'ok' : 'err');
+    }
+    CapsuladUI.resize();
+  });
+
+  CapsuladUI.resize();
+})();
+</script>
+</body>
+</html>

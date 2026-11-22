@@ -332,7 +332,12 @@ message SegmentCell {
 }
 message SegmentFrame {
   repeated SegmentCell cells = 1;
+  // colon lights both colon dots. The two dots can be driven separately with
+  // colon_top/colon_bottom (for example a hardware blink test); a dot is lit
+  // when its own field or colon is true.
   bool colon = 2;
+  bool colon_top = 3;
+  bool colon_bottom = 4;
 }
 message RgbPixel {
   uint32 red = 1;         // Range [0,255].

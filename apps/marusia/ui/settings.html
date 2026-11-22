@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marusia</title>
+</head>
+<body>
+<main class="capsulad-ui p-3">
+  <div class="flex flex-col gap-3">
+    <div class="card bg-base-100 border border-base-300">
+      <div class="card-body gap-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="card-title">Marusia authorization</h2>
+            <p class="text-sm text-base-content/60">Paste a fresh VK access token or the full OAuth redirect URL. The app exchanges it once for a vendor session, stores the session and clears the token. The stored token is never shown or read by this page.</p>
+          </div>
+          <span id="auth-pill" class="badge badge-ghost shrink-0">Loading</span>
+        </div>
+
+        <div id="token-panel" class="flex flex-col gap-2">
+          <label class="form-control">
+            <span class="label-text">VK access token or redirect URL</span>
+            <input id="token" type="password" class="input input-bordered w-full" autocomplete="new-password" spellcheck="false" placeholder="Paste once">
+            <span class="label-text-alt">Always empty when this page opens. The value is cleared as soon as it is submitted.</span>
+          </label>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="submit-token" type="button" class="btn btn-primary btn-sm">Submit and reauthorise</button>
+            <button id="clear-pending" type="button" class="btn btn-ghost btn-sm" hidden>Clear pending token</button>
+          </div>
+          <div class="alert" id="status" role="status" aria-live="polite" hidden></div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div>
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-base-content/60">Current authorization</h3>
+          <div id="auth-rows" class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2"></div>
+        </div>
+
+        <div class="alert" id="last-auth" role="status" hidden></div>
+
+        <p class="text-xs text-base-content/60">A failed exchange leaves its reason above and keeps the submitted token pending. Use <span class="font-mono">Re-run device attach</span> in the Actions list below this document to retry, or clear the pending token here.</p>
+      </div>
+    </div>
+
+    <details class="card bg-base-100 border border-base-300">
+      <summary class="cursor-pointer p-3 font-medium">Advanced settings</summary>
+      <div class="card-body gap-4">
+        <p class="text-sm text-base-content/60">Every other setting declared by this app. The framework validates each value; masked values are never echoed back.</p>
+        <div id="advanced" class="flex flex-col gap-4"></div>
+        <div class="alert" id="advanced-status" role="status" aria-live="polite" hidden></div>
+      </div>
+    </details>
+
+    <p class="text-xs text-base-content/60">Actions such as <span class="font-mono">Dismiss</span> and <span class="font-mono">Re-run device attach</span> are below this document in the application's Actions list.</p>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  var UI = window.CapsuladUI;
+  if (!UI) {
+    var unavailable = document.getElementById('status');
+    unavailable.textContent = 'The settings bridge is unavailable.';
+    unavailable.hidden = false;
+    return;
+  }
+
+  var submitToken = document.getElementById('submit-token');
+  var tokenInput = document.getElementById('token');
+  var clearPending = document.getElementById('clear-pending');
+  var statusEl = document.getElementById('status');
+  var authPill = document.getElementById('auth-pill');
+  var authRows = document.getElementById('auth-rows');
+  var lastAuth = document.getElementById('last-auth');
+  var advanced = document.getElementById('advanced');
+  var advancedStatus = document.getElementById('advanced-status');
+
+  var schema = { settings: [] };
+  var values = {};
+  var controls = {};
+  var advancedBuilt = false;
+  var schemaSignature = '';
+  var pendingPatches = {};
+  var lastAuthText = '';
+
+  function setAlert(element, text, kind) {
+    element.textContent = text || '';
+    element.hidden = !text;
+    if (kind === 'ok') element.className = 'alert alert-success';
+    else if (kind === 'err') element.className = 'alert alert-error';
+    else if (kind === 'warn') element.className = 'alert alert-warning';
+    else element.className = 'alert';
+  }
+
+  function readValues(state) {
+    var map = {};
+    (state.values || []).forEach(function (entry) {
+      if (entry && entry.key) {
+        map[entry.key] = {
+          valueJson: typeof entry.valueJson === 'string' ? entry.valueJson : '',
+          hasValue: Boolean(entry.hasValue)
+        };
+      }
+    });
+    return map;
+  }
+
+  function storedText(entry) {
+    if (!entry) return '';
+    try {
+      var parsed = JSON.parse(entry.valueJson);
+      return typeof parsed === 'string' ? parsed : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function parsedValue(def, entry, fallback) {
+    if (entry && entry.hasValue) {
+      try { return JSON.parse(entry.valueJson); } catch (_) { /* fall through */ }
+    }
+    if (def && typeof def.defaultValueJson === 'string' && def.defaultValueJson !== '') {
+      try { return JSON.parse(def.defaultValueJson); } catch (_) { /* fall through */ }
+    }
+    return fallback;
+  }
+
+  function rememberPatch(id, kind) {
+    if (!id) return;
+    pendingPatches[id] = { kind: kind };
+  }
+
+  function sendPatch(changes, kind) {
+    var id = UI.patch(changes);
+    if (!id) {
+      setAlert(kind === 'advanced' ? advancedStatus : statusEl,
+        'The settings host ignored the change; reload this page.', 'err');
+      return 0;
+    }
+    rememberPatch(id, kind);
+    return id;
+  }
+
+  function infoRow(label, value, badgeClass) {
+    var row = document.createElement('div');
+    row.className = 'flex flex-col gap-1 rounded border border-base-300 p-2';
+    var title = document.createElement('span');
+    title.className = 'text-xs uppercase tracking-wide text-base-content/60';
+    title.textContent = label;
+    row.appendChild(title);
+    if (badgeClass) {
+      var badge = document.createElement('span');
+      badge.className = badgeClass;
+      badge.textContent = value;
+      row.appendChild(badge);
+    } else {
+      var text = document.createElement('span');
+      text.className = 'text-sm break-words font-mono';
+      text.textContent = value;
+      row.appendChild(text);
+    }
+    return row;
+  }
+
+  function renderAuth() {
+    var sessionID = values.session_id && values.session_id.hasValue;
+    var sessionSecret = values.session_secret && values.session_secret.hasValue;
+    var pending = values.vk_access_token && values.vk_access_token.hasValue;
+    var xtoken = values.xtoken_id && values.xtoken_id.hasValue;
+    var sessionFile = storedText(values.session_file);
+
+    if (sessionID && sessionSecret) {
+      authPill.textContent = 'Session configured';
+      authPill.className = 'badge badge-success shrink-0';
+    } else if (sessionID || sessionSecret) {
+      authPill.textContent = 'Incomplete session';
+      authPill.className = 'badge badge-error shrink-0';
+    } else if (pending) {
+      authPill.textContent = 'Token pending';
+      authPill.className = 'badge badge-warning shrink-0';
+    } else {
+      authPill.textContent = 'Session settings not set';
+      authPill.className = 'badge badge-ghost shrink-0';
+    }
+
+    authRows.replaceChildren();
+    if (sessionID && sessionSecret) {
+      authRows.appendChild(infoRow('Vendor session settings', 'configured', 'badge badge-sm badge-success'));
+    } else if (sessionID || sessionSecret) {
+      authRows.appendChild(infoRow('Vendor session settings', 'incomplete — set both session id and secret', 'badge badge-sm badge-error'));
+    } else {
+      authRows.appendChild(infoRow('Vendor session settings', 'not set', 'badge badge-sm badge-ghost'));
+    }
+    authRows.appendChild(infoRow('Provisioned xtoken id',
+      xtoken ? 'stored' : 'not set', 'badge badge-sm badge-ghost'));
+    authRows.appendChild(infoRow('Pending VK access token',
+      pending ? 'pending' : 'none',
+      pending ? 'badge badge-sm badge-warning' : 'badge badge-sm badge-ghost'));
+    authRows.appendChild(infoRow('Vendor session file',
+      sessionFile ? sessionFile : 'not set', ''));
+    clearPending.hidden = !pending;
+  }
+
+  function renderLastAuth() {
+    var text = storedText(values.last_auth_status);
+    if (text !== lastAuthText) {
+      lastAuthText = text;
+      if (text) setAlert(statusEl, '', '');
+    }
+    if (!text) {
+      setAlert(lastAuth, '', '');
+      return;
+    }
+    if (text.indexOf('ok') === 0) setAlert(lastAuth, text, 'ok');
+    else if (text.indexOf('failed') === 0) setAlert(lastAuth, text, 'err');
+    else setAlert(lastAuth, text, '');
+  }
+
+  function setControlStatus(text, kind) {
+    setAlert(advancedStatus, text, kind);
+  }
+
+  function isNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value);
+  }
+
+  function buildAdvanced() {
+    advanced.replaceChildren();
+    controls = {};
+    (schema.settings || []).forEach(function (def) {
+      if (!def || !def.key || def.key === 'vk_access_token' || def.key === 'last_auth_status') return;
+      advanced.appendChild(buildField(def));
+    });
+    advancedBuilt = true;
+    refreshAdvanced();
+  }
+
+  function buildField(def) {
+    var wrapper = document.createElement('div');
+    wrapper.className = 'form-control';
+    var label = document.createElement('span');
+    label.className = 'label-text';
+    label.textContent = def.label || def.key;
+    wrapper.appendChild(label);
+    if (def.description) {
+      var description = document.createElement('span');
+      description.className = 'label-text-alt';
+      description.textContent = def.description;
+      wrapper.appendChild(description);
+    }
+    if (def.restartRequired) {
+      var restart = document.createElement('span');
+      restart.className = 'text-xs text-warning';
+      restart.textContent = 'Restart the app to apply.';
+      wrapper.appendChild(restart);
+    }
+
+    var type = String(def.type || '').toUpperCase();
+    var control = { def: def };
+
+    if (type.indexOf('TEXT_MASKED') >= 0) {
+      var state = document.createElement('span');
+      state.className = 'badge badge-sm badge-ghost mt-1';
+      state.textContent = 'not set';
+      wrapper.appendChild(state);
+
+      var secretInput = document.createElement('input');
+      secretInput.type = 'password';
+      secretInput.className = 'input input-bordered input-sm w-full mt-1';
+      secretInput.autocomplete = 'new-password';
+      secretInput.spellcheck = false;
+      secretInput.placeholder = 'Leave empty to keep the stored value';
+      wrapper.appendChild(secretInput);
+
+      var row = document.createElement('div');
+      row.className = 'flex flex-wrap items-center gap-2 mt-1';
+      var save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'btn btn-ghost btn-sm';
+      save.textContent = 'Replace';
+      save.addEventListener('click', function () {
+        var value = String(secretInput.value || '').trim();
+        secretInput.value = '';
+        if (!value) {
+          setControlStatus('Enter a replacement value first.', 'err');
+          return;
+        }
+        sendPatch([{ key: def.key, valueJson: JSON.stringify(value) }], 'advanced');
+      });
+      var clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'btn btn-ghost btn-sm';
+      clear.textContent = 'Clear';
+      clear.hidden = true;
+      clear.addEventListener('click', function () {
+        sendPatch([{ key: def.key, clear: true }], 'advanced');
+      });
+      row.appendChild(save);
+      row.appendChild(clear);
+      wrapper.appendChild(row);
+
+      control.refresh = function (entry) {
+        var has = Boolean(entry && entry.hasValue);
+        state.textContent = has ? 'stored — never shown' : 'not set';
+        state.className = 'badge badge-sm badge-ghost mt-1';
+        clear.hidden = !has;
+      };
+      controls[def.key] = control;
+      return wrapper;
+    }
+
+    if (type.indexOf('BOOLEAN') >= 0) {
+      var toggleLabel = document.createElement('label');
+      toggleLabel.className = 'label cursor-pointer justify-start gap-3';
+      var toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.className = 'checkbox checkbox-sm';
+      var toggleText = document.createElement('span');
+      toggleText.className = 'label-text';
+      toggleText.textContent = 'Enabled';
+      toggleLabel.appendChild(toggle);
+      toggleLabel.appendChild(toggleText);
+      wrapper.appendChild(toggleLabel);
+      toggle.addEventListener('change', function () {
+        toggleText.textContent = toggle.checked ? 'Enabled' : 'Disabled';
+        sendPatch([{ key: def.key, valueJson: String(toggle.checked) }], 'advanced');
+      });
+      control.refresh = function (entry) {
+        var value = parsedValue(def, entry, false);
+        toggle.checked = value === true;
+        toggleText.textContent = toggle.checked ? 'Enabled' : 'Disabled';
+      };
+      controls[def.key] = control;
+      return wrapper;
+    }
+
+    if (type.indexOf('SELECT') >= 0) {
+      var select = document.createElement('select');
+      select.className = 'select select-bordered select-sm w-full';
+      var choices = def.choices || [];
+      choices.forEach(function (choice) {
+        var option = document.createElement('option');
+        option.value = choice.value;
+        option.textContent = choice.label || choice.value;
+        select.appendChild(option);
+      });
+      wrapper.appendChild(select);
+      select.addEventListener('change', function () {
+        sendPatch([{ key: def.key, valueJson: JSON.stringify(select.value) }], 'advanced');
+      });
+      control.refresh = function (entry) {
+        var value = String(parsedValue(def, entry, ''));
+        var known = false;
+        for (var index = 0; index < select.options.length; index++) {
+          if (select.options[index].value === value) {
+            known = true;
+            break;
+          }
+        }
+        if (!known && value !== '') {
+          var extra = document.createElement('option');
+          extra.value = value;
+          extra.textContent = value + ' (not a declared choice)';
+          select.appendChild(extra);
+        }
+        select.value = value;
+      };
+      controls[def.key] = control;
+      return wrapper;
+    }
+
+    if (type.indexOf('INTEGER') >= 0 || type.indexOf('NUMBER') >= 0) {
+      var isInteger = type.indexOf('INTEGER') >= 0;
+      var number = document.createElement('input');
+      number.type = 'number';
+      number.className = 'input input-bordered input-sm w-32';
+      number.step = isInteger ? '1' : 'any';
+      if (def.hasMin) number.min = String(def.min);
+      if (def.hasMax) number.max = String(def.max);
+      wrapper.appendChild(number);
+      number.addEventListener('change', function () {
+        var text = String(number.value || '').trim();
+        if (text === '') {
+          setControlStatus('Enter a number for ' + (def.label || def.key) + '.', 'err');
+          return;
+        }
+        var value = Number(text);
+        if (!Number.isFinite(value) || (isInteger && !Number.isInteger(value))) {
+          setControlStatus((def.label || def.key) + ' must be ' + (isInteger ? 'a whole number' : 'a number') + '.', 'err');
+          return;
+        }
+        if (def.hasMin && value < def.min) {
+          setControlStatus((def.label || def.key) + ' must be at least ' + def.min + '.', 'err');
+          return;
+        }
+        if (def.hasMax && value > def.max) {
+          setControlStatus((def.label || def.key) + ' must be at most ' + def.max + '.', 'err');
+          return;
+        }
+        sendPatch([{ key: def.key, valueJson: String(value) }], 'advanced');
+      });
+      control.refresh = function (entry) {
+        if (document.activeElement === number) return;
+        var value = parsedValue(def, entry, def.hasMin ? def.min : 0);
+        number.value = String(value);
+      };
+      controls[def.key] = control;
+      return wrapper;
+    }
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'input input-bordered input-sm w-full';
+    input.spellcheck = false;
+    wrapper.appendChild(input);
+    input.addEventListener('change', function () {
+      sendPatch([{ key: def.key, valueJson: JSON.stringify(String(input.value || '')) }], 'advanced');
+    });
+    control.refresh = function (entry) {
+      if (document.activeElement === input) return;
+      var value = parsedValue(def, entry, '');
+      input.value = typeof value === 'string' ? value : String(value);
+    };
+    controls[def.key] = control;
+    return wrapper;
+  }
+
+  function refreshAdvanced() {
+    Object.keys(controls).forEach(function (key) {
+      var control = controls[key];
+      if (control && control.refresh) control.refresh(values[key]);
+    });
+  }
+
+  function applyState(state) {
+    if (!state) return;
+    values = readValues(state);
+    if (state.schema && Array.isArray(state.schema.settings)) {
+      schema = state.schema;
+    } else if (UI.schema && Array.isArray(UI.schema.settings)) {
+      schema = UI.schema;
+    }
+    var signature = (schema.settings || []).map(function (def) { return def.key; }).join(',');
+    if (!advancedBuilt || signature !== schemaSignature) {
+      schemaSignature = signature;
+      buildAdvanced();
+    }
+    renderAuth();
+    renderLastAuth();
+    refreshAdvanced();
+    UI.resize();
+  }
+
+  function submitTokenValue() {
+    var value = String(tokenInput.value || '').trim();
+    tokenInput.value = '';
+    if (!value) {
+      setAlert(statusEl, 'Paste a VK access token or redirect URL first.', 'err');
+      return;
+    }
+    setAlert(statusEl, 'Token submitted. The app exchanges a newly submitted token automatically; use Re-run device attach in Actions to retry a pending one.', '');
+    sendPatch([{ key: 'vk_access_token', valueJson: JSON.stringify(value) }], 'token');
+  }
+
+  // The settings frame has scripts but no form submission, so the button is a
+  // normal click target and Enter in the field invokes the same handler.
+  submitToken.addEventListener('click', submitTokenValue);
+  tokenInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitTokenValue();
+    }
+  });
+
+  clearPending.addEventListener('click', function () {
+    sendPatch([{ key: 'vk_access_token', clear: true }], 'clear');
+  });
+
+  UI.onResult(function (result) {
+    var requestId = Number(result.requestId) || 0;
+    var pending = pendingPatches[requestId];
+    if (pending) delete pendingPatches[requestId];
+
+    if (!result.ok) {
+      var message = result.error || result.message || 'The change was rejected.';
+      if (pending && pending.kind === 'token') setAlert(statusEl, message, 'err');
+      else setControlStatus(message, 'err');
+      return;
+    }
+
+    if (pending && pending.kind === 'token') {
+      setAlert(statusEl, 'Token accepted. Use Re-run device attach in Actions if this value was already pending.', '');
+    } else if (pending && pending.kind === 'clear') {
+      setAlert(statusEl, 'Pending token cleared.', 'ok');
+    } else {
+      setControlStatus('Saved.', 'ok');
+    }
+    UI.resize();
+  });
+
+  UI.onState(applyState);
+  if (UI.schema && Array.isArray(UI.schema.settings)) schema = UI.schema;
+  UI.resize();
+})();
+</script>
+</body>
+</html>

@@ -99,7 +99,7 @@ const (
 // control records using the calibrated channel table. Missing cells are dark.
 // A frame on a display with an unexpected record count falls back to the linear
 // order so an unverified variant is not driven with the wrong map.
-func encodeMultiCtrlFrame(cells []uint16, colon bool, brightness float64, count, digits, segmentsPerDigit int) []multiCtrlRecord {
+func encodeMultiCtrlFrame(cells []uint16, colonTop, colonBottom bool, brightness float64, count, digits, segmentsPerDigit int) []multiCtrlRecord {
 	brightness = linuxdev.ClampBrightness(brightness)
 	logical := make([]byte, count)
 	level := uint8(math.Round(brightness * 255))
@@ -119,15 +119,15 @@ func encodeMultiCtrlFrame(cells []uint16, colon bool, brightness float64, count,
 			}
 		}
 	}
-	if colon {
+	if colonTop || colonBottom {
 		top, bottom := multiCtrlColonTop, multiCtrlColonBottom
 		if !calibrated {
 			top, bottom = 28, 29
 		}
-		if top < count {
+		if colonTop && top < count {
 			logical[top] = level
 		}
-		if bottom < count {
+		if colonBottom && bottom < count {
 			logical[bottom] = level
 		}
 	}

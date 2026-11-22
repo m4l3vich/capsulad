@@ -112,7 +112,7 @@ func (s *multiCtrlSegment) WriteSegment(frame backend.SegmentFrame) error {
 	if s.fd == nil {
 		return os.ErrClosed
 	}
-	records := encodeMultiCtrlFrame(frame.Cells, frame.Colon, frame.Brightness, s.cells, s.digits, s.segmentsPerDigit)
+	records := encodeMultiCtrlFrame(frame.Cells, frame.TopColonOn(), frame.BottomColonOn(), frame.Brightness, s.cells, s.digits, s.segmentsPerDigit)
 	if err := linuxdev.IoctlPointer(s.fd, ledsMultiCtrlSet, unsafe.Pointer(&records[0])); err != nil {
 		return fmt.Errorf("set segment frame: %w", err)
 	}

@@ -76,6 +76,11 @@ type Config struct {
 	SocketPath      string
 	WebUIAddr       string
 	AppsDir         string
+	// SingleApp restricts the daemon to one application: it is the only app
+	// started at boot (regardless of manifest boot flags) and Launch refuses
+	// every other ID. Empty keeps the normal multi-app policy; the Web UI and
+	// MCP listener are unaffected.
+	SingleApp       string
 	AssetsDir       string
 	SandboxMode     string
 	SandboxUIDBase  int
@@ -792,6 +797,13 @@ func (d *Daemon) profile() *profile.Profile {
 // Run starts servers, boot applications and background loops; it blocks until
 // the context is cancelled or a fatal server error occurs.
 func (d *Daemon) Run() error {
+	// Single-app mode is a launch policy, not a reconfiguration: refuse an
+	// unknown ID before serving so a typo cannot look like a quiet device.
+	if d.cfg.SingleApp != "" {
+		if _, ok := d.reg.Get(d.cfg.SingleApp); !ok {
+			return fmt.Errorf("single-app %q is not installed", d.cfg.SingleApp)
+		}
+	}
 	d.writePIDFile()
 	if err := d.launcher.Probe(d.ctx); err != nil {
 		d.logs.Warnf("sandbox", "", "probe: %v", err)

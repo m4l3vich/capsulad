@@ -5690,10 +5690,8 @@ type ApiKeyView struct {
 	Prefix        string `protobuf:"bytes,2,opt,name=prefix,proto3" json:"prefix,omitempty"`
 	CreatedUnixMs int64  `protobuf:"varint,3,opt,name=created_unix_ms,json=createdUnixMs,proto3" json:"created_unix_ms,omitempty"`
 	Revoked       bool   `protobuf:"varint,4,opt,name=revoked,proto3" json:"revoked,omitempty"`
-	// The grant this key carries. "status" is the legacy read-only grant
-	// (device status and the public certificate); "operator" is full daemon
-	// administration, exposed as the MCP tool set. A key persisted before scopes
-	// existed reports exactly ["status"]; it is never promoted implicitly.
+	// Recorded API key grants: status for monitoring, assistant for everyday
+	// controls, and operator for administration. No grants means no API access.
 	Scopes []string `protobuf:"bytes,5,rep,name=scopes,proto3" json:"scopes,omitempty"`
 }
 

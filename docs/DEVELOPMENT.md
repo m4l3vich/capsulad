@@ -31,7 +31,7 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make web` | `npm ci && npm run build` into `internal/webui/dist`, plus the settings-document kit at `internal/appui/assets/kit.css` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
 | `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (Cadence Client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
-| `make simon` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the PA Speaker service, the Internet Radio (one native package), the Home Assistant integration and the AirPlay 2 receiver (`product-apps` is the five together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
+| `make simon` / `make soundboard` / `make hardwaretest` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the Soundboard, the Hardware Test, the PA Speaker service, the Internet Radio (one native package), the Home Assistant integration and the AirPlay 2 receiver (`product-apps` is the five product apps together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
 | `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps`, `BUNDLE_CLI=0` omits the CLI |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
@@ -170,13 +170,12 @@ paused provider is deliberately absent there while `capsulad-cli media list`, `L
 the explicit transport controls still report and reach it.
 
 The same listener also serves the daemon's MCP frontend at `https://HOST:8443/mcp`: an
-API-key surface exposing the same operations as the browser, with no separate port, flag
-or process. It needs no Web UI rebuild. Create an `operator`-scoped key to use it and a
-`status`-scoped key for read-only polling; the browser's Access page keeps minting
-`status` keys, and a legacy key is never promoted. See [MCP.md](MCP.md).
+API-key surface on the same port and process. Use `assistant` for day-to-day voice control,
+`operator` for administration, and `status` for read-only polling. The browser's Access page
+creates status keys. See [MCP.md](MCP.md) for the exact grants.
 
 ```sh
-./build/bin/capsulad-cli -data-dir build/dev-web auth key create agent --scope operator
+./build/bin/capsulad-cli -data-dir build/dev-web auth key create agent --scope assistant
 ```
 
 ## Application artifacts
@@ -448,6 +447,7 @@ killed); use a script and the init helper:
 
 ```sh
 # /tmp/deploy.sh
+umask 022
 /tmp/capsulad-bundle/capsulad-cli -data-dir /data/capsdemo deploy /tmp/capsulad-bundle \
   -staging /run -timeout 180s > /tmp/deploy.log 2>&1
 echo "exit=$?" >> /tmp/deploy.log
@@ -457,6 +457,11 @@ adb shell chmod +x /tmp/deploy.sh
 adb shell start-stop-daemon -S -b -x /tmp/deploy.sh
 # reconnect when the link returns, then read /tmp/deploy.log and the health gate
 ```
+Keep `umask 022` for the service launch. The stock mount-namespace helper creates
+app-visible directory components under the inherited umask; a restart under `077`
+can pass daemon health while leaving apps unable to traverse those directories.
+Verify the expected app runs reach `APP_READY` after the restart.
+
 If a deployment is cut off between `stopped the daemon` and `restarted`, start the stack with
 `/etc/init.d/S99btctl.sh start` (never by running the daemon by hand) and check the installed
 binary's md5 before retrying. Staging defaults to `/tmp/capsulad-deploy-*`; the bundle itself
@@ -594,7 +599,18 @@ simulator accepts no injected input.
 
 Useful `capsulad` flags: `-platform`, `-data-dir`, `-socket`, `-web-addr` (empty
 disables the UI), `-native-lib-dir`, `-sandbox auto|namespaces|mountns|uid|none`,
-`-dev-admin`, `-mem-limit-mb`, `-output-trace`, `-wakeword-trace`, `-watchdog`.
+`-single-app <app-id>`, `-dev-admin`, `-mem-limit-mb`, `-output-trace`,
+`-wakeword-trace`, `-watchdog`.
+
+`-single-app <app-id>` is a launch policy for a dedicated speaker deployment: the daemon
+starts that application at boot — even when its manifest does not set `start_on_boot` or
+`background` — and starts no other application, including selected providers,
+framework-owned compiled-in helpers and other `background` apps. `Launch` of any other app
+is refused. The Web UI and MCP surface keep their normal defaults; pass an empty
+`-web-addr` to exclude them deliberately. Stop keeps the normal rule — a selected
+provider restarts, an unselected app stays stopped — and the app's own
+`restart_on_failure` contract still applies. An unknown ID fails startup instead of
+serving an empty device.
 
 Platform selection:
 
@@ -746,6 +762,8 @@ staged directory under `build/apps`. None of them is part of `all`, `release` or
 | Target | Package | What it is |
 |---|---|---|
 | `make simon` | `org.capsulad.simon` | Simon Says, a QuickJS colour-and-tone memory game: the LED ring replays a growing four-colour sequence (north red, east yellow, south green, west blue) with one packaged tone per colour, the four side keys repeat it, an optional four-digit segment display keeps the score, and holding the unmarked centre leaves the game. The package is `manifest.toml`, `main.js`, the app guide `README.md` and the pre-rendered `audio/*.wav` cues; the contract test suite stays out of it. It needs a QuickJS host with `Call.tryRecv` and `capsulad.readPackageFile`, so build `make interpreter-quickjs` and ship its `lib/capsulad-quickjs` — an older host makes the app log that it must be rebuilt and stop cleanly. |
+| `make soundboard` | `org.capsulad.soundboard` | Soundboard, a QuickJS app: the centre key plays the active shared `/assets` WAV, left/right swipes switch sounds and briefly show the active name, and the ring lights the sound's fixed or random colour. Its package carries `manifest.toml`, `main.js`, `README.md` and `ui/settings.html`; user WAVs are assets, not package files. The host must provide `capsulad.readAssetFile` and `Call.tryRecv`; an older host logs that it must be rebuilt and stops. |
+| `make hardwaretest` | `org.capsulad.hardwaretest` | Hardware Test, a native foreground app: `12:34` with the upper colon dot at 1 Hz and the lower at 2 Hz in ten-second phases, a clockwise rainbow chase, a 20% 440 Hz tone checked through the microphone with a red ring failure flash, and a full-panel capture showing 1-5 for the held key. Its package carries the binary, manifest and app guide; it needs the host native runtime and the rebuilt native SDK that understands `colonTop`/`colonBottom`. |
 | `make pa` | `org.capsulad.pa` | PA Speaker, a background MicroPython service: another app routes one `SpeakerService/Play` (a streamed WAV) and the app plays it through the framework speaker, replying after the queued audio drains. |
 | `make radio` | `org.capsulad.radio` | Internet Radio, a single native app: it keeps the station list, fetches one HTTP(S) MP3 stream through the shared `libcapsulad` transport, strips ICY metadata, decodes MP3 and writes paced PCM to the framework speaker in the same process, and serves the standard media contract. Its package carries the binary, the manifest, the `ui/settings.html` station picker, the media descriptor and the app guide. There is no companion package. |
 | `make homeassistant` | `org.capsulad.homeassistant` | The Home Assistant integration, a native app: an MQTT client that publishes the speaker to Home Assistant through discovery, publishes state topics, and applies the commands it sends back to the ring, the segment display and the Bluetooth source. Its package carries the binary, the manifest, the descriptor and `docs/bridge.md`. |
@@ -776,11 +794,12 @@ into the staged manifest through `tools/stage-manifest-abi.sh`, runs
 prefix or a matching cross compiler.
 
 Each app's own entrypoint is authoritative for its package contents:
-`apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/build.sh`, `apps/homeassistant/build.sh`
-and `apps/airplay/build.sh` — all of them honor `OUT=`,
-`PACKAGE=0` and `CAPSULAD_CLI=` where they package. Simon and PA compile nothing; the radio, the
-bridge and the receiver are native and need the host native runtime (`make native`) because their
-binaries link the shared SDK.
+`apps/simon/build.sh`, `apps/soundboard/build.sh`, `apps/hardwaretest/build.sh`,
+`apps/pa/build.sh`, `apps/radio/build.sh`, `apps/homeassistant/build.sh` and
+`apps/airplay/build.sh` — all of them honor `OUT=`,
+`PACKAGE=0` and `CAPSULAD_CLI=` where they package. Simon, Soundboard and PA compile nothing; the
+Hardware Test, radio, bridge and receiver are native and need the host native runtime
+(`make native`) because their binaries link the shared SDK.
 
 A native app's build host artifacts are **simulator** binaries; a device package is
 the same script with the target toolchain, exactly like the other native apps:

@@ -29,6 +29,7 @@ const (
 	KeyCAPEM           = "ca_pem"
 	KeyHoldReleaseTail = "hold_release_tail_ms"
 	KeyFollowUp        = "follow_up"
+	KeyLastTestStatus  = "last_test_status"
 )
 
 // Board identifies the Cadence board this client reports in Hello and uses in

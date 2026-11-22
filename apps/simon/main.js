@@ -419,6 +419,8 @@ function loadTones() {
 
 function flushTones() {
   if (speaker === null) return;
+  // FLUSH discards only the audio written before it; the cue written next on
+  // this same stream is kept, so the backlog is dropped without losing it.
   speaker.send({ control: "PLAYBACK_FLUSH" });
 }
 

@@ -115,7 +115,13 @@ func (s *simSegment) ResourceID() string { return "display.segment.front" }
 func (s *simSegment) WriteSegment(f SegmentFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.frame = SegmentFrame{Cells: append([]uint16(nil), f.Cells...), Colon: f.Colon, Brightness: f.Brightness}
+	s.frame = SegmentFrame{
+		Cells:       append([]uint16(nil), f.Cells...),
+		Colon:       f.Colon,
+		ColonTop:    f.ColonTop,
+		ColonBottom: f.ColonBottom,
+		Brightness:  f.Brightness,
+	}
 	return nil
 }
 
@@ -123,7 +129,13 @@ func (s *simSegment) WriteSegment(f SegmentFrame) error {
 func (s *simSegment) Snapshot() SegmentFrame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SegmentFrame{Cells: append([]uint16(nil), s.frame.Cells...), Colon: s.frame.Colon, Brightness: s.frame.Brightness}
+	return SegmentFrame{
+		Cells:       append([]uint16(nil), s.frame.Cells...),
+		Colon:       s.frame.Colon,
+		ColonTop:    s.frame.ColonTop,
+		ColonBottom: s.frame.ColonBottom,
+		Brightness:  s.frame.Brightness,
+	}
 }
 
 // --- ring ------------------------------------------------------------------

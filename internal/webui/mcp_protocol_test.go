@@ -220,14 +220,14 @@ func TestMCPRevocationEndsSessions(t *testing.T) {
 // affected sessions without any MCP request arriving.
 func TestMCPRevocationViaAccessTopic(t *testing.T) {
 	env := newTestEnv(t)
-	key := operatorKey(t, env, "ops")
+	key := assistantKey(t, env)
 	mcpInitialize(t, env, key)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go env.srv.reconcileMCPKeysOnAccess(ctx)
 
-	if err := env.store.RevokeAPIKey("ops"); err != nil {
+	if err := env.store.RevokeAPIKey("assistant"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

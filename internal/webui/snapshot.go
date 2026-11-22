@@ -73,6 +73,59 @@ func (s *Server) snapshot(ctx context.Context, topic webv1.Topic, appID string) 
 	return snap, nil
 }
 
+// assistantSnapshot builds only the data needed to control the speaker. In
+// particular it never requests application configuration, log history,
+// adapter details, or wakeword data from the local administrator connection.
+func (s *Server) assistantSnapshot(ctx context.Context, topic webv1.Topic, appID string) (*webv1.Snapshot, error) {
+	snap := &webv1.Snapshot{Topic: topic}
+	switch topic {
+	case webv1.Topic_TOPIC_OVERVIEW:
+		view, err := s.buildOverview(ctx, true)
+		if err != nil {
+			return nil, err
+		}
+		snap.View = &webv1.Snapshot_Overview{Overview: view}
+	case webv1.Topic_TOPIC_SETTINGS:
+		view, err := s.buildSettings(ctx, true)
+		if err != nil {
+			return nil, err
+		}
+		snap.View = &webv1.Snapshot_Settings{Settings: view}
+	case webv1.Topic_TOPIC_APPLICATION:
+		if appID == "" {
+			return nil, status.Error(codes.InvalidArgument, "application topic needs an app id")
+		}
+		app, err := s.appByID(ctx, appID)
+		if err != nil {
+			return nil, err
+		}
+		view := &webv1.ApplicationView{App: assistantAppView(app)}
+		appsvc := frameworkv1.NewApplicationServiceClient(s.Conn)
+		if runs, err := appsvc.ListRuns(ctx, &frameworkv1.ListRunsRequest{AppId: appID}); err == nil {
+			view.Runs = assistantRunViews(runs.GetRuns())
+		}
+		switch appID {
+		case clockAppID:
+			if state, err := s.clockSnapshot(ctx, appID, clockServiceAPI); err == nil {
+				view.Clock = clockView(state)
+			} else {
+				view.ClockError = "clock state is unavailable"
+			}
+		case ringAppID:
+			if state, err := s.ringSnapshot(ctx, appID, ringServiceAPI); err == nil {
+				view.Ring = ringView(state)
+			} else {
+				view.RingError = "ring state is unavailable"
+			}
+		}
+		snap.AppId = appID
+		snap.View = &webv1.Snapshot_Application{Application: view}
+	default:
+		return nil, status.Error(codes.PermissionDenied, "the assistant scope does not permit this snapshot topic")
+	}
+	return snap, nil
+}
+
 // bluetoothAddressRe matches the address shapes BlueZ may hand back as a
 // device name: six colon- or hyphen-separated octets, or twelve bare hex
 // digits.
@@ -93,26 +146,34 @@ func displayPairedName(address, name string) string {
 }
 
 func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) {
-	dev := frameworkv1.NewDeviceServiceClient(s.Conn)
-	info, err := dev.GetInfo(ctx, &frameworkv1.GetInfoRequest{})
-	if err != nil {
-		return nil, err
-	}
-	audio, _ := frameworkv1.NewAudioServiceClient(s.Conn).GetAudioState(ctx, &frameworkv1.GetAudioStateRequest{})
-	bt, _ := frameworkv1.NewSystemServiceClient(s.Conn).GetBluetoothStatus(ctx, &frameworkv1.GetBluetoothStatusRequest{})
-	view := &webv1.OverviewView{
-		Device:    deviceView(info),
-		Audio:     audioView(audio),
-		Bluetooth: bluetoothView(bt),
-	}
-	if paired, err := frameworkv1.NewSystemServiceClient(s.Conn).ListPairedDevices(ctx, &frameworkv1.ListPairedDevicesRequest{}); err != nil {
-		view.BluetoothError = rpcMessage(err)
+	return s.buildOverview(ctx, false)
+}
+
+func (s *Server) buildOverview(ctx context.Context, assistant bool) (*webv1.OverviewView, error) {
+	view := &webv1.OverviewView{}
+	if assistant {
+		if audio, err := frameworkv1.NewAudioServiceClient(s.Conn).GetAudioState(ctx, &frameworkv1.GetAudioStateRequest{}); err == nil {
+			view.Audio = &webv1.AudioView{MasterVolume: audio.GetMasterVolume()}
+		}
 	} else {
-		for _, d := range paired.GetDevices() {
-			view.PairedDevices = append(view.PairedDevices, &webv1.PairedDeviceView{
-				Name: displayPairedName(d.GetAddress(), d.GetName()), Connected: d.GetConnected(), Trusted: d.GetTrusted(),
-				DeviceId: pairedDeviceID(d.GetAddress()),
-			})
+		dev := frameworkv1.NewDeviceServiceClient(s.Conn)
+		info, err := dev.GetInfo(ctx, &frameworkv1.GetInfoRequest{})
+		if err != nil {
+			return nil, err
+		}
+		audio, _ := frameworkv1.NewAudioServiceClient(s.Conn).GetAudioState(ctx, &frameworkv1.GetAudioStateRequest{})
+		sys := frameworkv1.NewSystemServiceClient(s.Conn)
+		bt, _ := sys.GetBluetoothStatus(ctx, &frameworkv1.GetBluetoothStatusRequest{})
+		view.Device, view.Audio, view.Bluetooth = deviceView(info), audioView(audio), bluetoothView(bt)
+		if paired, err := sys.ListPairedDevices(ctx, &frameworkv1.ListPairedDevicesRequest{}); err != nil {
+			view.BluetoothError = rpcMessage(err)
+		} else {
+			for _, d := range paired.GetDevices() {
+				view.PairedDevices = append(view.PairedDevices, &webv1.PairedDeviceView{
+					Name: displayPairedName(d.GetAddress(), d.GetName()), Connected: d.GetConnected(), Trusted: d.GetTrusted(),
+					DeviceId: pairedDeviceID(d.GetAddress()),
+				})
+			}
 		}
 	}
 	appsResp, err := frameworkv1.NewApplicationServiceClient(s.Conn).ListApplications(ctx, &frameworkv1.ListApplicationsRequest{})
@@ -136,11 +197,18 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 			running[run.GetAppId()] = true
 		}
 	}
-	providers, err := s.mediaProviders(ctx, appsResp.GetApplications(), running)
+	providers, err := s.mediaProviders(ctx, appsResp.GetApplications(), running, assistant)
 	if err != nil {
 		return nil, err
 	}
 	view.Providers = providers
+	if assistant {
+		for _, app := range appsResp.GetApplications() {
+			view.Apps = append(view.Apps, assistantAppView(app))
+		}
+		view.Runs = assistantRunViews(runs.GetRuns())
+		return view, nil
+	}
 	selected := map[string]bool{}
 	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
 		selected = selectedProviders(settings.GetValues())
@@ -156,11 +224,25 @@ func (s *Server) overviewView(ctx context.Context) (*webv1.OverviewView, error) 
 }
 
 func (s *Server) settingsView(ctx context.Context) (*webv1.SettingsView, error) {
+	return s.buildSettings(ctx, false)
+}
+
+func (s *Server) buildSettings(ctx context.Context, assistant bool) (*webv1.SettingsView, error) {
 	settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{})
 	if err != nil {
 		return nil, err
 	}
-	view := &webv1.SettingsView{Revision: settings.GetRevision(), Values: settingsValues(settings.GetValues())}
+	view := &webv1.SettingsView{Revision: settings.GetRevision()}
+	if assistant {
+		values := settings.GetValues()
+		view.Values = &webv1.SettingsValues{
+			DisplayBrightness: values.GetDisplayBrightness(), BrightnessMode: values.GetBrightnessMode(),
+			MasterVolume: values.GetMasterVolume(), StartupSoundEnabled: values.GetStartupSoundEnabled(),
+			Timezone: values.GetTimezone(),
+		}
+	} else {
+		view.Values = settingsValues(settings.GetValues())
+	}
 	resp, _ := frameworkv1.NewDeviceServiceClient(s.Conn).ListResources(ctx, &frameworkv1.ListResourcesRequest{})
 	for _, res := range resp.GetResources() {
 		switch res.Kind {
@@ -173,6 +255,9 @@ func (s *Server) settingsView(ctx context.Context) (*webv1.SettingsView, error) 
 				view.AmbientAvailable = true
 			}
 		}
+	}
+	if assistant {
+		return view, nil
 	}
 	if apps, err := frameworkv1.NewApplicationServiceClient(s.Conn).ListApplications(ctx, &frameworkv1.ListApplicationsRequest{}); err == nil {
 		for _, a := range apps.GetApplications() {
@@ -452,6 +537,21 @@ func pairedDeviceID(address string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
+func assistantAppView(app *frameworkv1.InstalledApplication) *webv1.AppView {
+	return &webv1.AppView{
+		AppId: app.GetAppId(), DisplayName: app.GetDisplayName(), Version: app.GetVersion(),
+		Provides: app.GetProvides(), SystemApp: app.GetSystemApp(), CanStop: app.GetCanStop(),
+	}
+}
+
+func assistantRunViews(runs []*frameworkv1.AppRun) []*webv1.RunView {
+	out := make([]*webv1.RunView, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, &webv1.RunView{RunId: run.GetRunId(), AppId: run.GetAppId(), State: run.GetState().String()})
+	}
+	return out
+}
+
 // appListing projects an installed application for the browser. Declared
 // actions are not part of the framework's application listing, so they come
 // from the registry manifest: the same definitions DescribeAppConfiguration
@@ -701,7 +801,7 @@ func (s *Server) logsTail(ctx context.Context, appID string, limit int) []logbus
 	return tail
 }
 
-func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.InstalledApplication, running map[string]bool) ([]*webv1.MediaProviderView, error) {
+func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.InstalledApplication, running map[string]bool, assistant bool) ([]*webv1.MediaProviderView, error) {
 	var out []*webv1.MediaProviderView
 	for _, a := range apps {
 		if !providesMedia(a) || !running[a.GetAppId()] {
@@ -720,13 +820,19 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 			if p.GetPlaybackState() != mediav1.PlaybackState_PLAYBACK_PLAYING {
 				continue
 			}
-			provider.Players = append(provider.Players, &webv1.MediaPlayerView{
+			player := &webv1.MediaPlayerView{
 				PlayerId: p.GetPlayerId(), PlaybackState: p.GetPlaybackState().String(),
 				SupportedActions: mediaActions(p.GetSupportedActions()),
-				AppName:          p.GetAppName(), SourceName: p.GetSourceName(), MediaName: p.GetMediaName(),
+				AppName: p.GetAppName(),
 				Title: p.GetTitle(), Artist: p.GetArtist(), Album: p.GetAlbum(),
 				DurationMs: p.GetDurationMs(), PositionMs: p.GetPositionMs(), Revision: p.GetRevision(),
-			})
+			}
+			// A bare configured radio URL can be the source/media name.
+			// Keep arbitrary source text (including peer names) on the operator view.
+			if !assistant {
+				player.SourceName, player.MediaName = p.GetSourceName(), p.GetMediaName()
+			}
+			provider.Players = append(provider.Players, player)
 		}
 		// A playing sibling keeps the provider in the projection; an idle,
 		// paused or stopped-only provider is omitted rather than shown empty.
@@ -742,7 +848,7 @@ func (s *Server) mediaProviders(ctx context.Context, apps []*frameworkv1.Install
 	// providers, so a running player stays the default view. It appears only
 	// while playback is actually observed; a connected but idle, paused or
 	// stopped source is provider discovery, not Now Playing, and adds no row.
-	if provider := s.frameworkMediaProvider(ctx); provider != nil {
+	if provider := s.frameworkMediaProvider(ctx, assistant); provider != nil {
 		out = append(out, provider)
 	}
 	return out, nil

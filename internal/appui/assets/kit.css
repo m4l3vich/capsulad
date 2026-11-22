@@ -3187,6 +3187,9 @@ html {
 .bg-transparent {
   background-color: transparent;
 }
+.p-1 {
+  padding: 0.25rem;
+}
 .p-2 {
   padding: 0.5rem;
 }
@@ -3332,6 +3335,10 @@ html {
 }
 
 @media (min-width: 640px) {
+
+  .sm\:col-span-2 {
+    grid-column: span 2 / span 2;
+  }
 
   .sm\:w-auto {
     width: auto;

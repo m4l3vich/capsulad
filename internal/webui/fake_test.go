@@ -43,6 +43,7 @@ type fakeBackend struct {
 	// watchRunsErr fails the run watch, so a test can prove a refused live
 	// stream stays an inline error instead of closing the browser socket.
 	watchRunsErr error
+	launchCalls []*frameworkv1.LaunchRequest
 	// stopCalls records the run IDs the browser asked to stop, so a test can
 	// prove a foreign or built-in run ID is rejected before it reaches the
 	// daemon.
@@ -79,6 +80,8 @@ type fakeBackend struct {
 	// observable.
 	mediaPlayers map[string][]*mediav1.PlayerStatus
 	mediaErr     map[string]error
+	mediaCommandDetail string
+	mediaCommandErr    error
 	// mediaWake broadcasts a provider player-set change to every WatchPlayers
 	// subscriber, with the same close-and-replace rule as btWake.
 	mediaWake chan struct{}
@@ -425,7 +428,10 @@ func (f *fakeApps) UninstallApplication(_ context.Context, req *frameworkv1.Unin
 	f.b.uninstallCalls = append(f.b.uninstallCalls, req.GetAppId())
 	return &frameworkv1.UninstallApplicationResult{AppId: req.GetAppId()}, nil
 }
-func (f *fakeApps) Launch(context.Context, *frameworkv1.LaunchRequest) (*frameworkv1.LaunchResult, error) {
+func (f *fakeApps) Launch(_ context.Context, req *frameworkv1.LaunchRequest) (*frameworkv1.LaunchResult, error) {
+	f.b.mu.Lock()
+	f.b.launchCalls = append(f.b.launchCalls, req)
+	f.b.mu.Unlock()
 	return &frameworkv1.LaunchResult{RunId: "run-2", InvocationId: "inv-1", SpawnedNewProcess: true}, nil
 }
 func (f *fakeApps) Stop(_ context.Context, req *frameworkv1.StopRequest) (*frameworkv1.StopResponse, error) {
@@ -770,6 +776,8 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 			return proto.Marshal(&clockv1.ClockState{
 				LocalTimeRfc3339: "2026-11-13T12:00:00Z", Timezone: "UTC",
 				Stopwatch: &clockv1.StopwatchState{Status: status, ElapsedMs: elapsed},
+				Timers: []*clockv1.Timer{{TimerId: "timer-1", DurationMs: 60000, RemainingMs: 30000}},
+				Alarms: []*clockv1.Alarm{{AlarmId: "0 7 * * *", Schedule: "0 7 * * *", Enabled: true}},
 				Revision:  3, AlarmsSetting: "0 7 * * *",
 			})
 		case "StopwatchStart":
@@ -803,7 +811,13 @@ func (f *fakeBus) response(start *frameworkv1.RoutedCallStart, request []byte) (
 			}
 			return proto.Marshal(&mediav1.ListPlayersResponse{Players: players})
 		}
-		return proto.Marshal(&mediav1.PlayerCommandResult{Accepted: true})
+		f.b.mu.Lock()
+		detail, err := f.b.mediaCommandDetail, f.b.mediaCommandErr
+		f.b.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return proto.Marshal(&mediav1.PlayerCommandResult{Accepted: true, Detail: detail})
 	}
 	return nil, status.Errorf(codes.Unimplemented, "unexpected service %s", start.GetGrpcService())
 }

@@ -334,6 +334,15 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   Selecting a built-in starts it immediately, while the explicit none choice leaves its output blank
   and survives restart. `Launch` on a stopped built-in starts exactly one run under its stable
   `builtin:<app_id>` ID, and stopping an unselected built-in leaves it stopped.
+- **Single-app launch mode.** `capsulad -single-app <app_id>` starts only that application and no
+  other: selected providers, framework-owned compiled-in helpers, and other `start_on_boot` or
+  `background` apps stay stopped, and a launch request for any other app is refused. The requested
+  app starts even when its manifest does not ask for boot. An unknown ID fails startup rather than
+  serving a quiet device. The Web UI and MCP listener keep their normal defaults; only an empty
+  `-web-addr` excludes them. With no clock helper running the display baseline is the explicit
+  blank frame that the no-selected-presentation rule already requires. Stop follows the existing
+  rule — a selected provider restarts, an unselected app stays stopped — and a crash follows the
+  manifest `restart_on_failure` contract.
 - **Panel game (`org.capsulad.simon`).** A launch reads the device's advertised capabilities
   (`DeviceService.ListResources`, `AudioService.ListEndpoints`) and then owns exactly four things
   for the life of the run: an LED ring presentation on `light.ring.main`, an *optional* score
@@ -584,13 +593,24 @@ from routing to driver submission; acoustics and photons are separate, explicitl
 
 ## Privacy and microphone interaction
 
-Supervised applications and authenticated Web UI automation are untrusted for private data even with
-a valid API key or supervised run identity. The daemon has one local gRPC listener on the Unix
-socket; there is no network gRPC listener. The Web UI is a local administrator client of that
-socket, but its authenticated browser/API-key surface is not a second privilege plane: a status key
-is limited to the read-only status and certificate endpoints, while an operator key is the existing
-administration credential (the MCP tools plus the PA Speaker play relay). Neither scope exposes a
-generic AppBus, capture or audio proxy, and no API key can change the administrator password.
+The daemon has one local gRPC listener on the Unix socket, not a network gRPC listener.
+The browser and MCP adapter are local administrator clients of that socket, but their
+remote credentials do not inherit that identity. A `status` key reads status and the
+certificate. An explicitly issued `assistant` key adds limited MCP state reads, volume,
+display brightness/mode, startup sound, timezone, media transport, the built-in clock, and
+explicit launch (installed app ID only) or stop of an installed app's run. It does not
+grant presence at the speaker, wake-word or talk-button authority, a browser session,
+app configuration/actions, access to logs or credentials, or the PA raw-WAV relay.
+An `operator` key has the full MCP tool set and the PA relay. No API key can change
+the administrator password or invoke a generic AppBus, capture or audio proxy.
+
+- **Delegated speaker controls.** The owner explicitly issues and shares an assistant key.
+  Each accepted request gets the normal control result; a forbidden request fails before it
+  reaches the speaker. Launching requires an explicit app ID, with no arguments or new
+  settings; the app still runs its normal startup behavior with its existing configuration.
+  Stop goes through the existing run ownership, cleanup and provider recovery path.
+  Revocation refuses new requests and closes the key's MCP sessions; it does
+  not undo completed operations. Browser-session and operator controls remain unchanged.
 
 - **Microphone indication, visible and audible.** A supervised app receives microphone audio only
   while both halves hold: a selected, visible, non-blank ring/segment presentation for that app at
@@ -615,12 +635,13 @@ generic AppBus, capture or audio proxy, and no API key can change the administra
   start cue before capture begins; if the ring cannot be selected/rendered or the cue cannot be
   delivered, recording fails instead of proceeding silently. The browser receives samples and status
   only, never PCM or stored takes.
-- **Administrator-only surfaces.** Device settings (including hostname, volume, microphone mute),
-  device-wide diagnostics and log history, forced capture release, wakeword enrollment/training,
-  Bluetooth incoming-connection/discoverable policy, advertised-name change and unpair, application
-  launch/stop, and foreign-app configuration. An app that omits its run ID still identifies as an
-  app through its sandbox UID or supervised PID; silence never grants administrator identity. A compiled-in app
-  is instead an explicit identity: its virtual run shares the daemon's PID with the Web UI and
+- **Local administrator RPCs.** Device settings, device-wide diagnostics and log history,
+  forced capture release, wakeword enrollment/training, Bluetooth incoming/discoverable
+  policy, advertised-name change and unpair, application launch/stop and foreign-app
+  configuration remain administrator RPCs. The Web UI/MCP adapter enforces the narrower
+  remote grants before calling those RPCs. An app that omits its run ID still identifies as
+  an app through its sandbox UID or supervised PID; silence never grants administrator identity.
+  A compiled-in app is instead an explicit identity: its virtual run shares the daemon's PID with the Web UI and
   every other in-process client, so a PID alone never selects `capsulad.clock` or `capsulad.ring`
   — only that run's stable ID plus the per-boot internal token does, and the Web UI's own reads
   stay administrator reads. Per-app configuration, actions and run listings are scoped to the

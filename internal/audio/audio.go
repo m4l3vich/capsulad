@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"capsulad/internal/backend"
@@ -433,12 +434,29 @@ func (m *Manager) HardwareMute() bool {
 
 // --- playback --------------------------------------------------------------
 
+// A playbackChunk is one PCM write tagged with its publication order. The
+// order is what lets FLUSH discard only the audio written before it: a cue
+// written immediately after the command must not be swallowed by the same
+// mixer tick that applies the flush.
+type playbackChunk struct {
+	pcm []byte
+	seq uint64
+}
+
+// A playbackCommand carries a control command with the same publication order
+// as chunks. It is applied asynchronously by the mixer, so without that order
+// a FLUSH would clear audio the producer already published after it.
+type playbackCommand struct {
+	cmd string
+	seq uint64
+}
+
 type Playback struct {
 	id, appID, runID, conversationID string
 	format                           backend.AudioFormat
 	events                           chan PlaybackEvent
-	in                               chan []byte
-	ctl                              chan string
+	in                               chan playbackChunk
+	ctl                              chan playbackCommand
 	done                             chan struct{}
 	conv                             *resampler
 
@@ -452,6 +470,12 @@ type Playback struct {
 	trim         float64
 	paused       bool
 	inputClosed  bool
+
+	// nextSeq orders chunks against control commands for every producer of
+	// this stream. flushThrough is the newest FLUSH sequence the mixer has
+	// applied, and the mixer goroutine owns it; feed drops chunks below it.
+	nextSeq      atomic.Uint64
+	flushThrough uint64
 }
 
 func (p *Playback) ID() string                   { return p.id }
@@ -507,13 +531,14 @@ func (p *Playback) Write(pcm []byte) error {
 	// send, before this goroutine is scheduled again.
 	p.queuedBytes += len(pcm)
 	p.mu.Unlock()
+	chunk := playbackChunk{pcm: pcm, seq: p.nextSeq.Add(1)}
 	select {
 	case <-p.done:
 		p.mu.Lock()
 		p.queuedBytes -= len(pcm)
 		p.mu.Unlock()
 		return fmt.Errorf("playback stream is closed")
-	case p.in <- pcm:
+	case p.in <- chunk:
 		return nil
 	}
 }
@@ -535,10 +560,15 @@ func (p *Playback) SetTrim(v float64) {
 	p.mu.Unlock()
 }
 
+// Control queues one live-stream command. The send blocks until the mixer
+// accepts it (or the stream ends) because a silently dropped FLUSH would leave
+// the cue backlog audible and a dropped PAUSE/RESUME would contradict the
+// caller's state. Capacity is per stream and the mixer drains every tick.
 func (p *Playback) Control(cmd string) {
+	command := playbackCommand{cmd: cmd, seq: p.nextSeq.Add(1)}
 	select {
-	case p.ctl <- cmd:
-	default:
+	case p.ctl <- command:
+	case <-p.done:
 	}
 }
 
@@ -556,8 +586,8 @@ func (m *Manager) OpenPlayback(appID, runID, endpointID string, format backend.A
 		id: ids.New("pbs"), appID: appID, runID: runID, conversationID: conversationID,
 		format:     format,
 		feedFrames: (format.RateHz*mixFrameMS+999)/1000 + 2,
-		events:     make(chan PlaybackEvent, 16), in: make(chan []byte, playbackQueue),
-		ctl: make(chan string, 4), done: make(chan struct{}),
+		events:     make(chan PlaybackEvent, 16), in: make(chan playbackChunk, playbackQueue),
+		ctl: make(chan playbackCommand, 4), done: make(chan struct{}),
 		conv: newResampler(format, m.outFmt()), gain: 1, trim: 1, mgr: m,
 	}
 	m.mu.Lock()
@@ -869,22 +899,15 @@ func finite32(v float32) float32 {
 func (p *Playback) drainControl() {
 	for {
 		select {
-		case cmd := <-p.ctl:
-			switch cmd {
+		case command := <-p.ctl:
+			switch command.cmd {
 			case "FLUSH":
-				discarded := 0
-			drain:
-				for {
-					select {
-					case chunk := <-p.in:
-						discarded += len(chunk)
-					default:
-						break drain
-					}
+				// Only audio published before the command is discarded. The
+				// chunks that survive stay queued (published after it); feed
+				// drops the older ones in order on this same tick.
+				if command.seq > p.flushThrough {
+					p.flushThrough = command.seq
 				}
-				p.mu.Lock()
-				p.queuedBytes -= discarded
-				p.mu.Unlock()
 				p.conv.reset()
 			case "PAUSE":
 				p.mu.Lock()
@@ -904,17 +927,22 @@ func (p *Playback) drainControl() {
 // feed moves only the next mixer quantum into the resampler. Draining the
 // entire channel on every tick would turn the resampler into an unbounded
 // second queue and defeat playback backpressure, especially while paused.
+// Chunks a FLUSH already covered are dropped here rather than deleted by the
+// command, because a chunk published after the FLUSH shares this queue.
 func (p *Playback) feed() {
 	for p.conv.srcFrames() < p.feedFrames {
 		select {
 		case chunk := <-p.in:
 			p.mu.Lock()
-			p.queuedBytes -= len(chunk)
+			p.queuedBytes -= len(chunk.pcm)
 			if p.queuedBytes < 0 {
 				p.queuedBytes = 0
 			}
 			p.mu.Unlock()
-			p.conv.feed(chunk)
+			if chunk.seq < p.flushThrough {
+				continue
+			}
+			p.conv.feed(chunk.pcm)
 		default:
 			return
 		}

@@ -89,9 +89,9 @@ func TestVolumeOSDSupersededTimerKeepsOverlay(t *testing.T) {
 	if sel := d.router.Current(segmentID); sel.SelectedCaptureID != captureID {
 		t.Fatalf("superseded expiry released the live capture: %+v", sel)
 	}
-	cells, colon, ok := overlay.RenderSegment(backend.SegmentCaps{DigitCount: 4, SegmentsPerDigit: 7, SupportsColon: true})
-	if !ok || colon || !slices.Equal(cells, volumeCells(60)) {
-		t.Fatalf("overlay shows %v/%v, want the newest percentage %v", cells, colon, volumeCells(60))
+	cells, colonTop, colonBottom, ok := overlay.RenderSegment(backend.SegmentCaps{DigitCount: 4, SegmentsPerDigit: 7, SupportsColon: true})
+	if !ok || colonTop || colonBottom || !slices.Equal(cells, volumeCells(60)) {
+		t.Fatalf("overlay shows %v/%v/%v, want the newest percentage %v", cells, colonTop, colonBottom, volumeCells(60))
 	}
 
 	// Its own generation still releases the overlay and the capture.

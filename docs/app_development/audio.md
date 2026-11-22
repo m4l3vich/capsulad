@@ -187,7 +187,9 @@ release) so overlapping apps or a framework cue stay below full scale instead of
   event stream ends. Use this for barge-in, stop buttons and errors.
 - **Pause**: the queue stays bounded; writers experience backpressure. A paused stream is not a
   place to park an unbounded buffer.
-- **FLUSH** clears the queue without closing the stream. It is not a substitute for
+- **FLUSH** clears the queue without closing the stream. It discards only audio written
+  **before** the command: a chunk written after it is kept, so flush a backlog and write the
+  next cue immediately rather than pausing between them. It is not a substitute for
   pause/abort when you need an immediate audible stop, because the chunk already handed to the
   mixer may still play.
 

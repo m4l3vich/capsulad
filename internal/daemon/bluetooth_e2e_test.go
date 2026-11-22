@@ -147,8 +147,8 @@ func TestBluetoothIndicatorContent(t *testing.T) {
 	if content.Cells[2] != bluetoothGlyphs[0] || content.Cells[3] != bluetoothGlyphs[1] {
 		t.Fatalf("rightmost cells = %#v, want %#v", content.Cells[2:], bluetoothGlyphs)
 	}
-	if content.Colon {
-		t.Fatal("bt indicator lights the colon")
+	if content.ColonTop || content.ColonBottom {
+		t.Fatal("bt indicator lights a colon dot")
 	}
 }
 
@@ -223,9 +223,9 @@ func TestBluetoothConnectNotifications(t *testing.T) {
 	if info := d.resources[displayID]; info != nil && info.GetSegment() != nil {
 		digitCount = int(info.GetSegment().GetDigitCount())
 	}
-	cells, colon, ok := pres.RenderSegment(backend.SegmentCaps{DigitCount: digitCount, SegmentsPerDigit: 7, SupportsColon: true})
-	if !ok || colon {
-		t.Fatalf("segment frame ok=%v colon=%v", ok, colon)
+	cells, colonTop, colonBottom, ok := pres.RenderSegment(backend.SegmentCaps{DigitCount: digitCount, SegmentsPerDigit: 7, SupportsColon: true})
+	if !ok || colonTop || colonBottom {
+		t.Fatalf("segment frame ok=%v colon_top=%v colon_bottom=%v", ok, colonTop, colonBottom)
 	}
 	want := bluetoothIndicatorCells(digitCount)
 	if len(cells) != len(want) {

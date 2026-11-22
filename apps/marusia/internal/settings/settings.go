@@ -21,11 +21,13 @@ const (
 	KeyEndpoint       = "endpoint"
 	KeyEndpointCustom = "endpoint_custom"
 	KeyXToken         = "xtoken_id"
+	KeyVKAccessToken  = "vk_access_token"
 	KeySerial         = "serial"
 	KeyDeviceID       = "device_id"
 	KeySessionID      = "session_id"
 	KeySessionSecret  = "session_secret"
 	KeySessionFile    = "session_file"
+	KeyLastAuthStatus = "last_auth_status"
 	KeyAudioFormat    = "audio_format"
 	KeyClientVersion  = "client_version"
 	KeyKeyword        = "keyword"
@@ -83,11 +85,13 @@ type Values struct {
 	Endpoint       string
 	EndpointCustom string
 	XToken         string
+	VKAccessToken  string
 	Serial         string
 	DeviceID       string
 	SessionID      string
 	SessionSecret  string
 	SessionFile    string
+	LastAuthStatus string
 	AudioFormat    string
 	ClientVersion  string
 	Keyword        string
@@ -133,6 +137,8 @@ func Read(changed *capsulad.SettingsChanged) (Values, error) {
 			values.EndpointCustom = text
 		case KeyXToken:
 			values.XToken = text
+		case KeyVKAccessToken:
+			values.VKAccessToken = text
 		case KeySerial:
 			values.Serial = text
 		case KeyDeviceID:
@@ -143,6 +149,8 @@ func Read(changed *capsulad.SettingsChanged) (Values, error) {
 			values.SessionSecret = text
 		case KeySessionFile:
 			values.SessionFile = text
+		case KeyLastAuthStatus:
+			values.LastAuthStatus = text
 		case KeyAudioFormat:
 			values.AudioFormat = text
 		case KeyClientVersion:

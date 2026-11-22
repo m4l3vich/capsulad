@@ -149,9 +149,10 @@ type lineDisplay struct {
 	colonBottom    string
 	glyphs         []byte
 	digits         int
-	lastMessage    []byte
-	lastBrightness int
-	lastColon      int
+	lastMessage     []byte
+	lastBrightness  int
+	lastColonTop    int
+	lastColonBottom int
 }
 
 // lineDisplayCandidates are the paths the kernel line-display framework has
@@ -181,9 +182,10 @@ func openLineDisplay(cfg Config) (backend.SegmentDevice, bool) {
 		messagePath:    messagePath,
 		brightnessPath: probeBrightness(messagePath),
 		glyphs:         glyphs,
-		digits:         cfg.LEDSegmentDigits,
-		lastBrightness: -1,
-		lastColon:      -1,
+		digits:          cfg.LEDSegmentDigits,
+		lastBrightness:  -1,
+		lastColonTop:    -1,
+		lastColonBottom: -1,
 	}
 	classDir := pathFor(cfg.RootPrefix, cfg.LEDSysfsClassDir)
 	if cfg.ColonTopLED != "" {
@@ -258,20 +260,32 @@ func (d *lineDisplay) WriteSegment(f backend.SegmentFrame) error {
 		}
 		d.lastBrightness = level
 	}
-	colon := 0
-	if f.Colon {
-		colon = level
+	colonTop, colonBottom := 0, 0
+	if f.TopColonOn() {
+		colonTop = level
 	}
-	if colon != d.lastColon {
-		for _, path := range []string{d.colonTop, d.colonBottom} {
-			if path == "" {
-				continue
-			}
-			if err := os.WriteFile(filepath.Join(path, "brightness"), []byte(strconv.Itoa(colon)), 0o644); err != nil && !os.IsNotExist(err) {
-				return err
-			}
+	if f.BottomColonOn() {
+		colonBottom = level
+	}
+	for i, state := range []struct {
+		path  string
+		value int
+		last  int
+	}{
+		{d.colonTop, colonTop, d.lastColonTop},
+		{d.colonBottom, colonBottom, d.lastColonBottom},
+	} {
+		if state.path == "" || state.value == state.last {
+			continue
 		}
-		d.lastColon = colon
+		if err := os.WriteFile(filepath.Join(state.path, "brightness"), []byte(strconv.Itoa(state.value)), 0o644); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if i == 0 {
+			d.lastColonTop = state.value
+		} else {
+			d.lastColonBottom = state.value
+		}
 	}
 	message := make([]byte, d.digits)
 	for cell := range message {

@@ -79,10 +79,7 @@ type apiKeyRecord struct {
 	Hash      string     `json:"hash"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	// Scopes is the grant this key was issued with. It is additive: a record
-	// persisted before scopes existed carries none, and such a legacy key keeps
-	// exactly its old grant (ScopeStatus) instead of being silently promoted.
-	Scopes []string `json:"scopes,omitempty"`
+	Scopes    []string   `json:"scopes,omitempty"`
 }
 
 type APIKeyInfo struct {
@@ -90,64 +87,69 @@ type APIKeyInfo struct {
 	Prefix    string
 	CreatedAt time.Time
 	Revoked   bool
-	// Scopes is the effective grant: the recorded scopes, or ScopeStatus for a
-	// legacy key.
+	// Scopes is the recorded grant. Missing or invalid scopes give no access.
 	Scopes []string
 }
 
-// API-key scopes separate the read-only service identity from full daemon
-// administration. They exist because the MCP frontend reuses the same static
-// keys: a key minted for status polling must never become an administration
-// credential by reaching a second frontend.
+// API-key scopes separate status polling, assistant controls, and full
+// administration across the HTTP and MCP frontends.
 const (
 	// ScopeStatus is the read-only service identity: GET /api/status and the
-	// public certificate. It is the implicit, only scope of a legacy key.
+	// public certificate.
 	ScopeStatus = "status"
+	// ScopeAssistant covers ordinary speaker controls and implies ScopeStatus.
+	ScopeAssistant = "assistant"
 	// ScopeOperator is full daemon administration, exposed by the MCP frontend
-	// as the operator tool set. It implies every other scope.
+	// as the operator tool set. It implies ScopeAssistant and ScopeStatus.
 	ScopeOperator = "operator"
 )
 
 // KnownScopes lists the scopes an API key may be issued with.
-func KnownScopes() []string { return []string{ScopeStatus, ScopeOperator} }
+func KnownScopes() []string { return []string{ScopeStatus, ScopeAssistant, ScopeOperator} }
 
-func knownScope(scope string) bool { return scope == ScopeStatus || scope == ScopeOperator }
-
-// ScopesAllow reports whether held scopes satisfy required. An empty
-// requirement is always satisfied, and ScopeOperator implies every scope, so
-// an operator key also passes status checks.
-func ScopesAllow(held []string, required string) bool {
-	if required == "" {
-		return true
+func scopeLevel(scope string) int {
+	switch scope {
+	case ScopeStatus:
+		return 1
+	case ScopeAssistant:
+		return 2
+	case ScopeOperator:
+		return 3
+	default:
+		return 0
 	}
+}
+
+// grantLevel returns the highest held scope, or zero for a missing or invalid grant.
+func grantLevel(held []string) int {
+	level := 0
 	for _, scope := range held {
-		if scope == required || scope == ScopeOperator {
-			return true
+		rank := scopeLevel(scope)
+		if rank == 0 {
+			return 0
 		}
+		level = max(level, rank)
 	}
-	return false
+	return level
 }
 
-// effectiveScopes returns the grant a record carries. A record without scopes
-// is a legacy key and grants only ScopeStatus.
-func effectiveScopes(rec apiKeyRecord) []string {
-	if len(rec.Scopes) == 0 {
-		return []string{ScopeStatus}
-	}
-	return append([]string(nil), rec.Scopes...)
+// ScopesAllow reports whether a valid grant satisfies a known requirement.
+func ScopesAllow(held []string, required string) bool {
+	rank := scopeLevel(required)
+	return rank != 0 && grantLevel(held) >= rank
 }
 
-// normalizeScopes validates and canonicalizes a requested grant. An empty list
-// means "no recorded scopes", which is the legacy status-only grant.
+// normalizeScopes validates and canonicalizes a requested grant. Issuance
+// without an explicit scope records a status-only grant.
 func normalizeScopes(scopes []string) ([]string, error) {
 	if len(scopes) == 0 {
-		return nil, nil
+		return []string{ScopeStatus}, nil
 	}
 	seen := make(map[string]bool, len(scopes))
 	out := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
 		scope = strings.TrimSpace(scope)
-		if !knownScope(scope) {
+		if scopeLevel(scope) == 0 {
 			return nil, fmt.Errorf("unknown API key scope %q (known: %s)", scope, strings.Join(KnownScopes(), ", "))
 		}
 		if seen[scope] {
@@ -325,16 +327,14 @@ var kdfMu sync.Mutex
 
 var keyNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
-// CreateAPIKey returns the plaintext key exactly once and persists only its
-// SHA-256 hash and identifying prefix. The key is issued with no recorded
-// scopes, i.e. the legacy read-only status grant.
+// CreateAPIKey issues a status-only key. The plaintext is returned exactly
+// once; the stored credential contains only its hash and identifying prefix.
 func (s *Store) CreateAPIKey(name string) (string, APIKeyInfo, error) {
 	return s.CreateAPIKeyWithScopes(name, nil)
 }
 
 // CreateAPIKeyWithScopes issues a key restricted to the given scopes. An empty
-// scope list is the legacy status-only grant; the caller must ask for
-// ScopeOperator explicitly to mint an administration credential.
+// scope list defaults to ScopeStatus at issuance.
 func (s *Store) CreateAPIKeyWithScopes(name string, scopes []string) (string, APIKeyInfo, error) {
 	if !keyNameRe.MatchString(name) {
 		return "", APIKeyInfo{}, fmt.Errorf("key name must match %s", keyNameRe)
@@ -374,7 +374,7 @@ func (s *Store) CreateAPIKeyWithScopes(name string, scopes []string) (string, AP
 func infoFromRecord(rec apiKeyRecord) APIKeyInfo {
 	return APIKeyInfo{
 		Name: rec.Name, Prefix: rec.Prefix, CreatedAt: rec.CreatedAt,
-		Revoked: rec.RevokedAt != nil, Scopes: effectiveScopes(rec),
+		Revoked: rec.RevokedAt != nil, Scopes: append([]string(nil), rec.Scopes...),
 	}
 }
 
@@ -383,9 +383,8 @@ func (s *Store) VerifyAPIKey(token string) bool {
 	return ok
 }
 
-// APIKeyScopes resolves a presented key to its info and effective grant. A
-// revoked or unknown key reports ok=false. A key persisted before scopes
-// existed resolves to exactly ScopeStatus.
+// APIKeyScopes resolves a presented key to its info and grant. Revoked or
+// unknown keys and records without a valid explicit grant report ok=false.
 func (s *Store) APIKeyScopes(token string) (APIKeyInfo, []string, bool) {
 	if token == "" {
 		return APIKeyInfo{}, nil, false
@@ -398,8 +397,9 @@ func (s *Store) APIKeyScopes(token string) (APIKeyInfo, []string, bool) {
 		if rec.RevokedAt != nil {
 			continue
 		}
-		if subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(got)) == 1 {
-			return infoFromRecord(rec), effectiveScopes(rec), true
+		if subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(got)) == 1 && grantLevel(rec.Scopes) != 0 {
+			info := infoFromRecord(rec)
+			return info, info.Scopes, true
 		}
 	}
 	return APIKeyInfo{}, nil, false
@@ -438,7 +438,7 @@ func (s *Store) ActiveAPIKeyCount() int {
 	defer s.mu.Unlock()
 	n := 0
 	for _, rec := range s.doc.APIKeys {
-		if rec.RevokedAt == nil {
+		if rec.RevokedAt == nil && grantLevel(rec.Scopes) != 0 {
 			n++
 		}
 	}

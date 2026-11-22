@@ -23,16 +23,19 @@ export function fixed(value, digits = 2) {
   return (Number(value) || 0).toFixed(digits)
 }
 
-/**
- * Human label for an API key's grant. "operator" is full daemon
- * administration (the MCP tool set) and implies "status"; a legacy key with no
- * recorded scopes is exactly "status only".
- */
+export function hasValidKeyScopes(scopes) {
+  return Array.isArray(scopes) && scopes.length > 0 &&
+    scopes.every(scope => scope === 'status' || scope === 'assistant' || scope === 'operator')
+}
+
+/** Human label for the recorded grant; malformed or missing grants give no access. */
 export function keyScopes(scopes) {
-  const list = (Array.isArray(scopes) ? scopes : []).filter(Boolean)
-  if (list.includes('operator')) return 'full administration'
-  if (list.length === 0 || list.includes('status')) return 'status only'
-  return list.join(', ')
+  if (!hasValidKeyScopes(scopes)) {
+    return Array.isArray(scopes) && scopes.length > 0 ? `no access: ${scopes.join(', ')}` : 'no access'
+  }
+  if (scopes.includes('operator')) return 'full administration'
+  if (scopes.includes('assistant')) return 'assistant controls'
+  return 'status only'
 }
 
 export function dateTime(unixMs) {

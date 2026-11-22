@@ -86,11 +86,24 @@ func main() {
 			}
 		},
 		Action: func(_ context.Context, a *capsulad.ActionInvoked) {
-			if a == nil || a.ActionID != "dismiss" {
+			if a == nil {
 				return
 			}
-			logger.Printf("dismiss")
-			controller.Dismiss()
+			switch a.ActionID {
+			case "dismiss":
+				logger.Printf("dismiss")
+				controller.Dismiss()
+			case "test_connection":
+				go func() {
+					ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					if err := runtime.testConnection(ctx); err != nil {
+						_ = client.NotifyActionResult(a.ID, false, err.Error())
+						return
+					}
+					_ = client.NotifyActionResult(a.ID, true, "the Cadence server is reachable")
+				}()
+			}
 		},
 		Invocation: func(_ context.Context, inv *capsulad.LaunchInvocation) {
 			_ = client.NotifyInvocationResult(inv.ID, true, "cadence client is ready")

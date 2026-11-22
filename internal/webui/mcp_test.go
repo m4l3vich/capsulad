@@ -197,6 +197,16 @@ func resultJSON(t *testing.T, result map[string]any) map[string]any {
 
 func toolNames(t *testing.T, env *testEnv, key, session string) []string {
 	t.Helper()
+	tools := listedMCPTools(t, env, key, session)
+	names := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		names = append(names, raw.(map[string]any)["name"].(string))
+	}
+	return names
+}
+
+func listedMCPTools(t *testing.T, env *testEnv, key, session string) []any {
+	t.Helper()
 	code, _, body := mcpPost(t, env, key, session, map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "tools/list",
 	})
@@ -205,11 +215,7 @@ func toolNames(t *testing.T, env *testEnv, key, session string) []string {
 	}
 	result, _ := body["result"].(map[string]any)
 	tools, _ := result["tools"].([]any)
-	names := make([]string, 0, len(tools))
-	for _, raw := range tools {
-		names = append(names, raw.(map[string]any)["name"].(string))
-	}
-	return names
+	return tools
 }
 
 // --- transport and authorization -------------------------------------------
@@ -241,20 +247,20 @@ func TestMCPRequiresAValidAPIKey(t *testing.T) {
 	}
 }
 
-func TestMCPLegacyKeyStaysReadOnly(t *testing.T) {
+func TestMCPDefaultStatusKeyStaysReadOnly(t *testing.T) {
 	env := newTestEnv(t)
-	// A key created the way the browser and `auth init` create one records no
-	// scopes: it must keep the legacy status/certificate grant only.
-	legacy, _, err := env.store.CreateAPIKey("legacy")
+	// The default used by the browser and auth init persists an explicit
+	// status scope, not a grant to any speaker control or administration tool.
+	key, _, err := env.store.CreateAPIKey("default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := mcpInitialize(t, env, legacy)
-	names := toolNames(t, env, legacy, session)
+	session := mcpInitialize(t, env, key)
+	names := toolNames(t, env, key, session)
 	if len(names) != 2 || names[0] != "get_status" || names[1] != "get_certificate" {
-		t.Fatalf("legacy key tools = %v, want only get_status and get_certificate", names)
+		t.Fatalf("status key tools = %v, want only get_status and get_certificate", names)
 	}
-	code, _, body := mcpPost(t, env, legacy, session, map[string]any{
+	code, _, body := mcpPost(t, env, key, session, map[string]any{
 		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
 		"params": map[string]any{"name": "launch_app", "arguments": map[string]any{"app_id": "capsulad.clock"}},
 	})
@@ -263,12 +269,12 @@ func TestMCPLegacyKeyStaysReadOnly(t *testing.T) {
 	}
 	rpcErr, _ := body["error"].(map[string]any)
 	if rpcErr == nil || int(rpcErr["code"].(float64)) != mcpCodeForbidden {
-		t.Fatalf("legacy key launch_app error = %v, want forbidden", body["error"])
+		t.Fatalf("status key launch_app error = %v, want forbidden", body["error"])
 	}
 	// The status read is allowed and reads the live daemon.
-	isErr, result := callTool(t, env, legacy, session, "get_status", map[string]any{})
+	isErr, result := callTool(t, env, key, session, "get_status", map[string]any{})
 	if isErr {
-		t.Fatalf("legacy get_status failed: %v", result)
+		t.Fatalf("status get_status failed: %v", result)
 	}
 	if status := resultJSON(t, result); status["device"] == nil {
 		t.Fatalf("get_status has no device: %v", status)
@@ -488,12 +494,12 @@ func TestMCPCreateAPIKeyGrantsExplicitScopes(t *testing.T) {
 	if len(toolNames(t, env, secret, newSession)) < 3 {
 		t.Fatal("minted operator key does not see the operator tools")
 	}
-	// A legacy (status) key cannot mint keys.
-	legacy, _, err := env.store.CreateAPIKey("legacy")
+	// A default status key cannot mint keys.
+	statusKey, _, err := env.store.CreateAPIKey("probe")
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, _, body := mcpPost(t, env, legacy, mcpInitialize(t, env, legacy), map[string]any{
+	code, _, body := mcpPost(t, env, statusKey, mcpInitialize(t, env, statusKey), map[string]any{
 		"jsonrpc": "2.0", "id": 4, "method": "tools/call",
 		"params": map[string]any{"name": "create_api_key", "arguments": map[string]any{"name": "nope"}},
 	})
@@ -502,7 +508,7 @@ func TestMCPCreateAPIKeyGrantsExplicitScopes(t *testing.T) {
 	}
 	rpcErr, _ := body["error"].(map[string]any)
 	if rpcErr == nil || int(rpcErr["code"].(float64)) != mcpCodeForbidden {
-		t.Fatalf("legacy create_api_key error = %v", body["error"])
+		t.Fatalf("status create_api_key error = %v", body["error"])
 	}
 	// list_api_keys reports the grants.
 	isErr, result = callTool(t, env, key, session, "list_api_keys", map[string]any{})
@@ -826,10 +832,11 @@ func TestMCPSchemaIsGeneratedFromTheProto(t *testing.T) {
 
 // TestAccessSnapshotShowsKeyScopesToTheBrowser is the browser-surface proof for
 // the Access view: the same WebSocket snapshot the SPA renders must carry each
-// key's grant, or the page cannot tell a status key from an administration key.
+// key's explicit grant, including the assistant key's distinct privileges.
 func TestAccessSnapshotShowsKeyScopesToTheBrowser(t *testing.T) {
 	env := newTestEnv(t)
 	operatorKey(t, env, "agent")
+	assistantKey(t, env)
 	if _, _, err := env.store.CreateAPIKey("probe"); err != nil {
 		t.Fatal(err)
 	}
@@ -848,6 +855,9 @@ func TestAccessSnapshotShowsKeyScopesToTheBrowser(t *testing.T) {
 	}
 	if got := scopes["agent"]; len(got) != 1 || got[0] != websecurity.ScopeOperator {
 		t.Fatalf("agent scopes in the browser snapshot = %v", got)
+	}
+	if got := scopes["assistant"]; len(got) != 1 || got[0] != websecurity.ScopeAssistant {
+		t.Fatalf("assistant scopes in the browser snapshot = %v", got)
 	}
 	if got := scopes["probe"]; len(got) != 1 || got[0] != websecurity.ScopeStatus {
 		t.Fatalf("probe scopes in the browser snapshot = %v", got)

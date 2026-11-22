@@ -35,12 +35,12 @@ const (
 // so an acknowledged Play that the peer did not act on cannot create a row;
 // receipt and transport evidence keep a MediaControl1-only source visible
 // while it is genuinely playing.
-func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProviderView {
+func (s *Server) frameworkMediaProvider(ctx context.Context, assistant bool) *webv1.MediaProviderView {
 	state, err := frameworkv1.NewBluetoothMediaServiceClient(s.Conn).GetState(ctx, &frameworkv1.GetBluetoothMediaStateRequest{})
 	if err != nil || !state.GetPresent() || !state.GetObservedPlaying() {
 		return nil
 	}
-	return &webv1.MediaProviderView{
+	provider := &webv1.MediaProviderView{
 		Name: frameworkBluetoothName,
 		Kind: webv1.MediaProviderKind_MEDIA_PROVIDER_KIND_FRAMEWORK_BLUETOOTH_MEDIA,
 		Players: []*webv1.MediaPlayerView{{
@@ -53,7 +53,6 @@ func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProvide
 				mediav1.MediaAction_MEDIA_SKIP_PREVIOUS,
 			}),
 			AppName:    frameworkBluetoothName,
-			SourceName: state.GetDeviceName(),
 			Title:      state.GetTitle(),
 			Artist:     state.GetArtist(),
 			Album:      state.GetAlbum(),
@@ -62,6 +61,10 @@ func (s *Server) frameworkMediaProvider(ctx context.Context) *webv1.MediaProvide
 			Revision:   state.GetRevision(),
 		}},
 	}
+	if !assistant {
+		provider.Players[0].SourceName = state.GetDeviceName()
+	}
+	return provider
 }
 
 // frameworkBluetoothCommand maps one browser transport action onto the public

@@ -1348,7 +1348,7 @@ func (rec *mcpRecorder) lastProgress() *webv1.Progress {
 
 // mcpDispatch runs one allowlisted command through the shared operation layer
 // and converts its outcome into an MCP tool result.
-func (s *Server) mcpDispatch(ctx context.Context, sess *mcpSession, cmd *webv1.Command) (*mcpToolResult, *mcpError) {
+func (s *Server) mcpDispatch(ctx context.Context, sess *mcpSession, cmd *webv1.Command, assistant bool) (*mcpToolResult, *mcpError) {
 	rec := newMCPRecorder(sess)
 	s.dispatch(rec, 1, cmd, ctx)
 	if !rec.wait(ctx) {
@@ -1357,6 +1357,18 @@ func (s *Server) mcpDispatch(ctx context.Context, sess *mcpSession, cmd *webv1.C
 	res, code, message, settled := rec.snapshot()
 	if !settled {
 		return mcpToolFailure(webv1.ErrorCode_ERROR_CODE_INTERNAL, "the daemon returned no outcome")
+	}
+	if assistant && cmd.GetMedia() != nil {
+		// Provider-authored text can quote a configured stream URL (including
+		// credentials). Only acceptance or the typed error may cross scopes.
+		if res == nil {
+			return mcpToolFailure(code, "media command failed")
+		}
+		media := res.GetMedia()
+		if media == nil {
+			return mcpToolFailure(errInternal, "the daemon returned no media outcome")
+		}
+		*media = webv1.MediaResult{Accepted: media.GetAccepted()}
 	}
 	if res == nil {
 		return mcpToolFailure(code, message)

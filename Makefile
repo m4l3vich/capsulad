@@ -195,7 +195,7 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence simon pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-apps test-simon test-pa test-radio test-homeassistant test-airplay test-interpreter clean
+.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
 
 all: release
 
@@ -422,16 +422,22 @@ dumbassistant: $(PACKAGER_TARGET)
 	@rm -f $(APPDIR)/org.capsulad.dumbassistant-*.tar.gz
 	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.dumbassistant
 
-# Marusia is the second optional first-party app. It has no runtime assets: the
-# reply is a TTS URL fetched at turn time. The package carries the binary, the
-# manifest and the operator-facing README.md guide. The staged package directory
-# and its <id>-<version>.tar.gz land side by side in $(APPDIR).
+# Marusia is the second optional first-party app. It has no runtime assets
+# beyond its self-contained settings document: the reply is a TTS URL fetched
+# at turn time. The package carries the binary, the manifest, the app-owned
+# settings page and the operator-facing README.md guide. The staged package
+# directory and its <id>-<version>.tar.gz land side by side in $(APPDIR).
 marusia: $(PACKAGER_TARGET)
+	@test -f apps/marusia/ui/settings.html || { \
+		echo "error: apps/marusia/ui/settings.html is missing" >&2; \
+		exit 1; \
+	}
 	rm -rf $(APPDIR)/org.capsulad.marusia
-	mkdir -p $(APPDIR)/org.capsulad.marusia
+	mkdir -p $(APPDIR)/org.capsulad.marusia/ui
 	cd apps/marusia && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.marusia/marusia ./cmd/marusia
 	cp apps/marusia/manifest.toml $(APPDIR)/org.capsulad.marusia/manifest.toml
 	cp apps/marusia/README.md $(APPDIR)/org.capsulad.marusia/README.md
+	cp -R apps/marusia/ui/. $(APPDIR)/org.capsulad.marusia/ui/
 	@$(MAKE) check-target-toolchain
 	@if [ "$(GOOS)" = linux ]; then sh tools/stage-manifest-abi.sh $(APPDIR)/org.capsulad.marusia/manifest.toml "$(TARGET_ABI)"; fi
 	@$(MAKE) check-target-toolchain
@@ -453,6 +459,18 @@ cadence: $(PACKAGER_TARGET)
 # is authoritative for OUT/PACKAGE=0/CAPSULAD_CLI.
 simon: $(PACKAGER_TARGET)
 	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/simon/build.sh
+
+# Soundboard is a QuickJS script app: the package is its manifest, main.js, app
+# guide and custom settings UI. User sounds are shared /assets files, not
+# package content; the contract suite stays out of the installed artifact.
+soundboard: $(PACKAGER_TARGET)
+	OUT=$(abspath $(APPDIR)) CAPSULAD_CLI=$(abspath $(PACKAGER)) sh apps/soundboard/build.sh
+
+# Hardware Test is a native foreground test app. Its build script owns the
+# package contents (binary, manifest, README) and needs the host native runtime
+# to link the shared SDK.
+hardwaretest:
+	OUT=$(abspath $(APPDIR)) sh apps/hardwaretest/build.sh
 
 # The PA Speaker MicroPython service: nothing is compiled, so its own script
 # stages the manifest, the script, the descriptor and the interface
@@ -544,16 +562,27 @@ test-cadence:
 # registration, cancellation, clock and poll behaviour) runs under CPython
 # without building a host.
 test-interpreter:
+	@mkdir -p $(BINDIR)
+	$(CC) -std=c11 -Wall -Wextra -Iinterpreter/common interpreter/common/capsulad_paths_test.c -o $(BINDIR)/capsulad-paths-test
+	$(BINDIR)/capsulad-paths-test
+	$(CC) -std=c11 -Wall -Wextra -Iinterpreter/common interpreter/common/capsulad_files_test.c -o $(BINDIR)/capsulad-files-test
+	$(BINDIR)/capsulad-files-test
 	python3 interpreter/micropython/sdk_test.py
 
 # Host-side suites. Simon's contract tests load the shipped main.js into a fake
 # QuickJS host under Node; Internet Radio's unit tests are a nested Go module;
 # the Home Assistant integration is another nested Go module; and the MicroPython
 # host's pure-Python prelude has its own self-test (timers included).
-test-apps: test-simon test-radio test-homeassistant test-pa test-interpreter
+test-apps: test-simon test-soundboard test-hardwaretest test-radio test-homeassistant test-pa test-interpreter
 
 test-simon:
 	node --test apps/simon/test/*.test.mjs
+
+test-soundboard:
+	node --test apps/soundboard/test/*.test.mjs
+
+test-hardwaretest:
+	cd apps/hardwaretest && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 test-pa:
 	python3 apps/pa/tests/test_wav.py

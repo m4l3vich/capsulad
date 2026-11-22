@@ -2,6 +2,8 @@ package websecurity
 
 import (
 	"crypto/tls"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -113,77 +115,107 @@ func TestPasswordAndAPIKeys(t *testing.T) {
 	}
 }
 
-func TestAPIKeyScopesAreExplicitAndLegacyKeysStayRestricted(t *testing.T) {
+func TestAPIKeyScopeIssuanceAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	store := Open(dir, DefaultOptions())
-	if err := store.Load(); err != nil {
-		t.Fatal(err)
-	}
 
-	// A key created without scopes is the legacy grant: status only.
-	legacy, legacyInfo, err := store.CreateAPIKey("legacy")
-	if err != nil {
-		t.Fatal(err)
+	// Only an explicit request mints a more powerful key. No flag gives
+	// status at issuance, on disk, and on authentication after a reload.
+	tests := []struct {
+		name string
+		want string
+		req  []string
+	}{
+		{name: "probe", want: ScopeStatus},
+		{name: "agent", want: ScopeAssistant, req: []string{ScopeAssistant, ScopeAssistant}},
+		{name: "admin", want: ScopeOperator, req: []string{ScopeOperator}},
 	}
-	if len(legacyInfo.Scopes) != 1 || legacyInfo.Scopes[0] != ScopeStatus {
-		t.Fatalf("legacy scopes = %v, want [status]", legacyInfo.Scopes)
+	tokens := make([]string, len(tests))
+	for i, tt := range tests {
+		token, info, err := store.CreateAPIKeyWithScopes(tt.name, tt.req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens[i] = token
+		if len(info.Scopes) != 1 || info.Scopes[0] != tt.want {
+			t.Fatalf("%s issued scopes = %v, want [%s]", tt.name, info.Scopes, tt.want)
+		}
 	}
-	_, scopes, ok := store.APIKeyScopes(legacy)
-	if !ok || !ScopesAllow(scopes, ScopeStatus) || ScopesAllow(scopes, ScopeOperator) {
-		t.Fatalf("legacy key resolves to %v (ok=%v)", scopes, ok)
-	}
-
-	// An operator key must be requested explicitly and implies status.
-	operator, operatorInfo, err := store.CreateAPIKeyWithScopes("agent", []string{ScopeOperator})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(operatorInfo.Scopes) != 1 || operatorInfo.Scopes[0] != ScopeOperator {
-		t.Fatalf("operator scopes = %v", operatorInfo.Scopes)
-	}
-	_, scopes, ok = store.APIKeyScopes(operator)
-	if !ok || !ScopesAllow(scopes, ScopeOperator) || !ScopesAllow(scopes, ScopeStatus) {
-		t.Fatalf("operator scopes = %v (ok=%v)", scopes, ok)
-	}
-	if !store.VerifyAPIKey(legacy) || !store.VerifyAPIKey(operator) {
-		t.Fatal("a valid key stopped verifying")
-	}
-
-	// Unknown scopes are refused instead of being persisted.
-	if _, _, err := store.CreateAPIKeyWithScopes("bad", []string{"root"}); err == nil {
+	if _, _, err := store.CreateAPIKeyWithScopes("bad", []string{ScopeOperator, "root"}); err == nil {
 		t.Fatal("unknown scope accepted")
 	}
-	// Duplicates are canonicalized.
-	_, deduped, err := store.CreateAPIKeyWithScopes("dedup", []string{ScopeStatus, ScopeStatus})
+
+	data, err := os.ReadFile(store.CredentialsPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deduped.Scopes) != 1 || deduped.Scopes[0] != ScopeStatus {
-		t.Fatalf("deduped scopes = %v", deduped.Scopes)
+	var onDisk persisted
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatal(err)
 	}
-
-	// A reload from disk keeps both grants; the legacy key's record has no
-	// scopes field at all, so it must resolve exactly as it did before the
-	// field existed.
+	if len(onDisk.APIKeys) != len(tests) {
+		t.Fatalf("persisted %d keys, want %d", len(onDisk.APIKeys), len(tests))
+	}
 	reloaded := Open(dir, DefaultOptions())
 	if err := reloaded.Load(); err != nil {
 		t.Fatal(err)
 	}
-	_, scopes, ok = reloaded.APIKeyScopes(legacy)
-	if !ok || len(scopes) != 1 || scopes[0] != ScopeStatus {
-		t.Fatalf("reloaded legacy scopes = %v (ok=%v)", scopes, ok)
+	for i, tt := range tests {
+		if got := onDisk.APIKeys[i].Scopes; len(got) != 1 || got[0] != tt.want {
+			t.Fatalf("%s persisted scopes = %v, want [%s]", tt.name, got, tt.want)
+		}
+		_, scopes, ok := reloaded.APIKeyScopes(tokens[i])
+		if !ok || len(scopes) != 1 || scopes[0] != tt.want {
+			t.Fatalf("%s reloaded scopes = %v (ok=%v), want [%s]", tt.name, scopes, ok, tt.want)
+		}
+		for j, required := range tests {
+			if got, want := ScopesAllow(scopes, required.want), i >= j; got != want {
+				t.Errorf("ScopesAllow(%v, %q) = %v, want %v", scopes, required.want, got, want)
+			}
+		}
+		for _, required := range []string{"", "unknown"} {
+			if ScopesAllow(scopes, required) {
+				t.Errorf("ScopesAllow(%v, %q) granted an invalid requirement", scopes, required)
+			}
+		}
 	}
-	_, scopes, ok = reloaded.APIKeyScopes(operator)
-	if !ok || len(scopes) != 1 || scopes[0] != ScopeOperator {
-		t.Fatalf("reloaded operator scopes = %v (ok=%v)", scopes, ok)
-	}
-
-	// Revocation is immediate for the scope lookup too.
 	if err := reloaded.RevokeAPIKey("agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := reloaded.APIKeyScopes(operator); ok {
-		t.Fatal("revoked key still resolves")
+	if reloaded.VerifyAPIKey(tokens[1]) {
+		t.Fatal("revoked assistant key still authenticates")
+	}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if store.VerifyAPIKey(tokens[1]) || !store.VerifyAPIKey(tokens[2]) || !store.VerifyAPIKey(tokens[0]) {
+		t.Fatal("assistant revocation was not persisted independently of other grants")
+	}
+}
+
+func TestInvalidPersistedAPIKeyScopeCannotAuthenticate(t *testing.T) {
+	for _, field := range []string{"", `,"scopes":null`, `,"scopes":[]`, `,"scopes":["operator","root"]`, `,"scopes":[""]`} {
+		t.Run(field, func(t *testing.T) {
+			store := Open(t.TempDir(), DefaultOptions())
+			const token = "known-test-token"
+			data := fmt.Appendf(nil, `{"api_keys":[{"name":"old","hash":%q%s}]}`, hashToken(token), field)
+			if err := os.WriteFile(store.CredentialsPath(), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if store.VerifyAPIKey(token) || store.ActiveAPIKeyCount() != 0 {
+				t.Fatal("record without a valid grant can authenticate")
+			}
+			keys := store.ListAPIKeys()
+			if len(keys) != 1 || keys[0].Name != "old" || ScopesAllow(keys[0].Scopes, ScopeStatus) {
+				t.Fatalf("invalid record should remain visible without access: %+v", keys)
+			}
+			if err := store.RevokeAPIKey("old"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

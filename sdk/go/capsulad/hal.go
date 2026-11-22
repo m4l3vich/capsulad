@@ -155,10 +155,22 @@ func (p *Presentation) send(frame *presentationFrame) error {
 	return call.sendJSON(presentationRequest{Frame: frame})
 }
 
-// Segment sends a segment frame. cells are per-digit masks; colon controls the
-// separator.
+// Segment sends a segment frame. cells are per-digit masks; colon lights both
+// separator dots.
 func (p *Presentation) Segment(cells []uint16, colon bool) error {
 	frame := &presentationFrame{Segment: &segmentFrame{Colon: colon}}
+	for _, cell := range cells {
+		frame.Segment.Cells = append(frame.Segment.Cells, segmentCell{Mask: uint32(cell)})
+	}
+	return p.send(frame)
+}
+
+// SegmentDots sends a segment frame with the two separator dots controlled
+// independently.
+func (p *Presentation) SegmentDots(cells []uint16, colonTop, colonBottom bool) error {
+	frame := &presentationFrame{Segment: &segmentFrame{
+		ColonTop: colonTop, ColonBottom: colonBottom,
+	}}
 	for _, cell := range cells {
 		frame.Segment.Cells = append(frame.Segment.Cells, segmentCell{Mask: uint32(cell)})
 	}

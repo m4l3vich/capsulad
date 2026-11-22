@@ -222,7 +222,9 @@ func contentFromProto(frame *frameworkv1.PresentationFrame, kind presentations.K
 			}
 			cells = append(cells, uint16(c.Mask))
 		}
-		return presentations.SegmentFrame(cells, p.Segment.Colon), nil
+		return presentations.SegmentFrameDots(cells,
+			p.Segment.Colon || p.Segment.ColonTop,
+			p.Segment.Colon || p.Segment.ColonBottom), nil
 	case *frameworkv1.PresentationFrame_Ring:
 		if kind != presentations.Ring {
 			return presentations.Content{}, fmt.Errorf("ring frames are only valid on ring presentations")

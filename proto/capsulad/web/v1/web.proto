@@ -657,10 +657,8 @@ message ApiKeyView {
   string prefix = 2;
   int64 created_unix_ms = 3;
   bool revoked = 4;
-  // The grant this key carries. "status" is the legacy read-only grant
-  // (device status and the public certificate); "operator" is full daemon
-  // administration, exposed as the MCP tool set. A key persisted before scopes
-  // existed reports exactly ["status"]; it is never promoted implicitly.
+  // Recorded API key grants: status for monitoring, assistant for everyday
+  // controls, and operator for administration. No grants means no API access.
   repeated string scopes = 5;
 }
 

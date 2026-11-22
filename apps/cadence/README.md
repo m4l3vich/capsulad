@@ -7,18 +7,22 @@ server**. It streams microphone audio as Opus, plays the server's streamed reply
 and server announcements, and uses the ring as its capture indication. The rest
 of this page documents the protocol and implementation for maintainers.
 
-- **Before selecting it:** set *Cadence server URL* and either an *Enrollment
-  code* from the Cadence dashboard or a *Device token* (or a token file). Add a
-  CA certificate if the server uses a private one, either pasted as PEM or as a
-  path in the shared Assets store. The app has no insecure TLS mode.
+- **Before selecting it:** open **Apps → Cadence Client → Details** and use the app's own
+  **Settings** page. It walks an unenrolled speaker through the server URL, the TLS CA asset
+  path (only for `https://`, defaulting to `/assets/cadence/ca.pem`), the **Test connection**
+  action below the page, and the enrollment code. Then set *Cadence server URL* and either an
+  *Enrollment code* from the Cadence dashboard or a *Device token* (or a token file). Add a
+  CA certificate if the server uses a private one, either pasted as PEM or as a path in the
+  shared Assets store. The app has no insecure TLS mode.
 - **First enrollment:** in the Cadence dashboard open **Devices → Enroll a
   speaker**, choose **VK Capsula Mini** (the recommended model for this
-  speaker) and a name, and make the code. Set *Cadence server URL* and paste the
-  code into *Enrollment code*; the app exchanges it, stores the returned device
-  token, clears the code and links within a few seconds. The dashboard then
-  shows the device online. If the dashboard's default **Simulator** model was
-  left selected, set *Cadence board* to **Simulator** before applying the code,
-  or make a new code for **VK Capsula Mini**.
+  speaker) and a name, and make the code. In the app's own Settings page set the
+  server URL and paste the code into *Enrollment code*; the page then waits
+  while the app exchanges it, stores the returned device token, clears the code
+  and confirms the enrollment live. The dashboard then shows the device
+  online. If the dashboard's default **Simulator** model was left selected, set
+  *Cadence board* to **Simulator** before applying the code, or make a new code
+  for **VK Capsula Mini**.
 - **Select it:** open **Settings → Voice assistant** and choose Cadence Client.
   Selection starts the app. Choosing another assistant, or **none**, leaves it
   stopped.
@@ -228,6 +232,21 @@ exchanges the code first; the link opens only after a token exists.
 | `ca_pem` | text | empty | Extra PEM certificate(s) for a self-hosted CA, appended to the system store. Either pasted PEM or a path in the shared Assets store (`cadence/ca.pem`, or the canonical `/assets/cadence/ca.pem` shown by the Assets page). A path is validated with the store's grammar, read fresh on each settings change, and must contain a CERTIFICATE block. There is no insecure mode. |
 | `hold_release_tail_ms` | integer 0…5000 | 1000 | Silence streamed after a hold-to-talk release. Dead air the user hears as latency. |
 | `follow_up` | boolean | true | Honor the server's follow-up windows. |
+| `last_test_status` | text | empty | Written by the app after a connection test: `test_ok`, or `test_failed` with a short credential-free reason. Non-secret and never used as input. |
+
+The manifest ships `[settings_ui] html = "ui/settings.html"`, so the setup page in
+**Apps → Cadence Client → Details** is app-owned and rendered inside the application detail.
+When the device is not enrolled it walks the values in order: server URL, TLS CA asset path
+(`cadence/ca.pem`, shown only for `https://` and defaulting to `/assets/cadence/ca.pem`),
+connection test, enrollment code, live enrollment confirmation, then MCP setup advice. The
+`test_connection` action in the **Actions** list below the document resolves DNS, opens TCP and
+performs the TLS handshake with the configured CA roots, logs `test_ok` or `test_failed`, and
+writes the same non-secret outcome to `last_test_status`; it needs neither a token nor a code
+and does not open a device link. After enrollment the page shows the server and credential
+status, live `board`, silence-tail and follow-up controls, and a confirm-then-reset that clears
+every declared setting on the speaker without touching the Cadence server, its enrollment
+records or its certificates. The page cannot invoke actions, read logs or fetch: the settings
+bridge exposes only redacted values and validated patches.
 
 A malformed value is rejected, logged with a reason, and the previous
 configuration is kept. A stale settings revision is ignored, so an older
@@ -243,9 +262,11 @@ The default path is the Cadence dashboard:
    Mini**, name the speaker and create the code. The dashboard's list includes
    `vk-capsula-mini` and `sim`; this client is a speaker, so `vk-capsula-mini`
    is the right model.
-2. In the capsulad Web UI open **Apps → Cadence Client → Settings**. Set
-   *Cadence server URL* and paste the code into *Enrollment code*. Leave
-   *Cadence board* on **Automatic** for the recommended choice.
+2. In the capsulad Web UI open **Apps → Cadence Client → Details** and use the
+   app's own Settings page. Set *Cadence server URL*, save it with the CA, run
+   **Test connection** in the Actions list, then paste the code into
+   *Enrollment code*. Leave *Cadence board* on **Automatic** for the recommended
+   choice.
 3. The app sends the upstream contract
    `POST <server_url>/v2/enroll` with
    `{"code":"…","fingerprint":{"board":"vk-capsula-mini"}}`. The server checks
@@ -267,11 +288,16 @@ minutes), already used, or made for another board. A transport failure is
 logged as `enroll_failed` and leaves the code set, so saving the settings again
 retries it. The token never appears in a log. The token and the spent-code
 clear are committed in one compare-and-swap at the settings revision that
-started the exchange; if the server, board, code or CA changed while the
-request was in flight, or another settings edit advances the revision before
-the commit, the answer is discarded and the code needs a new one.
-A settings event carrying the committed token is applied idempotently. The success line names the
-board only: the server-supplied device id is untrusted text and is not logged.
+started the exchange. If a concurrent status-only write advanced the revision,
+the already-obtained token is retried only after the pushed settings event
+reaches the authoritative snapshot; a timeout or a changed input discards the
+answer. If the server, board or CA changed, the enrollment code was cleared, or
+a newer device token appeared, the answer is discarded and the code needs a new
+one.
+The Get snapshot redacts masked values, so code and token presence are the
+comparable inputs. A settings event carrying the committed token is applied
+idempotently. The success line names the board only: the server-supplied device
+id is untrusted text and is not logged.
 
 The manual path remains available: exchange the code with the server and paste
 the returned token into *Device token*, or write it to a file named by *Device
@@ -299,7 +325,9 @@ make cadence           # package directory + build/apps/org.capsulad.cadence-<ve
 
 Standalone, `make build` here writes the package directory, `make` or
 `make package` also writes the archive beside it, and `make test` runs this
-module's tests.
+module's tests. The package directory contains the binary, manifest, README and
+the app-owned `ui/settings.html`; the packager validates that document (`.html`,
+regular file, valid UTF-8, at most 512 KiB, with at least one declared setting).
 
 **`make package` refuses a non-Linux host build.** The manifest declares a Linux
 ABI, so a darwin binary is for `make test`/inspection only; the guard runs
@@ -312,9 +340,9 @@ docker run --rm --platform linux/arm64 -v "$PWD/../..":/src -w /src/apps/cadence
   golang:1.22-bullseye sh -c 'apt-get update -qq && apt-get install -y -qq gcc libc6-dev libopus0 \
     && make check-abi GOOS=linux GOARCH=arm64 CC=gcc CGO_ENABLED=1'
 
-# arm64 musl: Alpine (build needs only gcc/musl-dev; Opus is dlopen'd at run time)
+# arm64 musl: Alpine (build needs only gcc/musl-dev/make; Opus is dlopen'd at run time)
 docker run --rm --platform linux/arm64 -v "$PWD/../..":/src -w /src/apps/cadence \
-  golang:1.22-alpine sh -c 'apk add --no-cache gcc musl-dev \
+  golang:1.22-alpine sh -c 'apk add --no-cache gcc musl-dev make \
     && make check-abi GOOS=linux GOARCH=arm64 CC=gcc CGO_ENABLED=1 TARGET_ABI=linux-musl'
 ```
 
@@ -363,8 +391,9 @@ capsulad-cli -data-dir build/demo app install \
 capsulad-cli -data-dir build/demo app list
 ```
 
-Select it in the Web UI under **Settings → Voice assistant**, then set
-`server_url` and an enrollment code (or a token). Selecting it starts the
+Select it in the Web UI under **Settings → Voice assistant**. Open
+**Apps → Cadence Client → Details**, then use the app's own Settings page to set
+the server URL and an enrollment code (or a token). Selecting it starts the
 package; another assistant or **none** leaves it stopped. The slot is a
 selected default provider, so an abnormal exit is recovered with backoff;
 deselecting, uninstalling or shutting the daemon down is the off switch.

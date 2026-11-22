@@ -154,15 +154,20 @@ func (s *SysfsSegment) WriteSegment(f backend.SegmentFrame) error {
 		}
 	}
 	if s.colonEntries == 2 && len(s.leds) >= s.digits*s.segmentsPerDigit+2 {
-		v := "0"
-		if f.Colon {
-			v = strconv.Itoa(Brightness255(f.Brightness))
+		level := strconv.Itoa(Brightness255(f.Brightness))
+		top, bottom := "0", "0"
+		if f.TopColonOn() {
+			top = level
 		}
-		for _, idx := range []int{s.digits * s.segmentsPerDigit, s.digits*s.segmentsPerDigit + 1} {
+		if f.BottomColonOn() {
+			bottom = level
+		}
+		for i, value := range []string{top, bottom} {
+			idx := s.digits*s.segmentsPerDigit + i
 			if idx >= len(s.leds) {
 				continue
 			}
-			_ = os.WriteFile(filepath.Join(s.leds[idx], "brightness"), []byte(v), 0o644)
+			_ = os.WriteFile(filepath.Join(s.leds[idx], "brightness"), []byte(value), 0o644)
 		}
 	}
 	return nil

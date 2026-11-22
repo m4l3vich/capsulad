@@ -1,11 +1,71 @@
 package audio
 
 import (
+	"encoding/binary"
 	"testing"
 	"time"
 
 	"capsulad/internal/backend"
 )
+
+// s16Constant builds mono 16-bit PCM holding one constant level.
+func s16Constant(level int, frames int) []byte {
+	pcm := make([]byte, frames*2)
+	for i := range frames {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(level))
+	}
+	return pcm
+}
+
+// TestFlushKeepsAudioPublishedAfterIt pins the Simon cue failure: the app
+// flushed the sounding backlog and wrote the next cue immediately afterwards,
+// as the audio contract allows. The mixer applied commands on a later tick, so
+// the flush also discarded the cue published after it; the first tone of every
+// replay, every key confirmation and the error cue were silently dropped.
+func TestFlushKeepsAudioPublishedAfterIt(t *testing.T) {
+	in := backend.AudioFormat{Format: backend.S16LE, RateHz: 24000, Channels: 1}
+	out := backend.AudioFormat{Format: backend.S16LE, RateHz: 48000, Channels: 2}
+	p := &Playback{
+		format:     in,
+		feedFrames: (in.RateHz*mixFrameMS+999)/1000 + 2,
+		events:     make(chan PlaybackEvent, 4),
+		in:         make(chan playbackChunk, playbackQueue),
+		ctl:        make(chan playbackCommand, 4),
+		done:       make(chan struct{}),
+		conv:       newResampler(in, out),
+		gain:       1,
+		trim:       1,
+	}
+	const backlogLevel, cueLevel = 0x1000, 0x2000
+	if err := p.Write(s16Constant(backlogLevel, 24)); err != nil {
+		t.Fatalf("write backlog: %v", err)
+	}
+	// The producer publishes the cue after the command; both are waiting when
+	// the mixer's next tick applies the flush.
+	p.Control("FLUSH")
+	if err := p.Write(s16Constant(cueLevel, 48)); err != nil {
+		t.Fatalf("write cue: %v", err)
+	}
+
+	p.drainControl()
+	p.feed()
+
+	if got, want := p.conv.srcFrames(), 48; got != want {
+		t.Fatalf("resampler holds %d frames after the flush, want the %d-frame cue only", got, want)
+	}
+	want := float32(cueLevel) / 32768
+	for i, sample := range p.conv.src {
+		if sample != want {
+			t.Fatalf("resampler sample %d = %v, want the cue at %v", i, sample, want)
+		}
+	}
+	p.mu.Lock()
+	queued := p.queuedBytes
+	p.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queued bytes = %d after the cue was consumed, want 0", queued)
+	}
+}
 
 func TestFiniteResampledPlaybackDrains(t *testing.T) {
 	m := newAudioManager(t, &fakeDevice{pace: time.Millisecond})

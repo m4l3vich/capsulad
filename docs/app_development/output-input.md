@@ -42,7 +42,7 @@ replace the presentation's content in place; they do not create new resources.
 
 | Payload | Fields | Validation |
 |---|---|---|
-| `SegmentFrame` | `cells[{mask, decimal_point}]`, `colon` | `mask` must fit 16 bits. Each cell is one digit, left to right; bit `i` selects segment `i`, and `0x7f` lights the whole digit. The Mini has four digits; extra cells are ignored and missing cells are dark. |
+| `SegmentFrame` | `cells[{mask, decimal_point}]`, `colon`, `colon_top`, `colon_bottom` | `mask` must fit 16 bits. Each cell is one digit, left to right; bit `i` selects segment `i`, and `0x7f` lights the whole digit. `colon` lights both separator dots; `colon_top` and `colon_bottom` light one dot each, so a frame may blink the dots independently. A dot is lit when its own field or `colon` is true. The Mini has four digits and two colon dots; extra cells are ignored and missing cells are dark. |
 | `RingFrame` | `pixels[{red, green, blue}]` | Each channel is clamped to 0–255. The Mini has 12 pixels; extra pixels are dropped and missing pixels stay dark. |
 | `RingEffect` | `effect_id`, `arguments[{name, value}]` | The ID must be a built-in ring effect returned by `ListPresets`; arguments are validated against its typed parameters. |
 | `SegmentFace` | `face_id`, `arguments` | The ID must be a built-in segment face returned by `ListPresets`. |
@@ -72,6 +72,7 @@ Four digits showing `12:34` on a configured default display app:
 → {"open":{"resourceId":"display.segment.front"}}
 ← {"ready":{"presentationId":"prs_9f2c1a7d4b5e6f708192a3b4c5","resourceId":"display.segment.front","hasValidFrame":false}}
 → {"frame":{"segment":{"cells":[{"mask":6,"decimalPoint":false},{"mask":91,"decimalPoint":false},{"mask":79,"decimalPoint":false},{"mask":102,"decimalPoint":false}],"colon":true}}}
+→ {"frame":{"segment":{"cells":[{"mask":6},{"mask":91},{"mask":79},{"mask":102}],"colonTop":true}}}
 ← {"ready":{"presentationId":"prs_9f2c1a7d4b5e6f708192a3b4c5","resourceId":"display.segment.front","hasValidFrame":true}}
 ← {"visibility":{"visible":true,"reason":"routing: default changed"}}
 → {"frame":{"blank":{}}}

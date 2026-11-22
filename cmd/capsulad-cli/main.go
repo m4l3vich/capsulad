@@ -134,7 +134,7 @@ Commands:
   auth init                      initialize admin password, certificate and first API key
   auth set-password              change the admin password
   auth key create NAME           create a static API key (printed once)
-                                 [--scope status|operator] (repeatable; default status)
+                                 [--scope status|assistant|operator] (repeatable; default status)
   auth key list                  list API keys, revocation state and scopes
   auth key revoke NAME           revoke an API key
   auth status                    show password/API-key/certificate status
@@ -812,11 +812,11 @@ func runAuth(args []string, dataDir, securityDir string) error {
 		switch args[1] {
 		case "create":
 			if len(args) < 3 {
-				return fmt.Errorf("usage: capsulad-cli auth key create NAME [--scope status|operator]...")
+				return fmt.Errorf("usage: capsulad-cli auth key create NAME [--scope status|assistant|operator]...")
 			}
 			fs := flag.NewFlagSet("auth key create", flag.ContinueOnError)
 			var scopes stringList
-			fs.Var(&scopes, "scope", "key scope: status (read-only status/certificate) or operator (full daemon administration, including the MCP tools); repeatable, default status")
+			fs.Var(&scopes, "scope", "key scope: status (read-only status/certificate), assistant (ordinary speaker controls), or operator (full daemon administration); repeatable, default status")
 			if err := fs.Parse(args[3:]); err != nil {
 				return err
 			}
@@ -838,6 +838,8 @@ func runAuth(args []string, dataDir, securityDir string) error {
 				state := "active"
 				if k.Revoked {
 					state = "revoked"
+				} else if !websecurity.ScopesAllow(k.Scopes, websecurity.ScopeStatus) {
+					state = "inactive (no valid scope)"
 				}
 				fmt.Printf("%-24s %s… created=%s %s scopes=%s\n", k.Name, k.Prefix,
 					k.CreatedAt.Format(time.RFC3339), state, strings.Join(k.Scopes, ","))

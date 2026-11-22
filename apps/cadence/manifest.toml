@@ -25,6 +25,14 @@ id = "dismiss"
 label = "Dismiss the current turn"
 description = "Cancels the running Cadence session, aborts reply playback, releases the microphone and ring, and drops activations queued behind it. The process stays running and ready."
 
+[[actions]]
+id = "test_connection"
+label = "Test connection"
+description = "Checks DNS, TCP and TLS from this device to the saved Cadence server URL using the configured CA trust roots. It does not need a device token or an enrollment code and does not open a device link. The result is logged as test_ok or test_failed and written to the non-secret Last connection test setting for the app's settings page."
+
+[settings_ui]
+html = "ui/settings.html"
+
 [[settings]]
 key = "server_url"
 label = "Cadence server URL"
@@ -94,3 +102,10 @@ label = "Follow-up windows"
 description = "When the server offers a follow-up window after a complete reply, keep the microphone and indication open and start a follow-up session. Turn off to end every turn at the server's close."
 type = "boolean"
 default = true
+
+[[settings]]
+key = "last_test_status"
+label = "Last connection test"
+description = "Written by the app after a Test connection run: test_ok, or test_failed with a short, credential-free reason. Non-secret and owned by the app; the app log carries the full line."
+type = "text"
+default = ""

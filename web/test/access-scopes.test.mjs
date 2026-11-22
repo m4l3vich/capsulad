@@ -6,17 +6,23 @@ import { keyScopes } from '../src/lib/format.js'
 // status key must never be shown as an administration credential or the other
 // way round.
 
-test('legacy and explicit status keys read as status only', () => {
-  assert.equal(keyScopes(undefined), 'status only')
-  assert.equal(keyScopes([]), 'status only')
+test('only an explicit status grant reads as status only', () => {
+  assert.equal(keyScopes(undefined), 'no access')
+  assert.equal(keyScopes([]), 'no access')
   assert.equal(keyScopes(['status']), 'status only')
+})
+
+test('an assistant key reads as assistant controls and is not full administration', () => {
+  assert.equal(keyScopes(['assistant']), 'assistant controls')
+  assert.equal(keyScopes(['assistant', 'status']), 'assistant controls')
 })
 
 test('an operator key reads as full administration, even beside status', () => {
   assert.equal(keyScopes(['operator']), 'full administration')
-  assert.equal(keyScopes(['operator', 'status']), 'full administration')
+  assert.equal(keyScopes(['operator', 'assistant', 'status']), 'full administration')
 })
 
-test('an unknown scope is shown verbatim rather than hidden', () => {
-  assert.equal(keyScopes(['experimental']), 'experimental')
+test('an unknown scope invalidates the entire recorded grant', () => {
+  assert.equal(keyScopes(['experimental']), 'no access: experimental')
+  assert.equal(keyScopes(['operator', 'experimental']), 'no access: operator, experimental')
 })

@@ -48,16 +48,28 @@ const (
 // Content is one in-place presentation value. Replacing an effect with a raw
 // frame does not change ownership.
 type Content struct {
-	Type     ContentType
-	Cells    []uint16
-	Colon    bool
-	Pixels   []backend.RGB
-	PresetID string
-	Params   presets.Params
+	Type        ContentType
+	Cells       []uint16
+	ColonTop    bool
+	ColonBottom bool
+	Pixels      []backend.RGB
+	PresetID    string
+	Params      presets.Params
 }
 
+// SegmentFrame lights both colon dots together.
 func SegmentFrame(cells []uint16, colon bool) Content {
-	return Content{Type: ContentSegmentFrame, Cells: append([]uint16(nil), cells...), Colon: colon}
+	return SegmentFrameDots(cells, colon, colon)
+}
+
+// SegmentFrameDots drives the two colon dots independently.
+func SegmentFrameDots(cells []uint16, colonTop, colonBottom bool) Content {
+	return Content{
+		Type:        ContentSegmentFrame,
+		Cells:       append([]uint16(nil), cells...),
+		ColonTop:    colonTop,
+		ColonBottom: colonBottom,
+	}
 }
 
 func RingFrame(pixels []backend.RGB) Content {
@@ -183,25 +195,26 @@ func (p *Presentation) emitLocked(e Event) {
 
 // RenderSegment resolves segment content for the given geometry. Effects are
 // not valid on segment presentations; only faces, frames and blanks are.
-func (p *Presentation) RenderSegment(caps backend.SegmentCaps) ([]uint16, bool, bool) {
+func (p *Presentation) RenderSegment(caps backend.SegmentCaps) ([]uint16, bool, bool, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.hasContent || p.closed {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	switch p.content.Type {
 	case ContentSegmentFrame:
-		return append([]uint16(nil), p.content.Cells...), p.content.Colon, true
+		return append([]uint16(nil), p.content.Cells...), p.content.ColonTop,
+			p.content.ColonBottom, true
 	case ContentSegmentFace:
 		cells, colon, err := presets.SegmentMask(p.content.PresetID, caps)
 		if err != nil {
-			return nil, false, true
+			return nil, false, false, true
 		}
-		return cells, colon, true
+		return cells, colon, colon, true
 	case ContentBlank:
-		return make([]uint16, caps.DigitCount), false, true
+		return make([]uint16, caps.DigitCount), false, false, true
 	default:
-		return nil, false, false
+		return nil, false, false, false
 	}
 }
 

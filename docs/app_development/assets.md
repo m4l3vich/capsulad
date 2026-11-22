@@ -18,7 +18,9 @@ How it relates to the package:
 - Files inside your package are immutable app data at `/app` (`CAPSULAD_APP_DIR`). Use them for
   defaults, templates, icons and fallback audio. A QuickJS app reads one with
   `capsulad.readPackageFile("<slash-relative path>")`; native apps open them relative to their
-  executable path.
+  executable path. A QuickJS app reads a shared asset with
+  `capsulad.readAssetFile("/assets/<asset-id>")`: the canonical app path only, at most 32 MiB,
+  with no host path, no escape from `CAPSULAD_ASSETS` and no symlinked path component.
 - The asset store is user-managed media shared by all apps. Use it for recordings, imported
   audio, images and other files a user adds at runtime.
 - An app cannot write the store. To change it, an administrator uploads through the Web UI.

@@ -28,7 +28,10 @@ description = "Aborts the in-flight phrase, stops playback and returns to idle w
 [[actions]]
 id = "reauth"
 label = "Re-run device attach"
-description = "Repeats the session attach handshake with the configured xtoken id and reports the result."
+description = "When VK access token is set, exchanges it for a session, stores the session and clears the token. Otherwise repeats the session attach handshake with the configured xtoken id or session and reports the result. A newly submitted token is exchanged automatically, so this action is the retry path."
+
+[settings_ui]
+html = "ui/settings.html"
 
 [[settings]]
 key = "endpoint"
@@ -67,6 +70,13 @@ type = "text_masked"
 default = ""
 
 [[settings]]
+key = "vk_access_token"
+label = "VK access token or redirect URL"
+description = "Fresh VK access token (or the full redirect URL it arrived in) exchanged once for a vendor session. A newly submitted value is exchanged automatically; Re-run device attach is the retry path. The app stores the session id and secret in their settings and clears this value. It is masked and never logged. Leave empty after reauthorization."
+type = "text_masked"
+default = ""
+
+[[settings]]
 key = "session_id"
 label = "Session id"
 description = "Optional vendor session id. Takes precedence over the vendor session file and is masked."
@@ -86,6 +96,13 @@ label = "Vendor session file"
 description = "Path to the vendor agent session.json. The matching device_settings.json is read beside it."
 type = "text"
 default = "/data/voice-agent/session.json"
+
+[[settings]]
+key = "last_auth_status"
+label = "Last authorization result"
+description = "Written by the app after a token exchange or attach attempt: ok or failed with a short, credential-free reason. Non-secret and owned by the app; the app log carries the full line."
+type = "text"
+default = ""
 
 [[settings]]
 key = "serial"
