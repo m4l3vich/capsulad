@@ -33,16 +33,7 @@ const cadenceAppID = "org.capsulad.cadence"
 // websocket handshake and this host's simulator backend.
 func TestCadenceCaptureAndMicOverLocalServer(t *testing.T) {
 	addr := startFakeCadenceServer(t)
-	binary := buildCadenceApp(t)
-	root := moduleRoot(t)
-	manifest, err := os.ReadFile(filepath.Join(root, "apps", "cadence", "manifest.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	d, _, _ := newTestDaemonWith(t, appInstall{
-		id: cadenceAppID, binaryName: "cadence", binaryPath: binary, manifest: manifest,
-	})
+	d, _, _ := newTestDaemonWith(t, cadenceInstall(t))
 
 	// The app talks to the loopback fake over http; the token is any value.
 	_, rev, private, err := d.appCfg.Update(cadenceAppID, 0, []settings.Change{
@@ -119,6 +110,27 @@ func buildCadenceApp(t *testing.T) string {
 		t.Fatalf("build apps/cadence: %v\n%s", err, b)
 	}
 	return out
+}
+
+// cadenceInstall stages the real package layout the daemon requires: the
+// manifest declares [settings_ui], so the packaged settings document must be
+// present beside the binary or the registry rejects the app.
+func cadenceInstall(t *testing.T) appInstall {
+	t.Helper()
+	root := moduleRoot(t)
+	manifest, err := os.ReadFile(filepath.Join(root, "apps", "cadence", "manifest.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsUI, err := os.ReadFile(filepath.Join(root, "apps", "cadence", "ui", "settings.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return appInstall{
+		id: cadenceAppID, binaryName: "cadence", binaryPath: buildCadenceApp(t),
+		manifest: manifest,
+		files:    map[string][]byte{"ui/settings.html": settingsUI},
+	}
 }
 
 // fakeCadenceWelcome is the one server frame the app's handshake needs:

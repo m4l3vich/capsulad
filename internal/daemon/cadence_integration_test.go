@@ -354,15 +354,7 @@ func cadenceAnnounceEnd(id string) []byte {
 
 func cadenceApp(t *testing.T) *Daemon {
 	t.Helper()
-	binary := buildCadenceApp(t)
-	root := moduleRoot(t)
-	manifest, err := os.ReadFile(filepath.Join(root, "apps", "cadence", "manifest.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, _, _ := newTestDaemonWith(t, appInstall{
-		id: cadenceAppID, binaryName: "cadence", binaryPath: binary, manifest: manifest,
-	})
+	d, _, _ := newTestDaemonWith(t, cadenceInstall(t))
 	return d
 }
 
