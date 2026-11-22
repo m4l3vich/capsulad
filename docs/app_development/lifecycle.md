@@ -275,14 +275,17 @@ that run is the recovery and the scheduled start is skipped, so one app never ha
 ### Boot
 
 On daemon start, framework-owned compiled-in helpers and selected compiled-in providers start
-first, then every installed app with `start_on_boot = true` or `background = true`, then the
-configured default provider for each resource and the selected assistant. A built-in provider is
-started only when selected, regardless of its manifest's `start_on_boot` or `background` flags;
-framework-owned helpers are marked explicitly and start independently of selection. An app that is
-already running is not started twice.
+first, then installed background apps and apps whose effective start-at-boot preference is
+enabled, then the configured default provider for each resource and the selected assistant. A
+built-in provider is started only when selected, regardless of its manifest's `start_on_boot` or
+`background` flags; framework-owned helpers are marked explicitly and start independently of
+selection. An app that is already running is not started twice.
 
-For installed apps, `background = true` therefore has two effects: the app is started at boot, and
-deselecting it does not stop it. `start_on_boot = true` gives the same protection from deselection.
+For a non-background app the manifest's `start_on_boot` is the default; the administrator may
+persistently override it. Changing the preference does not immediately start or stop a run.
+Selected providers still start at boot even when their preference is disabled. Background apps
+and compiled-in apps always start; their boot preference cannot be changed. Launches that need
+required arguments without defaults may still fail at boot.
 
 An operator can start the daemon with `-single-app <app-id>`, which replaces the boot set above:
 only that application is started (whether or not it declares `start_on_boot` or `background`) and
@@ -338,7 +341,8 @@ administrator-only. Administrators read the same stream with
 - A provider is selected by app ID in device settings, never by a port or a stable output
   identifier.
 - Selecting a provider starts it if it is installed and not running.
-- Deselecting a provider stops it, unless it declares `start_on_boot` or `background`; a compiled-in provider is stopped unless explicitly framework-owned.
+- Deselecting a provider stops it, unless its effective boot preference is enabled or it is
+  background; a compiled-in provider is stopped unless explicitly framework-owned.
 - Uninstalling a provider requires it to be stopped first, and removing the selection is the
   durable way to keep it off.
 - A presentation is owned by one run; when that run ends, its presentations and captures are

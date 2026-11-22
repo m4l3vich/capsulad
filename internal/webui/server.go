@@ -37,6 +37,7 @@ import (
 	"capsulad/internal/discovery"
 	"capsulad/internal/logbus"
 	"capsulad/internal/registry"
+	"capsulad/internal/settings"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/version"
 	"capsulad/internal/wakeword"
@@ -68,6 +69,8 @@ type Server struct {
 	// Apps resolves application package assets. Optional: without it the
 	// settings-UI endpoint and declaration are unavailable.
 	Apps *registry.Registry
+	// UserSettings stores administrator boot preferences.
+	UserSettings *settings.UserStore
 	// Assets is the shared read-only asset store. Optional: without it the
 	// browser asset-management routes report unavailability.
 	Assets *assets.Catalog
@@ -150,6 +153,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cert.pem", s.anyAuth(s.certPEM))
 	mux.HandleFunc("GET /api/apps/{appID}/settings-ui", s.sessionOnly(s.appSettingsUI))
 	mux.HandleFunc("GET /api/apps/{appID}/guide", s.sessionOnly(s.appGuide))
+	mux.HandleFunc("GET /api/apps/{appID}/boot", s.sessionOnly(s.appBoot))
+	mux.HandleFunc("PUT /api/apps/{appID}/boot", s.sessionOnly(s.appBoot))
 	// The PA Speaker route is the one app-specific HTTP operation. It is not a
 	// generic proxy: the handler names org.capsulad.pa and relays its Play RPC.
 	// The methodless registration answers 405 for anything but POST instead of

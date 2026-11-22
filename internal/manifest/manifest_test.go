@@ -56,6 +56,8 @@ func TestNativeSDKLoad(t *testing.T) {
 	manifest := `id = "org.example.sdkdemo"
 name = "SDK Demo"
 version = "0.1.0"
+user_guide = """Press the button.
+Hold to reset."""
 
 [entrypoint]
 runtime = "native"
@@ -74,6 +76,9 @@ min_minor = 3
 	m, err := Load(dir, file)
 	if err != nil {
 		t.Fatalf("load: %v", err)
+	}
+	if m.UserGuide != "Press the button.\nHold to reset." {
+		t.Fatalf("user_guide = %q", m.UserGuide)
 	}
 	if m.NativeSDK == nil {
 		t.Fatal("native_sdk was not parsed")

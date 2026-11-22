@@ -605,7 +605,7 @@ func (d *Daemon) reconcileProviderRuns(prev *settings.UserSettings, next setting
 			if !registered || systemApp.FrameworkOwned {
 				continue
 			}
-		} else if app.Manifest.StartOnBoot || app.Manifest.Background {
+		} else if bootEnabled(app.Manifest, next) {
 			continue
 		}
 		d.sup.StopApp(appID)
@@ -683,20 +683,32 @@ func (d *Daemon) ensureRunning(appID string) {
 	}
 }
 
+// bootEnabled applies the administrator's preference without weakening the
+// mandatory lifecycle of background and built-in applications.
+func bootEnabled(m *manifest.Manifest, v settings.UserSettings) bool {
+	if m.Background || m.Entrypoint.Runtime == manifest.RuntimeBuiltin {
+		return true
+	}
+	if enabled, ok := v.StartOnBootOverrides[m.ID]; ok {
+		return enabled
+	}
+	return m.StartOnBoot
+}
+
 func (d *Daemon) startBootApps() {
 	if d.cfg.SingleApp != "" {
 		d.ensureRunning(d.cfg.SingleApp)
 		return
 	}
+	snap := d.user.Get()
 	for _, app := range d.reg.List() {
 		if app.Manifest.Entrypoint.Runtime == manifest.RuntimeBuiltin {
 			continue // built-in start policy is handled by startSystemApps
 		}
-		if app.Manifest.StartOnBoot || app.Manifest.Background {
+		if bootEnabled(app.Manifest, snap.Values) {
 			d.ensureRunning(app.Manifest.ID)
 		}
 	}
-	snap := d.user.Get()
 	for _, appID := range snap.Values.DefaultAppByResource {
 		d.ensureRunning(appID)
 	}

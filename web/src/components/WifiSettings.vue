@@ -260,24 +260,46 @@ onUnmounted(() => {
       </div>
 
       <template v-else-if="data">
-        <div v-if="!data.available" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3" role="status">
+        <div v-if="!data.available" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3 border-2 border-neutral-300" role="status">
           <p class="text-sm font-medium">Wi-Fi is unavailable on this speaker.</p>
           <p class="text-xs text-base-content/60">Check that Wi-Fi is enabled on the speaker, then try again.</p>
         </div>
 
-        <div v-else-if="data.apActive" class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3" role="status">
-          <p class="text-sm font-medium">Setup access point active</p>
-          <p class="text-xs text-base-content/60">
-            No saved network could be joined, so the speaker is broadcasting
-            <span class="font-mono">{{ data.apSsid || 'its device name' }}</span>
-            with password <code class="font-mono">{{ fallbackPassword }}</code>.
+        <div v-else-if="data.apActive" class="flex flex-col gap-1 rounded-box bg-orange-100/60 p-3 border-orange-500 border" role="status">
+          <p class="text-md font-medium">Setup access point active</p>
+          <p class="text-sm text-base-content/60">
+            No saved network could be joined. Here you can connect to a new Wi-Fi network.
           </p>
-          <p class="text-xs text-base-content/60">
-            Join that network, then open
-            <a v-if="data.apPortalUrl" :href="data.apPortalUrl" target="_blank" rel="noopener" class="link">{{ data.apPortalUrl }}</a>
-            <span v-else>http://192.168.4.1</span>
-            to pick a network. The portal can only scan and connect.
-          </p>
+        </div>
+
+        <div v-else class="flex flex-col gap-1 rounded-box bg-base-200/60 p-3 border-2 border-neutral-300" role="status">
+          <details>
+            <summary class="text-sm font-medium cursor-pointer">
+              <Icon size="16px" class="align-text-top mr-1">wifi_off</Icon>
+              Fallback access point
+            </summary>
+            <p class="text-sm mt-2">
+              If the device can't connect to any known network at startup, it will activate a Wi-Fi access point for you to change settings:.
+            </p>
+
+            <dl class="grid grid-cols-2 justify-self-start gap-1 my-3">
+              <dt class="text-base-content/60">Network name:</dt>
+              <dd>
+                <code class="rounded bg-base-300 px-1 py-0.5 font-mono block">{{ data.apSsid }}</code>
+              </dd>
+
+              <dt class="text-base-content/60">Password:</dt>
+              <dd>
+                <code class="rounded bg-base-300 px-1 py-0.5 font-mono block">{{ fallbackPassword }}</code>
+              </dd>
+            </dl>
+
+            <p class="text-sm">
+              Join that network, then open
+              <code class="rounded bg-base-300 px-1 py-0.5 font-mono">{{ data.apPortalUrl || 'http://192.168.4.1' }}</code>
+              in your browser.
+            </p>
+          </details>
         </div>
 
         <template v-if="data.available">

@@ -22,7 +22,7 @@ const nav = [
   { path: '/', label: 'Overview' },
   { path: '/apps', label: 'Apps' },
   { path: '/settings', label: 'Settings' },
-  { path: '/assets', label: 'Assets' },
+  { path: '/files', label: 'Files' },
   { path: '/access', label: 'Access' },
   { path: '/diagnostics', label: 'Diagnostics' }
 ]
@@ -31,7 +31,7 @@ const views = {
   '/': OverviewView,
   '/apps': AppsView,
   '/settings': SettingsView,
-  '/assets': AssetsView,
+  '/files': AssetsView,
   '/access': AccessView,
   '/diagnostics': DiagnosticsView
 }

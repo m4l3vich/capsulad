@@ -122,16 +122,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- popover="manual" hides the element until showPopover() puts it in the top
-       layer, above an open <dialog>. Nothing here sets display, so the closed
-       state stays hidden; the flex stack lives on the inner wrapper. -->
   <div
     ref="stack"
     popover="manual"
     class="pointer-events-none fixed inset-x-0 bottom-0 top-auto z-[1000] m-0 w-full overflow-visible border-0 bg-transparent px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-0 text-inherit sm:inset-x-auto sm:bottom-4 sm:right-4 sm:w-96 sm:max-w-[calc(100vw-2rem)] sm:px-0 sm:pb-4"
   >
-    <!-- The live region is the stack itself: each toast carries its own role so
-         an error interrupts while routine confirmations stay polite. -->
     <TransitionGroup
       tag="div"
       name="toast"

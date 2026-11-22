@@ -22,6 +22,9 @@ from routing to driver submission; acoustics and photons are separate, explicitl
   recovery relaunches re-check selection before starting, regardless of `restart_on_failure`; a
   never-selected manifest restart keeps its ordinary contract. A manual or wakeword activation after
   recovery routes to the fresh ready run.
+- **App boot preference.** Administrators may persistently override an external non-background
+  application's manifest boot default. The change affects the next daemon start, not the current
+  run. Selected providers still start independently; background and built-in apps always start.
 - **Timer.** The nearest running timer appears on the segment display and takes an orange ring
   capture (RGB 255/96/24). The ring starts full; pixel 0 is at the top, indices increase clockwise,
   and pixels extinguish in the order 0, N−1, N−2, …, 1. Another application's capture may interrupt

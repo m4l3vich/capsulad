@@ -16,6 +16,8 @@ when reading or extending this page.
 
 A gRPC send is asynchronous and is never an output acknowledgement. "The stream opened" is
 not proof of sound; "the frame was written" is not proof of light.
+The per-application boot preference requires a target restart/power-cycle check; no device
+evidence for this preference has been collected here.
 
 ## Verified on Capsula Mini rev 4
 
@@ -1653,6 +1655,10 @@ not the speaker; read the level stated in each part.
   throwaway loopback HTTP→TLS/WebSocket proxy in a native Tern browser; the managed WebKit
   build crashed in EGL and Chromium failed its Mach-port launch, so a full desktop viewport
   and a physical phone are unverified.
+- The application modal was exercised against an isolated simulator in desktop Chromium: the
+  selected clock showed its display-controller badge, running/restart controls, disabled boot
+  checkbox, embedded settings document and nested default-provider and interface dialogs.
+  Launch-argument and boot-preference changes have not been exercised on a physical speaker.
 - Wi-Fi manager logic: stock `wpa_supplicant.conf` import, priority-ordered association,
   previous-network recovery, scan capability and token expiry against fixtures; captive
   portal host/origin/token/subnet behavior against `httptest`.

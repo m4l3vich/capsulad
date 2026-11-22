@@ -27,8 +27,9 @@ declares the removed `single_instance` key is rejected as unknown.
 | `name` | string | — | Required, must not be blank. Display name. |
 | `version` | string | — | Required, must not be empty. Free-form; compared for equality only. |
 | `description` | string | `""` | Shown in listings. |
+| `user_guide` | string | `""` | Optional plain-text instructions for users, shown in the application's Web UI guide. An empty string means no guide. |
 | `background` | bool | `false` | The app is started at boot and is not stopped when it is deselected as a provider. |
-| `start_on_boot` | bool | `false` | Start a run when the daemon starts; deselecting the app does not stop it. |
+| `start_on_boot` | bool | `false` | Default boot preference; an administrator can override it for non-background apps. While enabled, deselecting the app does not stop it. |
 | `restart_on_failure` | bool | `false` | Restart after an exit the framework did not request — including a clean self-exit — or after a lost framework connection. An app that exits itself when idle must leave this false. |
 | `provides` | array of string | `[]` | Nonexclusive UI hints. Every entry must be non-empty after trimming. |
 | `entrypoint` | table | — | Required. See below. |

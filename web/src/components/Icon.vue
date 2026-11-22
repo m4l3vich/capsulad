@@ -1,6 +1,6 @@
 <script setup>
 import '../assets/material-symbols-rounded.css'
-defineProps({ size: Number })
+defineProps({ size: String })
 </script>
 
 <template>

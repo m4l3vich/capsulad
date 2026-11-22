@@ -304,11 +304,24 @@ func (s *Server) applicationView(ctx context.Context, appID string) (*webv1.Appl
 		return nil, status.Errorf(codes.NotFound, "application %q is not installed", appID)
 	}
 	view := &webv1.ApplicationView{App: s.appListing(app)}
-	selected := false
-	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
-		selected = isSelectedProvider(settings.GetValues(), appID)
+	if s.Apps != nil {
+		if installed, ok := s.Apps.Get(appID); ok && installed.Manifest != nil {
+			view.UserGuide = installed.Manifest.UserGuide
+		}
 	}
-	view.SelectedDefault = selected
+	if settings, err := frameworkv1.NewSettingsServiceClient(s.Conn).GetSettings(ctx, &frameworkv1.GetSettingsRequest{}); err == nil {
+		values := settings.GetValues()
+		if values.GetDefaultAssistantAppId() == appID {
+			view.SelectedDefaultRoles = append(view.SelectedDefaultRoles, "assistant")
+		}
+		for resource, selected := range values.GetDefaultAppByResource() {
+			if selected == appID {
+				view.SelectedDefaultRoles = append(view.SelectedDefaultRoles, resource)
+			}
+		}
+		sort.Strings(view.SelectedDefaultRoles)
+		view.SelectedDefault = len(view.SelectedDefaultRoles) > 0
+	}
 
 	cfg := frameworkv1.NewApplicationConfigurationServiceClient(s.Conn)
 	if schema, err := cfg.Describe(ctx, &frameworkv1.DescribeAppConfigurationRequest{AppId: appID}); err == nil {
@@ -348,7 +361,7 @@ func (s *Server) applicationView(ctx context.Context, appID string) (*webv1.Appl
 		}
 	}
 	if runs, err := appsvc.ListRuns(ctx, &frameworkv1.ListRunsRequest{AppId: appID}); err == nil {
-		view.Runs = runViews(runs.GetRuns(), map[string]bool{appID: selected})
+		view.Runs = runViews(runs.GetRuns(), map[string]bool{appID: view.SelectedDefault})
 	}
 	if prov, err := appsvc.GetBinaryProvenance(ctx, &frameworkv1.GetBinaryProvenanceRequest{AppId: appID}); err == nil {
 		view.Provenance = &webv1.ProvenanceView{

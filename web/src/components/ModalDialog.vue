@@ -36,7 +36,9 @@ function close() {
       :class="maxWidth"
     >
       <div class="flex shrink-0 flex-wrap items-start justify-between gap-x-3 gap-y-2 border-b border-base-300 p-4 pb-3">
-        <h2 :id="titleId" class="min-w-0 flex-1 break-words text-lg font-semibold leading-tight">{{ title }}</h2>
+        <slot name="header" :title-id="titleId">
+          <h2 :id="titleId" class="min-w-0 flex-1 break-words text-lg font-semibold leading-tight">{{ title }}</h2>
+        </slot>
         <div class="flex shrink-0 items-center gap-1">
           <slot name="actions" />
           <button type="button" class="btn btn-sm btn-ghost btn-square -mr-1 -mt-1" aria-label="Close dialog" @click="close">

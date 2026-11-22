@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+input[type="range"][disabled]::-webkit-slider-thumb {
+  display: none;
+}
+
 @layer base {
   /* daisyUI themes also set color-scheme, but the custom pair is not derived
      from its light/dark presets, so state it explicitly for form controls and

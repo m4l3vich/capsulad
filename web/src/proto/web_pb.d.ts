@@ -253,6 +253,8 @@ export interface ApplicationView {
   ring?: RingView;
   ringError?: string;
   selectedDefault?: boolean;
+  userGuide?: string;
+  selectedDefaultRoles?: string[];
 }
 export declare const ApplicationView: {
   readonly type: string;
