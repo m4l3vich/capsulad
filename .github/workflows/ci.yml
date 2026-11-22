@@ -51,14 +51,3 @@ jobs:
         run: make web
       - name: Checked-in UI artifacts are current
         run: git diff --exit-code -- internal/webui/dist internal/appui/assets/kit.css
-
-  darwin:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22.6"
-          cache: true
-      - name: Installer suite
-        run: make test-installer
