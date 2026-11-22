@@ -11,7 +11,7 @@ import (
 	"capsulad/sdk/capsulad"
 
 	"capsulad/apps/cadence/internal/settings"
-	"capsulad/apps/cadence/internal/websocket"
+	"capsulad/sdk/websocket"
 )
 
 // Conn is one established link: the SDK's verified TLS stream after the

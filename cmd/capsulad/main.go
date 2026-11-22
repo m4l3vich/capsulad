@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -42,6 +43,7 @@ func main() {
 	fs.IntVar(&cfg.SandboxUIDBase, "sandbox-uid-base", 20000, "first host UID assigned to sandboxed apps")
 	fs.StringVar(&cfg.TrustedRootPath, "trusted-root", "", "offline Sigstore trusted_root.json for provenance verification")
 	fs.StringVar(&cfg.LogFile, "log-file", "", "daemon log file (default <data-dir>/capsulad.log)")
+	fs.StringVar(&cfg.LogArchiveDir, "log-archive-dir", filepath.Join(os.TempDir(), "capsulad-logs"), "directory for rotated daemon logs")
 	fs.StringVar(&cfg.DevAdminSocket, "dev-admin", "", "development-only admin Unix socket (simulator); empty disables")
 	fs.IntVar(&cfg.MemLimitMB, "mem-limit-mb", rk.Memory.HeapLimitMB, "soft Go heap limit in MiB (0 disables); keeps the OOM killer away on a 240-256 MiB board")
 	fs.StringVar(&cfg.WakewordModel, "wakeword-model", "", "trained keyword classifier (default <data-dir>/wakeword/model.json)")

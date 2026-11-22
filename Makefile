@@ -58,7 +58,6 @@ HOST_CLI ?= $(BINDIR)/capsulad-cli-host
 LIBDIR ?= build/lib
 INCLUDEDIR ?= build/include
 APPDIR ?= build/apps
-DEVAPPSDIR ?= build/devapps
 DEPLOYDIR ?= build/deploy-bundle
 DEPLOY_TARBALL ?= $(DEPLOYDIR).tar.gz
 # Include the CLI in the deployment bundle. The default keeps the documented
@@ -76,9 +75,6 @@ $(error BUNDLE_CLI must be 0 or 1, got '$(BUNDLE_CLI)')
 endif
 CLI_ENABLED := $(if $(filter 1,$(BUNDLE_CLI)),1,0)
 CLI_PREREQ := $(if $(filter 1,$(CLI_ENABLED)),capsulad-cli,)
-# Include the development apps staged in $(DEVAPPSDIR) in the bundle. They are
-# never built here: `make devapps` produces their artifacts first.
-BUNDLE_DEVAPPS ?= 0
 # Native runtime in the bundle. The normal target carries it; BUNDLE_NATIVE=0
 # assembles a bundle without it (static Go and script apps only), and native app
 # packages are then rejected at install by the profile's ABI gate.
@@ -195,7 +191,7 @@ NATIVE_LIBRARY := libcapsulad.so.1.0.0
 NATIVE_METADATA_LIBRARY := libcapsulad.so.1
 endif
 
-.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle devapps web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
+.PHONY: check-target-toolchain all release debug all-targets daemon daemon-release daemon-debug capsulad capsulad-cli capsulad-cli-host deploy-bundle web sdk sdk-go sdk-rust native interpreter interpreter-quickjs interpreter-micropython dumbassistant marusia cadence opencapsula simon soundboard hardwaretest pa radio homeassistant airplay airplay-target product-apps test test-go test-race test-sdk check-sdk-abi test-dumbassistant test-marusia test-cadence test-opencapsula test-apps test-simon test-soundboard test-hardwaretest test-pa test-radio test-homeassistant test-airplay test-interpreter clean
 
 all: release
 
@@ -239,7 +235,7 @@ capsulad-cli-host:
 # One directory that `capsulad-cli deploy` accepts as-is. Layout:
 # capsulad, capsulad-cli (unless BUNDLE_CLI=0), lib/ (native runtime incl.
 # headers), apps/*.tar.gz, boot/<hook>. App artifacts are produced and packaged
-# by the app build targets (`make dumbassistant`, `make devapps`); assembly only
+# by the app build targets (`make dumbassistant`, `make product-apps`); assembly only
 # copies the ready-made .tar.gz files, so nothing is ever packaged for or on the
 # device.
 # DEPLOY_PLATFORM selects the boot hook (rockchip-stock, amlogic-stock or
@@ -317,27 +313,9 @@ endif
 		id=$$(basename "$$d"); \
 		target=$${id#org.capsulad.}; \
 		bundle_app "$$id" "$(APPDIR)" "$$target"; \
-	done; \
-	if [ "$(BUNDLE_DEVAPPS)" = "1" ]; then \
-		staged=; \
-		for d in $(DEVAPPSDIR)/*/; do \
-			[ -f "$$d/manifest.toml" ] || continue; \
-			staged=1; \
-			bundle_app "$$(basename "$$d")" "$(DEVAPPSDIR)" devapps; \
-		done; \
-		if [ -z "$$staged" ]; then \
-			echo "error: BUNDLE_DEVAPPS=1 but $(DEVAPPSDIR) has no staged dev apps." >&2; \
-			echo "       run 'make devapps' first, then rerun make deploy-bundle." >&2; \
-			exit 1; \
-		fi; \
-	fi
+	done
 	COPYFILE_DISABLE=1 tar -C $(DEPLOYDIR) -czf $(DEPLOY_TARBALL) .
 	@echo "deployment bundle: $(DEPLOYDIR) and $(DEPLOY_TARBALL)"
-
-# Optional first-party app packages, built by the app workspace tooling. The
-# script is authoritative for which apps exist and how they are packaged.
-devapps:
-	sh apps/devtools/build.sh
 
 # Independently built browser SPA and the settings-document kit. Outputs are
 # embedded by internal/webui and internal/appui, so run this before rebuilding
@@ -452,6 +430,24 @@ marusia: $(PACKAGER_TARGET)
 cadence: $(PACKAGER_TARGET)
 	$(MAKE) -C apps/cadence package OUT=$(abspath $(APPDIR)) CLI=$(abspath $(PACKAGER))
 
+# OpenCapsula is the fourth optional first-party assistant: a client for a
+# self-hosted OpenCapsula server, with no runtime assets beyond manifest.toml
+# and the README.md guide. Compiled and packaged on the build host like
+# dumbassistant; the staged package directory and its <id>-<version>.tar.gz
+# land side by side in $(APPDIR).
+opencapsula: $(PACKAGER_TARGET)
+	rm -rf $(APPDIR)/org.capsulad.opencapsula
+	mkdir -p $(APPDIR)/org.capsulad.opencapsula
+	cd apps/opencapsula && CGO_ENABLED=1 $(GOBUILD) -o $(CURDIR)/$(APPDIR)/org.capsulad.opencapsula/opencapsula ./cmd/opencapsula
+	cp apps/opencapsula/manifest.toml $(APPDIR)/org.capsulad.opencapsula/manifest.toml
+	cp apps/opencapsula/README.md $(APPDIR)/org.capsulad.opencapsula/README.md
+	@$(MAKE) check-target-toolchain
+	@if [ "$(GOOS)" = linux ]; then sh tools/stage-manifest-abi.sh $(APPDIR)/org.capsulad.opencapsula/manifest.toml "$(TARGET_ABI)"; fi
+	@$(MAKE) check-target-toolchain
+	@if [ "$(GOOS)" = linux ]; then sh tools/check-elf-interp.sh $(APPDIR)/org.capsulad.opencapsula/opencapsula "$(TARGET_ABI)" $(if $(filter linux-musl,$(TARGET_ABI)),require-dynamic,); fi
+	@rm -f $(APPDIR)/org.capsulad.opencapsula-*.tar.gz
+	cd $(APPDIR) && $(abspath $(PACKAGER)) app package org.capsulad.opencapsula
+
 # Simon Says is a QuickJS script app: the package is its manifest, main.js,
 # app guide and pre-rendered audio/ cues, with the contract test suite
 # deliberately left out. Same conventions as the assistants (staged package
@@ -517,13 +513,13 @@ airplay-target:
 product-apps: simon pa radio homeassistant airplay
 
 # `make test` runs every Go module that ships in this repository: the root Go
-# module, the nested app modules (both assistants, Internet Radio and the Home
-# Assistant bridge), the Rust binding and the native crate (the frozen C ABI),
-# plus a compile of the public C++ example. `make test-race` adds the race
+# module, the nested app modules (the four assistants, Internet Radio and the
+# Home Assistant bridge), the Rust binding and the native crate (the frozen C
+# ABI), plus a compile of the public C++ example. `make test-race` adds the race
 # detector to the root module. The script-app suites need Node or CPython, so
 # they stay out of it: run them with `make test-apps` (`test-simon`, `test-pa`,
 # `test-interpreter`).
-test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-radio test-homeassistant test-airplay
+test: test-go test-sdk test-dumbassistant test-marusia test-cadence test-opencapsula test-radio test-homeassistant test-airplay
 
 test-go:
 	$(GO) test -ldflags "$(GO_LINKMODE)" ./...
@@ -557,6 +553,11 @@ test-marusia:
 # libopus on the host (it skips with a clear message when it is missing).
 test-cadence:
 	cd apps/cadence && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
+
+# The OpenCapsula client is a nested Go module. Tests run on the build host, so
+# the host link mode applies.
+test-opencapsula:
+	cd apps/opencapsula && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 # The MicroPython host's prelude is pure Python, so its self-test (timer
 # registration, cancellation, clock and poll behaviour) runs under CPython
@@ -607,5 +608,5 @@ test-airplay:
 # Remove generated binaries and packages but leave build/demo (operator data)
 # untouched.
 clean:
-	rm -rf $(BINDIR) $(LIBDIR) $(INCLUDEDIR) $(APPDIR) $(DEVAPPSDIR) $(DEPLOYDIR) $(DEPLOY_TARBALL)
+	rm -rf $(BINDIR) $(LIBDIR) $(INCLUDEDIR) $(APPDIR) $(DEPLOYDIR) $(DEPLOY_TARBALL)
 	@if [ -f $(NATIVE_MANIFEST) ]; then $(CARGO) clean --manifest-path $(NATIVE_MANIFEST); fi

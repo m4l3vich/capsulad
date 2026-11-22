@@ -139,19 +139,27 @@ func readRootDisk() (total, free uint64, ok bool) {
 	return st.Blocks * blockSize, st.Bavail * blockSize, true
 }
 
+// diskUsageAt reports total and unprivileged free space of the filesystem
+// holding path. App storage uses the applications root so its figures match
+// the partition that will actually accept an install.
+func diskUsageAt(path string) (total, free uint64, ok bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, false
+	}
+	blockSize := uint64(st.Bsize)
+	if blockSize == 0 {
+		return 0, 0, false
+	}
+	return st.Blocks * blockSize, st.Bavail * blockSize, true
+}
+
 // diskFreeAt reports the unprivileged free space of the filesystem holding
 // path. The asset page uses the store root so its figure matches the partition
 // that will actually accept an upload.
 func diskFreeAt(path string) (uint64, bool) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, false
-	}
-	blockSize := uint64(st.Bsize)
-	if blockSize == 0 || st.Bavail == 0 {
-		return 0, false
-	}
-	return st.Bavail * blockSize, true
+	_, free, ok := diskUsageAt(path)
+	return free, ok
 }
 
 func readSoCTemperature() (float64, bool) {

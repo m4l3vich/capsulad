@@ -187,7 +187,7 @@ turn with one explicit error and keeps running.
 All transport goes through the shared SDK: `capsulad.OpenTCP` (verified TLS 1.2+,
 `ca_pem` appended to the system store) performs the link connection,
 `capsulad.OpenHTTP` performs the one-time enrollment exchange, and this app's
-RFC 6455 client (`internal/websocket`) frames the link. The app links no
+RFC 6455 client (`capsulad/sdk/websocket`) frames the link. The app links no
 `net/http`, `crypto/tls` or gRPC stack.
 
 ## Interaction contract

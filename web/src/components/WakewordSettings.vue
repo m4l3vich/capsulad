@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onUnmounted, ref, watch } from 'vue'
+import ModalDialog from './ModalDialog.vue'
 import WakewordTrainingDialog from './WakewordTrainingDialog.vue'
 import Icon from './Icon.vue'
 import { socket, topicNames } from '../lib/ws.js'
@@ -15,6 +16,10 @@ const trainingTarget = ref(null)
 const modelDeleteBusy = ref('')
 const confirmModelDeleteId = ref('')
 const deleteBusy = ref('')
+const deleteAllOpen = ref(false)
+const deleteAllBusy = ref(false)
+const deleteAllProgress = ref(0)
+const deleteAllTotal = ref(0)
 const detectionBusy = ref('')
 const confirmDeleteId = ref('')
 let confirmTimer = null
@@ -313,6 +318,62 @@ async function removeTake(sample) {
   }
 }
 
+function askDeleteAll() {
+  if (deleteAllBusy.value || !samples.value.length) return
+  deleteAllTotal.value = samples.value.length
+  deleteAllProgress.value = 0
+  deleteAllOpen.value = true
+}
+
+function beforeDeleteAllClose() {
+  return !deleteAllBusy.value
+}
+
+function closeDeleteAll() {
+  if (deleteAllBusy.value) return
+  deleteAllOpen.value = false
+}
+
+// Recordings are deleted one at a time because the device exposes a single-
+// sample command. A failure does not stop the rest: the page reports how many
+// remain so the user can retry, and only a complete run closes the dialog.
+async function removeAllTakes() {
+  if (deleteAllBusy.value) return
+  const takes = [...samples.value]
+  if (!takes.length) {
+    deleteAllOpen.value = false
+    return
+  }
+  deleteAllTotal.value = takes.length
+  deleteAllProgress.value = 0
+  deleteAllBusy.value = true
+  let failed = 0
+  try {
+    for (const sample of takes) {
+      try {
+        await socket.request({ deleteSample: { sampleId: sample.sampleId } }, { timeout: 10000 })
+      } catch (_) {
+        failed += 1
+      }
+      deleteAllProgress.value += 1
+    }
+    try {
+      await refresh()
+    } catch (_) {
+      // The per-sample results are authoritative; the topic resyncs on the
+      // next event if this snapshot failed.
+    }
+    if (failed > 0) {
+      notify.error(`${failed} of ${takes.length} recordings could not be deleted.`)
+      return
+    }
+    deleteAllOpen.value = false
+    notify.success(takes.length === 1 ? 'Recording deleted.' : `Deleted ${takes.length} recordings.`)
+  } finally {
+    deleteAllBusy.value = false
+  }
+}
+
 function closeTraining() {
   trainingOpen.value = false
   trainingTarget.value = null
@@ -544,8 +605,13 @@ onUnmounted(() => {
           <div class="flex flex-wrap items-center gap-2">
             <h3 class="text-base font-semibold flex-grow">Recordings on Capsula</h3>
             <span class="badge badge-ghost badge-sm">{{ samples.length }}</span>
-            <!-- TODO: implement this; needs a confirmation modal with recording count -->
-            <button class="btn btn-outline btn-error btn-xs">
+            <button
+              type="button"
+              class="btn btn-outline btn-error btn-xs"
+              :disabled="!samples.length || deleteAllBusy || Boolean(deleteBusy)"
+              @click="askDeleteAll"
+            >
+              <span v-if="deleteAllBusy" class="loading loading-spinner loading-xs" aria-hidden="true"></span>
               Delete all
             </button>
           </div>
@@ -588,6 +654,33 @@ onUnmounted(() => {
       @close="closeTraining"
       @refresh="refresh"
     />
+
+    <ModalDialog
+      v-if="deleteAllOpen"
+      max-width="max-w-md"
+      title="Delete all recordings"
+      :before-close="beforeDeleteAllClose"
+      @close="closeDeleteAll"
+    >
+      <p class="text-sm">
+        Delete {{ deleteAllTotal }} {{ deleteAllTotal === 1 ? 'recording' : 'recordings' }} from Capsula?
+      </p>
+      <p class="mt-2 text-sm text-base-content/60">
+        This cannot be undone. Wakewords stay installed; only their saved recordings are removed.
+      </p>
+      <p v-if="deleteAllBusy" class="mt-2 text-sm" role="status">
+        Deleting {{ deleteAllProgress }} of {{ deleteAllTotal }}…
+      </p>
+      <template #footer>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="deleteAllBusy" @click="closeDeleteAll">
+          Cancel
+        </button>
+        <button type="button" class="btn btn-error btn-sm" :disabled="deleteAllBusy" @click="removeAllTakes">
+          <span v-if="deleteAllBusy" class="loading loading-spinner loading-sm"></span>
+          Delete all
+        </button>
+      </template>
+    </ModalDialog>
     </div>
   </section>
 </template>

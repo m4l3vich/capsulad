@@ -13,7 +13,7 @@ import (
 // explicit request mints a higher-privilege key.
 func TestAuthKeyCreateScope(t *testing.T) {
 	dataDir := t.TempDir()
-	if err := runAuth([]string{"init", "-hostname", "localhost", "-password", "correct horse battery", "-no-api-key"}, dataDir, ""); err != nil {
+	if err := runAuth([]string{"init", "-hostname", "localhost", "-password", "correct horse battery"}, dataDir, ""); err != nil {
 		t.Fatalf("auth init: %v", err)
 	}
 	if err := runAuth([]string{"key", "create", "admin", "--scope", "operator"}, dataDir, ""); err != nil {
@@ -45,6 +45,9 @@ func TestAuthKeyCreateScope(t *testing.T) {
 	}
 	if got := scopes["probe"]; len(got) != 1 || got[0] != websecurity.ScopeStatus {
 		t.Fatalf("probe scopes = %v", got)
+	}
+	if _, exists := scopes["bootstrap"]; exists {
+		t.Fatal("auth init minted a bootstrap API key")
 	}
 	if _, exists := scopes["rooted"]; exists {
 		t.Fatal("a rejected scope minted a key")

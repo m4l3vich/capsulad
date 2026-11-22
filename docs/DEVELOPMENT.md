@@ -18,8 +18,8 @@ is in [VERIFICATION.md](VERIFICATION.md).
 ## Build profiles and targets
 
 `make` is the release profile (`-trimpath -s -w`, Cargo release); `make debug` keeps
-symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`,
-`build/devapps` and `build/deploy-bundle`.
+symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps` and
+`build/deploy-bundle`.
 
 | Command | Builds |
 |---|---|
@@ -30,9 +30,9 @@ symbols. Outputs land in `build/bin`, `build/lib`, `build/include`, `build/apps`
 | `make native` | `libcapsulad`, header, symlinks and `capsulad-native.json` |
 | `make web` | `npm ci && npm run build` into `internal/webui/dist`, plus the settings-document kit at `internal/appui/assets/kit.css` |
 | `make interpreter` | QuickJS and MicroPython hosts, staged in `build/lib` |
-| `make devapps` / `make dumbassistant` / `make marusia` / `make cadence` | development apps and the three optional assistants (Cadence Client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/devapps` / `build/apps` |
+| `make dumbassistant` / `make marusia` / `make cadence` / `make opencapsula` | the four optional assistants (Cadence Client and OpenCapsula Client included): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
 | `make simon` / `make soundboard` / `make hardwaretest` / `make pa` / `make radio` / `make homeassistant` / `make airplay` / `make product-apps` | the Simon Says game, the Soundboard, the Hardware Test, the PA Speaker service, the Internet Radio (one native package), the Home Assistant integration and the AirPlay 2 receiver (`product-apps` is the five product apps together): package directories plus one `<id>-<version>.tar.gz` each, under `build/apps` |
-| `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_DEVAPPS=1` adds `build/devapps`, `BUNDLE_CLI=0` omits the CLI |
+| `make deploy-bundle` | self-contained bundle directory and `.tar.gz`, assembled from ready-made artifacts; `BUNDLE_CLI=0` omits the CLI |
 
 Go targets whose `GOOS` is `darwin` are linked with `-linkmode=external`, because the Go
 internal linker emits Mach-O binaries that current dyld rejects (missing `LC_UUID`). The
@@ -202,13 +202,15 @@ beside the package directory: `make dumbassistant` leaves
 `build/apps/org.capsulad.marusia-<version>.tar.gz`, `make cadence` leaves
 `build/apps/org.capsulad.cadence-<version>.tar.gz` (add `TARGET_ABI=linux-musl` for the
 Alpine board, which also rewrites the staged manifest and checks the binary's loader), and
-`make devapps` leaves one archive per development app under `build/devapps`. The product apps follow the same layout:
+`make opencapsula` leaves `build/apps/org.capsulad.opencapsula-<version>.tar.gz`. The
+OpenCapsula client is native and needs a built host runtime (`make native`) like the other
+native apps; for the device build it with the target toolchain, for example
+`GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc make opencapsula`. The product apps follow the same layout:
 `make simon` leaves `build/apps/org.capsulad.simon-<version>.tar.gz`, `make pa`
 `org.capsulad.pa-<version>.tar.gz` and `make radio` `org.capsulad.radio-<version>.tar.gz`.
-`apps/devtools/build.sh` takes
-`PACKAGE=0` to stage the directories without archives and `CAPSULAD_CLI=/path/to/capsulad-cli`
-to choose the packager; `apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/build.sh`
-and `apps/homeassistant/build.sh` take the same two variables plus `OUT=`
+`apps/simon/build.sh`, `apps/pa/build.sh`, `apps/radio/build.sh` and
+`apps/homeassistant/build.sh` take `PACKAGE=0` to stage the directories without archives,
+`CAPSULAD_CLI=/path/to/capsulad-cli` to choose the packager, and `OUT=`
 (`apps/radio/Makefile` wraps that script for local use). Every first-party package stages its
 own root `README.md` next to `manifest.toml`, because that file is the app's user guide in the
 Web UI; a build script that cannot find it fails rather than packaging a guide-less app.
@@ -219,7 +221,7 @@ The device receives archives only:
 
 ```sh
 capsulad-cli app install build/apps/org.capsulad.dumbassistant-<version>.tar.gz
-capsulad-cli app install build/deploy-bundle/apps/dev.hardware-<version>.tar.gz
+capsulad-cli app install build/deploy-bundle/apps/org.capsulad.simon-<version>.tar.gz
 capsulad-cli app list
 capsulad-cli app start APP_ID [NAME=VALUE ...]
 capsulad-cli app runs [APP_ID]
@@ -241,7 +243,9 @@ package is usable immediately and needs no restart. `app remove` likewise reache
 `ApplicationService/UninstallApplication`. The same operations are exposed to the
 session-authenticated Web UI as `POST /api/apps` (raw `.tar.gz` body, 65 MiB cap — the 64 MiB
 unpacked budget plus gzip slack) and `DELETE /api/apps/{appID}`, behind the Assets-style
-admin session on the Apps page; API keys are refused.
+admin session on the Apps page; API keys are refused. The Apps page also installs a package
+from an http(s) URL through `POST /api/apps/url`, and reads storage figures from
+`GET /api/apps/storage` and `GET /api/apps/{appID}/storage`.
 
 Only when the socket is provably absent (`ENOENT`, `ECONNREFUSED`, `ENOTSOCK`) does the CLI fall
 back to the previous on-disk path under `<data-dir>/apps` and print that the daemon must be
@@ -274,8 +278,7 @@ app is a singleton. A launch while the existing run is stopping is refused with
 `make deploy-bundle` writes `build/deploy-bundle/` and `build/deploy-bundle.tar.gz` from the
 current build outputs. Assembly never compiles or packages an app: it copies the ready-made
 `<id>-<version>.tar.gz` archives from `build/apps` and fails, naming the target to run, when a
-staged package directory has no archive. `BUNDLE_DEVAPPS=1` also copies the archives that
-`make devapps` staged in `build/devapps`. Build the app artifacts on the build host first when
+staged package directory has no archive. Build the app artifacts on the build host first when
 they belong in the bundle. The bundle contains host-targeted binaries unless you built with
 `GOOS`/`GOARCH` and `NATIVE_TARGET` for the device: a host bundle is for simulator work, and
 installing it on the Capsula Mini fails the daemon's self-check (`-version` cannot execute
@@ -562,7 +565,7 @@ Operating consequences:
 /data/capsdemo/assets/
 /data/capsdemo/run/hal.sock
 /data/capsdemo/security/
-/data/capsdemo/capsulad.log       plus one rotated copy (512 KiB cap)
+/data/capsdemo/capsulad.log       active daemon log (500 KiB cap; older logs rotate to /tmp/capsulad-logs, 2 MiB total)
 /etc/init.d/S99btctl.sh
 ```
 
@@ -583,8 +586,8 @@ mkdir -p build/demo
   -dev-admin build/demo/run/dev.sock
 ```
 
-`auth init` creates the certificate, sets an admin password (printed once when generated)
-and issues a bootstrap API key; open `https://127.0.0.1:8443/`. Without `-dev-admin`, the
+`auth init` creates the certificate and sets an admin password (printed once when
+generated); open `https://127.0.0.1:8443/`. Without `-dev-admin`, the
 simulator accepts no injected input.
 
 ```sh
@@ -627,7 +630,7 @@ selection case and no backend for them, so any other `-platform` value fails wit
 ## Tests
 
 ```sh
-make test              # every Go module: root, sdk/go, the three assistants, the native Internet
+make test              # every Go module: root, sdk/go, the four assistants, the native Internet
                        # Radio, the Home Assistant integration and the AirPlay 2
                        # receiver, the Rust binding, the native crate and the C++
                        # header compile
@@ -635,6 +638,7 @@ make test-race         # root Go module with -race
 make test-sdk          # ABI check, Go binding, Rust binding, native crate, C++ header compile
 make test-marusia      # the apps/marusia module's tests from the repository root
 make test-cadence      # the apps/cadence module: wire goldens, websocket framing, Opus, turn engine, announcements, enrollment, settings
+make test-opencapsula  # the nested apps/opencapsula Go module
 make test-radio        # the nested apps/radio Go module (stations, media, streaming)
 make test-homeassistant # the nested apps/homeassistant Go module
 make test-airplay      # the nested apps/airplay Go module (protocol, codecs, session)
@@ -736,22 +740,12 @@ make interpreter
 sh interpreter/smoke/run.sh
 ```
 
-## Interpreters and development apps
+## Interpreters
 
 `make interpreter` builds both hosts and `make interpreter-quickjs` /
 `make interpreter-micropython` one. They come from pinned sha256-verified sources
 (quickjs-ng 0.18.0, MicroPython `1c6321…`); set `QUICKJS_SRC`/`MICROPYTHON_SRC` for
 offline builds and note that they stage beside `libcapsulad`.
-
-```sh
-make devapps        # dev.hardware, dev.quickjs, dev.micropython, one .tar.gz each
-capsulad-cli -data-dir build/demo app install \
-  build/devapps/dev.hardware-<version>.tar.gz
-```
-
-`make devapps` compiles and packages on the build host and needs a built native runtime
-(`make native`) plus, for cross builds, a target C compiler. See [DEV_APPS.md](DEV_APPS.md) for
-what each development app does, and for `PACKAGE=0`, `APP=`, `OUT=` and `CAPSULAD_CLI=`.
 
 ### Product apps
 

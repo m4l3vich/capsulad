@@ -502,6 +502,7 @@ if !authorized {
 | `WatchInput(ctx, captureID)` → `*InputStream` | touch/gesture stream; `Events()`, `Done()`, `Close()` |
 | `OpenPlayback(ctx, endpoint, format, conversationID)` → `*Playback` | `Write`, `Control`, `Close` (drain), `Abort` |
 | `OpenMic(ctx, activationID, conversationID)` → `*Mic` | `Chunks()`, `Close`; PCM arrives as bytes |
+| `OpenMicWithFormat(ctx, activationID, conversationID, format)` → `*Mic` | microphone capture with an explicit `AudioFormat` preference; `Chunks()`, `Close` |
 | `BeginConversation(ctx, activationID)` → `*Conversation` | assistant turn lifetime |
 | `AudioState`, `ListAudioEndpoints`, `UserSettings` | read-only state helpers |
 | `SetMasterVolume(ctx, volume)` → `AudioState` | persist the device master position (0–1, mapped by the mixer's logarithmic taper — not a linear amplitude); local administrators, and only the installed AirPlay 2 receiver's authenticated READY run |
@@ -509,6 +510,12 @@ if !authorized {
 | `Call`, `CallJSON`, `Stream`, `OpenStream`, `OpenBidi` | routed calls and framework streams |
 | `RegisterDescriptors(set)` | enable the JSON path for your own messages |
 | `NotifyInvocationResult`, `NotifyActionResult` | acknowledgements |
+
+`OpenMic` uses `DefaultAudioFormat()`; `OpenMicWithFormat` sends the supplied
+`AudioFormat` as the capture request's `preferred_format`. The current daemon still delivers the
+backend's capture format, so always read `MicChunk.Format` (`actual_format`) instead of assuming
+the preference was granted. A zero `AudioFormat` selects the default. Both constructors stream
+the same `MicChunk` events: format announcement, PCM chunks and notices.
 
 `Call(ctx, targetAppID, service, rpc, request, timeout)` takes serialized protobuf bytes;
 `CallJSON(ctx, targetAppID, service, rpc, request, response, timeout)` takes and returns Go
@@ -598,6 +605,23 @@ The binding wraps the appended ABI v1 networking surface; the contract is [netwo
 | `OpenUDP(ctx, env, host, port, UDPOptions) (*UDPConn, error)` | Connected only when host **and** port are both set; ephemeral local port only. `Send(ctx, *UDPAddr, data)` and `Receive(ctx, maxLen)`. |
 | `OpenListener(ctx, env, ListenerOptions) (*Listener, error)` | The daemon binds; `Accept(ctx) (*TCPStream, *UDPAddr, error)`, `Receive`, `Send`, `Info`, `Close`. |
 | `(*Client) PublishMDNS`, `UnpublishMDNS`, `BrowseMDNS` | Avahi-backed publication and browse; `BrowseMDNS` returns an iterator whose `Next` returns `io.EOF` at the end. |
+
+### Websocket client
+
+`capsulad/sdk/websocket` is an RFC 6455 client for app protocols carried over a
+`*capsulad.TCPStream` (verified TLS when `OpenTCP` was called with `TLS`). It adds no HTTP or
+TLS stack of its own: the upgrade is one HTTP/1.1 request written directly to the stream.
+
+| Call | Purpose |
+|---|---|
+| `websocket.Dial(ctx, stream, websocket.Options{Host, Path, Token, MaxMessageBytes})` | Performs the client handshake. `Token` becomes `Authorization: Bearer`; a 401 is `ErrUnauthorized`, any other non-101 response is `ErrHandshake`. |
+| `(*Conn) ReadMessage(ctx) (Opcode, []byte, error)` | Reads the next complete data message. Only one goroutine reads. Pings are answered and a peer close returns `*websocket.CloseError`; `ErrProtocol` and `ErrMessageTooBig` identify framing failures. `OpText` and `OpBinary` let a protocol distinguish JSON from raw audio. |
+| `(*Conn) WriteText(ctx, payload)`, `WriteBinary(ctx, payload)`, `WritePing(ctx, payload)` | Client frames, masked as RFC 6455 requires. Writes are serialized and safe from any goroutine. |
+| `(*Conn) Close(ctx)`, `CloseNow()` | Normal close frame plus stream close, or an immediate drop. |
+
+No extension is offered, so a server that selects one (for example permessage-deflate) is
+refused instead of being misread. The default reassembled-message cap is 16 MiB; an app with a
+larger envelope can raise `MaxMessageBytes` or lower it to bound memory.
 
 Networking errors are `*capsulad.StatusError`; when `NativeStatus` is true, `Code` is an ABI
 status (`10` timeout, `16` unsupported, …), not a gRPC code. `ErrClosed` means the handle was

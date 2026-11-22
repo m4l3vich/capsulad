@@ -209,8 +209,8 @@ stock Rockchip image.
 
 - A sampled idle state reported 72 % CPU idle, daemon RSS 77 MiB, assistant 8.9 MiB and
   17.8 MiB free on `/data`.
-- The bounded log rotates at 512 KiB with one backup; wakeword recording and training refuse
-  below 2 MiB free.
+- The daemon log is capped at 500 KiB, with older logs rotating to `/tmp/capsulad-logs` up to
+  2 MiB total; wakeword recording and training refuse below 2 MiB free.
 
 ### 2026-11-17 second deployment: aarch64 build of the working tree
 
@@ -282,17 +282,15 @@ reboot was performed.
   max GLIBC 2.30), `capsulad-native.json` `f4491337…` (ABI 1.0), `capsulad-quickjs`
   `f80ae271…`, `capsulad-micropython` `dfe2fbb0…`, `/etc/init.d/S99btctl.sh` `91440905…`.
   The installed files matched `SHA256SUMS.final` (`evidence/check-installed-hashes.sh`).
-- **Packages.** All twelve installed and listed with the expected versions/runtimes:
+- **Packages.** All nine installed and listed with the expected versions/runtimes:
   `simon 1.0.0` (quickjs), `pa 0.1.0`/`radio 0.1.0` (micropython), `radio.tuner 0.1.0`,
   `homeassistant 0.1.0`, `dumbassistant 0.2.0`, `marusia 0.1.0`, `cadence 0.1.0`,
-  `airplay 0.1.0`, `dev.hardware 0.1.0` (native), `dev.quickjs 0.1.0` (quickjs),
-  `dev.micropython 0.1.0` (micropython).
+  `airplay 0.1.0`.
 - **Runs and runtime.** `capsulad -health` exit 0; `S99btctl.sh status` 0. Runs: clock,
   marusia, airplay, homeassistant, pa, radio, radio.tuner all `APP_READY`, single runs. The
   four native runs' `/proc/<pid>/maps` resolve
   `/capsulad/lib/libcapsulad.so.1.0.0` with no `(deleted)` entry, so the restarted native apps
-  load the updated runtime. A safe smoke started `dev.quickjs` and `dev.micropython` to
-  `APP_READY` and stopped both; the non-dev run set was unchanged.
+  load the updated runtime.
 - **Service restarts and recovery.** Three canonical service restarts were required by the
   observed failures, not by a reboot: (1) the daemon/boot deploy's `-restart auto`; (2) a
   recovery `S99btctl.sh restart` after the live apps attempt refused; (3) the final
@@ -341,8 +339,8 @@ reboot was performed.
 - **Settings/user state.** The four pre-existing app-settings files are byte-identical
   (`capsulad.clock 66d8345f…`, `capsulad.ring f9c799ae…`, `org.capsulad.dumbassistant
   c3726d99…`, `org.capsulad.marusia f4190f1b…`); installing the new apps seeded
-  new app-settings for `org.capsulad.airplay`, `dev.quickjs`, `dev.micropython` and
-  `org.capsulad.radio`, and advanced the global settings revision 3800 -> 3808.
+  new app-settings for `org.capsulad.airplay` and `org.capsulad.radio`, and advanced the
+  global settings revision 3800 -> 3808.
   The selected default assistant, display provider, startup-sound switch and
   `startup-sound.played` marker are unchanged. The master volume was moved 19.7 % -> 10 % by
   logged **physical panel volume key presses** (`key volume_down/up` at 22:36:07–22:36:14 UTC),
@@ -429,12 +427,12 @@ deployment replaced every installed application package, so no package from the 
   SPA was rebuilt with `npm run build` before the daemon build; the served
   `/assets/index-161e48dd.js` and `/` md5s matched the embedded files
   (`6845e9a2…` and `c1d114c5…`).
-- **Packages.** All 11 installed packages were rebuilt from the same tree: `dev.hardware 0.1.0`,
-  `dev.micropython 0.1.0`, `dev.quickjs 0.1.0`, `org.capsulad.airplay 0.1.0`,
+- **Packages.** All eight installed product and assistant packages were rebuilt from the same
+  tree: `org.capsulad.airplay 0.1.0`,
   `org.capsulad.cadence 0.1.0`, `org.capsulad.dumbassistant 0.2.0`,
   `org.capsulad.homeassistant 0.1.0`, `org.capsulad.marusia 0.1.0`, `org.capsulad.pa 0.1.0`,
-  `org.capsulad.radio 0.2.0`, `org.capsulad.simon 1.1.0`. The archives total 9,382,609 B.
-  The native packages declare `abi = "linux-gnu"` and passed the deploy ELF gate; AirPlay's
+  `org.capsulad.radio 0.2.0`, `org.capsulad.simon 1.1.0`. The native packages declare
+  `abi = "linux-gnu"` and passed the deploy ELF gate; AirPlay's
   aarch64 package came from the pinned buster/FFmpeg recipe, the other native packages from the
   repo-local glibc 2.31 sysroot toolchain.
 - **Deployment and the reset.** The first attempt refused before installing anything: with the
@@ -726,6 +724,66 @@ settings values are unchanged; revision 4203 -> 4205 is the two selection writes
   would require changing the dashboard's desired configuration, which this task did not
   authorize. No announcement, TTS, microphone capture, acoustic or optical measurement was
   made. The temporary deselection is observable as the settings revision advance.
+
+### 2026-11-22 deployment: container-built daemon and CLI, rebuilt OpenCapsula, log rotation
+
+Deployed over ADB to the rev 4 unit at `192.168.1.50:5555` (RK3308, stock Buildroot, aarch64
+glibc 2.33).
+
+- **Build.** Daemon and CLI were cross-built in `golang:1.22-bullseye` for `linux/arm64`:
+  `capsulad` 28 MB stripped and `capsulad-cli` 8.4 MB stripped, ELF interpreter
+  `/lib/ld-linux-aarch64.so.1`, highest required symbol `GLIBC_2.17`. The OpenCapsula app
+  (`org.capsulad.opencapsula` 0.1.0) was built in the same container: 2.3 MiB stripped ELF,
+  `GLIBC_2.17`, 1,001 KiB package archive and a 2.3 MiB unpacked app directory. The previously
+  verified arm64 native runtime (`libcapsulad.so.1.0.0`, `capsulad-native.json`,
+  `capsulad-quickjs`) was reused by sha256 after those hashes matched the installed device
+  files, so the deploy wrote no runtime bytes.
+- **Space constraint and the refused deploy.** A first, normal bundle was refused before the
+  daemon was stopped; this was the CLI's own data-space preflight, not a failure. `/data` had
+  6.5 MiB free, and replacing the binaries needs about 0.1 MiB plus an 8.0 MiB reserve. The
+  recovery CLI was copied to `/tmp`, the old installed `/data/capsdemo/capsulad-cli` and the
+  old logs were removed, and a CLI-free bundle (`capsulad`, `lib/`, `boot/S99btctl.sh`,
+  `apps/org.capsulad.opencapsula-0.1.0.tar.gz`; no `capsulad-cli`) was deployed from
+  `/tmp/capsulad-bundle` with `-staging /run -timeout 180s`, detached through
+  `start-stop-daemon` because the daemon owns Wi-Fi. The new CLI was then pushed to
+  `/data/capsdemo/capsulad-cli` (0755) so the device keeps a recovery copy; `/data` ended at
+  73.7M used, 4.7M free (94%).
+- **Deploy log and health.** The deploy log records `stopped the daemon through
+  /etc/init.d/S99btctl.sh stop`, `installed app org.capsulad.opencapsula (0.1.0)`,
+  `updated native runtime in /data/capsdemo/lib`, `installed boot hook
+  /etc/init.d/S99btctl.sh`, `installed daemon /data/capsdemo/capsulad`, `restarted through
+  /etc/init.d/S99btctl.sh restart`, `daemon healthy` and `exit=0`. Afterwards
+  `capsulad healthy: version=0.1.0-dev` and `capsulad 0.1.0-dev (sdk 0.5)`.
+  `app list` shows `org.capsulad.opencapsula 0.1.0 RUNTIME_NATIVE` with no `dev.*` packages
+  left. The selected assistant is still `org.capsulad.cadence`; cadence, airplay,
+  homeassistant and PA reached `APP_READY` after the restart.
+- **Web UI and log rotation.** The Web UI serves the rebuilt SPA: `/` references
+  `/assets/index-3ba31325.js` (HTTP 200, 359,187 bytes) and `/assets/index-67074bbc.css`;
+  `/healthz` returns `ok`. `/data/capsdemo/capsulad.log` was 21.4 KiB after startup and
+  `/tmp/capsulad-logs` exists with mode 0750. Rotation was not forced on the device; the
+  500 KiB/2 MiB boundary, archive pruning, legacy `.1` migration and write-continuity paths are
+  covered by `go test ./internal/logbus`.
+- **OpenCapsula run.** The app started to `APP_READY` in the mount-namespace sandbox, resolved
+  framework device id `ca0aa849-ba6a-43a8-a9af-ab51b65c63f7` and connected the app bus. It then
+  attempted its default `ws://127.0.0.1:8080/v1/stream` and logged
+  `connect 127.0.0.1:8080: Connection refused (os error 111)` repeatedly with backoff. The
+  disconnected amber ring was written once and then released (routing returned to no selected
+  app); the app was then stopped. No real OpenCapsule server was available.
+- **Host and simulator.** `web` tests: 92 pass / 0 fail. `go test` passed for `internal/webui`,
+  `internal/logbus`, `internal/registry`, the backend profile/rockchip/amlogic packages and
+  `cmd/capsulad-cli`; `apps/opencapsula`, `sdk/go` and the Cadence link suite passed. A live
+  macOS simulator daemon plus a browser verified the overview headline
+  `Simulator (host, simulator)`; an install-from-URL of the OpenCapsula archive succeeded and
+  refreshed the list; the uninstall confirmation read `The package uses 2.3 MiB, so deleting it
+  frees that much space`, kept settings, and the removal succeeded; app-action menus showed
+  `Restart` for a selected default and no Delete for built-in apps; the install modal rendered
+  the storage panel (`Unavailable` on macOS by design) and the URL/file controls.
+- **Limits.** The proof is installed-file identity, daemon and run state, deploy/health log
+  lines, HTTP responses and host tests. No reboot or persistence test was performed, no
+  Amlogic board was involved, and no real OpenCapsule server was present, so no handshake,
+  audio, TLS, command or AVRCP path was exercised on device. Volume writes and Bluetooth
+  discoverability remain administrator-only and are still not announced by the app. Physical
+  ring, panel and audio proof is unchanged from the prior deployment.
 
 ### Assistant API-key scope: Rockchip deployment
 
@@ -1389,8 +1447,8 @@ not the speaker; read the level stated in each part.
   displayed "How to play" and "392 Hz", and **Back** returned to the application; the built-in
   Clock guide displayed "Stopwatch".
 - Archive checks found a root `README.md` in each package built here: Simon, Radio, PA, Home
-  Assistant, AirPlay (its host-only package override), DumbAssistant, Marusia, `dev.hardware`,
-  `dev.quickjs` and `dev.micropython`. Cadence was packaged in the cached arm64 Bullseye
+  Assistant, AirPlay (its host-only package override), DumbAssistant, Marusia. Cadence was
+  packaged in the cached arm64 Bullseye
   container with the glibc loader and also contained `README.md`. Built-in guide embedding was
   covered independently, and authentication plus rendering were verified in real Chrome.
 - These remain simulator/host/browser results; no device run of the guide path is recorded here.
@@ -1538,9 +1596,9 @@ not the speaker; read the level stated in each part.
   MicroPython manifests carry none. The bundle now applies the libc/ABI check only to
   `runtime = "native"` archives, accepts QuickJS/MicroPython runtimes, and still refuses an
   unknown runtime. Narrow proof (stub daemon and CLI, no Go compile):
-  `make -o capsulad -o capsulad-cli deploy-bundle BUNDLE_NATIVE=0 BUNDLE_DEVAPPS=1
+  `make -o capsulad -o capsulad-cli deploy-bundle BUNDLE_NATIVE=0
   GOOS=linux GOARCH=arm64 DEPLOY_PLATFORM=rockchip-stock
-  NATIVE_TARGET=aarch64-unknown-linux-gnu …` bundled all 12 archives (9 apps + 3 devapps);
+  NATIVE_TARGET=aarch64-unknown-linux-gnu …` bundled all 9 archives;
   a fabricated `org.capsulad.fakenative` archive (`runtime = "native"`, no `abi`) still failed
   with `declares abi "", but rockchip-stock needs gnu`, and a `runtime = "wasm"` archive failed
   with `declares runtime "wasm"; the rockchip-stock ABI gate needs native, quickjs or
@@ -1551,9 +1609,9 @@ not the speaker; read the level stated in each part.
   `make native` produced `libcapsulad.1.dylib` 5,270,288 bytes with metadata ABI 1.0, which the
   appended networking surface keeps (pre-release);
   `make sdk-go` and `make sdk-rust` passed (596,400-byte rlib); a fresh `WORK` directory built
-  `capsulad-quickjs` 1,120,416 bytes and `capsulad-micropython` 352,520 bytes; `make devapps`
-  built the sample set (`dev.hardware` 964,863 bytes); `make dumbassistant` produced a
-  1,093,495-byte tarball and `make marusia` a 1,636,371-byte tarball (4,249,810-byte stripped
+  `capsulad-quickjs` 1,120,416 bytes and `capsulad-micropython` 352,520 bytes;
+  `make dumbassistant` produced a 1,093,495-byte tarball and `make marusia` a
+  1,636,371-byte tarball (4,249,810-byte stripped
   binary). `make daemon GOOS=linux GOARCH=arm64` produced static aarch64 ELF binaries
   (40,894,616 and 11,600,024 bytes), so the Go-only daemon cross-compiles. The native SDK
   aarch64 cross build was **not** run: `make native NATIVE_TARGET=aarch64-unknown-linux-gnu`
@@ -2426,7 +2484,7 @@ host/simulator evidence only. No app package has been installed or run on the un
   HEAD while functionality is unchanged. Native app binaries therefore stamp the revision: two
   consecutive builds at one commit reproduce byte-for-byte, the digests above were taken at HEAD
   `33378ec`, and only `-buildvcs=false` would make them stable across commits (the repository
-  convention, shared with the devtools app and the assistant Makefile targets, is to leave
+  convention, shared with the assistant Makefile targets, is to leave
   stamping on). Script packages such as the radio front end are unaffected because they compile
   nothing.
 - **Tuner unit tests (reported by the app's author, run in `apps/radio/tuner`).**

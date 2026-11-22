@@ -533,8 +533,9 @@ The hardware watchdog cannot be assumed disarmable: stop the daemon with TERM so
 its detached feeder, start the replacement explicitly under `nohup`, and verify the live RPC rather
 than a background shell's exit status (see [HARDWARE.md](HARDWARE.md)).
 
-Persistent space is the other hard limit: the daemon log rotates at 512 KiB with one copy, and new
-recordings or training are refused below 2 MiB free, because a full `/data` breaks logging and the
+Persistent space is the other hard limit: the active daemon log is capped at 500 KiB, older logs
+rotate to `/tmp/capsulad-logs` up to 2 MiB total, and new recordings or training are refused
+below 2 MiB free, because a full `/data` breaks logging and the
 upgrade path rather than failing one write. Each installed word is one artifact of roughly 130 KB, so
 the eight-word bound is about 1 MB of `/data`; the shared frontend is compiled in, not stored per
 word. `-wakeword-trace` logs per-word score peaks, the arbitration winner and detection heartbeats

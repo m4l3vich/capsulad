@@ -30,6 +30,7 @@ var AmlogicA113XStock = Profile{
 	Platform: "amlogic-stock",
 
 	Model: Model{
+		BoardRevision: "Capsula-mini-6",
 		// The stock DTB's root model is just "Amlogic", so SoCMatch is the board
 		// vendor token, not the SoC part number.
 		ModelFallback:      "VK Capsula Mini (model probe unavailable)",
@@ -157,6 +158,7 @@ var AmlogicA113XAlpine = Profile{
 	Platform: "amlogic-alpine",
 
 	Model: Model{
+		BoardRevision: "Capsula-mini-6",
 		ModelFallback: "VK Capsula Mini Amlogic 113X (model probe unavailable)",
 		// The supplied DTB reports compatible "amlogic,a113d amlogic,meson-axg"
 		// while the model string calls the product A113X; both are kept visible.

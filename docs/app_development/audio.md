@@ -24,9 +24,11 @@ the advertised format as authoritative; the simulator and the device can differ.
 | `channels` | Interleaved channel count. |
 | `channel_names` | Optional labels; do not rely on them being present. |
 
-- Capture ignores `preferred_format` and `packet_ms`: the stream always uses the backend's
-  capture format and delivers chunks sized for **20 ms** of that format (320 frames, 640 bytes,
-  at 16 kHz mono S16LE). Read `started.actual_format` rather than assuming.
+- Capture ignores `packet_ms`, and the current daemon still uses the backend's capture format
+  even when `preferred_format` is set. A preferred format can be sent explicitly with
+  `OpenMicWithFormat`; the stream delivers chunks sized for **20 ms** of the actual format
+  (320 frames, 640 bytes, at 16 kHz mono S16LE). Read `started.actual_format` rather than
+  assuming the preference was granted.
 - Playback accepts `PCM_S16LE` or `PCM_F32LE` at any rate and channel count and resamples to the
   48 kHz stereo mixer. `PlaybackStarted.actual_format` reports the **output** format.
 - Playback input is bounded at the mixer input. `PCM_F32LE` samples outside `[-1, 1]` are
@@ -44,7 +46,7 @@ streams events.
 | Request field | Meaning |
 |---|---|
 | `endpoint_id` | `audio.input.microphone` (processed) or `audio.input.microphone.raw`. Empty selects the processed endpoint. |
-| `preferred_format` | Accepted but currently ignored. |
+| `preferred_format` | A hint from `OpenMicWithFormat`. The current daemon accepts it but still uses the backend's capture format; read `started.actual_format`. |
 | `packet_ms` | Accepted but currently ignored. |
 | `activation_id` | Optional. Attaches the bounded pre-roll only when the framework issued this activation to the calling app. |
 | `conversation_id` | Optional lifetime marker. |
@@ -55,6 +57,9 @@ streams events.
 ← {"chunk":{"sequence":"1841","firstFrame":"588800","monotonicTimeNs":"19234000000","frameCount":320,"pcm":"…base64…","discontinuity":false,"droppedFramesBefore":"0"}}
 ← {"notice":{"code":"CLIENT_TOO_SLOW","detail":"audio consumer is not draining chunks"}}
 ```
+
+`OpenMic` is the convenience form: it uses `DefaultAudioFormat()` as the preference. Both
+forms produce the same event stream, and both must treat `actual_format` as authoritative.
 
 | Event | Fields | Meaning |
 |---|---|---|
@@ -129,7 +134,10 @@ The framework keeps a rolling **1 second** of capture history.
 ### Complete Go example
 
 ```go
-mic, err := client.OpenMic(ctx, activationID, conversationID)
+// Explicit preference: 16 kHz mono S16LE. The current daemon may still report
+// a different actual_format, so always read the started event.
+format := capsulad.AudioFormat{SampleFormat: capsulad.SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1}
+mic, err := client.OpenMicWithFormat(ctx, activationID, conversationID, format)
 if err != nil {
     log.Fatalf("microphone: %v", err) // FAILED_PRECONDITION names the missing half
 }
@@ -296,7 +304,7 @@ The gain stages, in order:
 
 | Limit | Current behavior |
 |---|---|
-| Custom capture format or packet size | Not supported; the backend format and 20 ms chunks are used. |
+| Custom capture format or packet size | `OpenMicWithFormat` sends `preferred_format`, but the current daemon still uses the backend format and 20 ms chunks. Read `actual_format`. |
 | Multiple microphone captures per app | Allowed, each a separate fan-out stream; each must satisfy the indication. |
 | Capture without indication | Denied; there is no silent capture mode. |
 | Global wakeword capture | Framework-owned; apps cannot subscribe to it or read its pre-roll. |

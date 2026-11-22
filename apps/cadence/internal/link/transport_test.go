@@ -17,8 +17,8 @@ import (
 
 	"capsulad/apps/cadence/internal/link"
 	cadencev2 "capsulad/apps/cadence/internal/proto/cadencev2"
-	"capsulad/apps/cadence/internal/websocket"
 	"capsulad/apps/cadence/internal/wire"
+	"capsulad/sdk/websocket"
 )
 
 // TestTransportOverLoopbackFakeUpstream drives the real websocket client and

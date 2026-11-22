@@ -30,12 +30,13 @@ func NewSimulator(opts SimulatorOptions) *Simulator {
 	}
 	s := &Simulator{
 		info: DeviceInfo{
-			DeviceID: opts.DeviceID,
-			Model:    model,
-			SoC:      "virtual",
-			Kernel:   "simulator",
-			Firmware: "capsulad-simulator",
-			Platform: PlatformSimulator,
+			DeviceID:      opts.DeviceID,
+			Model:         model,
+			BoardRevision: profile.Simulator.Model.BoardRevision,
+			SoC:           "virtual",
+			Kernel:        "simulator",
+			Firmware:      "capsulad-simulator",
+			Platform:      PlatformSimulator,
 		},
 		segment: newSimSegment(),
 		ring:    newSimRing(),

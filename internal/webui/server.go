@@ -161,7 +161,10 @@ func (s *Server) Handler() http.Handler {
 	// letting the SPA fallback serve index.html.
 	mux.HandleFunc("POST /api/apps/org.capsulad.pa/play", s.operatorOnly(s.playPASpeaker))
 	mux.HandleFunc("/api/apps/org.capsulad.pa/play", s.paMethodNotAllowed)
+	mux.HandleFunc("GET /api/apps/storage", s.sessionOnly(s.appStorage))
+	mux.HandleFunc("GET /api/apps/{appID}/storage", s.sessionOnly(s.appPackageStorage))
 	mux.HandleFunc("POST /api/apps", s.sessionOnly(s.installApp))
+	mux.HandleFunc("POST /api/apps/url", s.sessionOnly(s.installAppFromURL))
 	mux.HandleFunc("DELETE /api/apps/{appID}", s.sessionOnly(s.removeApp))
 	mux.HandleFunc("GET /api/assets", s.sessionOnly(s.apiAssets))
 	mux.HandleFunc("POST /api/assets", s.sessionOnly(s.uploadAsset))

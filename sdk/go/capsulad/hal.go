@@ -374,14 +374,27 @@ type Mic struct {
 	closeOnce sync.Once
 }
 
-// OpenMic opens microphone capture for an activation.
+// OpenMic opens microphone capture for an activation using the framework's
+// default format preference. Capture still delivers the backend's actual
+// format; read MicChunk.Format.
 func (c *Client) OpenMic(ctx context.Context, activationID, conversationID string) (*Mic, error) {
+	return c.OpenMicWithFormat(ctx, activationID, conversationID, DefaultAudioFormat())
+}
+
+// OpenMicWithFormat opens microphone capture with an explicit format
+// preference. The format is sent as CaptureAudioRequest.preferred_format; the
+// daemon may still deliver the backend's capture format, which the started
+// event reports as MicChunk.Format. A zero format selects DefaultAudioFormat.
+func (c *Client) OpenMicWithFormat(ctx context.Context, activationID, conversationID string,
+	format AudioFormat) (*Mic, error) {
 	ctx = orBackground(ctx)
 	client, err := c.clientHandle()
 	if err != nil {
 		return nil, err
 	}
-	format := DefaultAudioFormat()
+	if format.isZero() {
+		format = DefaultAudioFormat()
+	}
 	handle, err := audioCaptureOpenNative(client, "audio.input.microphone", format,
 		0, activationID, conversationID)
 	if err != nil {

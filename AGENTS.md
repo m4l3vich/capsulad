@@ -140,9 +140,9 @@ or equate extra animation with polish.
   a gap occurred. Always resume/clean up a paused test process on failure.
 - Run the narrowest relevant checks after changes; use `-race` for touched shared
   lifecycle/state paths. Root Go tests do not cover nested modules. `make test` runs the root
-  module, `sdk/go`, the nested app Go modules (the three assistants, the native Internet Radio,
+  module, `sdk/go`, the nested app Go modules (the four assistants, the native Internet Radio,
   the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the native crate
-  and the C++ example;
+  and the C++ example; `make test-opencapsula` runs just the OpenCapsula client module;
   `make test-apps` adds the app-level suites that need Node or CPython (Simon, PA, the MicroPython
   host prelude) and repeats the radio and bridge Go modules; `make test-race` adds the race
   detector to the root module.
@@ -170,7 +170,7 @@ or equate extra animation with polish.
   an address, device identity, or user preference.
 - An application package is the pinned `.tar.gz` artifact: root `manifest.toml`, regular files
   and directories only, 48 MiB per file, 64 MiB unpacked, 4096 entries. Build targets compile
-  and package on the build host — `make dumbassistant` and `make devapps` write
+  and package on the build host — `make dumbassistant` writes
   `<id>-<version>.tar.gz` beside each package directory with `capsulad-cli app package` — and the
   device only ever installs that archive. `capsulad-cli app install|remove` refuses while the app
   is running. While the daemon is reachable the change is applied live: the CLI streams the
@@ -178,15 +178,14 @@ or equate extra animation with polish.
   usable with no restart. Only when the daemon is provably absent (or with `deploy -restart
   never`) does the on-disk path apply, where the package becomes visible at the next start.
 - `make deploy-bundle` assembles a bundle from ready-made artifacts and never packages anything:
-  it copies `apps/*.tar.gz` from `build/apps`, adds the `build/devapps` archives when
-  `BUNDLE_DEVAPPS=1`, and fails when a staged app directory has no archive. Run
-  `make dumbassistant`/`make devapps` first, then assemble.
+  it copies `apps/*.tar.gz` from `build/apps` and fails when a staged app directory has no
+  archive. Run the relevant app target first, then assemble.
 - The shared asset store is the plain directory `<data-dir>/assets`, mounted read-only at
   `/assets`. There is no asset manifest. Every regular, non-symlink file is an asset addressed
   by its slash-relative path. Only the session-authenticated admin API writes it; apps never
   do.
 - Inventory affected daemon, CLI, app packages, native runtime and metadata, assets and
-  settings together. `make`/`make daemon` do not build the optional assistant; rebuilding the
+  settings together. `make`/`make daemon` do not build the optional assistants; rebuilding the
   daemon does not update installed app packages. Verify installed versions and ready runs, not
   just source or build times.
 - Prefer `capsulad-cli deploy PATH` for a coordinated stack: it validates the whole bundle

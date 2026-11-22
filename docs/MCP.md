@@ -56,7 +56,7 @@ client can also mint keys with the `create_api_key` tool:
 
 That is deliberate delegation, not a default: only an `operator` key may call
 `create_api_key`, and the `assistant` and `operator` grants must be named explicitly.
-`auth init` and the browser Access page keep minting status-only keys.
+The browser Access page keeps minting status-only keys.
 
 Key edits are picked up live: the daemon watches `credentials.json`, so a revocation or
 a new key applies without a restart. Revocation is effective for every frontend

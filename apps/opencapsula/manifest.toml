@@ -1,0 +1,90 @@
+id = "org.capsulad.opencapsula"
+name = "OpenCapsula"
+version = "0.1.0"
+description = "First-party OpenCapsule voice-assistant client: streams a framework activation to an OpenCapsule server, plays the reply and executes server commands for volume reads, Bluetooth media control and conversation commands."
+background = false
+start_on_boot = false
+restart_on_failure = true
+provides = ["voice_assistant"]
+
+[entrypoint]
+runtime = "native"
+path = "opencapsula"
+architecture = "aarch64"
+abi = "linux-gnu"
+sdk = "0.5"
+
+# The app links only the Go SDK, which dlopens the shared Capsulad engine. The
+# engine is injected by the launcher and is never bundled into this package.
+[native_sdk]
+abi_major = 1
+min_minor = 0
+
+[[actions]]
+id = "dismiss"
+label = "Dismiss the current turn"
+description = "Aborts listening, the current reply and playback, releases the microphone and ring, and returns to idle without restarting the app."
+
+[[settings]]
+key = "server_url"
+label = "OpenCapsule server URL"
+description = "Streaming endpoint of the OpenCapsule server, for example ws://192.168.1.10:8080/v1/stream or wss://voice.example.test/v1/stream. The path is required; query strings and credentials are rejected."
+type = "text"
+default = "ws://127.0.0.1:8080/v1/stream"
+
+[[settings]]
+key = "token"
+label = "Device token"
+description = "Bearer token from the OpenCapsule panel. It is sent only as the Authorization header on the streaming connection and is never logged."
+type = "text_masked"
+
+[[settings]]
+key = "device_id"
+label = "Device ID"
+description = "OpenCapsule device identifier. Empty uses the framework's stable device id; a value here overrides it for the next connection."
+type = "text"
+default = ""
+
+[[settings]]
+key = "language"
+label = "Language"
+description = "BCP-47 language sent in the device hello, for example ru-RU or en-US."
+type = "text"
+default = "ru-RU"
+
+[[settings]]
+key = "location"
+label = "Location"
+description = "Where the speaker is, for example Ashdod. OpenCapsule uses it for time, weather and local answers. Empty leaves the server default."
+type = "text"
+default = ""
+
+[[settings]]
+key = "timezone"
+label = "Time zone"
+description = "IANA time zone, for example Asia/Jerusalem. Empty leaves the server default; a value that is not an installed IANA zone is rejected."
+type = "text"
+default = ""
+
+[[settings]]
+key = "follow_up"
+label = "Follow-up questions"
+description = "After a reply, keep listening for one more question without another wake word. A turn that plays no audio does not follow up."
+type = "boolean"
+default = true
+
+[[settings]]
+key = "follow_up_timeout_ms"
+label = "Follow-up window"
+description = "How long to wait for speech after a reply. Zero disables the window even when follow-up questions are enabled. Values are whole milliseconds from 0 to 60000."
+type = "integer"
+default = 4000
+min = 0
+max = 60000
+
+[[settings]]
+key = "earcons"
+label = "Earcons"
+description = "Play short generated tones when listening starts and when a turn fails. The tones are synthesized in memory; the package ships no audio files."
+type = "boolean"
+default = true

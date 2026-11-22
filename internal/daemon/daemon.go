@@ -70,12 +70,12 @@ type Config struct {
 	// supplies the platform implementation; nil disables the supervisor.
 	WatchdogOpen func(path string) (backend.Watchdog, error)
 
-	Platform        string
-	DataDir         string
-	RunDir          string
-	SocketPath      string
-	WebUIAddr       string
-	AppsDir         string
+	Platform   string
+	DataDir    string
+	RunDir     string
+	SocketPath string
+	WebUIAddr  string
+	AppsDir    string
 	// SingleApp restricts the daemon to one application: it is the only app
 	// started at boot (regardless of manifest boot flags) and Launch refuses
 	// every other ID. Empty keeps the normal multi-app policy; the Web UI and
@@ -88,7 +88,10 @@ type Config struct {
 	DeviceModel     string
 	DeviceID        string
 	LogFile         string
-	DevAdminSocket  string
+	// LogArchiveDir receives rotated daemon logs. Empty means
+	// filepath.Join(os.TempDir(), "capsulad-logs").
+	LogArchiveDir  string
+	DevAdminSocket string
 	// WakewordModel is a legacy single-classifier path. It is imported once
 	// into <data-dir>/wakeword/models/<id>.json on the first scan and then
 	// ignored; the live store is always the models directory. Empty means
@@ -409,7 +412,7 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	}
 	cfg.DataDir, cfg.RunDir = abs(cfg.DataDir), abs(cfg.RunDir)
 	cfg.SocketPath, cfg.AppsDir, cfg.AssetsDir = abs(cfg.SocketPath), abs(cfg.AppsDir), abs(cfg.AssetsDir)
-	cfg.LogFile, cfg.TrustedRootPath = abs(cfg.LogFile), abs(cfg.TrustedRootPath)
+	cfg.LogFile, cfg.LogArchiveDir, cfg.TrustedRootPath = abs(cfg.LogFile), abs(cfg.LogArchiveDir), abs(cfg.TrustedRootPath)
 	ctx, cancel := context.WithCancel(parent)
 	clock := ids.NewClock()
 	for _, dir := range []string{cfg.DataDir, cfg.RunDir, cfg.AppsDir} {
@@ -430,7 +433,12 @@ func New(parent context.Context, cfg Config) (*Daemon, error) {
 	if logPath == "" {
 		logPath = filepath.Join(cfg.DataDir, "capsulad.log")
 	}
-	logs, err := logbus.New(clock, 6000, logPath)
+	logs, err := logbus.Open(logbus.Options{
+		Clock:      clock,
+		MaxEntries: 6000,
+		Path:       logPath,
+		ArchiveDir: cfg.LogArchiveDir,
+	})
 	if err != nil {
 		cancel()
 		return nil, err

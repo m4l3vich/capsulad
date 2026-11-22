@@ -36,7 +36,7 @@ test('subset bytes match the generated manifest', () => {
   assert.equal(fontBytes.length, manifest.font_bytes)
   assert.ok(fontBytes.length < MAX_FONT_BYTES, `${fontBytes.length} bytes`)
   assert.match(manifest.source.sha256, /^[0-9a-f]{64}$/)
-  assert.equal(manifest.source.version, '0.48.3')
+  assert.equal(manifest.source.version, '0.49.0')
   assert.equal(manifest.license, 'Apache-2.0')
 })
 

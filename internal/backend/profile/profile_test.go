@@ -14,6 +14,7 @@ func TestRK3308Rev4StockLiterals(t *testing.T) {
 		ID:       "rk3308-capsula-mini-rev4-stock",
 		Platform: "rockchip-stock",
 		Model: Model{
+			BoardRevision:      "Capsula-mini-4",
 			ModelFallback:      "Capsula Mini Rockchip (model probe unavailable)",
 			SoC:                "Rockchip RK3308",
 			SoCMatch:           "rk3308",
@@ -101,6 +102,28 @@ func TestRK3308Rev4StockLiterals(t *testing.T) {
 	}
 	if !reflect.DeepEqual(RK3308Rev4Stock, want) {
 		t.Fatalf("RK3308Rev4Stock drifted from the documented literals:\n got %#v\nwant %#v", RK3308Rev4Stock, want)
+	}
+}
+
+// TestBoardRevisionsAreSupportedProducts pins the product name each supported
+// configuration reports. The Web UI headline pairs it with the SoC and
+// software type; a new name must correspond to a new supported board, not a
+// guessed one.
+func TestBoardRevisionsAreSupportedProducts(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"rockchip rev 4 stock", RK3308Rev4Stock.Model.BoardRevision, "Capsula-mini-4"},
+		{"amlogic A113X stock", AmlogicA113XStock.Model.BoardRevision, "Capsula-mini-6"},
+		{"amlogic A113X alpine", AmlogicA113XAlpine.Model.BoardRevision, "Capsula-mini-6"},
+		{"simulator", Simulator.Model.BoardRevision, "Simulator"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Fatalf("%s board revision = %q, want %q", tc.name, tc.got, tc.want)
+		}
 	}
 }
 

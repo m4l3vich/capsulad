@@ -131,7 +131,7 @@ Commands:
   cert init                      create the self-signed HTTPS server certificate
   cert renew                     renew the self-signed server certificate
   cert status                    show certificate fingerprint, names and expiry
-  auth init                      initialize admin password, certificate and first API key
+  auth init                      initialize admin password and certificate
   auth set-password              change the admin password
   auth key create NAME           create a static API key (printed once)
                                  [--scope status|assistant|operator] (repeatable; default status)
@@ -728,8 +728,6 @@ func runAuth(args []string, dataDir, securityDir string) error {
 		password := fs.String("password", "", "admin password (empty generates one)")
 		hostname := fs.String("hostname", "", "certificate hostname")
 		days := fs.Int("days", 0, "certificate lifetime in days")
-		noKey := fs.Bool("no-api-key", false, "do not create the bootstrap API key")
-		keyName := fs.String("key-name", "bootstrap", "bootstrap API key name")
 		var ips stringList
 		fs.Var(&ips, "ip", "additional IP SAN (repeatable)")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -758,19 +756,6 @@ func runAuth(args []string, dataDir, securityDir string) error {
 			fmt.Println("admin password set")
 		} else {
 			fmt.Println("admin password already set; use `capsulad-cli auth set-password` to change it")
-		}
-		if !*noKey {
-			token, info, err := store.CreateAPIKey(*keyName)
-			if err != nil {
-				if strings.Contains(err.Error(), "already exists") {
-					fmt.Printf("API key %q already exists; not printing it again\n", *keyName)
-				} else {
-					return err
-				}
-			} else {
-				fmt.Printf("created API key %q (%s…): %s\n", info.Name, info.Prefix, token)
-				fmt.Println("store it now; only its hash is saved")
-			}
 		}
 		fmt.Println("start capsulad, then open https://HOST:8443/ and sign in with the admin password")
 		return nil

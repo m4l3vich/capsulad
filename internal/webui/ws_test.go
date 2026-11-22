@@ -365,6 +365,11 @@ func TestSessionRevocationClosesWebSocket(t *testing.T) {
 
 func TestSnapshotAndCommands(t *testing.T) {
 	env := newTestEnv(t)
+	// A wake-word binding makes its app a selected provider too: the daemon's
+	// Stop restarts it instead of leaving it stopped.
+	env.back.settings.Values.Wakewords = []*frameworkv1.WakewordBinding{
+		{ModelId: "capsulad.wakeword.hey", AppId: "org.example.player", Enabled: true},
+	}
 	conn, _, _ := connectSession(t, env)
 
 	conn.send(&webv1.ClientFrame{RequestId: 10, Body: &webv1.ClientFrame_SnapshotRequest{
@@ -393,6 +398,9 @@ func TestSnapshotAndCommands(t *testing.T) {
 	}
 	if overview.GetSelectedProviders()["capsulad.clock"] != true {
 		t.Fatalf("selected providers = %v", overview.GetSelectedProviders())
+	}
+	if overview.GetSelectedProviders()["org.example.player"] != true {
+		t.Fatalf("wake-word app not selected: %v", overview.GetSelectedProviders())
 	}
 
 	// Settings volume update uses the snapshot revision as its CAS token.

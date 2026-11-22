@@ -19,8 +19,8 @@ import (
 	"time"
 
 	cadencev2 "capsulad/apps/cadence/internal/proto/cadencev2"
-	"capsulad/apps/cadence/internal/websocket"
 	"capsulad/apps/cadence/internal/wire"
+	"capsulad/sdk/websocket"
 )
 
 // Handler receives the link's lifecycle and every decoded envelope. Both run

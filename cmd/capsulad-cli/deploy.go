@@ -899,7 +899,7 @@ func (d *deployment) apply() error {
 		return cause
 	}
 	root := filepath.Join(d.dataDir, "apps")
-	logs, _ := logbus.New(ids.NewClock(), 100, "")
+	logs, _ := logbus.Open(logbus.Options{Clock: ids.NewClock(), MaxEntries: 100})
 	reg, err := registry.Open(root, logs)
 	if err != nil {
 		return fail(err)

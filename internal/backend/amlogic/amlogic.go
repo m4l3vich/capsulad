@@ -62,6 +62,7 @@ type Config struct {
 	// Model/SoC/kernel fallbacks are reported when the corresponding probe
 	// cannot read the device.
 	ModelFallback  string
+	BoardRevision  string
 	SoC            string
 	SoCMatch       string
 	KernelFallback string
@@ -119,6 +120,7 @@ func ConfigFor(p profile.Profile) Config {
 		AudioPlaybackFormat:   audioFormat(p.Audio.PlaybackFormat, p.Audio.PlaybackRateHz, p.Audio.PlaybackChannels),
 		AudioCaptureFormat:    audioFormat(p.Audio.CaptureFormat, p.Audio.CaptureRateHz, p.Audio.CaptureChannels),
 		ModelFallback:         p.Model.ModelFallback,
+		BoardRevision:         p.Model.BoardRevision,
 		SoC:                   p.Model.SoC,
 		SoCMatch:              p.Model.SoCMatch,
 		KernelFallback:        p.Model.KernelFallback,
@@ -276,6 +278,9 @@ func withDefaults(cfg Config) Config {
 	if cfg.ModelFallback == "" {
 		cfg.ModelFallback = "VK Capsula Mini Amlogic 113X (model probe unavailable)"
 	}
+	if cfg.BoardRevision == "" {
+		cfg.BoardRevision = "Capsula-mini-6"
+	}
 	if cfg.SoC == "" {
 		cfg.SoC = "Amlogic A113X"
 	}
@@ -356,7 +361,7 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 		serial = bootID
 	}
 	return backend.DeviceInfo{
-		DeviceID: serial, Model: model, SoC: soc, Kernel: kernel,
+		DeviceID: serial, Model: model, BoardRevision: b.cfg.BoardRevision, SoC: soc, Kernel: kernel,
 		Firmware: firmware, Platform: b.cfg.Platform,
 	}
 }

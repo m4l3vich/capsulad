@@ -915,6 +915,11 @@ func isSelectedProvider(values *frameworkv1.UserSettings, appID string) bool {
 			return true
 		}
 	}
+	for _, binding := range values.GetWakewords() {
+		if binding.GetAppId() == appID {
+			return true
+		}
+	}
 	return false
 }
 
@@ -929,6 +934,11 @@ func selectedProviders(values *frameworkv1.UserSettings) map[string]bool {
 	for _, selected := range values.GetDefaultAppByResource() {
 		if selected != "" {
 			out[selected] = true
+		}
+	}
+	for _, binding := range values.GetWakewords() {
+		if appID := binding.GetAppId(); appID != "" {
+			out[appID] = true
 		}
 	}
 	return out

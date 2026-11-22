@@ -12,6 +12,10 @@ import "time"
 
 // Model describes the board identity probe and its fallbacks.
 type Model struct {
+	// BoardRevision names the product revision the profile describes, for
+	// display only (for example "Capsula-mini-4"). It is not probed from the
+	// device tree: the profile is the authority on which hardware it supports.
+	BoardRevision string
 	// ModelFallback is reported when the device tree has no readable model.
 	ModelFallback string
 	// SoC is the SoC name reported when the model probe succeeds.
@@ -243,6 +247,7 @@ var RK3308Rev4Stock = Profile{
 	Platform: "rockchip-stock",
 
 	Model: Model{
+		BoardRevision:      "Capsula-mini-4",
 		ModelFallback:      "Capsula Mini Rockchip (model probe unavailable)",
 		SoC:                "Rockchip RK3308",
 		SoCMatch:           "rk3308",
@@ -348,6 +353,7 @@ var Simulator = Profile{
 	Platform: "simulator",
 
 	Model: Model{
+		BoardRevision:  "Simulator",
 		ModelFallback:  "Capsula Mini (simulator)",
 		SoC:            "simulator",
 		SoCMatch:       "",

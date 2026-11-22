@@ -16,7 +16,7 @@ cd "$root"
 work=$(mktemp -d "${TMPDIR:-/tmp}/capsulad-bundle-check.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-mkdir -p "$work/bin" "$work/lib" "$work/include" "$work/apps" "$work/devapps"
+mkdir -p "$work/bin" "$work/lib" "$work/include" "$work/apps"
 cat > "$work/bin/capsulad" <<'EOF'
 #!/bin/sh
 echo 'capsulad stub (sdk 0.5)'
@@ -30,7 +30,7 @@ chmod 0755 "$work/bin/capsulad" "$work/bin/capsulad-cli"
 # Paths contain no spaces (mktemp under TMPDIR), so unquoted expansion is the
 # intended word split.
 # shellcheck disable=SC2086
-MAKE_ARGS="BUNDLE_NATIVE=0 BUNDLE_DEVAPPS=0 BINDIR=$work/bin DEPLOYDIR=$work/bundle DEPLOY_TARBALL=$work/bundle.tar.gz LIBDIR=$work/lib INCLUDEDIR=$work/include APPDIR=$work/apps DEVAPPSDIR=$work/devapps"
+MAKE_ARGS="BUNDLE_NATIVE=0 BINDIR=$work/bin DEPLOYDIR=$work/bundle DEPLOY_TARBALL=$work/bundle.tar.gz LIBDIR=$work/lib INCLUDEDIR=$work/include APPDIR=$work/apps"
 
 assemble() {
 	make -o capsulad -o capsulad-cli deploy-bundle $MAKE_ARGS "$@"

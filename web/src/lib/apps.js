@@ -19,6 +19,31 @@ export function packageFileError(file) {
   return ''
 }
 
+/**
+ * Reject a URL the device would refuse before opening a request. Only the
+ * scheme and structure are checked here; the daemon owns the download.
+ */
+export function packageURLError(value) {
+  const text = String(value || '').trim()
+  if (!text) return 'Enter a package URL.'
+  let parsed
+  try {
+    parsed = new URL(text)
+  } catch (_) {
+    return 'Enter an absolute http or https URL.'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'Only http and https package URLs are supported.'
+  }
+  if (!parsed.hostname) return 'The package URL needs a host.'
+  // WHATWG URL folds "https:///pkg" into a host named "pkg"; the daemon's
+  // parser does not, so require the literal authority separator here too.
+  if (!/^https?:\/\/[^/\s]+/i.test(text)) return 'The package URL needs a host.'
+  if (parsed.username || parsed.password) return 'The package URL must not contain credentials.'
+  if (parsed.hash) return 'The package URL must not contain a fragment.'
+  return ''
+}
+
 function describeOutcome(result) {
   const name = result.displayName || result.appId
   if (!result.replaced) return `Installed ${name} ${result.version}.`
@@ -42,14 +67,32 @@ async function readError(resp) {
   }
 }
 
+/** Normalize the daemon's install reply into the shape the page renders. */
+function installResult(body) {
+  return {
+    appId: String(body.app_id),
+    displayName: String(body.display_name || ''),
+    version: String(body.version || ''),
+    previousVersion: String(body.previous_version || ''),
+    replaced: Boolean(body.replaced)
+  }
+}
+
 /**
  * Install or replace one package. XMLHttpRequest is used instead of fetch
  * because only it reports upload progress; the archive is the raw request body
  * and the device streams it straight into its staging tree. Resolves with
  * { appId, displayName, version, previousVersion, replaced }.
+ *
+ * An AbortSignal cancels the upload; the promise then rejects with the same
+ * "install cancelled" message the URL route uses.
  */
-export function installPackage(file, { onProgress } = {}) {
+export function installPackage(file, { onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('install cancelled'))
+      return
+    }
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/apps')
     xhr.withCredentials = true
@@ -63,7 +106,11 @@ export function installPackage(file, { onProgress } = {}) {
         if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total)
       }
     }
+    const onAbort = () => xhr.abort()
+    const cleanup = () => signal?.removeEventListener('abort', onAbort)
+    signal?.addEventListener('abort', onAbort, { once: true })
     xhr.onload = () => {
+      cleanup()
       let body = {}
       try {
         body = JSON.parse(xhr.responseText)
@@ -71,21 +118,103 @@ export function installPackage(file, { onProgress } = {}) {
         body = {}
       }
       if (xhr.status >= 200 && xhr.status < 300 && body.app_id) {
-        resolve({
-          appId: String(body.app_id),
-          displayName: String(body.display_name || ''),
-          version: String(body.version || ''),
-          previousVersion: String(body.previous_version || ''),
-          replaced: Boolean(body.replaced)
-        })
+        resolve(installResult(body))
         return
       }
       reject(new Error(body.error || `install failed (${xhr.status})`))
     }
-    xhr.onerror = () => reject(new Error('install failed: the connection to the speaker was lost'))
-    xhr.onabort = () => reject(new Error('install cancelled'))
+    xhr.onerror = () => {
+      cleanup()
+      reject(new Error('install failed: the connection to the speaker was lost'))
+    }
+    xhr.onabort = () => {
+      cleanup()
+      reject(new Error('install cancelled'))
+    }
     xhr.send(file)
   })
+}
+
+/**
+ * Ask the daemon to download and install a package from an http(s) URL. The
+ * daemon fetches and validates it; the browser only waits, so there is no byte
+ * progress to report. Resolves with the same shape as installPackage.
+ */
+export async function installPackageFromURL(url, { signal } = {}) {
+  let resp
+  try {
+    resp = await fetch('/api/apps/url', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-Capsulad-CSRF': session.csrf
+      },
+      body: JSON.stringify({ url }),
+      signal
+    })
+  } catch (err) {
+    if (err?.name === 'AbortError') throw new Error('install cancelled')
+    throw new Error('install failed: the connection to the speaker was lost')
+  }
+  let body = {}
+  try {
+    body = await resp.json()
+  } catch (_) {
+    body = {}
+  }
+  if (!resp.ok || !body.app_id) {
+    throw new Error(body.error || `install failed (${resp.status})`)
+  }
+  return installResult(body)
+}
+
+/**
+ * The applications filesystem capacity for the install dialog. `available`
+ * false means the platform cannot stat it; the byte fields are then zero.
+ */
+export async function appStorage({ signal } = {}) {
+  const resp = await fetch('/api/apps/storage', {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+    signal
+  })
+  let body = {}
+  try {
+    body = await resp.json()
+  } catch (_) {
+    body = {}
+  }
+  if (!resp.ok) throw new Error(body.error || `storage unavailable (${resp.status})`)
+  return {
+    available: Boolean(body.available),
+    totalBytes: Number(body.total_bytes) || 0,
+    freeBytes: Number(body.free_bytes) || 0,
+    usedBytes: Number(body.used_bytes) || 0
+  }
+}
+
+/** One installed package's size and the free space its removal would release. */
+export async function appPackageStorage(appId, { signal } = {}) {
+  const resp = await fetch(`/api/apps/${encodeURIComponent(appId)}/storage`, {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+    signal
+  })
+  let body = {}
+  try {
+    body = await resp.json()
+  } catch (_) {
+    body = {}
+  }
+  if (!resp.ok) throw new Error(body.error || `storage unavailable (${resp.status})`)
+  return {
+    sizeBytes: Number(body.size_bytes) || 0,
+    freeBytes: Number(body.free_bytes) || 0,
+    totalBytes: Number(body.total_bytes) || 0,
+    available: Boolean(body.available)
+  }
 }
 
 /** Remove one installed package. App settings are kept by the device. */

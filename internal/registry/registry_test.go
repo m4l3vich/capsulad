@@ -60,6 +60,21 @@ func newTestRegistry(t *testing.T) *Registry {
 	return reg
 }
 
+func TestRegistryRootIsTheScannedDirectory(t *testing.T) {
+	root := t.TempDir()
+	logs, err := logbus.New(ids.NewClock(), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := Open(root, logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reg.Root(); got != root {
+		t.Fatalf("Root() = %q, want %q", got, root)
+	}
+}
+
 // A failed install must not leave a partial package behind: on the 78.5 MiB
 // data partition the remnants would consume the space a retry needs.
 func TestInstallFailureRemovesPartialPackage(t *testing.T) {

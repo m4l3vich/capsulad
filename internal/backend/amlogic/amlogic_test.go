@@ -40,6 +40,9 @@ func TestConfigForSelectsUserlandAudio(t *testing.T) {
 	if stock.ModelFallback == "" || stock.SoCMatch != "amlogic" || stock.LEDWS2812Channels != 36 {
 		t.Fatalf("stock config = %+v", stock)
 	}
+	if stock.BoardRevision != "Capsula-mini-6" || alpine.BoardRevision != "Capsula-mini-6" {
+		t.Fatalf("board revisions = %q/%q, want Capsula-mini-6", stock.BoardRevision, alpine.BoardRevision)
+	}
 }
 
 func TestConfigKeepsProfilesDistinct(t *testing.T) {

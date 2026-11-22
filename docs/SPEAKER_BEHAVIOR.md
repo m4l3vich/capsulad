@@ -750,8 +750,9 @@ tail -f /data/capsdemo/capsulad.log
 ```
 
 A direct daemon launch uses `-output-trace`. Animation samples are limited to four successful writes
-per second per resource; ownership/brightness transitions are recorded separately. Logs rotate at
-512 KiB with one backup. Traces contain output/control metadata, not microphone PCM.
+per second per resource; ownership/brightness transitions are recorded separately. The active
+daemon log is capped at 500 KiB; older logs rotate to `/tmp/capsulad-logs` up to 2 MiB total.
+Traces contain output/control metadata, not microphone PCM.
 
 A released ring with no baseline must be followed by a successful all-zero ring write. A countdown
 must have a contiguous orange arc whose extinguished prefix follows the counterclockwise order.

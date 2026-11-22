@@ -65,7 +65,7 @@ controlling the speaker's physical level. It is not a manifest permission; see
 |---|---|---|
 | `device_id` | string | Stable device identity. |
 | `model` | string | Board model name. |
-| `board_revision` | string | Board revision. |
+| `board_revision` | string | Product revision the running board profile describes: `Capsula-mini-4` for the Rockchip rev 4 stock image, `Capsula-mini-6` for either Amlogic A113X build, or `Simulator`. It is profile data, not a probe result, and is empty only when a backend reports no revision. |
 | `soc` | string | SoC identifier. |
 | `kernel` | string | Kernel release. |
 | `firmware` | string | Firmware description. |

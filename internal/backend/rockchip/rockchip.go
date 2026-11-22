@@ -53,6 +53,7 @@ type Config struct {
 	// Model/SoC/kernel fallbacks are reported when the corresponding probe
 	// cannot read the device.
 	ModelFallback  string
+	BoardRevision  string
 	SoC            string
 	SoCMatch       string
 	KernelFallback string
@@ -89,6 +90,7 @@ func ConfigFor(p profile.Profile) Config {
 		AudioCaptureFormat:    backend.AudioFormat{Format: backend.SampleFormat(p.Audio.CaptureFormat), RateHz: p.Audio.CaptureRateHz, Channels: p.Audio.CaptureChannels},
 		MicEnableGPIO:         p.Audio.MicEnableGPIO,
 		ModelFallback:         p.Model.ModelFallback,
+		BoardRevision:         p.Model.BoardRevision,
 		SoC:                   p.Model.SoC,
 		SoCMatch:              p.Model.SoCMatch,
 		KernelFallback:        p.Model.KernelFallback,
@@ -139,6 +141,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.ModelFallback == "" {
 		cfg.ModelFallback = def.ModelFallback
+	}
+	if cfg.BoardRevision == "" {
+		cfg.BoardRevision = def.BoardRevision
 	}
 	if cfg.SoC == "" {
 		cfg.SoC = def.SoC
@@ -408,7 +413,7 @@ func (b *Backend) probeInfo() backend.DeviceInfo {
 		serial = bootID
 	}
 	return backend.DeviceInfo{
-		DeviceID: serial, Model: model, SoC: soc, Kernel: kernel,
+		DeviceID: serial, Model: model, BoardRevision: b.cfg.BoardRevision, SoC: soc, Kernel: kernel,
 		Firmware: firmware, Platform: backend.PlatformRockchipStock,
 	}
 }

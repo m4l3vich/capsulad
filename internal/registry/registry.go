@@ -220,6 +220,10 @@ func firstNonEmptyLine(s string) string {
 	return ""
 }
 
+// Root is the applications directory the registry scans. Package storage is
+// accounted against this filesystem, not the process's working directory.
+func (r *Registry) Root() string { return r.root }
+
 func (r *Registry) Get(appID string) (*App, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

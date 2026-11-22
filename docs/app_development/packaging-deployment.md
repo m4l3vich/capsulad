@@ -75,13 +75,8 @@ capsulad-cli app package ./my-app -out build/apps/my-app.tar.gz
 | Command | Result |
 |---|---|
 | `make dumbassistant` | Builds the first-party assistant for the selected `GOOS`/`GOARCH`, stages `build/apps/org.capsulad.dumbassistant/` and runs `app package` there, producing `build/apps/org.capsulad.dumbassistant-<version>.tar.gz`. |
-| `make devapps` | Runs `apps/devtools/build.sh`, which builds and packages `dev.hardware`, `dev.quickjs` and `dev.micropython` under `build/devapps/`. |
-| `APP=dev.hardware make devapps` | Builds one development app. |
-| `OUT=/tmp/devapps make devapps` | Changes the output directory. |
-| `PACKAGE=0 make devapps` | Stages package directories only, with no `.tar.gz`. Development convenience; the device path installs archives. |
 | `make deploy-bundle` | Assembles `build/deploy-bundle/` and `build/deploy-bundle.tar.gz` from already-built artifacts. It builds or reuses the daemon, the CLI and the native runtime, but never packages an app. |
 | `BUNDLE_CLI=0 make deploy-bundle` | Writes the same bundle without `capsulad-cli`: the CLI is not built and not copied. A separately installed `<data-dir>/capsulad-cli` is left untouched. |
-| `BUNDLE_DEVAPPS=1 make deploy-bundle` | Also copies staged development-app archives from `build/devapps/`. |
 
 `BUNDLE_CLI` accepts only `0` and `1`; the default is `1` and any other value is rejected.
 `make deploy-bundle` requires every app directory under `build/apps/` to have a matching
@@ -129,7 +124,9 @@ capsulad-cli -data-dir /data/capsdemo app remove ID
 
 `PATH` is a `.tar.gz` or, for development convenience, an unpacked package directory. The same
 two operations are available from the authenticated Web UI **Apps** page, which uploads the
-archive to `POST /api/apps` and removes a package with `DELETE /api/apps/<app-id>`.
+archive to `POST /api/apps`, removes a package with `DELETE /api/apps/<app-id>`, installs from
+an http(s) URL through `POST /api/apps/url`, and reads storage figures from
+`GET /api/apps/storage` and `GET /api/apps/<app-id>/storage`.
 
 There are two paths, chosen by whether capsulad is reachable — never by a retry:
 
@@ -270,7 +267,7 @@ under the operator's environment.
 | `/data/capsdemo/lib` | Native runtime (`libcapsulad`, `capsulad-native.json`, script hosts). |
 | `/data/capsdemo/run/hal.sock` | Framework Unix socket (host path). |
 | `/run/capsulad/hal.sock` | The same socket inside an app's mount namespace. |
-| `/data/capsdemo/capsulad.log` | Daemon log. |
+| `/data/capsdemo/capsulad.log` | Active daemon log, capped at 500 KiB; older logs rotate to `/tmp/capsulad-logs` up to 2 MiB total. |
 
 ## Simulator
 
@@ -288,8 +285,8 @@ capsulad-cli -data-dir run/demo app install hello.tar.gz
 capsulad-cli -data-dir run/demo app start com.example.hello
 ```
 
-`auth init` creates the HTTPS certificate, an admin password (generated when `-password` is
-empty) and a bootstrap API key. The daemon listens on `<data-dir>/run/hal.sock`; every CLI
+`auth init` creates the HTTPS certificate and sets an admin password (generated when `-password` is
+empty). The daemon listens on `<data-dir>/run/hal.sock`; every CLI
 command resolves that path from `-data-dir`. `-dev-admin` adds a development-only admin socket
 for simulator tooling. `capsulad-cli dev …` injects wakeword, gesture, key, raw and state events into a running
 simulator.

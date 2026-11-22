@@ -2,10 +2,14 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -42,6 +46,9 @@ const packageUploadReadBudget = 10 * time.Minute
 
 // installApp installs or atomically replaces one application package.
 func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {
+	// The install can outlast the server's write timeout, so give this response
+	// the same budget as reading the archive.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(packageUploadReadBudget))
 	if r.ContentLength > artifact.MaxArchiveBytes {
 		writeJSONError(w, http.StatusRequestEntityTooLarge, packageTooLargeMessage())
 		return
@@ -57,6 +64,12 @@ func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {
 		s.writePackageError(w, err)
 		return
 	}
+	writePackageResult(w, res)
+}
+
+// writePackageResult is the install response both the raw upload and the URL
+// download return, so the browser parses one shape.
+func writePackageResult(w http.ResponseWriter, res *frameworkv1.InstallApplicationResult) {
 	app := res.GetApplication()
 	writeJSONValue(w, http.StatusOK, map[string]any{
 		"replaced":         res.GetReplaced(),
@@ -65,6 +78,181 @@ func (s *Server) installApp(w http.ResponseWriter, r *http.Request) {
 		"display_name":     app.GetDisplayName(),
 		"version":          app.GetVersion(),
 	})
+}
+
+// packageURLRedirectLimit bounds how many redirects the daemon follows for a
+// package URL. A redirect chain is a download detail, not a package feature;
+// stopping early keeps a misconfigured URL from becoming an open relay walk.
+const packageURLRedirectLimit = 5
+
+var (
+	errPackageDownloadTooLarge = errors.New("package archive exceeds the download limit")
+	errPackageRedirectLimit    = errors.New("package URL redirected too many times")
+)
+
+// installAppFromURL downloads one package archive and streams it into the same
+// installArchive path as a browser upload. The daemon still validates and
+// installs the archive; this route only fetches bytes from an http(s) origin
+// the administrator named. It deliberately accepts no other scheme: a file or
+// data URL would let the browser reach the daemon's own filesystem.
+func (s *Server) installAppFromURL(w http.ResponseWriter, r *http.Request) {
+	// The download and install can outlast the server's write timeout, so give
+	// this response the same budget as reading the request.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(packageUploadReadBudget))
+	var body struct {
+		URL string `json:"url"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "send a JSON object with a package URL")
+		return
+	}
+	target, err := parsePackageURL(body.URL)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), packageUploadReadBudget)
+	defer cancel()
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= packageURLRedirectLimit {
+				return errPackageRedirectLimit
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return errors.New("redirect to an unsupported scheme")
+			}
+			return nil
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "the package URL is not usable")
+		return
+	}
+	req.Header.Set("Accept", "application/gzip, application/octet-stream")
+	resp, err := client.Do(req)
+	if err != nil {
+		s.writePackageDownloadError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("the package URL answered HTTP %d", resp.StatusCode))
+		return
+	}
+	if resp.ContentLength > artifact.MaxArchiveBytes {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, packageTooLargeMessage())
+		return
+	}
+
+	// A declared length can lie and a chunked response has none, so the body is
+	// capped independently. io.LimitReader carries the byte budget and the
+	// extra byte distinguishes "exactly at the limit" from "the origin has
+	// more to send"; boundedPackageBody turns reaching it into a refusal
+	// instead of a silent truncation.
+	limit := artifact.MaxArchiveBytes + 1
+	bodyReader := &boundedPackageBody{r: io.LimitReader(resp.Body, limit), limit: limit}
+	res, err := s.installArchive(ctx, bodyReader, packageDownloadName(resp.Request.URL))
+	if err != nil {
+		switch {
+		case errors.Is(err, errPackageDownloadTooLarge):
+			writeJSONError(w, http.StatusRequestEntityTooLarge, packageTooLargeMessage())
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			writeJSONError(w, http.StatusBadGateway, "the download ended before the archive was complete")
+		default:
+			s.writePackageError(w, err)
+		}
+		return
+	}
+	writePackageResult(w, res)
+}
+
+// parsePackageURL accepts only an absolute http(s) URL with a host and no
+// credentials or fragment. The message is browser-facing: it never echoes the
+// offending value.
+func parsePackageURL(raw string) (*url.URL, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, errors.New("enter an http or https URL for the package")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return nil, errors.New("the package URL is not valid")
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return nil, errors.New("the package URL must be an absolute http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("the package URL must use http or https")
+	}
+	if parsed.User != nil {
+		return nil, errors.New("the package URL must not contain credentials")
+	}
+	if parsed.Fragment != "" {
+		return nil, errors.New("the package URL must not contain a fragment")
+	}
+	return parsed, nil
+}
+
+// boundedPackageBody caps a download at limit bytes. Reaching the cap returns
+// errPackageDownloadTooLarge, which installArchive turns into an abandoned
+// stream so a truncated archive is never installed.
+type boundedPackageBody struct {
+	r     io.Reader
+	limit int64
+	read  int64
+}
+
+func (b *boundedPackageBody) Read(p []byte) (int, error) {
+	if b.read >= b.limit {
+		return 0, errPackageDownloadTooLarge
+	}
+	if remaining := b.limit - b.read; int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := b.r.Read(p)
+	b.read += int64(n)
+	if err == io.EOF && b.read >= b.limit {
+		// The origin ended exactly at the extra byte: the archive is over the
+		// accepted size even though the reader saw a clean EOF.
+		return n, errPackageDownloadTooLarge
+	}
+	return n, err
+}
+
+// packageDownloadName labels the archive for diagnostics only. The daemon
+// never installs from a client-named location.
+func packageDownloadName(target *url.URL) string {
+	if target == nil {
+		return "package.tar.gz"
+	}
+	name := path.Base(target.Path)
+	if name == "." || name == "/" || name == "" {
+		return "package.tar.gz"
+	}
+	return name
+}
+
+// writePackageDownloadError maps a failed fetch onto the same refusal
+// vocabulary the install routes use. The URL, host and network detail stay in
+// the daemon log; the browser gets an actionable sentence.
+func (s *Server) writePackageDownloadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		writeJSONError(w, http.StatusGatewayTimeout, "the download did not finish within 10 minutes")
+	case errors.Is(err, errPackageRedirectLimit):
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("the package URL redirected more than %d times", packageURLRedirectLimit))
+	case errors.Is(err, context.Canceled):
+		writeJSONError(w, http.StatusServiceUnavailable, "the download was cancelled")
+	default:
+		if s.Logs != nil {
+			s.Logs.Warnf("webui", "", "package download failed: %v", err)
+		}
+		writeJSONError(w, http.StatusBadGateway, "the speaker could not download the package; check the URL and try again")
+	}
 }
 
 // installArchive streams one package archive to the daemon's
@@ -146,6 +334,8 @@ const (
 func classifyPackageFailure(err error) (packageFailureClass, string) {
 	var tooLarge *http.MaxBytesError
 	switch {
+	case errors.Is(err, errPackageDownloadTooLarge):
+		return packageFailureTooLarge, packageTooLargeMessage()
 	case errors.As(err, &tooLarge):
 		return packageFailureTooLarge, packageTooLargeMessage()
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):

@@ -307,6 +307,20 @@ func TestServerCallExposesCallerRunID(t *testing.T) {
 	}
 }
 
+func TestOpenMicUsesDefaultOrExplicitFormatBeforeNativeOpen(t *testing.T) {
+	// A closed client proves the format path is taken before any native
+	// capture call: no library is loaded and both constructors report the same
+	// closed-client error.
+	closed := &Client{}
+	if _, err := closed.OpenMic(context.Background(), "act", "conv"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("OpenMic on a closed client = %v, want ErrClosed", err)
+	}
+	explicit := AudioFormat{SampleFormat: SampleFormatPCM16LE, SampleRateHz: 16000, Channels: 1}
+	if _, err := closed.OpenMicWithFormat(context.Background(), "act", "conv", explicit); !errors.Is(err, ErrClosed) {
+		t.Fatalf("OpenMicWithFormat on a closed client = %v, want ErrClosed", err)
+	}
+}
+
 func TestLoadRealNativeLibrary(t *testing.T) {
 	path := os.Getenv("CAPSULAD_TEST_LIBRARY")
 	if path == "" {

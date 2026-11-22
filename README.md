@@ -229,8 +229,11 @@ version.
   capture indication, Opus mic uplink, streamed Opus reply and announcement playback, follow-up,
   dismiss/cancel/error cleanup; a one-time dashboard code enrolls the device and its returned
   token is stored in a masked setting, with the reported board (`vk-capsula-mini` or `sim`)
-  matching the dashboard's model. Credentials in masked settings and never logged. None is
-  compiled into the daemon, and none is installed by default.
+  matching the dashboard's model. Credentials in masked settings and never logged; and
+  `apps/opencapsula` — **OpenCapsula Client**, an optional voice-assistant client for a
+  self-hosted OpenCapsula server: Gemini Live and OpenAI Realtime sessions brokered by that
+  server, framework wake-word and talk-key activation, PCM microphone streaming and voice
+  commands. None is compiled into the daemon, and none is installed by default.
 - **Web UI:** six destinations — Overview, Apps, Settings, Assets, Access and Diagnostics. The Apps
   page lists installed packages with their running/system state and installs, updates or removes
   one through the session-authenticated `/api/apps` routes (a raw `.tar.gz` upload, refused while
@@ -267,7 +270,8 @@ version.
   caller's scope selects both the input schema and the direct-call restrictions.
   See [docs/MCP.md](docs/MCP.md).
 - **Operations:** in-place daemon upgrade through the boot service with a health gate,
-  a 512 KiB rotating log, bounded storage guard, and deployment bundles applied by
+  a 500 KiB daemon log with older logs rotated to `/tmp/capsulad-logs` (2 MiB total), bounded
+  storage guard, and deployment bundles applied by
   `capsulad-cli deploy`.
 - **Simulator:** complete virtual segment display, LED ring, touch/keys and audio, plus
   development injection sockets.
@@ -330,8 +334,9 @@ optionally, `capsulad-cli`. `make deploy-bundle` includes the CLI by default;
 installed `<data-dir>/capsulad-cli` untouched (neither removed nor updated), so on-device
 deployment and recovery then need a CLI pushed separately, for example through the
 temporary directory. The bundle is assembled from ready-made host-built
-archives — build them first with `make dumbassistant`, `make marusia`, `make product-apps` (the
-five product apps) or `make devapps` — and never packages an app. `deploy-bundle` refuses to
+archives — build them first with `make dumbassistant`, `make marusia`, `make cadence`,
+`make opencapsula` or `make product-apps` (the
+five product apps) — and never packages an app. `deploy-bundle` refuses to
 assemble while `build/apps` still holds a staged directory or archive for the retired
 `org.capsulad.radio.tuner` companion, printing the `rm -rf` cleanup instead of shipping it; a
 fresh bundle never stages that package. `capsulad-cli deploy PATH`
@@ -354,7 +359,7 @@ On the device the data directory is `/data/capsdemo`:
 /data/capsdemo/assets/           shared asset store, mounted read-only at /assets
 /data/capsdemo/run/hal.sock      framework socket
 /data/capsdemo/security/         certificate and credential store
-/data/capsdemo/capsulad.log      bounded daemon log
+/data/capsdemo/capsulad.log      active daemon log (500 KiB; older logs in /tmp/capsulad-logs, 2 MiB total)
 /etc/init.d/S99btctl.sh          boot hook
 ```
 
@@ -378,6 +383,16 @@ action: store the new `session_id`/`session_secret` through the settings API; no
 can mint a replacement. A turn that receives `UNAUTHENTICATED`/`PERMISSION_DENIED` drops its session,
 logs one actionable line and re-resolves the credential — settings first, then the fallback file —
 before the next turn.
+
+`make opencapsula` builds and packages the fourth optional assistant
+(`build/apps/org.capsulad.opencapsula-<version>.tar.gz`). It has no packaged assets: the
+package carries the binary, `manifest.toml` and the `README.md` guide. The app is a client for
+an operator-run OpenCapsula server, which brokers Gemini Live or OpenAI Realtime sessions:
+select it as the voice assistant and a framework wake word or the talk key starts a turn,
+microphone PCM is streamed to the server, and voice commands are applied through the framework.
+The server endpoint is an operator app setting; nothing is sent while the app is stopped,
+unselected or unconfigured, and the app opens no listening socket and needs a built native
+runtime like the other native apps.
 
 ## Security model
 
@@ -416,7 +431,7 @@ before the next turn.
   binary digest, signature, certificate chain, transparency log and workflow identity; it
   is evidence, not a runtime safety guarantee.
 - **Which first-party apps reach the network.** The daemon, the framework plane and every other
-  first-party component stay local-only. Three optional packages open outbound connections, each
+  first-party component stay local-only. Four optional packages open outbound connections, each
   only after the operator configured it or asked it to play:
   - `apps/marusia`, the assistant. While it is installed and
     selected as the assistant, a turn sends microphone PCM and the device identity (serial from
@@ -435,6 +450,11 @@ before the next turn.
     configured `xtoken_id` (empty when unset) and whose refusal is logged. A turn with no
     recognised text and no command is reported as a no-answer with the terminal error
     indication, never as a completed turn.
+  - `apps/opencapsula`, the OpenCapsula client. While it is installed and selected as the voice
+    assistant, a turn opens one outbound TLS connection to the operator's configured
+    OpenCapsula server, streams microphone PCM for the brokered Gemini Live or OpenAI Realtime
+    session, and sends the voice audio the framework routed to it. Nothing is sent while the
+    app is stopped, unselected or unconfigured, and it never opens a listening socket.
   - `apps/homeassistant`, the Home Assistant integration. It is an MQTT client for the broker named in its
     `broker_host`/`broker_port` settings, or for the broker it finds by browsing `_mqtt._tcp`
     when `broker_discover` is on. It publishes its discovery payloads, its availability and one state
@@ -656,7 +676,7 @@ before the next turn.
 | `sdk/native` | Rust shared engine behind the C ABI: UDS gRPC, HTTP/TLS, remote gRPC, primitives, header and C example |
 | `sdk/go`, `sdk/rust`, `sdk/cpp` | bindings and examples over the shared library |
 | `interpreter` | pinned QuickJS/MicroPython hosts, script SDKs, samples and smoke test |
-| `apps/devtools`, `apps/dumbassistant`, `apps/marusia`, `apps/cadence` | development apps and the three optional assistants (Cadence Client included) |
+| `apps/dumbassistant`, `apps/marusia`, `apps/cadence`, `apps/opencapsula` | the four optional assistants (Cadence Client and OpenCapsula Client included) |
 | `apps/simon`, `apps/soundboard`, `apps/hardwaretest`, `apps/pa`, `apps/radio`, `apps/homeassistant`, `apps/airplay` | first-party app packages: Simon Says (QuickJS), Soundboard (QuickJS), Hardware Test (native), PA Speaker (MicroPython), Internet Radio (native, single package), the Home Assistant integration, and the AirPlay 2 receiver. Each package root `README.md` is also the app's packaged user guide |
 | `deploy/rockchip-stock` | the single boot hook and bring-up scripts |
 | `proto` | framework and standard contract schemas (media, clock, ring, web) |
@@ -745,7 +765,7 @@ mkdir -p build/demo
 # open https://127.0.0.1:8443/ and sign in with the printed admin password
 ```
 
-`make test` runs the root Go module, `sdk/go`, the nested app Go modules (the three assistants,
+`make test` runs the root Go module, `sdk/go`, the nested app Go modules (the four assistants,
 the Internet Radio, the Home Assistant integration and the AirPlay 2 receiver), the Rust binding, the
 native crate and the C++ example; `make test-apps` adds the Node/CPython app suites. See
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full build, packaging and deployment workflow.

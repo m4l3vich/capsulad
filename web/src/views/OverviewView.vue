@@ -4,8 +4,12 @@ import { MediaAction, Topic } from '../proto/web_pb.js'
 import { liveState, useTopic } from '../lib/live.js'
 import { coldPlayLaunch, hasLiveRun, hasReadyRun, isColdPlay } from '../lib/appActions.js'
 import { socket } from '../lib/ws.js'
+import { formatBytes } from '../lib/format.js'
+import { deviceHeadline } from '../lib/device.js'
+import { appPackageStorage, installOutcome, removePackage } from '../lib/apps.js'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
+import ModalDialog from '../components/ModalDialog.vue'
 import AppInstallModal from '../components/AppInstallModal.vue'
 import ApplicationView from './ApplicationView.vue'
 import Icon from '../components/Icon.vue'
@@ -168,6 +172,128 @@ function isRunning(appId) {
 
 function selectedRole(appId) {
   return !!selected.value[appId]
+}
+
+function hasLaunchArguments(app) {
+  return (app.launchArguments || []).length > 0
+}
+
+// A required argument has no safe default; the plain Launch entry would just
+// bounce the user to Settings, so only the argument form is offered.
+function requiresLaunchArguments(app) {
+  return (app.launchArguments || []).some((arg) => arg.required)
+}
+
+function showLifecycle(app) {
+  if (isRunning(app.appId)) return !!app.canStop
+  return true
+}
+
+function openLaunchArguments(app) {
+  closeMenu()
+  selectedApp.value = app.appId
+}
+
+// Framework stop restarts a selected-default app instead of leaving it down,
+// which is exactly the Restart affordance the menu offers. Every live run is
+// addressed by ID so a multi-instance app stops completely.
+async function stopRuns(app) {
+  const live = appRuns(app.appId)
+  if (!live.length) return
+  closeMenu()
+  if (busy.value) return
+  if (liveState.value !== 'open') {
+    notify.error('The speaker is not connected.')
+    return
+  }
+  const restart = selectedRole(app.appId)
+  const key = `stop:${app.appId}`
+  busy.value = key
+  try {
+    for (const runItem of live) {
+      await socket.request({ stop: { appId: app.appId, runId: runItem.runId } })
+    }
+    notify.success(`${restart ? 'Restart' : 'Stop'} requested for ${app.displayName}`)
+  } catch (err) {
+    notify.error(err?.message || 'The device rejected the request.')
+  } finally {
+    if (busy.value === key) busy.value = ''
+    // A partial stop is possible when several runs were addressed; the
+    // snapshot, not the loop, is the authority on what is still running.
+    await refresh()
+  }
+}
+
+function onInstalled(result) {
+  showInstallModal.value = false
+  notify.success(installOutcome(result))
+  refresh()
+}
+
+// --- uninstall confirmation -------------------------------------------------
+
+const deleteTarget = ref(null)
+const deleteStorage = ref(null)
+const deleteStorageLoading = ref(false)
+const deleteStorageError = ref('')
+const deleteBusy = ref(false)
+let deleteController = null
+
+function canDelete(app) {
+  return !!app.canUninstall && !app.systemApp
+}
+
+async function openDelete(app) {
+  closeMenu()
+  deleteTarget.value = app
+  deleteStorage.value = null
+  deleteStorageError.value = ''
+  deleteStorageLoading.value = true
+  deleteController?.abort()
+  const controller = new AbortController()
+  deleteController = controller
+  try {
+    const measured = await appPackageStorage(app.appId, { signal: controller.signal })
+    if (deleteTarget.value?.appId === app.appId) deleteStorage.value = measured
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    if (deleteTarget.value?.appId === app.appId) {
+      deleteStorageError.value = err?.message || 'The package size could not be read.'
+    }
+  } finally {
+    if (deleteTarget.value?.appId === app.appId) deleteStorageLoading.value = false
+  }
+}
+
+function beforeDeleteClose() {
+  return !deleteBusy.value
+}
+
+function closeDelete() {
+  if (deleteBusy.value) return
+  deleteController?.abort()
+  deleteController = null
+  deleteTarget.value = null
+  deleteStorage.value = null
+  deleteStorageError.value = ''
+  deleteStorageLoading.value = false
+}
+
+async function confirmDelete() {
+  const app = deleteTarget.value
+  if (!app || deleteBusy.value) return
+  deleteBusy.value = true
+  try {
+    await removePackage(app.appId)
+    notify.success(`Removed ${app.displayName || app.appId}. Its settings were kept.`)
+    deleteBusy.value = false
+    closeDelete()
+    await refresh()
+  } catch (err) {
+    notify.error(err?.message || 'The device rejected the removal.')
+  } finally {
+    deleteBusy.value = false
+  }
 }
 
 // Declared manifest actions arrive with the overview listing; an app that
@@ -400,7 +526,7 @@ function trackTime(ms) {
         Still loading…
       </h1>
       <h1 v-else class="text-xl font-semibold leading-tight my-2" :title="data?.device?.deviceId || 'Unknown device'">
-        {{ data?.device?.model || 'Unknown device' }}
+        {{ deviceHeadline(data?.device) }}
       </h1>
     </div>
 
@@ -652,47 +778,50 @@ function trackTime(ms) {
                       :aria-label="`Actions for ${app.displayName}`"
                       class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
                     >
-                      <li v-if="!selectedRole(app.appId)">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50"
-                        >
-                          <Icon size="20px" class="mr-1">refresh</Icon>
-                          Restart
-                        </button>
-                      </li>
-                      <li v-else>
-                        <!-- TODO: implement the action; show only if running -->
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
-                        >
-                          <Icon size="20px" class="mr-1">stop</Icon>
-                          Stop
-                        </button>
-                        <!-- TODO: implement the action; show only if not running & no required arguments -->
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
-                        >
-                          <Icon size="20px" class="mr-1">play_arrow</Icon>
-                          Launch
-                        </button>
-                        <!-- TODO: implement the action; show only if not running & has arguments -->
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
-                        >
-                          <Icon size="20px" class="mr-1">list</Icon>
-                          Launch with arguments
-                        </button>
-                      </li>
+                      <template v-if="isRunning(app.appId) && app.canStop">
+                        <li>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
+                            :disabled="!!busy || liveState !== 'open'"
+                            :title="selectedRole(app.appId) ? 'Stopping a selected default restarts it.' : 'Stop the application.'"
+                            @click="stopRuns(app)"
+                          >
+                            <Icon size="20px" class="mr-1">{{ selectedRole(app.appId) ? 'refresh' : 'stop' }}</Icon>
+                            {{ selectedRole(app.appId) ? 'Restart' : 'Stop' }}
+                          </button>
+                        </li>
+                      </template>
+                      <template v-else-if="!isRunning(app.appId)">
+                        <li v-if="!requiresLaunchArguments(app)">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
+                            :disabled="!!busy || liveState !== 'open'"
+                            @click="launch(app)"
+                          >
+                            <Icon size="20px" class="mr-1">play_arrow</Icon>
+                            Launch
+                          </button>
+                        </li>
+                        <li v-if="hasLaunchArguments(app)">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
+                            :disabled="!!busy || liveState !== 'open'"
+                            title="Review the launch arguments in Settings before starting the app."
+                            @click="openLaunchArguments(app)"
+                          >
+                            <Icon size="20px" class="mr-1">list</Icon>
+                            Launch with arguments
+                          </button>
+                        </li>
+                      </template>
 
-                      <hr class="my-1"/>
+                      <hr v-if="showLifecycle(app)" class="my-1"/>
 
                       <li v-for="action in actionsOf(app)" :key="action.actionId" role="none">
                         <button
@@ -716,17 +845,22 @@ function trackTime(ms) {
                         This app doesn't declare any actions.
                       </li>
 
-                      <hr class="my-1"/>
-
-                      <!-- TODO: implement the action with confirmation modal (show how much disk space it will free); show only if not a system app (hide the hr above if hidden); disabled if app is running -->
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
-                      >
-                        <Icon size="20px" class="mr-1">delete</Icon>
-                        Delete this app
-                      </button>
+                      <template v-if="canDelete(app)">
+                        <hr class="my-1"/>
+                        <li>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
+                            :disabled="!!busy || isRunning(app.appId)"
+                            :title="isRunning(app.appId) ? 'Stop the app before removing its package.' : 'Remove the package but keep its settings.'"
+                            @click="openDelete(app)"
+                          >
+                            <Icon size="20px" class="mr-1">delete</Icon>
+                            Delete this app
+                          </button>
+                        </li>
+                      </template>
                     </ul>
                   </div>
                 </div>
@@ -749,6 +883,43 @@ function trackTime(ms) {
     <AppInstallModal
       v-if="showInstallModal"
       @close="showInstallModal = false"
+      @installed="onInstalled"
     />
+
+    <ModalDialog
+      v-if="deleteTarget"
+      max-width="max-w-md"
+      title="Delete this app"
+      :before-close="beforeDeleteClose"
+      @close="closeDelete"
+    >
+      <p class="text-sm">
+        Remove <span class="font-semibold">{{ deleteTarget.displayName || deleteTarget.appId }}</span>
+        (<span class="data-value">{{ deleteTarget.appId }}</span>) from the applications filesystem?
+      </p>
+      <p class="mt-2 text-sm">
+        <template v-if="deleteStorageLoading">Measuring the package…</template>
+        <template v-else-if="deleteStorage">
+          The package uses {{ formatBytes(deleteStorage.sizeBytes) }}, so deleting it frees that much space.
+        </template>
+        <template v-else>The package size could not be read.</template>
+      </p>
+      <p class="mt-2 text-sm text-base-content/60">
+        The app's settings are kept, so reinstalling it restores its configuration.
+      </p>
+      <p v-if="deleteStorageError" class="mt-2 text-sm text-warning">{{ deleteStorageError }}</p>
+      <p v-else-if="deleteStorage?.available" class="mt-2 text-xs text-base-content/60">
+        Free space now: {{ formatBytes(deleteStorage.freeBytes) }} of {{ formatBytes(deleteStorage.totalBytes) }}.
+      </p>
+      <template #footer>
+        <button type="button" class="btn btn-ghost btn-sm" :disabled="deleteBusy" @click="closeDelete">
+          Cancel
+        </button>
+        <button type="button" class="btn btn-error btn-sm" :disabled="deleteBusy" @click="confirmDelete">
+          <span v-if="deleteBusy" class="loading loading-spinner loading-sm"></span>
+          Delete
+        </button>
+      </template>
+    </ModalDialog>
   </div>
 </template>

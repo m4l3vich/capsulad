@@ -303,7 +303,7 @@ and a firmware-provided pristine `S99btctl.sh` can be copied back.
 Deployment is one bundle applied by `capsulad-cli deploy <dir-or-tar.gz>` holding `capsulad`,
 `capsulad-cli`, `lib/`, `apps/*.tar.gz` and `boot/S99btctl.sh`; unknown top-level entries are reported
 and ignored, and the restart goes through the hook so the watchdog keeps one owner. The app archives
-are compiled and packaged on the build host (`make dumbassistant`, `make devapps`, then
+are compiled and packaged on the build host (`make dumbassistant` and the other app targets, then
 `make deploy-bundle`, which only copies them); the device installs archives and never packages. A
 factory reset wipes the overlay, so the device boots the stock assistant and the deployment must be
 repeated.

@@ -242,7 +242,7 @@ func installOffline(src, dataDir, socket, nativeLibDir string) error {
 	if run := liveRun(dataDir, socket, m.ID); run != "" {
 		return fmt.Errorf("app %s is running (run %s); stop it before replacing the package", m.ID, run)
 	}
-	logs, _ := logbus.New(ids.NewClock(), 100, "")
+	logs, _ := logbus.Open(logbus.Options{Clock: ids.NewClock(), MaxEntries: 100})
 	reg, err := registry.Open(root, logs)
 	if err != nil {
 		return err
@@ -266,7 +266,7 @@ func removeOffline(appID, dataDir, socket string) error {
 		return fmt.Errorf("app %s is running (run %s); stop it before removing", appID, run)
 	}
 	root := filepath.Join(resolveDataDir(dataDir), "apps")
-	logs, _ := logbus.New(ids.NewClock(), 100, "")
+	logs, _ := logbus.Open(logbus.Options{Clock: ids.NewClock(), MaxEntries: 100})
 	reg, err := registry.Open(root, logs)
 	if err != nil {
 		return err

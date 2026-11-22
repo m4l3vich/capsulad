@@ -14,8 +14,8 @@ import (
 	"capsulad/apps/cadence/internal/link"
 	cadencev2 "capsulad/apps/cadence/internal/proto/cadencev2"
 	"capsulad/apps/cadence/internal/settings"
-	"capsulad/apps/cadence/internal/websocket"
 	"capsulad/apps/cadence/internal/wire"
+	"capsulad/sdk/websocket"
 )
 
 type syncBuffer struct {

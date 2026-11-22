@@ -19,3 +19,6 @@ func readSystemMetrics(cpuCounters, bool) (SystemMetrics, cpuCounters, bool) {
 // diskFreeAt is unavailable on a development host: the daemon does not present
 // host storage as appliance capacity.
 func diskFreeAt(string) (uint64, bool) { return 0, false }
+
+// diskUsageAt carries the same rule for the applications filesystem.
+func diskUsageAt(string) (uint64, uint64, bool) { return 0, 0, false }
