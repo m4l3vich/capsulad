@@ -558,13 +558,13 @@ function documentationLines(text) {
       <div class="flex flex-col">
         <h2 :id="titleId" class="text-lg font-semibold leading-tight">
           {{ title }}
-          <span class="badge badge-ghost">v{{ data.app.version || '—' }}</span>
+          <span class="badge badge-ghost">v{{ data?.app?.version || '—' }}</span>
         </h2>
 
         <div class="flex flex-wrap items-center gap-1.5 mt-3">
-          <span v-if="data.app.systemApp" class="badge badge-outline badge-sm">built-in</span>
+          <span v-if="data?.app?.systemApp" class="badge badge-outline badge-sm">built-in</span>
           <span v-for="role in defaultRoles" :key="role" class="badge badge-primary badge-sm">default {{ role }}</span>
-          <span v-if="data.app.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
+          <span v-if="data?.app?.background" class="badge badge-success badge-outline badge-sm">runs in background</span>
         </div>
       </div>
     </template>
