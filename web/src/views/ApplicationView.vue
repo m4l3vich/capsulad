@@ -10,7 +10,6 @@ import { getAppBoot, setAppBoot } from '../lib/appBoot.js'
 import { safeJson, shortId, status } from '../lib/format.js'
 import { notify } from '../lib/toast.js'
 import ModalDialog from '../components/ModalDialog.vue'
-import ThemeSwitch from '../components/ThemeSwitch.vue'
 import Icon from '../components/Icon.vue'
 
 const props = defineProps({
@@ -555,12 +554,6 @@ function documentationLines(text) {
 
 <template>
   <ModalDialog :title="title" :before-close="requestClose" @close="emit('close')">
-    <!-- A dialog is in the top layer, so the shell's header switch cannot be
-         reached while an app detail is open. Keep appearance available beside
-         the live controls; System still follows the OS. -->
-    <template #actions>
-      <ThemeSwitch />
-    </template>
     <template #header="{ titleId }">
       <div class="flex flex-col">
         <h2 :id="titleId" class="text-lg font-semibold leading-tight">
@@ -906,7 +899,7 @@ function documentationLines(text) {
       </form>
     </ModalDialog>
     <ModalDialog v-if="defaultInfo" title="Default application" max-width="max-w-lg" @close="defaultInfo = false">
-      <p class="text-sm">The speaker automatically restarts its selected default apps. Choose another app or none in Settings to stop this app permanently.</p>
+      <p class="text-sm">This is a default application and it cannot be stopped, it can only be restarted. Choose another app or none in Settings to stop this app permanently.</p>
     </ModalDialog>
     <ModalDialog v-if="interfaceDialog" :title="interfaceDialog.grpcService" @close="interfaceDialog = null">
       <p v-if="interfaceDialog.summary" class="text-sm">{{ interfaceDialog.summary }}</p>

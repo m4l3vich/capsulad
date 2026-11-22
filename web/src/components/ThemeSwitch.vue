@@ -1,18 +1,41 @@
 <script setup>
+import { computed, onBeforeUnmount, useTemplateRef } from 'vue'
 import { THEME_MODES, setThemeMode, theme } from '../lib/theme.js'
+import Icon from './Icon.vue'
+
+const currentThemeIcon = computed(() =>
+  THEME_MODES.find(e => e.id === theme.mode).icon
+)
+
+// to get rid of this manual "click outside to close"
+// we need to update to daisyUI 5. that's for later
+const details = useTemplateRef('dropdown')
+
+function globalOnClick(e) {
+  if (!details.value.contains(e.target)) {
+    details.value.removeAttribute('open')
+  }
+}
+
+document.addEventListener('click', globalOnClick)
+onBeforeUnmount(() => {
+  document.removeEventListener('click', globalOnClick)
+})
 </script>
 
 <template>
-  <div class="join shrink-0" role="group" aria-label="Color theme">
-    <button
-      v-for="option in THEME_MODES"
-      :key="option.id"
-      type="button"
-      class="btn btn-xs join-item"
-      :class="theme.mode === option.id ? 'btn-primary btn-active' : 'btn-ghost'"
-      :aria-pressed="theme.mode === option.id"
-      :title="`${option.label} appearance`"
-      @click="setThemeMode(option.id)"
-    >{{ option.label }}</button>
-  </div>
+  <details ref="dropdown" class="dropdown dropdown-end">
+    <summary class="btn btn-sm btn-outline btn-square">
+      <Icon size="20px">{{ currentThemeIcon }}</Icon>
+    </summary>
+    <ul class="menu dropdown-content bg-base-100 rounded-box z-1 w-52 p-2 shadow-sm">
+      <li class="text-xs p-2 text-base-content/50">Colour theme</li>
+      <li v-for="theme in THEME_MODES" :key="theme.id">
+        <a @click="setThemeMode(theme.id)">
+          <Icon size="20px">{{ theme.icon }}</Icon>
+          {{ theme.label }}
+        </a>
+      </li>
+    </ul>
+  </details>
 </template>

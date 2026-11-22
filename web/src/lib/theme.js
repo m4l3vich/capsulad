@@ -12,9 +12,9 @@ import { reactive } from 'vue'
 export const THEME_STORAGE_KEY = 'capsulad.theme'
 
 export const THEME_MODES = Object.freeze([
-  { id: 'light', label: 'Light' },
-  { id: 'dark', label: 'Dark' },
-  { id: 'system', label: 'System' }
+  { id: 'light', label: 'Light', icon: 'light_mode' },
+  { id: 'dark', label: 'Dark', icon: 'dark_mode' },
+  { id: 'system', label: 'System', icon: 'devices' }
 ])
 
 const LIGHT_THEME = 'capsulad'

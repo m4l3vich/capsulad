@@ -37,3 +37,9 @@ export const SETTINGS_SECTION_ICONS = Object.freeze({
   wifi: 'wifi',
   device: 'schedule'
 })
+
+export const THEME_ICONS = Object.freeze({
+  light: 'light_mode',
+  dark: 'dark_mode',
+  system: 'devices'
+})

@@ -9,7 +9,6 @@ import ToastHost from './components/ToastHost.vue'
 import ThemeSwitch from './components/ThemeSwitch.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
-import AppsView from './views/AppsView.vue'
 import SettingsView from './views/SettingsView.vue'
 import AssetsView from './views/AssetsView.vue'
 import AccessView from './views/AccessView.vue'
@@ -20,7 +19,6 @@ let recovering = null
 
 const nav = [
   { path: '/', label: 'Overview' },
-  { path: '/apps', label: 'Apps' },
   { path: '/settings', label: 'Settings' },
   { path: '/files', label: 'Files' },
   { path: '/access', label: 'Access' },
@@ -29,7 +27,6 @@ const nav = [
 
 const views = {
   '/': OverviewView,
-  '/apps': AppsView,
   '/settings': SettingsView,
   '/files': AssetsView,
   '/access': AccessView,

@@ -414,10 +414,6 @@ onUnmounted(() => {
                     >{{ statusText(model) }}</span>
                   </div>
                   <p v-if="model.detail" class="mt-1 text-xs text-warning">{{ model.detail }}</p>
-                  <p v-else class="mt-1 text-xs text-base-content/60">
-                    Activates {{ appLabel(bindingFor(model.modelId)?.appId || model.appId) }}
-                    <span v-if="thresholdFor(model)"> · threshold {{ thresholdFor(model) }}</span>
-                  </p>
                 </div>
 
                 <label class="flex items-center gap-2 text-sm">
@@ -545,9 +541,13 @@ onUnmounted(() => {
 
       <div class="rounded-box bg-base-200/60">
         <div class="flex flex-col gap-3 p-3">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-base font-semibold">Recordings on Capsula</h3>
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="text-base font-semibold flex-grow">Recordings on Capsula</h3>
             <span class="badge badge-ghost badge-sm">{{ samples.length }}</span>
+            <!-- TODO: implement this; needs a confirmation modal with recording count -->
+            <button class="btn btn-outline btn-error btn-xs">
+              Delete all
+            </button>
           </div>
           <div v-if="!samplesLoaded" class="skeleton h-12 w-full" aria-hidden="true"></div>
           <ul v-else-if="samples.length" class="divide-y divide-base-300 rounded-box bg-base-100">

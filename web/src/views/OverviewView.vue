@@ -6,6 +6,7 @@ import { coldPlayLaunch, hasLiveRun, hasReadyRun, isColdPlay } from '../lib/appA
 import { socket } from '../lib/ws.js'
 import VolumeControl from '../components/VolumeControl.vue'
 import MicrophoneControl from '../components/MicrophoneControl.vue'
+import AppInstallModal from '../components/AppInstallModal.vue'
 import ApplicationView from './ApplicationView.vue'
 import Icon from '../components/Icon.vue'
 import { notify } from '../lib/toast.js'
@@ -20,6 +21,7 @@ const busy = ref('')
 const selectedApp = ref('')
 const discoverable = ref(false)
 const incoming = ref(false)
+const showInstallModal = ref(false)
 
 const bluetooth = computed(() => data.value?.bluetooth || null)
 const bluetoothReady = computed(() =>
@@ -584,6 +586,13 @@ function trackTime(ms) {
             <Icon size="20px">widgets</Icon>
             <h2 class="text-sm font-semibold uppercase tracking-wide">Installed applications</h2>
             <span class="badge badge-soft badge-primary badge-sm">{{ apps.length }}</span>
+
+            <span class="flex-grow"/>
+
+            <button class="btn btn-xs btn-primary" @click="showInstallModal = true">
+              <Icon size="16px">system_update_alt</Icon>
+              Install an app
+            </button>
           </div>
           <div v-if="apps.length" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <article
@@ -643,6 +652,48 @@ function trackTime(ms) {
                       :aria-label="`Actions for ${app.displayName}`"
                       class="absolute right-0 top-full z-30 mt-1 w-56 rounded-box border border-base-300 bg-base-100 p-1 text-sm shadow-lg"
                     >
+                      <li v-if="!selectedRole(app.appId)">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50"
+                        >
+                          <Icon size="20px" class="mr-1">refresh</Icon>
+                          Restart
+                        </button>
+                      </li>
+                      <li v-else>
+                        <!-- TODO: implement the action; show only if running -->
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
+                        >
+                          <Icon size="20px" class="mr-1">stop</Icon>
+                          Stop
+                        </button>
+                        <!-- TODO: implement the action; show only if not running & no required arguments -->
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
+                        >
+                          <Icon size="20px" class="mr-1">play_arrow</Icon>
+                          Launch
+                        </button>
+                        <!-- TODO: implement the action; show only if not running & has arguments -->
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-primary"
+                        >
+                          <Icon size="20px" class="mr-1">list</Icon>
+                          Launch with arguments
+                        </button>
+                      </li>
+
+                      <hr class="my-1"/>
+
                       <li v-for="action in actionsOf(app)" :key="action.actionId" role="none">
                         <button
                           type="button"
@@ -664,6 +715,18 @@ function trackTime(ms) {
                       <li v-if="!actionsOf(app).length" class="menu-disabled px-2 py-1.5 opacity-50 w-full">
                         This app doesn't declare any actions.
                       </li>
+
+                      <hr class="my-1"/>
+
+                      <!-- TODO: implement the action with confirmation modal (show how much disk space it will free); show only if not a system app (hide the hr above if hidden); disabled if app is running -->
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="flex w-full items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-base-200 disabled:opacity-50 text-error"
+                      >
+                        <Icon size="20px" class="mr-1">delete</Icon>
+                        Delete this app
+                      </button>
                     </ul>
                   </div>
                 </div>
@@ -681,6 +744,11 @@ function trackTime(ms) {
       :key="selectedApp"
       :app-id="selectedApp"
       @close="selectedApp = ''"
+    />
+
+    <AppInstallModal
+      v-if="showInstallModal"
+      @close="showInstallModal = false"
     />
   </div>
 </template>

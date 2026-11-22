@@ -20,7 +20,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   SETTINGS_SECTION_ICONS,
   TOAST_ICONS,
-  WIFI_SIGNAL_ICONS
+  WIFI_SIGNAL_ICONS,
+  THEME_ICONS
 } from '../src/lib/iconNames.js'
 
 const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url))
@@ -29,7 +30,9 @@ const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url))
 const DYNAMIC_EXPRESSIONS = new Map([
   ['{{ look(toast).icon }}', Object.values(TOAST_ICONS)],
   ['{{ signalLevel(network.signalDbm).icon }}', Object.values(WIFI_SIGNAL_ICONS)],
-  ['{{ section.icon }}', Object.values(SETTINGS_SECTION_ICONS)]
+  ['{{ section.icon }}', Object.values(SETTINGS_SECTION_ICONS)],
+  ['{{ currentThemeIcon }}', Object.values(THEME_ICONS)],
+  ['{{ theme.icon }}', Object.values(THEME_ICONS)]
 ])
 
 export const ICON_NAME_PATTERN = /^[a-z0-9_]+$/

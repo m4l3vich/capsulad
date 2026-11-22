@@ -27,7 +27,9 @@
   "fill_glyphs": [
     "check_circle.fill",
     "cloud_upload.fill",
+    "dark_mode.fill",
     "delete.fill",
+    "devices.fill",
     "display_settings.fill",
     "edit.fill",
     "error.fill",
@@ -45,6 +47,7 @@
     "settings.fill",
     "skip_next.fill",
     "skip_previous.fill",
+    "stop.fill",
     "video_library.fill",
     "visibility_off.fill",
     "volume_up.fill",
@@ -52,16 +55,18 @@
     "widgets.fill"
   ],
   "font": "material-symbols-rounded-subset.woff2",
-  "font_bytes": 51748,
-  "font_sha256": "7d193c5b7098a744b8c82ffcfde043768518c76b57f80046a328465a513acbed",
+  "font_bytes": 59104,
+  "font_sha256": "b1d8f9d8fb17451703bd2bad9b2c11d12b68d07d6eed7766d6abd192c5b7e970",
   "fonttools": "4.68.0",
-  "glyph_count": 102,
+  "glyph_count": 111,
   "glyphs": [
     "bluetooth",
     "check_circle",
     "close",
     "cloud_upload",
+    "dark_mode",
     "delete",
+    "devices",
     "display_settings",
     "download",
     "edit",
@@ -70,6 +75,7 @@
     "folder_open",
     "info",
     "light_mode",
+    "list",
     "menu_book",
     "mic",
     "more_vert",
@@ -79,6 +85,7 @@
     "pause",
     "play_arrow",
     "record_voice_over",
+    "refresh",
     "robot_2",
     "schedule",
     "search",
@@ -87,6 +94,8 @@
     "signal_wifi_4_bar",
     "skip_next",
     "skip_previous",
+    "stop",
+    "system_update_alt",
     "video_library",
     "visibility_off",
     "volume_up",
@@ -100,8 +109,8 @@
   "source": {
     "file": "material-symbols-rounded.woff2",
     "package": "material-symbols",
-    "sha256": "5913b06d8c3ce0c9575a1884a420283d1532f1ccb1c3cdb5326c683c57cbaad8",
-    "version": "0.48.3"
+    "sha256": "9f7fd471e65425ff504c00133f92d807f7acd0ebe853c1a27b669976e64474cc",
+    "version": "0.49.0"
   },
   "uharfbuzz": "0.51.1"
 }

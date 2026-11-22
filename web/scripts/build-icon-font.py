@@ -49,7 +49,7 @@ MANIFEST = WEB / "src" / "assets" / "icon-font.json"
 EXTRACTOR = WEB / "scripts" / "icon-names.mjs"
 
 PINNED_FONTTOOLS = "4.68.0"
-PINNED_MATERIAL_SYMBOLS = "0.48.3"
+PINNED_MATERIAL_SYMBOLS = "0.49.0"
 EXPECTED_AXES = {
     "FILL": (0.0, 0.0, 1.0),
     "GRAD": (-50.0, 0.0, 200.0),
