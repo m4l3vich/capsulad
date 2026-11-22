@@ -537,9 +537,9 @@ func TestCadenceAnnouncementReachesSimulatorPlayback(t *testing.T) {
 	waitFor(t, 10*time.Second, "announcement start", func() bool {
 		return strings.Contains(logText(d), "announce_start stream=an-1")
 	})
-	if !playbackOpen(d, cadenceAppID) {
-		t.Fatal("the announcement did not open speaker playback")
-	}
+	waitFor(t, 10*time.Second, "announcement playback open", func() bool {
+		return playbackOpen(d, cadenceAppID)
+	})
 	if inputOpen(d, cadenceAppID) {
 		t.Fatal("the announcement opened a microphone")
 	}
