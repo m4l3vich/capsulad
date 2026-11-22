@@ -1,10 +1,12 @@
 import { createI18n } from 'vue-i18n'
-import enGB from '../locales/en-GB.js'
-import ruRU from '../locales/ru-RU.js'
+import enGB from '../locales/en-GB.json'
+import ruRU from '../locales/ru-RU.json'
 
 // The console ships two complete catalogues. A locale is a first-class UI
 // choice: it is persisted in localStorage, applied to <html lang>, and used by
-// the formatters in lib/format.js. Adding a locale means importing its
+// the formatters in lib/format.js. The catalogues are JSON so the Vite i18n
+// plugin can precompile them into runtime message functions; nothing is
+// compiled from a string in the browser. Adding a locale means importing its
 // catalogue, adding it to MESSAGES, and adding an AVAILABLE_LOCALES entry.
 
 export const LOCALE_STORAGE_KEY = 'capsulad-locale'

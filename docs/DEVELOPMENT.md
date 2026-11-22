@@ -101,9 +101,11 @@ build must keep emitting it.
 The checked-in `internal/webui/dist` is embedded with `go:embed`, so an ordinary Go build
 needs no Node toolchain. For frontend work, run Vite against a live simulator daemon; Vite
 serves sources and proxies `/api`, `/healthz` and `/ws` to the daemon's real HTTPS surface.
-Every user-visible string lives in `web/src/locales/en-GB.js` (the source catalogue) and
-`ru-RU.js`; add a locale by importing its catalogue, adding it to the `MESSAGES` map in
-`src/lib/i18n.js`, and adding one `AVAILABLE_LOCALES` entry.
+Every user-visible string lives in `web/src/locales/en-GB.json` (the source catalogue) and
+`ru-RU.json`; add a locale by importing its catalogue, adding it to the `MESSAGES` map in
+`src/lib/i18n.js`, and adding one `AVAILABLE_LOCALES` entry. The catalogues are JSON so
+`@intlify/unplugin-vue-i18n` precompiles them at build time; the bundle uses the runtime-only
+vue-i18n build, and `scripts/check-csp.mjs` fails the build if `new Function` or `eval` returns.
 `npm test` checks key parity, placeholders and locale-sensitive formatting. The Access page
 downloads the server certificate from `/api/cert.pem` and the same self-signed certificate as a
 CA file from `/api/ca.pem`; a plaintext HTTP request to the HTTPS listener gets a guidance page

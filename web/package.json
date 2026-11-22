@@ -8,9 +8,9 @@
     "dev": "vite",
     "fonts": "python3 scripts/build-icon-font.py",
     "check:icons": "node scripts/check-icon-font.mjs",
-    "build": "npm run check:icons && npm run build:kit && vite build",
+    "build": "npm run check:icons && npm run build:kit && vite build && node scripts/check-csp.mjs",
     "preview": "vite preview",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --import ./test/register-json-loader.mjs --test test/*.test.mjs",
     "build:kit": "node scripts/build-settings-kit.mjs",
     "check:kit": "node scripts/build-settings-kit.mjs --check"
   },
@@ -20,6 +20,7 @@
     "vue-i18n": "^9.14.5"
   },
   "devDependencies": {
+    "@intlify/unplugin-vue-i18n": "^4.0.0",
     "@vitejs/plugin-vue": "4.6.2",
     "autoprefixer": "10.4.20",
     "daisyui": "4.12.23",

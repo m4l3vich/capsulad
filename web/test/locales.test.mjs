@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import enGB from '../src/locales/en-GB.js'
-import ruRU from '../src/locales/ru-RU.js'
+import enGB from '../src/locales/en-GB.json'
+import ruRU from '../src/locales/ru-RU.json'
 import { AVAILABLE_LOCALES, getLocale, i18n, setLocale } from '../src/lib/i18n.js'
 import { formatBytes, formatNumber, keyScopes, status } from '../src/lib/format.js'
 

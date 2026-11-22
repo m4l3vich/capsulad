@@ -161,8 +161,12 @@ Observed on the rev 4 hardware; these are integrated device outcomes, not host o
   asset hashes equal the local build, and `/api/status` returns 401 without a session.
 - The daemon and CLI were replaced in place over ADB; the boot hook restarted the stack, the
   health gate returned 0, and the served SPA asset contains both the English (United Kingdom) and
-  Russian catalogues. A plain-HTTP request to the HTTPS listener now returns the guidance page
-  (sign in, then download the CA from Access) instead of `net/http`'s bare TLS error.
+  Russian catalogues. The production SPA uses the runtime-only vue-i18n build with JSON
+  catalogues precompiled at build time; the login page and the EN→RU switch render under the
+  daemon's `script-src 'self'` CSP with no console or `unsafe-eval` violation. `npm run build`
+  fails if the bundle contains `new Function` or `eval`. A plain-HTTP request to the HTTPS
+  listener returns the guidance page (sign in, then download the CA from Access) instead of
+  `net/http`'s bare TLS error.
 - `capsulad-cli -json wifi status` on the unit returned `state=connected`, the station SSID and
   IP through the new local HTTPS admin API. The CLI minted a temporary operator key, retried the
   daemon's credential reload, and revoked it; a status-scoped key fetched `/api/ca.pem` with

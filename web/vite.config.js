@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import VueI18nPlugin from '@intlify/unplugin-vue-i18n/vite'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -32,8 +33,21 @@ const https = process.env.CAPSULAD_DEV_HTTPS === '0' || !existsSync(certPath) ||
 // matches; only the browser-facing origin differs.
 const proxy = { target: daemon, changeOrigin: false, secure: false }
 
+// The daemon serves the SPA with `script-src 'self'`, so no message may be
+// compiled from a string in the browser. The plugin compiles the JSON
+// catalogues at build time and the runtime-only vue-i18n build is selected
+// automatically for the production bundle.
+const locales = fileURLToPath(new URL('./src/locales/**', import.meta.url))
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    VueI18nPlugin({
+      include: locales,
+      runtimeOnly: true,
+      compositionOnly: true
+    })
+  ],
   base: '/',
   server: {
     https,
