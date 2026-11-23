@@ -179,8 +179,15 @@ build_abi() {
   # The transcript is teed to the work directory, not to $OUT/$abi: the
   # container removes and recreates /out/<abi>, so a file opened there first
   # would be unlinked while it is still being written.
+  # The container runs as root so it can hide /opt/ffmpeg for the runtime
+  # dependency proof. It writes the package, binary and LGPL material into the
+  # host-mounted $OUT and its build tree into $WORK, so hand those back to the
+  # invoking user before exiting; otherwise the caller's evidence copy and
+  # cleanup fail on a CI runner.
   # shellcheck disable=SC2086
   docker run --rm --platform "$PLATFORM" \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     -v "$WORK/src:/work" \
     -v "$OUT:/out" \
     $run_args \

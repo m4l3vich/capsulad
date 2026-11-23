@@ -19,6 +19,17 @@ case "$ABI" in
   *) echo "run.sh: TARGET_ABI must be linux-gnu or linux-musl, got '$ABI'" >&2; exit 2 ;;
 esac
 
+# The caller mounts /out and /work from the host and runs this container as
+# root so the runtime-dependency proof can hide /opt/ffmpeg. Hand the mounted
+# outputs back to the invoking user before exiting, or the caller's evidence
+# copy and temporary-tree cleanup fail with EACCES.
+if [ -n "${HOST_UID:-}" ]; then
+  handoff_owner() {
+    chown -R "$HOST_UID:${HOST_GID:-$HOST_UID}" /out /work 2>/dev/null || true
+  }
+  trap handoff_owner EXIT
+fi
+
 say "builder"
 head -2 /etc/os-release 2>/dev/null || true
 go version
