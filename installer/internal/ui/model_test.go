@@ -137,7 +137,7 @@ func TestOpDoneTransitions(t *testing.T) {
 	if m.generated == "" {
 		t.Fatal("prepare did not generate a password")
 	}
-	if !strings.Contains(m.View(), "Continue to summary") {
+	if !strings.Contains(m.View(), "Installation options") {
 		t.Fatal("options form missing")
 	}
 	// The form is step 4; continuing opens the separate installation summary.
@@ -232,14 +232,11 @@ func TestWiFiSecuritySelection(t *testing.T) {
 
 func TestFirstScreenArrowOrderAndLanguage(t *testing.T) {
 	m := newModel(Options{})
-	if m.firstIx != 3 {
-		t.Fatalf("default row = %d, want Mini", m.firstIx)
+	if m.firstIx != 0 {
+		t.Fatalf("default row = %d, want English", m.firstIx)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.firstIx != 2 {
-		t.Fatalf("up selected row %d, want Capsula", m.firstIx)
-	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.firstIx != 1 {
-		t.Fatalf("up selected row %d, want Russian", m.firstIx)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}); m.firstIx != 1 {
+		t.Fatalf("down selected row %d, want Russian", m.firstIx)
 	}
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.lang != langRU || m.screen != screenDevice {
 		t.Fatalf("selecting Russian: lang=%v screen=%v", m.lang, m.screen)
@@ -434,12 +431,12 @@ func TestFormAndSummaryFitSmallTerminal(t *testing.T) {
 		ReserveBytes: 8 << 20, BundleBytes: 24 << 20, AppBytes: 40 << 20,
 	}
 
-	// Step 4: the form, with its acknowledgement and continue action visible.
+	// Step 4: the options form and its continue action.
 	view := m.View()
 	if lines := strings.Split(view, "\n"); len(lines) > m.height {
 		t.Fatalf("form view is %d lines, terminal is %d", len(lines), m.height)
 	}
-	for _, want := range []string{"Nothing is deleted", "Continue to summary"} {
+	for _, want := range []string{"Installation options", "Continue"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("form hides %q at 24 rows", want)
 		}
@@ -456,6 +453,19 @@ func TestFormAndSummaryFitSmallTerminal(t *testing.T) {
 			t.Fatalf("summary hides %q at 24 rows", want)
 		}
 	}
+
+	// Step 6: the completion summary states what was preserved.
+	m.screen = screenSummary
+	view = m.View()
+	if lines := strings.Split(view, "\n"); len(lines) > m.height {
+		t.Fatalf("completion view is %d lines, terminal is %d", len(lines), m.height)
+	}
+	for _, want := range []string{"Installation complete", "Nothing was deleted"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("completion hides %q at 24 rows", want)
+		}
+	}
+	m.screen = screenReview
 
 	// A shorter terminal clips, and then says how to scroll.
 	m.height = 12
@@ -599,7 +609,7 @@ func TestRussianRenderingAndInputPreserved(t *testing.T) {
 	m.authState = install.AuthState{Configured: true, Known: true}
 	m.generated = "generated-password-1234"
 	m.passwordReady = true
-	if !strings.Contains(m.View(), "Параметры установки") || !strings.Contains(m.View(), "Перейти к сводке") {
+	if !strings.Contains(m.View(), "Параметры установки") || !strings.Contains(m.View(), "Далее") {
 		t.Fatal("Russian options form missing")
 	}
 	m.screen = screenReview
@@ -625,7 +635,9 @@ func TestFormHasNoLetterShortcuts(t *testing.T) {
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.jingle == jingle {
 		t.Fatal("enter on the jingle row did not toggle it")
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}); !m.acknowledged {
+	m.identityRequired = true
+	m.formIx = m.formRowIndex(rowIdentityAck)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}); !m.identityAck {
 		t.Fatal("space on the acknowledgement row did not toggle it")
 	}
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd}); m.formIx != len(m.formRows())-1 {

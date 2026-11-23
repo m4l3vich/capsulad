@@ -102,11 +102,9 @@ type catalog struct {
 	passCustomHint         string
 	passwordCaptured       string
 	optJingle              string
-	optAcknowledge         string
 	optIdentity            string
 	optForce               string
 	formContinue           string
-	statusAckRequired      string
 	statusIdentityRequired string
 	statusSpaceRequired    string
 	statusCustomRequired   string
@@ -374,7 +372,6 @@ var enCatalog = catalog{
 	optIdentity:            "ADB cannot authenticate this device",
 	optForce:               "Try to install despite low free space",
 	formContinue:           "Continue",
-	statusAckRequired:      "Select the acknowledgement before continuing.",
 	statusIdentityRequired: "No stable serial: ADB cannot authenticate this device. Select the acknowledgement or go back.",
 	statusSpaceRequired:    "Free space is below the deployment floor; select the low-space option or go back.",
 	statusCustomRequired:   "Choose 'Set my own', type the password, then press enter.",
@@ -638,7 +635,6 @@ var ruCatalog = catalog{
 	optIdentity:            "ADB не может подтвердить подлинность устройства",
 	optForce:               "Всё равно попытаться установить",
 	formContinue:           "Далее",
-	statusAckRequired:      "Отметьте подтверждение, чтобы продолжить.",
 	statusIdentityRequired: "Нет стабильного серийного номера: ADB не может подтвердить устройство. Отметьте подтверждение или вернитесь назад.",
 	statusSpaceRequired:    "В памяти устройства слишком мало свободного места.",
 	statusCustomRequired:   "Выберите «Задать свой», введите пароль и нажмите enter.",
