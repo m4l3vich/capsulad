@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -18,11 +19,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"capsulad/installer/internal/device"
 	"capsulad/installer/internal/release"
 )
 
@@ -507,21 +510,161 @@ func TestWaitHealthRefusesRedirects(t *testing.T) {
 }
 
 func TestEnsureStagingArgs(t *testing.T) {
-	script := strings.Join(EnsureStagingArgs("/tmp/capsulad-installer"), " ")
+	args := EnsureStagingArgs("/tmp/capsulad-installer")
+	script := strings.Join(args, " ")
 	for _, want := range []string{
-		`[ "$(id -u)" = "0" ]`,
+		"fail() { echo \"capsulad-installer: $*\" >&2; exit 1; }",
+		"current_uid() {",
+		"id -u 2>/dev/null && return 0",
+		"[ -r /proc/self/status ] || return 1",
+		"if [ \"$key\" = \"Uid:\" ]",
+		"[ -O / ] || fail \"the device shell must be root (cannot read the uid and / is not owned by this user)\"",
+		"elif [ \"$u\" != \"0\" ]; then",
+		"fail \"the device shell must be root (uid $u)\"",
 		"d=/tmp/capsulad-installer",
 		"[ -L \"$d\" ]",
-		"mkdir -p \"$d\"",
-		"chmod 0700 \"$d\"",
-		"[ -O \"$d\" ]",
+		"mkdir -p \"$d\" || fail \"cannot create $d\"",
+		"chmod 0700 \"$d\" || fail \"cannot chmod 0700 $d\"",
+		"[ -O \"$d\" ] || fail",
 		"a=\"$d/apps\"",
-		"chmod 0700 \"$a\"",
-		"[ -O \"$a\" ]",
+		"mkdir -p \"$a\" || fail \"cannot create $a\"",
+		"chmod 0700 \"$a\" || fail \"cannot chmod 0700 $a\"",
+		"[ -O \"$a\" ] || fail",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("staging script missing %q:\n%s", want, script)
 		}
+	}
+	// Parse every branch, including the root-only paths this host may not run.
+	if out, err := exec.Command(args[0], "-n", "-c", args[2]).CombinedOutput(); err != nil {
+		t.Fatalf("staging script does not parse: %v\n%s", err, out)
+	}
+}
+
+// fakeID puts a stub `id` first on PATH so the staging script's root check is
+// deterministic whether or not the test host runs as root.
+func fakeID(t *testing.T, uid string) string {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "id"), []byte("#!/bin/sh\necho "+uid+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+func runStaging(t *testing.T, pathEnv, dir string) (string, error) {
+	t.Helper()
+	args := EnsureStagingArgs(dir)
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = append(os.Environ(), "PATH="+pathEnv)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestEnsureStagingScriptAlwaysExplainsAFailure covers the reported bug: the
+// step exited 1 with an empty stderr and no hint about which check failed.
+func TestEnsureStagingScriptAlwaysExplainsAFailure(t *testing.T) {
+	out, err := runStaging(t, fakeID(t, "501"), filepath.Join(t.TempDir(), "capsulad-installer"))
+	if err == nil {
+		t.Fatalf("non-root staging unexpectedly succeeded: %s", out)
+	}
+	if !strings.Contains(out, "capsulad-installer: the device shell must be root (uid 501)") {
+		t.Fatalf("staging failure did not explain itself: %q", out)
+	}
+}
+
+// toolOnlyPath returns a PATH with only the named host tools, so a missing
+// `id` can be simulated the way a trimmed stock BusyBox presents it.
+func toolOnlyPath(t *testing.T, tools ...string) string {
+	t.Helper()
+	bin := t.TempDir()
+	for _, name := range tools {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := os.Symlink(target, filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return bin
+}
+
+// TestEnsureStagingScriptWithoutID reproduces the reported stock image: the
+// shell is root but BusyBox ships no id/whoami. The uid then comes from
+// /proc/self/status (Linux) or the root-directory owner probe.
+func TestEnsureStagingScriptWithoutID(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capsulad-installer")
+	out, err := runStaging(t, toolOnlyPath(t, "mkdir", "chmod", "ls"), dir)
+
+	if os.Geteuid() != 0 {
+		if err == nil {
+			t.Fatalf("non-root staging without id unexpectedly succeeded: %s", out)
+		}
+		if !strings.Contains(out, "the device shell must be root") {
+			t.Fatalf("failure did not name the root requirement: %q", out)
+		}
+		// On Linux the uid must come from /proc/self/status.
+		if _, statErr := os.Stat("/proc/self/status"); statErr == nil {
+			want := fmt.Sprintf("must be root (uid %d)", os.Geteuid())
+			if !strings.Contains(out, want) {
+				t.Fatalf("output = %q, want %q", out, want)
+			}
+		}
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("root staging without id failed: %v\n%s", err, out)
+	}
+	for _, p := range []string{dir, filepath.Join(dir, "apps")} {
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			t.Fatalf("staging did not create %s: %v", p, statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("%s mode = %o, want 700", p, got)
+		}
+	}
+}
+
+func TestEnsureStagingScriptCreatesStagingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capsulad-installer")
+	out, err := runStaging(t, fakeID(t, "0"), dir)
+	if err != nil {
+		t.Fatalf("root staging failed: %v\n%s", err, out)
+	}
+	for _, p := range []string{dir, filepath.Join(dir, "apps")} {
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			t.Fatalf("staging did not create %s: %v", p, statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("%s mode = %o, want 700", p, got)
+		}
+	}
+}
+
+// errorDevice returns one canned result for every command.
+type errorDevice struct{ res device.Result }
+
+func (d errorDevice) Connect(context.Context) error { return nil }
+func (d errorDevice) Run(context.Context, device.Command) (device.Result, error) {
+	return d.res, nil
+}
+func (d errorDevice) Push(context.Context, string, string) error { return nil }
+func (d errorDevice) Addr() string                               { return "192.168.1.20:5555" }
+func (d errorDevice) Kind() string                               { return "adb" }
+func (d errorDevice) Close() error                               { return nil }
+
+func TestRunReportsMergedStdoutOnFailure(t *testing.T) {
+	i := &Installer{Dev: errorDevice{res: device.Result{
+		ExitCode: 1,
+		Stdout:   []byte("capsulad-installer: /tmp/capsulad-installer is a symlink\n"),
+	}}}
+	_, err := i.run(context.Background(), device.Command{Args: []string{"sh", "-c", "check"}})
+	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("err = %v, want the device-side reason", err)
 	}
 }
 

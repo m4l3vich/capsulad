@@ -512,6 +512,28 @@ func TestIdentityFromDevinfo(t *testing.T) {
 	}
 }
 
+// TestCommandErrorReportsDeviceDiagnostics covers legacy adbd, which merges
+// the remote stderr into stdout: dropping stdout would turn a failed remote
+// check into a bare "exited 1".
+func TestCommandErrorReportsDeviceDiagnostics(t *testing.T) {
+	e := &CommandError{
+		Args:     []string{"sh", "-c", "check"},
+		ExitCode: 1,
+		Stdout:   "capsulad-installer: the device shell must be root (uid 501)\n",
+	}
+	if got := e.Error(); !strings.Contains(got, "must be root (uid 501)") {
+		t.Fatalf("error dropped the device diagnostic: %q", got)
+	}
+
+	// stderr wins when both streams are present, and newlines fold into one
+	// line because the error screen collapses them anyway.
+	e = &CommandError{Args: []string{"x"}, ExitCode: 2, Stderr: "first\nsecond\n", Stdout: "noise"}
+	got := e.Error()
+	if !strings.Contains(got, "first | second") || strings.Contains(got, "noise") {
+		t.Fatalf("error = %q", got)
+	}
+}
+
 func TestADBCheckedExitMarker(t *testing.T) {
 	script := deviceShellChecked([]string{"sh", "-c", "exit 7"})
 	if !strings.Contains(script, adbExitMarker) {

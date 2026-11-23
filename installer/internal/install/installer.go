@@ -114,7 +114,7 @@ func (i *Installer) run(ctx context.Context, cmd device.Command) (device.Result,
 		return res, err
 	}
 	if res.ExitCode != 0 {
-		return res, &device.CommandError{Args: cmd.Args, ExitCode: res.ExitCode, Stderr: string(res.Stderr)}
+		return res, &device.CommandError{Args: cmd.Args, ExitCode: res.ExitCode, Stderr: string(res.Stderr), Stdout: string(res.Stdout)}
 	}
 	return res, nil
 }

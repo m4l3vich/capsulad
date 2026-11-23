@@ -324,7 +324,6 @@ func (m *model) viewDevice() string {
 	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.originalNote, 4)) + "\n\n")
 	b.WriteString(m.firstRow(3, true, m.cat.deviceMini, m.cat.supported) + "\n")
 	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.miniNote, 4)) + "\n\n")
-	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.onlyMiniNote)))
 	return b.String()
 }
 
@@ -335,7 +334,6 @@ func (m *model) viewFirmware() string {
 	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.firmwareStockNote, 4)) + "\n\n")
 	b.WriteString(radio(m.firmwareIx == 1, m.cat.firmwareAlpine, "") + "\n")
 	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.firmwareAlpineNote, 4)) + "\n\n")
-	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.firmwareBoardNote)))
 	return b.String()
 }
 
@@ -393,9 +391,6 @@ func (m *model) viewForm(width int) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(m.cat.optionsHeading) + "\n\n")
 	b.WriteString(titleStyle.Render(m.cat.passwordHeading) + "\n")
-	if !m.authState.Known {
-		b.WriteString(warnStyle.Render("  "+m.wrapIndented(m.cat.authUnknownNote, 2)) + "\n")
-	}
 
 	rows := m.formRows()
 	sel := rowContinue
@@ -427,7 +422,6 @@ func (m *model) viewForm(width int) string {
 	if m.identityRequired {
 		b.WriteString(opt(rowIdentityAck, m.cat.optIdentity, checkbox(m.identityAck)) + "\n")
 	}
-	b.WriteString(opt(rowAcknowledge, m.cat.optAcknowledge, checkbox(m.acknowledged)) + "\n")
 	if m.space != nil && !m.space.OK {
 		b.WriteString(opt(rowForce, m.cat.optForce, checkbox(m.forceInstall)) + "\n")
 	}

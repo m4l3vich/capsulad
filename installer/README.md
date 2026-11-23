@@ -326,6 +326,30 @@ bundle-only platform; the manifest then carries an empty app list.
   answers at the same address can still be accepted when no serial exists or
   before the first check; use SSH or a trusted network for that guarantee.
 
+## Device tool assumptions
+
+The installer runs POSIX shell on the device and reads files; it does not assume a full
+userland. Notably, the root check needs no `id`/`whoami`: the uid comes from `id -u` when
+present, otherwise `/proc/self/status`, otherwise the `/` owner probe.
+
+| Dependency | Used for | If absent |
+|---|---|---|
+| `sh`, `[`/`test` | every step; both vendor boot hooks are POSIX shell | unsupported image |
+| `cat` | firmware, identity, certificate and deploy-log reads | detection fails before anything is changed |
+| `tar` | stock pre-change backup | the backup fails before the deployment starts |
+| `df -Pk` | free-space preflight | the preflight fails; the deployment is not started |
+| `stat -c %s` | installed daemon size | `wc -c` fallback |
+| `mkdir`, `chmod`, `rm`, `touch` | staging, script mode, log cleanup, jingle marker | the step fails with the device's own error |
+| `start-stop-daemon` | detached deployment | `setsid sh` fallback (Alpine gets it from OpenRC) |
+| `id -u` | root check | `/proc/self/status`, then the `/` owner probe |
+| `getprop`, `devinfo`, `uname`, `hostname` | identity and architecture | optional; only the identity continuity check weakens |
+| `stty` | raw pty backup fallback | `adb exec-out` when adbd supports it |
+
+Checked against the Buildroot 2022.11.1 default BusyBox config and an Alpine 3.24 BusyBox
+1.37 container with `openrc`. The read-only run against the unit already streamed and
+validated the vendor backup, so `cat`, `tar` and `df` are device-proven there; the unit's
+trimmed BusyBox is known not to ship `id`, which the staging check now handles.
+
 ## Rollback
 
 | Platform | Command |
@@ -375,6 +399,8 @@ device is deleted by the installer.
 | Symptom | Action |
 |---|---|
 | `adb` not found | install Android platform-tools or pass `-adb` |
+| `prepare ... exited 1` with a `capsulad-installer:` reason | act on the named check: run the shell as root (the reported uid is non-zero), remove a symlinked or foreign-owned `/tmp/capsulad-installer`, or free `/tmp` so the staging directory can be created |
+| `prepare ... exited 1` with no reason at all | a legacy adbd merges stderr into stdout; the installer now shows that merged output, so re-run and report the missing line together with the device firmware |
 | `unauthorized` | accept the on-device debugging prompt; the installer waits |
 | SSH host key mismatch | re-flash or remove only that host's pin from `known_hosts.json`; never accept a changed key blindly |
 | Device disappears after deploy starts | normal; wait, then re-enter the same IP, or join the setup AP (portal `http://192.168.4.1`) |

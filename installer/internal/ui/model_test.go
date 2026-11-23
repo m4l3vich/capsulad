@@ -141,7 +141,6 @@ func TestOpDoneTransitions(t *testing.T) {
 		t.Fatal("options form missing")
 	}
 	// The form is step 4; continuing opens the separate installation summary.
-	m.acknowledged = true
 	m.formIx = len(m.formRows()) - 1
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenReview {
 		t.Fatalf("continue -> %v, want installation summary", m.screen)
@@ -302,7 +301,6 @@ func TestIdentityAcknowledgement(t *testing.T) {
 	m.det = device.Detection{Platform: device.PlatformRockchipStock, Arch: "aarch64"}
 	m.identity = device.Identity{Hostname: "capsula-mini"}
 	m.identityRequired = true
-	m.acknowledged = true
 	m.passMode = passGenerate
 	m.generated = "generated-password-1234"
 	m.passwordReady = true
@@ -621,13 +619,12 @@ func TestFormHasNoLetterShortcuts(t *testing.T) {
 	for _, ch := range []string{"j", "a", "f", "x", "1", "2", "3"} {
 		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(ch)})
 	}
-	if m.jingle != jingle || m.acknowledged || m.forceInstall || m.passEditing || m.formIx != m.formRowIndex(rowJingle) {
+	if m.jingle != jingle || m.forceInstall || m.passEditing || m.formIx != m.formRowIndex(rowJingle) {
 		t.Fatal("a letter shortcut changed the form")
 	}
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.jingle == jingle {
 		t.Fatal("enter on the jingle row did not toggle it")
 	}
-	m.formIx = m.formRowIndex(rowAcknowledge)
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}); !m.acknowledged {
 		t.Fatal("space on the acknowledgement row did not toggle it")
 	}

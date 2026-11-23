@@ -83,23 +83,46 @@ func ChmodArgs(mode, path string) []string {
 // EnsureStagingArgs creates or validates the installer's remote staging
 // directory. It must be a real directory owned by the current (root) user and
 // mode 0700; a symlink or foreign-owned directory is refused before any
-// artifact or secret is written there.
+// artifact or secret is written there. Every refusal names the failed check
+// and the observed value, because the host only sees this output when the
+// device-side step exits non-zero.
 func EnsureStagingArgs(dir string) []string {
 	d := device.ShellQuote(dir)
 	script := "set -e\n" +
-		"[ \"$(id -u)\" = \"0\" ] || { echo \"capsulad-installer: the device shell must be root\" >&2; exit 1; }\n" +
+		"fail() { echo \"capsulad-installer: $*\" >&2; exit 1; }\n" +
+		// Some stock BusyBox builds ship no `id`/`whoami`; /proc/self/status
+		// carries the effective uid using shell builtins only.
+		"current_uid() {\n" +
+		"  id -u 2>/dev/null && return 0\n" +
+		"  [ -r /proc/self/status ] || return 1\n" +
+		"  while read -r key value; do\n" +
+		"    if [ \"$key\" = \"Uid:\" ]; then\n" +
+		"      set -- $value\n" +
+		"      if [ -n \"${2:-}\" ]; then echo \"$2\"; return 0; fi\n" +
+		"      if [ -n \"${1:-}\" ]; then echo \"$1\"; return 0; fi\n" +
+		"      return 1\n" +
+		"    fi\n" +
+		"  done < /proc/self/status\n" +
+		"  return 1\n" +
+		"}\n" +
+		"u=$(current_uid) || u=\n" +
+		"if [ -z \"$u\" ]; then\n" +
+		"  [ -O / ] || fail \"the device shell must be root (cannot read the uid and / is not owned by this user)\"\n" +
+		"elif [ \"$u\" != \"0\" ]; then\n" +
+		"  fail \"the device shell must be root (uid $u)\"\n" +
+		"fi\n" +
 		"d=" + d + "\n" +
-		"if [ -L \"$d\" ]; then echo \"capsulad-installer: $d is a symlink\" >&2; exit 1; fi\n" +
-		"if [ -e \"$d\" ] && [ ! -d \"$d\" ]; then echo \"capsulad-installer: $d is not a directory\" >&2; exit 1; fi\n" +
-		"mkdir -p \"$d\"\n" +
-		"chmod 0700 \"$d\"\n" +
-		"[ -O \"$d\" ] || { echo \"capsulad-installer: $d is not owned by the current user\" >&2; exit 1; }\n" +
-		"[ -d \"$d\" ] && [ ! -L \"$d\" ]\n" +
+		"if [ -L \"$d\" ]; then fail \"$d is a symlink\"; fi\n" +
+		"if [ -e \"$d\" ] && [ ! -d \"$d\" ]; then fail \"$d exists and is not a directory\"; fi\n" +
+		"mkdir -p \"$d\" || fail \"cannot create $d\"\n" +
+		"chmod 0700 \"$d\" || fail \"cannot chmod 0700 $d\"\n" +
+		"[ -O \"$d\" ] || fail \"$d is not owned by the current user: $(ls -ld \"$d\" 2>/dev/null)\"\n" +
+		"[ -d \"$d\" ] && [ ! -L \"$d\" ] || fail \"$d is not a plain directory after creation\"\n" +
 		"a=\"$d/apps\"\n" +
-		"if [ -L \"$a\" ]; then echo \"capsulad-installer: $a is a symlink\" >&2; exit 1; fi\n" +
-		"mkdir -p \"$a\"\n" +
-		"chmod 0700 \"$a\"\n" +
-		"[ -O \"$a\" ] || { echo \"capsulad-installer: $a is not owned by the current user\" >&2; exit 1; }\n" +
-		"[ -d \"$a\" ] && [ ! -L \"$a\" ]\n"
+		"if [ -L \"$a\" ]; then fail \"$a is a symlink\"; fi\n" +
+		"mkdir -p \"$a\" || fail \"cannot create $a\"\n" +
+		"chmod 0700 \"$a\" || fail \"cannot chmod 0700 $a\"\n" +
+		"[ -O \"$a\" ] || fail \"$a is not owned by the current user: $(ls -ld \"$a\" 2>/dev/null)\"\n" +
+		"[ -d \"$a\" ] && [ ! -L \"$a\" ] || fail \"$a is not a plain directory after creation\"\n"
 	return []string{"sh", "-c", script}
 }

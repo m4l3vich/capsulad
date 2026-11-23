@@ -209,7 +209,9 @@ physical timing, brightness/gamma, recognition accuracy or peer-device behavior.
   sanitisation. A read-only run against the unit detected the platform, streamed and validated a
   1.8 MiB / 256-entry vendor backup, and reported the stock data-partition shortfall honestly. A
   complete install through the TUI has not been performed; the daemon/CLI on the unit were
-  deployed with `capsulad-cli deploy`.
+  deployed with `capsulad-cli deploy`. The unit's trimmed stock BusyBox has no `id`/`whoami`;
+  the staging root check therefore reads the effective uid from `/proc/self/status` and was
+  exercised under an Alpine 3.24 BusyBox 1.37 container with `id` removed from `PATH`.
 - A browser run against a simulator daemon verified the EN/RU language switch, locale-sensitive
   dates and numbers, and the Access page's certificate and CA download controls. The CDP harness
   cancels browser downloads, so the download endpoint, filename header and button were verified

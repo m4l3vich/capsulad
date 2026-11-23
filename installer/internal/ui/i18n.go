@@ -64,7 +64,6 @@ type catalog struct {
 	notSupported             string
 	originalNote             string
 	miniNote                 string
-	onlyMiniNote             string
 	statusCapsulaUnsupported string
 
 	// Step 2.
@@ -73,7 +72,6 @@ type catalog struct {
 	firmwareStockNote  string
 	firmwareAlpine     string
 	firmwareAlpineNote string
-	firmwareBoardNote  string
 
 	// Step 3.
 	addressHeading       string
@@ -97,7 +95,6 @@ type catalog struct {
 	// Step 4: installation options.
 	optionsHeading         string
 	passwordHeading        string
-	authUnknownNote        string
 	passGenerate           string
 	passCustom             string
 	passKeep               string
@@ -333,21 +330,19 @@ var enCatalog = catalog{
 	langEnglish:              "English (UK)",
 	langRussian:              "Русский",
 	deviceLabel:              "Device",
-	deviceOriginal:           "Capsula (original)",
+	deviceOriginal:           "Capsula (fat)",
 	deviceMini:               "Capsula Mini",
-	supported:                "supported",
+	supported:                "soon",
 	notSupported:             "not supported",
-	originalNote:             "No maintained firmware image; this installer cannot prepare it.",
-	miniNote:                 "RK3308 (Rockchip) or A113X (Amlogic), on stock or Alpine.",
-	onlyMiniNote:             "Capsula Mini is the only supported device.",
+	originalNote:             "For now capsulad does not support the fat Capsula.",
+	miniNote:                 "Jailbroken Rockchip or Amlogic with Alpine Linux or stock software.",
 	statusCapsulaUnsupported: "The original Capsula is not supported by capsulad.",
 
-	firmwareHeading:    "How is the device running today?",
+	firmwareHeading:    "What software is your device running?",
 	firmwareStock:      "Jailbroken stock (capsula-jb)",
-	firmwareStockNote:  "Connects over ADB on port 5555. Rockchip RK3308 or Amlogic A113X.",
+	firmwareStockNote:  "Connects over ADB on port 5555.",
 	firmwareAlpine:     "Alpine Linux",
-	firmwareAlpineNote: "Connects over SSH as root. Amlogic A113X.",
-	firmwareBoardNote:  "The board is discovered after connecting; the firmware decides the transport.",
+	firmwareAlpineNote: "Connects over SSH as root.",
 
 	addressHeading:       "Device address",
 	addressLabel:         "Address",
@@ -362,25 +357,23 @@ var enCatalog = catalog{
 	wifiSSIDPlaceholder:  "Wi-Fi network name",
 	wifiPassPlaceholder:  "Wi-Fi passphrase (hidden)",
 	tokenPlaceholder:     "VK access token (hidden, optional)",
-	addressStockNote:     "ADB connects to <address>:5555. Accept the on-device debugging prompt when it appears.",
+	addressStockNote:     "ADB connects to <address>:5555.",
 	addressAlpineNote:    "A password or a private key is required. The host key is pinned on first use.",
 	statusAddressEmpty:   "Enter the device address first.",
 	statusAlpineCreds:    "Alpine needs an SSH password or a private key.",
 
 	optionsHeading:         "Installation options",
 	passwordHeading:        "Administrator password",
-	authUnknownNote:        "Existing password state could not be read; a new password will be created.",
 	passGenerate:           "Generate a strong password",
 	passCustom:             "Set my own",
 	passKeep:               "Keep the existing password",
 	passRecommended:        "recommended",
 	passCustomHint:         "Type the password, then press enter to capture it (esc cancels).",
 	passwordCaptured:       "Password captured; it will be sent over stdin.",
-	optJingle:              "One-time installation jingle",
-	optAcknowledge:         "Nothing is deleted; vendor files stay",
+	optJingle:              "Play startup jingle after install",
 	optIdentity:            "ADB cannot authenticate this device",
-	optForce:               "Install despite low free space",
-	formContinue:           "Continue to summary",
+	optForce:               "Try to install despite low free space",
+	formContinue:           "Continue",
 	statusAckRequired:      "Select the acknowledgement before continuing.",
 	statusIdentityRequired: "No stable serial: ADB cannot authenticate this device. Select the acknowledgement or go back.",
 	statusSpaceRequired:    "Free space is below the deployment floor; select the low-space option or go back.",
@@ -601,21 +594,19 @@ var ruCatalog = catalog{
 	langEnglish:              "English (UK)",
 	langRussian:              "Русский",
 	deviceLabel:              "Устройство",
-	deviceOriginal:           "Capsula (оригинальная)",
-	deviceMini:               "Capsula Mini",
+	deviceOriginal:           "Капсула (большая)",
+	deviceMini:               "Капсула Мини",
 	supported:                "поддерживается",
-	notSupported:             "не поддерживается",
-	originalNote:             "Нет поддерживаемого образа прошивки; установщик не может её подготовить.",
-	miniNote:                 "RK3308 (Rockchip) или A113X (Amlogic), заводская прошивка или Alpine.",
-	onlyMiniNote:             "Поддерживается только Capsula Mini.",
+	notSupported:             "скоро",
+	originalNote:             "На данный момент capsulad не поддерживает большую Капсулу.",
+	miniNote:                 "Прошитая Rockchip или Amlogic с Alpine Linux или стоковой прошивкой.",
 	statusCapsulaUnsupported: "Оригинальная Capsula не поддерживается capsulad.",
 
-	firmwareHeading:    "Как сейчас работает устройство?",
-	firmwareStock:      "Взломанная заводская (capsula-jb)",
-	firmwareStockNote:  "Подключение по ADB на порту 5555. Rockchip RK3308 или Amlogic A113X.",
+	firmwareHeading:    "Какая прошивка сейчас на вашем устройстве?",
+	firmwareStock:      "Взломанная стоковая (capsula-jb)",
+	firmwareStockNote:  "Подключается по ADB на порту 5555.",
 	firmwareAlpine:     "Alpine Linux",
-	firmwareAlpineNote: "Подключение по SSH от root. Amlogic A113X.",
-	firmwareBoardNote:  "Плата определяется после подключения; прошивка задаёт транспорт.",
+	firmwareAlpineNote: "Подключается по SSH как root.",
 
 	addressHeading:       "Адрес устройства",
 	addressLabel:         "Адрес",
@@ -630,31 +621,29 @@ var ruCatalog = catalog{
 	wifiSSIDPlaceholder:  "имя сети Wi-Fi",
 	wifiPassPlaceholder:  "пароль Wi-Fi (скрыт)",
 	tokenPlaceholder:     "токен доступа VK (скрыт, необязательно)",
-	addressStockNote:     "ADB подключается к <адрес>:5555. Примите запрос отладки на устройстве.",
+	addressStockNote:     "ADB подключается к <адрес>:5555.",
 	addressAlpineNote:    "Нужен пароль или закрытый ключ. Ключ узла закрепляется при первом подключении.",
 	statusAddressEmpty:   "Сначала введите адрес устройства.",
 	statusAlpineCreds:    "Для Alpine нужен пароль SSH или закрытый ключ.",
 
 	optionsHeading:         "Параметры установки",
 	passwordHeading:        "Пароль администратора",
-	authUnknownNote:        "Не удалось прочитать состояние пароля; будет создан новый пароль.",
 	passGenerate:           "Сгенерировать надёжный пароль",
 	passCustom:             "Задать свой",
 	passKeep:               "Оставить существующий пароль",
 	passRecommended:        "рекомендуется",
 	passCustomHint:         "Введите пароль и нажмите enter (esc отменяет).",
 	passwordCaptured:       "Пароль принят; он будет передан через stdin.",
-	optJingle:              "Однократный звук установки",
-	optAcknowledge:         "Ничего не удаляется; файлы поставщика сохраняются",
+	optJingle:              "Вкл. мелодию запуска",
 	optIdentity:            "ADB не может подтвердить подлинность устройства",
-	optForce:               "Установить несмотря на нехватку места",
-	formContinue:           "Перейти к сводке",
+	optForce:               "Всё равно попытаться установить",
+	formContinue:           "Далее",
 	statusAckRequired:      "Отметьте подтверждение, чтобы продолжить.",
 	statusIdentityRequired: "Нет стабильного серийного номера: ADB не может подтвердить устройство. Отметьте подтверждение или вернитесь назад.",
-	statusSpaceRequired:    "Свободного места меньше минимума; отметьте вариант установки при нехватке места или вернитесь назад.",
+	statusSpaceRequired:    "В памяти устройства слишком мало свободного места.",
 	statusCustomRequired:   "Выберите «Задать свой», введите пароль и нажмите enter.",
-	onOn:                   "вкл",
-	onOff:                  "выкл",
+	onOn:                   "да",
+	onOff:                  "нет",
 	statusReenterAddress:   "Введите текущий адрес устройства и продолжите.",
 	optLabelWidth:          50,
 	rowLabelWidth:          20,

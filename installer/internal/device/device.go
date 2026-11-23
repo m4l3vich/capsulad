@@ -60,14 +60,45 @@ type CommandError struct {
 	Args     []string
 	ExitCode int
 	Stderr   string
+	// Stdout is carried because a legacy adbd without shell-v2 merges the
+	// remote stderr into stdout; that stream is the only place the device's
+	// diagnostic survives on those devices.
+	Stdout string
 }
 
 func (e *CommandError) Error() string {
-	msg := fmt.Sprintf("%s exited %d", strings.Join(e.Args, " "), e.ExitCode)
-	if e.Stderr != "" {
-		msg += ": " + firstLine(e.Stderr)
+	cmd := fmt.Sprintf("%s exited %d", strings.Join(e.Args, " "), e.ExitCode)
+	detail := commandDetail(e.Stderr, e.Stdout)
+	if detail == "" {
+		return cmd
 	}
-	return msg
+	// The device's reason is what the user acts on; the command (often a
+	// multi-line script) follows it so the error screen shows it first.
+	return detail + " (" + cmd + ")"
+}
+
+// maxCommandDetailLines bounds how much remote text an error carries; the
+// error screen folds newlines into one line.
+const maxCommandDetailLines = 4
+
+// commandDetail picks the remote diagnostic for a failed command. Stderr wins
+// when it has content; otherwise the first non-empty stdout lines are used,
+// because legacy adbd merges both streams into stdout.
+func commandDetail(stderr, stdout string) string {
+	stream := stderr
+	if strings.TrimSpace(stream) == "" {
+		stream = stdout
+	}
+	var lines []string
+	for _, line := range strings.Split(stream, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+			if len(lines) == maxCommandDetailLines {
+				break
+			}
+		}
+	}
+	return strings.Join(lines, " | ")
 }
 
 func firstLine(s string) string {

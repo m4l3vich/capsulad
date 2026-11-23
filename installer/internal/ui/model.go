@@ -94,7 +94,6 @@ const (
 	rowPassKeep
 	rowJingle
 	rowIdentityAck
-	rowAcknowledge
 	rowForce
 	rowContinue
 )
@@ -190,7 +189,6 @@ type model struct {
 	passwordReady bool
 	passEditing   bool
 	jingle        bool
-	acknowledged  bool
 	forceInstall  bool
 
 	passwordAcked bool
@@ -233,7 +231,7 @@ func newModel(opts Options) *model {
 		screen:        screenDevice,
 		lang:          langEN,
 		cat:           catalogFor(langEN),
-		firstIx:       3,
+		firstIx:       0,
 		spinner:       spinner.New(spinner.WithSpinner(spinner.Dot)),
 		appSelected:   map[string]bool{},
 		addrInput:     newInput("", false, 48),

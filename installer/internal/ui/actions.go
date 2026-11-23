@@ -218,8 +218,6 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 				m.jingle = !m.jingle
 			case rowIdentityAck:
 				m.identityAck = !m.identityAck
-			case rowAcknowledge:
-				m.acknowledged = !m.acknowledged
 			case rowForce:
 				m.forceInstall = !m.forceInstall
 			case rowContinue:
@@ -546,7 +544,6 @@ func (m *model) formRows() []formRow {
 	if m.identityRequired {
 		rows = append(rows, rowIdentityAck)
 	}
-	rows = append(rows, rowAcknowledge)
 	if m.space != nil && !m.space.OK {
 		rows = append(rows, rowForce)
 	}
@@ -572,10 +569,6 @@ func (m *model) formValidation() string {
 	if m.identityRequired && !m.identityAck {
 		m.formIx = m.formRowIndex(rowIdentityAck)
 		return m.cat.statusIdentityRequired
-	}
-	if !m.acknowledged {
-		m.formIx = m.formRowIndex(rowAcknowledge)
-		return m.cat.statusAckRequired
 	}
 	if m.space != nil && !m.space.OK && !m.forceInstall {
 		m.formIx = m.formRowIndex(rowForce)
@@ -675,7 +668,6 @@ func (m *model) startOp(kind opKind) tea.Cmd {
 	case opPrepare:
 		return m.prepareCmd()
 	case opDeploy:
-		m.acknowledged = false
 		return m.deployCmd()
 	case opWiFiStatus:
 		return m.wifiStatusCmd()
@@ -1125,7 +1117,6 @@ func (m *model) applyOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
 		m.passwordReady = true
 		m.passEditing = false
 		m.formIx = 0
-		m.acknowledged = false
 		m.forceInstall = false
 		m.appResults = nil
 		m.appError = ""
