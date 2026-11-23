@@ -807,6 +807,57 @@ func TestSpeechTrackerEndsAfterSpeechOverColoredRoom(t *testing.T) {
 	}
 }
 
+// A dropped chunk after the voice was confirmed must not discard the turn.
+// The classifier restarts without splicing audio across the gap, but the
+// hypothesis and the recent voice level survive, so the silence that follows
+// still ends the utterance instead of leaving it to be cancelled as "no
+// speech" three seconds later.
+func TestSpeechTrackerGapPreservesConfirmedUtterance(t *testing.T) {
+	noise := roomNoisePCM(8, 0.06)
+	preroll := noise[:fixtureRate*2]
+	speech := speechPCM(0.8, 0.2)
+	body := mixPCM(speech, noise[fixtureRate*2:fixtureRate*2+len(speech)])
+
+	tr := &speechTracker{}
+	tr.observe(preroll, fixtureRate, speechFeedCalibrate)
+	feed := func(data []byte) (ended, rejected bool) {
+		for off := 0; off+1 < len(data); off += 640 {
+			end := min(off+640, len(data))
+			if end%2 != 0 {
+				end--
+			}
+			ev := tr.observe(data[off:end], fixtureRate, speechFeedLive)
+			if ev.Ended {
+				return true, rejected
+			}
+			if ev.Rejected {
+				rejected = true
+			}
+		}
+		return false, rejected
+	}
+
+	if ended, rejected := feed(body); ended || rejected {
+		t.Fatalf("the utterance finished before the gap: ended=%v rejected=%v", ended, rejected)
+	}
+	if !tr.confirmedSpeech() || !tr.active() {
+		t.Fatal("the utterance was not confirmed before the gap")
+	}
+
+	tr.gap()
+	if !tr.active() || !tr.confirmedSpeech() {
+		t.Fatal("the gap discarded the confirmed utterance")
+	}
+
+	ended, rejected := feed(noise[fixtureRate*2+len(speech):])
+	if !ended {
+		t.Fatal("silence after the gap did not end the confirmed utterance")
+	}
+	if rejected {
+		t.Fatal("the tail after the gap was classified as noise")
+	}
+}
+
 // Colored room noise with variable amplitude must not produce a reply, however
 // long the turn listens. A rejected hypothesis is allowed; an utterance is not.
 func TestSpeechTrackerColoredRoomNoiseProducesNoReply(t *testing.T) {

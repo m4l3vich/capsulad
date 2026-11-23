@@ -519,7 +519,7 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 				log.Printf("dumbassistant: activation=%s microphone notice %s: %s",
 					item.activationID, chunk.Notice.Code, chunk.Notice.Detail)
 				if chunk.Notice.Code == "CLIENT_TOO_SLOW" {
-					tracker.reset()
+					tracker.gap()
 					continue
 				}
 				return false
@@ -532,18 +532,19 @@ func (a *assistant) listen(ctx context.Context, item reply, t *turn, ring *ringV
 			}
 			c := chunk.Chunk
 			if c.Discontinuity || c.DroppedFramesBefore > 0 {
-				// A gap is not evidence that the utterance ended. Reset the
-				// classifier and keep listening; the no-speech window and the
-				// safety cap still bound the turn, so dropped audio can never
-				// produce a premature reply. Log at most twice a second: a
-				// backlog can carry hundreds of gap markers, and a line per
-				// chunk slows this consumer enough to overflow the transport
-				// buffer instead of draining it.
+				// A gap is not evidence that the utterance ended. Restart the
+				// classifier without discarding a confirmed hypothesis, so the
+				// silence after the voice can still end the turn; the no-speech
+				// window and the safety cap still bound a turn that never
+				// confirms. Log at most twice a second: a backlog can carry
+				// hundreds of gap markers, and a line per chunk slows this
+				// consumer enough to overflow the transport buffer instead of
+				// draining it.
 				if time.Since(lastGapLog) >= 500*time.Millisecond {
 					lastGapLog = time.Now()
 					log.Printf("dumbassistant: activation=%s audio gap dropped=%d; continuing", item.activationID, c.DroppedFramesBefore)
 				}
-				tracker.reset()
+				tracker.gap()
 				continue
 			}
 
@@ -900,6 +901,29 @@ func (t *speechTracker) reset() {
 	}
 	t.floor, t.armed, t.cold, t.coldOnset = floor, armed, cold, coldOnset
 	t.calValues, t.calCount, t.calNext = calValues, calCount, calNext
+}
+
+// gap forgets the sample continuity of the stream without forgetting an
+// utterance already confirmed. A dropped chunk is not evidence that speech
+// ended, so the hypothesis and the recent voice level survive and the silence
+// that follows can still end the turn. The filters, modulation window and
+// frame accumulators restart, so no audio is spliced across the gap and the
+// gap itself is never credited as end-of-speech silence.
+func (t *speechTracker) gap() {
+	rate := t.rate
+	floor, armed, cold, coldOnset := t.floor, t.armed, t.cold, t.coldOnset
+	calValues, calCount, calNext := t.calValues, t.calCount, t.calNext
+	speaking, confirmed := t.speaking, t.confirmed
+	ref, tailLevel := t.ref, t.tailLevel
+	if rate > 0 {
+		t.configure(rate)
+	} else {
+		*t = speechTracker{}
+	}
+	t.floor, t.armed, t.cold, t.coldOnset = floor, armed, cold, coldOnset
+	t.calValues, t.calCount, t.calNext = calValues, calCount, calNext
+	t.speaking, t.confirmed = speaking, confirmed
+	t.ref, t.tailLevel = ref, tailLevel
 }
 
 // resetDetection ends the current hypothesis but keeps the learned floor and the
