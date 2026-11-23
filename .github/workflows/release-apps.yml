@@ -120,6 +120,7 @@ jobs:
       - name: Publish app channel
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
           if gh release view apps >/dev/null 2>&1; then
