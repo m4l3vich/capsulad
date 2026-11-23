@@ -265,9 +265,14 @@ func newTestDaemonPrepared(t *testing.T, prepare func(*Daemon), extras ...appIns
 	return d, cancel, done
 }
 
+// waitFor observes a condition until it holds. The product contract these
+// daemon journeys assert is the eventual state; the budgets are observation
+// deadlines, not latency requirements. e2eTimeoutScale stretches them under
+// the race detector, where every goroutine is slower and Go runs the packages
+// concurrently, so a valid transition can legitimately take seconds longer.
 func waitFor(t *testing.T, timeout time.Duration, what string, fn func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(timeout * e2eTimeoutScale)
 	for time.Now().Before(deadline) {
 		if fn() {
 			return
