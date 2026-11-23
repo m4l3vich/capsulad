@@ -1,6 +1,13 @@
 # `capsulad`
+![Core build status badge](https://img.shields.io/github/actions/workflow/status/m4l3vich/capsulad/release-core.yml?label=core%20build) ![Apps build status badge](https://img.shields.io/github/actions/workflow/status/m4l3vich/capsulad/release-apps.yml?label=apps%20build)
+
+![VK Capsula Homebrew badge](https://img.shields.io/badge/VK_Capsula_Homebrew-blue?logo=vk) ![Golang badge](https://img.shields.io/badge/Golang-00ADD8?logo=go&logoColor=FFF) ![Heavily Vibecoded badge](https://img.shields.io/badge/Heavily_vibecoded-FF5555?logo=claude&logoColor=FFF)
+
+[На русском](README_RU.md)
+
 Universal framework and application runtime for jailbroken VK Capsula smart speakers.
 It replaces stock `voice-agent` and reimplements its core logic:
+
 - Bluetooth speaker mode
 - Wakeword training and detection (supports multiple simultaneous wakewords for different assistants!)
 - Marusia assistant (if you want her back for some reason…)

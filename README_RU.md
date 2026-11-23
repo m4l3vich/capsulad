@@ -1,6 +1,13 @@
 # `capsulad`
+![Core build status badge](https://img.shields.io/github/actions/workflow/status/m4l3vich/capsulad/release-core.yml?label=core%20build) ![Apps build status badge](https://img.shields.io/github/actions/workflow/status/m4l3vich/capsulad/release-apps.yml?label=apps%20build)
+
+![VK Capsula Homebrew badge](https://img.shields.io/badge/VK_Capsula_Homebrew-blue?logo=vk) ![Golang badge](https://img.shields.io/badge/Golang-00ADD8?logo=go&logoColor=FFF) ![Heavily Vibecoded badge](https://img.shields.io/badge/Heavily_vibecoded-FF5555?logo=claude&logoColor=FFF)
+
+[English](README.md)
+
 Универсальный фреймворк и среда исполнения для приложений для прошитых умных колонок «VK Капсула».
 Заменяет собой стоковый `voice-agent` и реализует его основную логику:
+
 - Режим Bluetooth-колонки
 - Обучение и распознавание вейкворда (поддерживает несколько вейквордов одновременно, которые могут запускать разных ассистентов!)
 - Ассистент Маруся (если вы, зачем-то, хотите её вернуть…)
