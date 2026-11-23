@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ func TestNavigationAndDisabledCapsula(t *testing.T) {
 	m.width, m.height = 100, 40
 
 	// The original Capsula is refused with a reason, not silently skipped.
-	m.deviceIx = 0
+	m.firstIx = 2
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenDevice {
 		t.Fatalf("Capsula should stay on the device screen, got %v", m.screen)
 	}
@@ -25,7 +26,7 @@ func TestNavigationAndDisabledCapsula(t *testing.T) {
 		t.Fatalf("status = %q", m.status)
 	}
 
-	m.deviceIx = 1
+	m.firstIx = 3
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenFirmware {
 		t.Fatalf("screen = %v, want firmware", m.screen)
 	}
@@ -46,8 +47,11 @@ func TestCustomPasswordEditing(t *testing.T) {
 	m.passMode = passGenerate
 	m.passwordReady = true
 
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}); !m.passEditing {
-		t.Fatal("pressing 2 should start custom-password editing")
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}); m.formIx != 1 {
+		t.Fatalf("down selected row %d, want custom password", m.formIx)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !m.passEditing {
+		t.Fatal("enter on 'Set my own' should start custom-password editing")
 	}
 	if m.focusedInput() == nil {
 		t.Fatal("custom-password field is not focused")
@@ -84,7 +88,7 @@ func TestAllScreensRender(t *testing.T) {
 	m.hostKey = &hostKeyMsg{host: "10.0.0.2:22", fingerprint: "SHA256:abc", reply: make(chan bool, 1)}
 
 	for _, s := range []screen{
-		screenDevice, screenFirmware, screenAddress, screenConfirm, screenWorking,
+		screenDevice, screenFirmware, screenAddress, screenConfirm, screenReview, screenWorking,
 		screenShowPassword, screenChangePassword, screenWiFi, screenWiFiPass, screenWiFiManual, screenApps,
 		screenMarusia, screenSummary, screenError, screenHostKey, screenAbort,
 	} {
@@ -123,17 +127,27 @@ func TestOpDoneTransitions(t *testing.T) {
 	space := install.SpaceCheck{AvailableBytes: 1 << 30, RequiredBytes: 8 << 20, OK: true}
 	if _, _ = m.Update(opDoneMsg{
 		kind: opPrepare, inst: inst, space: &space,
-		det:  device.Detection{Platform: device.PlatformRockchipStock, Arch: "aarch64"},
-		auth: install.AuthState{Configured: false, Known: true},
-		host: "capsula-mini",
+		det:      device.Detection{Platform: device.PlatformRockchipStock, Arch: "aarch64"},
+		auth:     install.AuthState{Configured: false, Known: true},
+		host:     "capsula-mini",
+		identity: device.Identity{Serial: "SN12345", Hostname: "capsula-mini"},
 	}); m.screen != screenConfirm {
 		t.Fatalf("prepare -> %v, want confirm", m.screen)
 	}
 	if m.generated == "" {
 		t.Fatal("prepare did not generate a password")
 	}
+	if !strings.Contains(m.View(), "Continue to summary") {
+		t.Fatal("options form missing")
+	}
+	// The form is step 4; continuing opens the separate installation summary.
+	m.acknowledged = true
+	m.formIx = len(m.formRows()) - 1
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenReview {
+		t.Fatalf("continue -> %v, want installation summary", m.screen)
+	}
 	if !strings.Contains(m.View(), "Install capsulad") {
-		t.Fatal("confirm view missing")
+		t.Fatal("installation summary missing")
 	}
 
 	if _, _ = m.Update(opDoneMsg{kind: opDeploy, deploy: &install.DeployResult{Exit: 0}, fingerprint: "AA:BB"}); m.screen != screenShowPassword {
@@ -172,6 +186,9 @@ func TestOpDoneTransitions(t *testing.T) {
 	}
 	if !m.errCanAddr {
 		t.Fatal("deploy error should offer address re-entry")
+	}
+	if !m.errCanBack || m.backScreen != screenReview {
+		t.Fatalf("deploy error back target = %v (canBack=%v), want installation summary", m.backScreen, m.errCanBack)
 	}
 }
 
@@ -214,16 +231,32 @@ func TestWiFiSecuritySelection(t *testing.T) {
 	}
 }
 
-func TestDeviceArrowOrder(t *testing.T) {
+func TestFirstScreenArrowOrderAndLanguage(t *testing.T) {
 	m := newModel(Options{})
-	if m.deviceIx != 1 {
-		t.Fatalf("default device = %d, want Mini", m.deviceIx)
+	if m.firstIx != 3 {
+		t.Fatalf("default row = %d, want Mini", m.firstIx)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.deviceIx != 0 {
-		t.Fatalf("up selected %d, want Capsula", m.deviceIx)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.firstIx != 2 {
+		t.Fatalf("up selected row %d, want Capsula", m.firstIx)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}); m.deviceIx != 1 {
-		t.Fatalf("down selected %d, want Mini", m.deviceIx)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.firstIx != 1 {
+		t.Fatalf("up selected row %d, want Russian", m.firstIx)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.lang != langRU || m.screen != screenDevice {
+		t.Fatalf("selecting Russian: lang=%v screen=%v", m.lang, m.screen)
+	}
+	if !strings.Contains(m.View(), "Выберите язык и устройство") {
+		t.Fatal("Russian catalog was not applied")
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}); m.firstIx != 0 {
+		t.Fatalf("row = %d, want English", m.firstIx)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.lang != langEN {
+		t.Fatalf("selecting English: lang=%v", m.lang)
+	}
+	m.firstIx = 3
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenFirmware {
+		t.Fatalf("enter on Mini -> %v, want firmware", m.screen)
 	}
 }
 
@@ -274,17 +307,27 @@ func TestIdentityAcknowledgement(t *testing.T) {
 	m.generated = "generated-password-1234"
 	m.passwordReady = true
 
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")}); m.screen != screenConfirm {
-		t.Fatalf("install without identity acknowledgement -> %v", m.screen)
+	// Letter shortcuts are gone; only arrow navigation and enter work.
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}); m.identityAck {
+		t.Fatal("x should not toggle the identity row")
+	}
+
+	m.formIx = len(m.formRows()) - 1
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenConfirm {
+		t.Fatalf("continue without identity acknowledgement -> %v", m.screen)
 	}
 	if !strings.Contains(m.status, "stable serial") {
 		t.Fatalf("status = %q", m.status)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}); !m.identityAck {
-		t.Fatal("x did not acknowledge the identity warning")
+	if m.formIx != m.formRowIndex(rowIdentityAck) {
+		t.Fatalf("cursor moved to %d, want the identity row", m.formIx)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")}); m.screen != screenWorking {
-		t.Fatalf("install after acknowledgement -> %v", m.screen)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !m.identityAck {
+		t.Fatal("enter did not acknowledge the identity warning")
+	}
+	m.formIx = len(m.formRows()) - 1
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenReview {
+		t.Fatalf("continue after acknowledgement -> %v, want summary", m.screen)
 	}
 }
 
@@ -374,7 +417,7 @@ func TestManualSSIDThenPassphraseTyping(t *testing.T) {
 	}
 }
 
-func TestConfirmViewFitsSmallTerminal(t *testing.T) {
+func TestFormAndSummaryFitSmallTerminal(t *testing.T) {
 	m := newModel(Options{})
 	m.width, m.height = 80, 24
 	m.screen = screenConfirm
@@ -383,28 +426,40 @@ func TestConfirmViewFitsSmallTerminal(t *testing.T) {
 	m.generated = "generated-password-1234"
 	m.passwordReady = true
 	m.passMode = passGenerate
+	m.backup = &device.BackupResult{
+		Path:    "/Users/me/.config/capsulad-installer/backups/capsula-mini-20261123.tar.gz",
+		Bytes:   12 << 20,
+		Entries: 34,
+	}
 	m.space = &install.SpaceCheck{
 		AvailableBytes: 1 << 30, RequiredBytes: 8 << 20, OK: true,
 		ReserveBytes: 8 << 20, BundleBytes: 24 << 20, AppBytes: 40 << 20,
 	}
 
+	// Step 4: the form, with its acknowledgement and continue action visible.
 	view := m.View()
-	lines := strings.Split(view, "\n")
-	if len(lines) > m.height {
-		t.Fatalf("view is %d lines, terminal is %d", len(lines), m.height)
+	if lines := strings.Split(view, "\n"); len(lines) > m.height {
+		t.Fatalf("form view is %d lines, terminal is %d", len(lines), m.height)
 	}
-	if !strings.Contains(lines[len(lines)-1], "install") {
-		t.Fatalf("primary action missing from the fixed footer: %q", lines[len(lines)-1])
-	}
-	// The required acknowledgement and the install action must be visible
-	// without scrolling on a stock 80x24 terminal.
-	for _, want := range []string{"Nothing is deleted", "Install capsulad"} {
+	for _, want := range []string{"Nothing is deleted", "Continue to summary"} {
 		if !strings.Contains(view, want) {
-			t.Fatalf("review screen hides %q at 24 rows", want)
+			t.Fatalf("form hides %q at 24 rows", want)
 		}
 	}
 
-	// A shorter terminal does clip, and then says how to scroll.
+	// Step 5: the installation summary and its install action.
+	m.screen = screenReview
+	view = m.View()
+	if lines := strings.Split(view, "\n"); len(lines) > m.height {
+		t.Fatalf("summary view is %d lines, terminal is %d", len(lines), m.height)
+	}
+	for _, want := range []string{"Installation summary", "Install capsulad"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("summary hides %q at 24 rows", want)
+		}
+	}
+
+	// A shorter terminal clips, and then says how to scroll.
 	m.height = 12
 	view = m.View()
 	if lines := strings.Split(view, "\n"); len(lines) > m.height {
@@ -489,6 +544,98 @@ func TestAddressTabMovesInputFocus(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if m.sshUserInput.Value() == "root" {
 		t.Fatalf("typing went to the wrong field: ssh user = %q", m.sshUserInput.Value())
+	}
+}
+
+func TestCatalogsComplete(t *testing.T) {
+	check := func(c *catalog, name string) {
+		v := reflect.ValueOf(*c)
+		for i := range v.NumField() {
+			f := v.Field(i)
+			field := v.Type().Field(i).Name
+			switch f.Kind() {
+			case reflect.String:
+				if strings.TrimSpace(f.String()) == "" {
+					t.Errorf("%s.%s is empty", name, field)
+				}
+			case reflect.Int:
+				if f.Int() <= 0 {
+					t.Errorf("%s.%s = %d", name, field, f.Int())
+				}
+			case reflect.Map:
+				if f.IsNil() || f.Len() == 0 {
+					t.Errorf("%s.%s is empty", name, field)
+				}
+			}
+		}
+	}
+	check(&enCatalog, "en")
+	check(&ruCatalog, "ru")
+	for id := range enCatalog.appDescriptions {
+		if ruCatalog.appDescriptions[id] == "" {
+			t.Errorf("missing Russian app description for %s", id)
+		}
+	}
+	for p := range enCatalog.platformLabels {
+		if ruCatalog.platformLabels[p] == "" {
+			t.Errorf("missing Russian platform label for %s", p)
+		}
+	}
+}
+
+func TestRussianRenderingAndInputPreserved(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 80, 30
+	m.addrInput.SetValue("192.168.1.42")
+	m.setLanguage(langRU)
+	if m.addrInput.Value() != "192.168.1.42" {
+		t.Fatal("switching language cleared the address")
+	}
+	if got := m.addrInput.Placeholder; got != ruCatalog.addrPlaceholder {
+		t.Fatalf("placeholder = %q", got)
+	}
+	if !strings.Contains(m.View(), "Язык") || !strings.Contains(m.View(), "Устройство") {
+		t.Fatal("Russian first screen missing")
+	}
+	m.screen = screenConfirm
+	m.authState = install.AuthState{Configured: true, Known: true}
+	m.generated = "generated-password-1234"
+	m.passwordReady = true
+	if !strings.Contains(m.View(), "Параметры установки") || !strings.Contains(m.View(), "Перейти к сводке") {
+		t.Fatal("Russian options form missing")
+	}
+	m.screen = screenReview
+	m.det = device.Detection{Platform: device.PlatformRockchipStock, Arch: "aarch64"}
+	if !strings.Contains(m.View(), "Сводка установки") || !strings.Contains(m.View(), "Установить capsulad") {
+		t.Fatal("Russian installation summary missing")
+	}
+}
+
+func TestFormHasNoLetterShortcuts(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.screen = screenConfirm
+	m.authState = install.AuthState{Configured: true, Known: true}
+	m.formIx = m.formRowIndex(rowJingle)
+	jingle := m.jingle
+	for _, ch := range []string{"j", "a", "f", "x", "1", "2", "3"} {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(ch)})
+	}
+	if m.jingle != jingle || m.acknowledged || m.forceInstall || m.passEditing || m.formIx != m.formRowIndex(rowJingle) {
+		t.Fatal("a letter shortcut changed the form")
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.jingle == jingle {
+		t.Fatal("enter on the jingle row did not toggle it")
+	}
+	m.formIx = m.formRowIndex(rowAcknowledge)
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}); !m.acknowledged {
+		t.Fatal("space on the acknowledgement row did not toggle it")
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd}); m.formIx != len(m.formRows())-1 {
+		t.Fatalf("end selected row %d, want continue", m.formIx)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome}); m.formIx != 0 {
+		t.Fatalf("home selected row %d, want the first row", m.formIx)
 	}
 }
 

@@ -68,19 +68,21 @@ core `release.json` for compatibility with older combined releases.
 
 ## What the interface does
 
-1. **Device** — Capsula Mini is offered; the original Capsula is disabled with
-   the reason that no maintained firmware image exists.
+1. **Language and device** — the first screen selects English (UK) or Russian
+   and switches the whole interface immediately. Capsula Mini is offered; the
+   original Capsula is disabled with the reason that no maintained firmware
+   image exists.
 2. **Firmware** — *Jailbroken stock (capsula-jb)* over ADB, or *Alpine Linux*
    over SSH. The board (Rockchip or Amlogic) is discovered, not chosen.
 3. **Address** — ADB connects to `<address>:5555`; SSH defaults to `root` and
    accepts a hidden password, a private key, or both.
 4. **Identity** — the installer reads `/proc/device-tree/serial-number`, then
    `getprop ro.serialno`, then `devinfo`, plus the hostname, and shows the result
-   on the confirmation screen. After the deployment's reconnect it reads the
+   on the installation summary. After the deployment's reconnect it reads the
    identity again and aborts before sending Wi-Fi, app or token credentials if a
-   serial that was present has changed. With no stable serial the confirmation
-   carries a warning and requires an explicit acknowledgement (`x`); ADB itself
-   cannot authenticate the peer.
+   serial that was present has changed. With no stable serial the options form
+   carries a warning and requires an explicit acknowledgement (move to the row
+   and press Enter or Space); ADB itself cannot authenticate the peer.
 5. **Discovery and backup** — after connecting, the installer reads
    `/etc/os-release`, `/proc/device-tree/compatible` and `uname -m`, maps them to
    `rockchip-stock`, `amlogic-stock` or `amlogic-alpine`, and refuses a
@@ -102,11 +104,15 @@ core `release.json` for compatibility with older combined releases.
      (8 MiB + any positive staged-minus-installed daemon growth) with the
      available bytes. When short it names installed apps that are not running,
      but never stops or moves them. The deploy tool remains authoritative.
-6. **Confirmation** — the administrator password (generated with `crypto/rand`,
-   24 characters, or your own, or the existing one when `auth status` says it is
-   set), the one-time jingle (default **off**), and an explicit acknowledgement
-   are shown before anything is deployed.
-7. **Deployment** — the bundle and the device CLI are pushed to
+6. **Installation options** — an arrow-navigated form: the administrator
+   password (generated with `crypto/rand`, 24 characters, or your own, or the
+   existing one when `auth status` says it is set), the one-time jingle (default
+   **off**), and the acknowledgements. Up/Down moves, Enter or Space changes the
+   selected row; there are no letter shortcuts.
+7. **Installation summary** — the detected platform, identity, backup path and
+   free-space check, with the **Install capsulad** action. Nothing is deployed
+   before this screen.
+8. **Deployment** — the bundle and the device CLI are pushed to
    `/tmp/capsulad-installer/`. The bundle must carry `capsulad-cli`; a
    `BUNDLE_CLI=0` bundle is refused before the device is touched. The
    administrator password and certificate are then created or changed **before**
@@ -121,37 +127,39 @@ core `release.json` for compatibility with older combined releases.
    writes `<data-dir>/startup-sound.played` when the jingle is off (creating the
    data directory first), or removes the marker when the jingle is on; the
    daemon's one-shot cue follows that choice on its first boot.
-8. **Wi-Fi** — `-json wifi status`; a connected link is skipped. Otherwise the
-   scan is deduplicated by SSID (strongest advertisement wins, the connected one
-   is never hidden). Every connect passes an explicit `-security` value: `open`
-   for an open network, otherwise the scanned mode; a manual secured entry with
-   no chosen mode relies on the backend's WPA2 default. A passphrase travels on
-   stdin only for a secured network, and the installer waits for
-   `state=connected` with an IP. Scan-less firmware gets a manual SSID entry.
-   Setup-AP details are surfaced when active.
-9. **Administrator password** — shown on this screen, with OSC 52 copy, a
+9. **Administrator password** — shown after deployment, with OSC 52 copy, a
    "change now" key that runs `auth set-password` through stdin, and a required
    "stored" confirmation. Copy it before continuing. Recovery is
    `capsulad-cli auth set-password` in the device shell.
-10. **Apps** — exactly ten first-party apps are offered: AirPlay 2, Cadence,
-   Dumb Assistant, Home Assistant, Marusia, OpenCapsula, PA Speaker, Internet
-   Radio, Simon Says, Soundboard. Hardware Test is deliberately absent. Each
-   selected archive is pushed and installed in order, and its ID is verified in
-   `app list`. A missing artifact is reported as a failed app, never silently
-   omitted.
-11. **Marusia** — on stock, an existing `/data/voice-agent/session.json` with
+10. **Wi-Fi** — `-json wifi status`; a connected link is skipped. Otherwise the
+    scan is deduplicated by SSID (strongest advertisement wins, the connected one
+    is never hidden). Every connect passes an explicit `-security` value: `open`
+    for an open network, otherwise the scanned mode; a manual secured entry with
+    no chosen mode relies on the backend's WPA2 default. A passphrase travels on
+    stdin only for a secured network, and the installer waits for
+    `state=connected` with an IP. Scan-less firmware gets a manual SSID entry.
+    Setup-AP details are surfaced when active.
+11. **Apps** — exactly ten first-party apps are offered: AirPlay 2, Cadence,
+    Dumb Assistant, Home Assistant, Marusia, OpenCapsula, PA Speaker, Internet
+    Radio, Simon Says, Soundboard. Hardware Test is deliberately absent. Each
+    selected archive is pushed and installed in order, and its ID is verified in
+    `app list`. A missing artifact is reported as a failed app, never silently
+    omitted.
+12. **Marusia** — on stock, an existing `/data/voice-agent/session.json` with
     `session` and `secret` is migrated into app settings; the vendor file is
     left in place. Otherwise (and on all Alpine installs) a hidden, optional VK
     access token is stored through stdin.
-12. **Summary** — Web UI URL, certificate SHA-256 fingerprint, certificate
+13. **Summary** — Web UI URL, certificate SHA-256 fingerprint, certificate
     downloads (`/api/cert.pem`, `/api/ca.pem`) and verification
     (`capsulad-cli cert status`), installed apps and failures, Wi-Fi state, backup
     path and the exact rollback command. It states that nothing was deleted.
 
 Every step keeps a running log, and back/retry is available where returning is
-safe. Each screen has a fixed header showing the current step, a body sized to
-the terminal, and a footer that lists the keys for that screen; tall bodies
-scroll with PgUp/PgDn and the primary action stays in the footer. Ctrl-C (or Esc
+safe. The interface is bilingual: English (UK) and Russian are chosen on the
+first screen. Each screen has a fixed header showing the current step, a body
+sized to the terminal, and a footer that lists the keys for that screen; tall
+bodies scroll with PgUp/PgDn and the primary action stays in the footer. The
+options form is driven entirely by Up/Down plus Enter/Space. Ctrl-C (or Esc
 while a step is running) opens a stop dialog; stopping cancels the step and
 exits. Ctrl-C again on that dialog stops immediately. Stopping a detached
 deployment still leaves the device-side script running, as described above.

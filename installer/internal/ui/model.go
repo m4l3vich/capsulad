@@ -48,6 +48,7 @@ const (
 	screenFirmware
 	screenAddress
 	screenConfirm
+	screenReview
 	screenWorking
 	screenShowPassword
 	screenChangePassword
@@ -82,6 +83,20 @@ const (
 	passGenerate passwordMode = iota
 	passCustom
 	passKeep
+)
+
+// formRow is one focusable row of the step 4 installation-options form.
+type formRow int
+
+const (
+	rowPassGenerate formRow = iota
+	rowPassCustom
+	rowPassKeep
+	rowJingle
+	rowIdentityAck
+	rowAcknowledge
+	rowForce
+	rowContinue
 )
 
 type logMsg string
@@ -130,6 +145,11 @@ type model struct {
 	prevScreen    screen
 	cursor        int
 	scroll        int
+	bodyWidth     int
+	lang          lang
+	cat           *catalog
+	firstIx       int
+	formIx        int
 
 	spinner  spinner.Model
 	logs     []string
@@ -150,7 +170,6 @@ type model struct {
 
 	firmware   device.Firmware
 	firmwareIx int
-	deviceIx   int
 
 	inst             *install.Installer
 	det              device.Detection
@@ -212,25 +231,51 @@ func newModel(opts Options) *model {
 	m := &model{
 		opts:          opts,
 		screen:        screenDevice,
-		deviceIx:      1,
+		lang:          langEN,
+		cat:           catalogFor(langEN),
+		firstIx:       3,
 		spinner:       spinner.New(spinner.WithSpinner(spinner.Dot)),
 		appSelected:   map[string]bool{},
-		addrInput:     newInput("device address, e.g. 192.168.1.42", false, 48),
-		sshUserInput:  newInput("root", false, 32),
-		sshPassInput:  newInput("SSH password (hidden)", true, 48),
-		sshKeyInput:   newInput("SSH private key path (optional)", false, 64),
-		customPass:    newInput("your admin password (hidden)", true, 48),
-		wifiSSIDInput: newInput("Wi-Fi network name", false, 40),
-		wifiPassInput: newInput("Wi-Fi passphrase (hidden)", true, 48),
-		marusiaToken:  newInput("VK access token (hidden, optional)", true, 64),
+		addrInput:     newInput("", false, 48),
+		sshUserInput:  newInput("", false, 32),
+		sshPassInput:  newInput("", true, 48),
+		sshKeyInput:   newInput("", false, 64),
+		customPass:    newInput("", true, 48),
+		wifiSSIDInput: newInput("", false, 40),
+		wifiPassInput: newInput("", true, 48),
+		marusiaToken:  newInput("", true, 64),
 	}
 	m.sshUserInput.SetValue("root")
 	if opts.SSHKey != "" {
 		m.sshKeyInput.SetValue(opts.SSHKey)
 	}
+	m.applyPlaceholders()
 	m.viewport = viewport.New(76, 12)
 	m.viewport.Style = logStyle
 	return m
+}
+
+// setLanguage switches the interface catalog without losing current input.
+func (m *model) setLanguage(l lang) {
+	if l == m.lang {
+		return
+	}
+	m.lang = l
+	m.cat = catalogFor(l)
+	m.applyPlaceholders()
+	m.status = ""
+}
+
+func (m *model) applyPlaceholders() {
+	c := m.cat
+	m.addrInput.Placeholder = c.addrPlaceholder
+	m.sshUserInput.Placeholder = c.sshUserPlaceholder
+	m.sshPassInput.Placeholder = c.sshPassPlaceholder
+	m.sshKeyInput.Placeholder = c.keyPlaceholder
+	m.customPass.Placeholder = c.adminPassPlaceholder
+	m.wifiSSIDInput.Placeholder = c.wifiSSIDPlaceholder
+	m.wifiPassInput.Placeholder = c.wifiPassPlaceholder
+	m.marusiaToken.Placeholder = c.tokenPlaceholder
 }
 
 func newInput(placeholder string, secret bool, width int) textinput.Model {

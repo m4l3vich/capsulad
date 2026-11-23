@@ -30,11 +30,15 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.scrollBy(m.pageStep())
 			return true, nil
 		case "home":
-			m.scroll = 0
-			return true, nil
+			if m.screen != screenConfirm {
+				m.scroll = 0
+				return true, nil
+			}
 		case "end":
-			m.scroll = 1 << 20
-			return true, nil
+			if m.screen != screenConfirm {
+				m.scroll = 1 << 20
+				return true, nil
+			}
 		}
 	}
 	switch m.screen {
@@ -44,12 +48,12 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.hostKey.reply <- true
 			m.hostKey = nil
 			m.screen = m.prevScreen
-			m.status = "host key pinned"
+			m.status = m.cat.statusHostKeyPinned
 		case "n", "N", "esc":
 			m.hostKey.reply <- false
 			m.hostKey = nil
 			m.screen = m.prevScreen
-			m.status = "host key refused"
+			m.status = m.cat.statusHostKeyRefused
 		}
 		return true, nil
 
@@ -72,21 +76,26 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 	case screenDevice:
 		switch s {
 		case "up", "k":
-			if m.deviceIx > 0 {
-				m.deviceIx--
+			if m.firstIx > 0 {
+				m.firstIx--
 			}
 			m.status = ""
 		case "down", "j":
-			if m.deviceIx < 1 {
-				m.deviceIx++
+			if m.firstIx < 3 {
+				m.firstIx++
 			}
 			m.status = ""
-		case "enter":
-			if m.deviceIx == 0 {
-				m.status = "The original Capsula is not supported by capsulad."
-				return true, nil
+		case "enter", " ":
+			switch m.firstIx {
+			case 0:
+				m.setLanguage(langEN)
+			case 1:
+				m.setLanguage(langRU)
+			case 2:
+				m.status = m.cat.statusCapsulaUnsupported
+			case 3:
+				m.screen = screenFirmware
 			}
-			m.screen = screenFirmware
 		case "esc", "q":
 			return true, tea.Quit
 		}
@@ -114,11 +123,11 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 	case screenAddress:
 		if s == "enter" {
 			if strings.TrimSpace(m.addrInput.Value()) == "" {
-				m.status = "Enter the device address first."
+				m.status = m.cat.statusAddressEmpty
 				return true, nil
 			}
 			if m.firmware == device.FirmwareAlpine && m.sshPassInput.Value() == "" && strings.TrimSpace(m.sshKeyInput.Value()) == "" {
-				m.status = "Alpine needs an SSH password or a private key."
+				m.status = m.cat.statusAlpineCreds
 				return true, nil
 			}
 			m.status = ""
@@ -144,77 +153,94 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 		if m.passEditing {
 			switch s {
 			case "enter", "tab":
-				if err := install.ValidatePassword(m.customPass.Value()); err != nil {
-					m.status = err.Error()
+				pw := m.customPass.Value()
+				if err := install.ValidatePassword(pw); err != nil {
+					m.status = m.passwordError(pw, err)
 					return true, nil
 				}
 				m.passwordReady = true
 				m.passEditing = false
 				m.customPass.Blur()
-				m.status = "Password captured; it will be sent over stdin."
+				m.status = m.cat.passwordCaptured
 				return true, nil
 			case "esc":
 				m.passEditing = false
 				m.customPass.Blur()
 				m.passMode = passGenerate
-				m.passwordReady = false
+				m.passwordReady = true
+				m.formIx = m.formRowIndex(rowPassGenerate)
+				m.status = ""
 				return true, nil
 			}
 			return false, nil
 		}
+		rows := m.formRows()
+		if len(rows) == 0 {
+			return true, nil
+		}
+		if m.formIx >= len(rows) {
+			m.formIx = len(rows) - 1
+		}
+		if m.formIx < 0 {
+			m.formIx = 0
+		}
 		switch s {
-		case "1":
-			m.passMode = passGenerate
-			m.passwordReady = true
-			m.passEditing = false
-		case "2":
-			m.passMode = passCustom
-			m.passwordReady = false
-			m.passEditing = true
-			m.customPass.Focus()
-			m.status = "Type the password, then press Enter."
-		case "3":
-			if m.authState.Configured {
-				m.passMode = passKeep
-				m.passwordReady = true
-				m.passEditing = false
+		case "up":
+			if m.formIx > 0 {
+				m.formIx--
 			}
-		case "j":
-			m.jingle = !m.jingle
-		case "a":
-			m.acknowledged = !m.acknowledged
-		case "x":
-			if m.identityRequired {
-				m.identityAck = !m.identityAck
+		case "down":
+			if m.formIx < len(rows)-1 {
+				m.formIx++
 			}
-		case "f":
-			if m.space != nil && !m.space.OK {
-				m.forceInstall = !m.forceInstall
-			}
-		case "i", "enter":
-			if !m.acknowledged {
-				m.status = "Tick the acknowledgement (a) before installing."
-				return true, nil
-			}
-			if m.identityRequired && !m.identityAck {
-				m.status = "This device has no stable serial; ADB cannot authenticate it. Press x to acknowledge, or abort."
-				return true, nil
-			}
-			if m.space != nil && !m.space.OK && !m.forceInstall {
-				m.status = "Free space is below the deployment floor; press f to install anyway or b to abort."
-				return true, nil
-			}
-			if m.passMode == passCustom && !m.passwordReady {
-				m.status = "Press 2 to edit the password, type it, then press Enter."
-				return true, nil
-			}
-			m.status = ""
-			return true, m.startOp(opDeploy)
-		case "b":
-			m.screen = screenAddress
-			m.status = ""
+		case "home":
+			m.formIx = 0
+		case "end":
+			m.formIx = len(rows) - 1
 		case "esc":
 			m.screen = screenAddress
+			m.status = ""
+		case "enter", " ":
+			switch rows[m.formIx] {
+			case rowPassGenerate:
+				m.passMode = passGenerate
+				m.passwordReady = true
+			case rowPassCustom:
+				m.passMode = passCustom
+				m.passwordReady = false
+				m.passEditing = true
+				m.customPass.Focus()
+				m.status = m.cat.passCustomHint
+			case rowPassKeep:
+				m.passMode = passKeep
+				m.passwordReady = true
+			case rowJingle:
+				m.jingle = !m.jingle
+			case rowIdentityAck:
+				m.identityAck = !m.identityAck
+			case rowAcknowledge:
+				m.acknowledged = !m.acknowledged
+			case rowForce:
+				m.forceInstall = !m.forceInstall
+			case rowContinue:
+				if msg := m.formValidation(); msg != "" {
+					m.status = msg
+					return true, nil
+				}
+				m.status = ""
+				m.screen = screenReview
+			}
+		}
+		return true, nil
+
+	case screenReview:
+		switch s {
+		case "enter", "i":
+			m.status = ""
+			return true, m.startOp(opDeploy)
+		case "esc":
+			m.screen = screenConfirm
+			m.status = ""
 		}
 		return true, nil
 
@@ -254,7 +280,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.passwordAcked = !m.passwordAcked
 		case "enter":
 			if !m.passwordAcked && m.chosenPassword() != "" {
-				m.status = "Confirm you have stored the password (space), or press c to copy it."
+				m.status = m.cat.statusConfirmStored
 				return true, nil
 			}
 			m.screen = screenWorking
@@ -267,7 +293,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 		case "enter":
 			pw := m.customPass.Value()
 			if err := install.ValidatePassword(pw); err != nil {
-				m.status = err.Error()
+				m.status = m.passwordError(pw, err)
 				return true, nil
 			}
 			m.pendingPass = pw
@@ -318,7 +344,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 		case "s":
 			m.wifiSkip = true
 			m.screen = screenApps
-			m.logFunc()("Wi-Fi skipped by the user")
+			m.logFunc()(m.cat.logWiFiSkipped)
 		case "b":
 			m.screen = screenShowPassword
 		}
@@ -329,7 +355,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 		case "enter":
 			ssid := m.selectedSSID()
 			if ssid == "" {
-				m.status = "No network selected."
+				m.status = m.cat.statusNoNetwork
 				return true, nil
 			}
 			m.screen = screenWorking
@@ -346,11 +372,14 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 		case "enter":
 			ssid := strings.TrimSpace(m.wifiSSIDInput.Value())
 			if ssid == "" {
-				m.status = "Enter a network name."
+				m.status = m.cat.statusEnterSSID
 				return true, nil
 			}
 			if err := install.ValidateSSID(ssid); err != nil {
-				m.status = err.Error()
+				m.status = m.ssidError(ssid)
+				if m.status == "" {
+					m.status = err.Error()
+				}
 				return true, nil
 			}
 			if m.wifiOpen {
@@ -449,36 +478,36 @@ type errAction struct {
 func (m *model) errorActions() []errAction {
 	var acts []errAction
 	if m.errOp != opNone {
-		acts = append(acts, errAction{"r", "Retry this step"})
+		acts = append(acts, errAction{"r", m.cat.actionRetry})
 	}
 	switch m.errOp {
 	case opWiFiStatus, opWiFiConnect:
 		if m.errCanAddr {
-			acts = append(acts, errAction{"a", "Change the device address"})
+			acts = append(acts, errAction{"a", m.cat.actionChangeAddress})
 		}
 		if m.errCanSkip {
-			acts = append(acts, errAction{"s", "Skip Wi-Fi and continue"})
+			acts = append(acts, errAction{"s", m.cat.actionSkipWiFi})
 		}
 	case opApps:
 		if m.errCanBack {
-			acts = append(acts, errAction{"b", "Back to the app selection"})
+			acts = append(acts, errAction{"b", m.cat.actionBackApps})
 		}
 		if m.errCanSkip {
-			acts = append(acts, errAction{"s", "Skip to the summary"})
+			acts = append(acts, errAction{"s", m.cat.actionSkipSummary})
 		}
 	case opMarusiaProbe, opMarusiaToken:
 		if m.errCanSkip {
-			acts = append(acts, errAction{"s", "Skip to the summary"})
+			acts = append(acts, errAction{"s", m.cat.actionSkipSummary})
 		}
 	default:
 		if m.errCanAddr {
-			acts = append(acts, errAction{"a", "Change the device address"})
+			acts = append(acts, errAction{"a", m.cat.actionChangeAddress})
 		}
 		if m.errCanBack {
-			acts = append(acts, errAction{"b", "Back"})
+			acts = append(acts, errAction{"b", m.cat.actionBack})
 		}
 	}
-	return append(acts, errAction{"q", "Quit the installer"})
+	return append(acts, errAction{"q", m.cat.actionQuit})
 }
 
 func (m *model) runErrAction(key string) (bool, tea.Cmd) {
@@ -495,7 +524,7 @@ func (m *model) runErrAction(key string) (bool, tea.Cmd) {
 		if m.errCanAddr {
 			m.fieldIx = 0
 			m.screen = screenAddress
-			m.status = "Re-enter the address the device has now; then continue."
+			m.status = m.cat.statusReenterAddress
 		}
 	case "s":
 		if m.errCanSkip {
@@ -505,6 +534,109 @@ func (m *model) runErrAction(key string) (bool, tea.Cmd) {
 		return true, tea.Quit
 	}
 	return true, nil
+}
+
+// formRows lists the focusable rows of the options form in display order.
+func (m *model) formRows() []formRow {
+	rows := []formRow{rowPassGenerate, rowPassCustom}
+	if m.authState.Configured {
+		rows = append(rows, rowPassKeep)
+	}
+	rows = append(rows, rowJingle)
+	if m.identityRequired {
+		rows = append(rows, rowIdentityAck)
+	}
+	rows = append(rows, rowAcknowledge)
+	if m.space != nil && !m.space.OK {
+		rows = append(rows, rowForce)
+	}
+	return append(rows, rowContinue)
+}
+
+func (m *model) formRowIndex(k formRow) int {
+	for i, r := range m.formRows() {
+		if r == k {
+			return i
+		}
+	}
+	return 0
+}
+
+// formValidation checks the choices before moving to the installation summary.
+// It moves the cursor to the row that needs attention.
+func (m *model) formValidation() string {
+	if m.passMode == passCustom && !m.passwordReady {
+		m.formIx = m.formRowIndex(rowPassCustom)
+		return m.cat.statusCustomRequired
+	}
+	if m.identityRequired && !m.identityAck {
+		m.formIx = m.formRowIndex(rowIdentityAck)
+		return m.cat.statusIdentityRequired
+	}
+	if !m.acknowledged {
+		m.formIx = m.formRowIndex(rowAcknowledge)
+		return m.cat.statusAckRequired
+	}
+	if m.space != nil && !m.space.OK && !m.forceInstall {
+		m.formIx = m.formRowIndex(rowForce)
+		return m.cat.statusSpaceRequired
+	}
+	return ""
+}
+
+// passwordError localises the two cheap preconditions install enforces.
+func (m *model) passwordError(pw string, err error) string {
+	if len(pw) < install.MinCustomPasswordLength {
+		return fmt.Sprintf(m.cat.errPasswordShortFormat, install.MinCustomPasswordLength)
+	}
+	if strings.ContainsAny(pw, "\r\n") {
+		return m.cat.errPasswordNewline
+	}
+	return err.Error()
+}
+
+// ssidError localises install.ValidateSSID's conditions.
+func (m *model) ssidError(ssid string) string {
+	switch {
+	case strings.TrimSpace(ssid) == "":
+		return m.cat.errSSIDEmpty
+	case strings.HasPrefix(ssid, "-"):
+		return fmt.Sprintf(m.cat.errSSIDStartsDashFormat, ssid)
+	case hasControl(ssid):
+		return m.cat.errSSIDControl
+	}
+	return ""
+}
+
+func (m *model) platformLabel(p device.Platform) string {
+	if s, ok := m.cat.platformLabels[p]; ok {
+		return s
+	}
+	return p.Label()
+}
+
+func (m *model) appDescription(a install.App) string {
+	if s, ok := m.cat.appDescriptions[a.ID]; ok {
+		return s
+	}
+	return a.Description
+}
+
+func (m *model) recoveryAdvice(address, apSSID, apHint string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, m.cat.recoveryAddressFormat+"\n", address)
+	b.WriteString(m.cat.recoveryWait + "\n")
+	if apSSID != "" {
+		fmt.Fprintf(&b, m.cat.recoveryNetworkFormat+"\n", apSSID)
+	}
+	if apHint != "" {
+		fmt.Fprintf(&b, m.cat.recoveryHintFormat+"\n", apHint)
+	} else {
+		b.WriteString(m.cat.recoveryPasswordNote + "\n")
+	}
+	fmt.Fprintf(&b, m.cat.recoveryPortalFormat+"\n", "http://192.168.4.1")
+	b.WriteString(m.cat.recoveryRetry)
+	return b.String()
 }
 
 func (m *model) selectedSSID() string {
@@ -537,7 +669,7 @@ func (m *model) startOp(kind opKind) tea.Cmd {
 	m.op = kind
 	m.opStart = time.Now()
 	m.screen = screenWorking
-	m.status = opLabel(kind)
+	m.status = m.opLabel(kind)
 	m.progress = ""
 	switch kind {
 	case opPrepare:
@@ -566,28 +698,28 @@ func (m *model) startWiFiConnect(ssid, security, pass string) tea.Cmd {
 	m.op = opWiFiConnect
 	m.opStart = time.Now()
 	m.screen = screenWorking
-	m.status = "Connecting to Wi-Fi"
+	m.status = m.cat.connectingWiFi
 	return m.wifiConnectCmd(ssid, security, pass)
 }
 
-func opLabel(kind opKind) string {
+func (m *model) opLabel(kind opKind) string {
 	switch kind {
 	case opPrepare:
-		return "Connecting to the device and preparing the installation"
+		return m.cat.opPrepare
 	case opDeploy:
-		return "Deploying capsulad (detached; the link may drop)"
+		return m.cat.opDeploy
 	case opWiFiStatus:
-		return "Reading Wi-Fi state"
+		return m.cat.opWiFiStatus
 	case opWiFiConnect:
-		return "Joining the Wi-Fi network"
+		return m.cat.opWiFiConnect
 	case opApps:
-		return "Installing first-party apps"
+		return m.cat.opApps
 	case opMarusiaProbe, opMarusiaToken:
-		return "Configuring Marusia"
+		return m.cat.opMarusia
 	case opChangePassword:
-		return "Updating the administrator password"
+		return m.cat.opChangePassword
 	}
-	return "Working"
+	return m.cat.opWorking
 }
 
 func (m *model) prepareCmd() tea.Cmd {
@@ -681,7 +813,7 @@ func (m *model) prepareCmd() tea.Cmd {
 
 		err := dev.Connect(ctx)
 		if errors.Is(err, device.ErrUnauthorized) {
-			logf("On the device, accept the \"Allow USB debugging?\" prompt for this computer.")
+			logf(m.cat.logAcceptDebugging)
 			if waiter, ok := dev.(interface {
 				WaitAuthorized(context.Context) error
 			}); ok {
@@ -712,7 +844,7 @@ func (m *model) prepareCmd() tea.Cmd {
 		if identity.Available() {
 			logf("device identity: %s", identity)
 		} else if dev.Kind() == "adb" {
-			logf("warning: this device has no stable serial; ADB cannot authenticate it across a reconnect")
+			logf(m.cat.logNoStableSerial)
 		}
 		inst, err := install.New(dev, provider, det.Platform, opts.ConfigDir)
 		if err != nil {
@@ -775,7 +907,7 @@ func (m *model) deployCmd() tea.Cmd {
 
 	var before install.BeforeLaunch
 	if configured && mode == passKeep {
-		logf("keeping the existing administrator password; verifying it before launch")
+		logf(m.cat.logKeepingPassword)
 	} else {
 		before = func(ctx context.Context) error { return inst.ApplyPassword(ctx, password, hostname, addr) }
 	}
@@ -836,20 +968,20 @@ func (m *model) wifiStatusCmd() tea.Cmd {
 		}
 		res.wifi = w
 		if w.Connected() {
-			logf("Wi-Fi is already connected: %s (%s)", w.SSID, w.IPAddress)
+			logf(m.cat.logWiFiConnectedFormat, w.SSID, w.IPAddress)
 			return res
 		}
 		if !w.Available {
-			logf("Wi-Fi is not available: %s", w.Detail)
+			logf(m.cat.logWiFiUnavailableFormat, w.Detail)
 			return res
 		}
 		if !w.ScanSupported {
-			logf("this firmware cannot scan; enter the network name manually")
+			logf(m.cat.logNoScanManual)
 			return res
 		}
 		nets, err := inst.WiFiScan(ctx)
 		if err != nil {
-			logf("scan failed: %v", err)
+			logf(m.cat.logScanFailedFormat, err)
 			return res
 		}
 		res.networks = nets
@@ -937,7 +1069,7 @@ func (m *model) handleOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
 	// A step can finish while the user is deciding whether to stop. Keep the
 	// result rather than silently yanking them back to the stop dialog.
 	if wasAbort && msg.err == nil && m.screen != screenWorking {
-		m.status = "That step finished before it could be stopped; nothing was cancelled."
+		m.status = m.cat.statusFinishedBeforeStop
 	}
 	return model, cmd
 }
@@ -992,6 +1124,7 @@ func (m *model) applyOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
 		}
 		m.passwordReady = true
 		m.passEditing = false
+		m.formIx = 0
 		m.acknowledged = false
 		m.forceInstall = false
 		m.appResults = nil
@@ -1064,7 +1197,7 @@ func (m *model) showError(msg opDoneMsg) {
 		m.backScreen = screenAddress
 		m.errCanBack = true
 	case opDeploy:
-		m.backScreen = screenConfirm
+		m.backScreen = screenReview
 		m.errCanBack = true
 		m.errCanAddr = true
 	case opWiFiStatus, opWiFiConnect:

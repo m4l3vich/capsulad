@@ -23,16 +23,13 @@ var (
 	labelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	valueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	boxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1)
-	logStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	logStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	footerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	stepStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	ruleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 )
 
-const (
-	minBodyLines = 3
-	labelWidth   = 12
-)
+const minBodyLines = 3
 
 // View renders the persistent frame: title and step, a body sized to the
 // terminal, then the status line and key hints. The footer never scrolls away,
@@ -53,12 +50,17 @@ func (m *model) View() string {
 		// Those screens already render the current step in their body.
 		status = ""
 	}
-	statusLines := 0
+	var statusLines []string
 	if status != "" {
-		statusLines = 1
+		wrapped := ansi.Wordwrap(cleanLine(status), max(10, cw-2), "")
+		statusLines = strings.Split(wrapped, "\n")
+		if len(statusLines) > 3 {
+			statusLines = statusLines[:3]
+			statusLines[2] = ansi.Truncate(statusLines[2]+"…", max(1, cw-4), "…")
+		}
 	}
 	// One leading blank, header, rule, gap, body, gap, status, footer.
-	avail := height - 6 - statusLines
+	avail := height - 6 - len(statusLines)
 	if avail < minBodyLines {
 		avail = minBodyLines
 	}
@@ -74,8 +76,8 @@ func (m *model) View() string {
 	)
 	lines = append(lines, splitLines(m.scrolledBody(body, avail, cw))...)
 	lines = append(lines, "")
-	if status != "" {
-		lines = append(lines, warnStyle.Render("! "+ansi.Truncate(cleanLine(status), max(1, cw-2), "…")))
+	for _, ln := range statusLines {
+		lines = append(lines, warnStyle.Render("! "+ln))
 	}
 	lines = append(lines, m.hint(overflow, cw))
 	return strings.Join(lines, "\n")
@@ -95,35 +97,42 @@ func (m *model) headerLine(width int) string {
 }
 
 func (m *model) stepLabel() string {
+	var n int
+	var title string
 	switch m.screen {
 	case screenDevice:
-		return "Step 1 · Device"
+		n, title = 1, m.cat.stepLanguageDevice
 	case screenFirmware:
-		return "Step 2 · Firmware"
+		n, title = 2, m.cat.stepFirmware
 	case screenAddress:
-		return "Step 3 · Address"
+		n, title = 3, m.cat.stepAddress
 	case screenConfirm:
-		return "Step 4 · Review"
+		n, title = 4, m.cat.stepOptions
+	case screenReview:
+		n, title = 5, m.cat.stepSummary
 	case screenWorking:
-		return "Working"
+		return m.cat.stepWorking
 	case screenShowPassword, screenChangePassword:
-		return "Step 5 · Admin password"
+		n, title = 6, m.cat.stepPassword
 	case screenWiFi, screenWiFiPass, screenWiFiManual:
-		return "Step 6 · Wi-Fi"
+		n, title = 7, m.cat.stepWiFi
 	case screenApps:
-		return "Step 7 · Apps"
+		n, title = 8, m.cat.stepApps
 	case screenMarusia:
-		return "Step 8 · Marusia"
+		n, title = 9, m.cat.stepMarusia
 	case screenSummary:
-		return "Complete"
+		return m.cat.stepComplete
 	case screenError:
-		return "Stopped"
+		return m.cat.stepStopped
 	case screenHostKey:
-		return "SSH host key"
+		return m.cat.stepHostKey
 	case screenAbort:
-		return "Confirm stop"
+		return m.cat.stepAbort
 	}
-	return ""
+	if n == 0 {
+		return title
+	}
+	return fmt.Sprintf(m.cat.stepFormat, n, title)
 }
 
 func (m *model) footerVersion() string {
@@ -140,6 +149,7 @@ func (m *model) contentWidth() int {
 // bodyView dispatches to the current screen. Screens that embed a scrolling
 // pane (the operation log) receive the available height directly.
 func (m *model) bodyView(avail, width int) string {
+	m.bodyWidth = width
 	switch m.screen {
 	case screenDevice:
 		return m.viewDevice()
@@ -148,7 +158,9 @@ func (m *model) bodyView(avail, width int) string {
 	case screenAddress:
 		return m.viewAddress()
 	case screenConfirm:
-		return m.viewConfirm(width)
+		return m.viewForm(width)
+	case screenReview:
+		return m.viewReview(width)
 	case screenWorking:
 		return m.viewWorking(avail, width)
 	case screenShowPassword:
@@ -223,111 +235,127 @@ func splitLines(s string) []string {
 }
 
 func (m *model) hint(overflow bool, width int) string {
-	var parts []string
+	var suffix string
 	switch m.screen {
 	case screenDevice:
-		parts = []string{"↑/↓ select", "enter continue", "ctrl+c quit"}
+		suffix = m.cat.hintDevice
 	case screenFirmware:
-		parts = []string{"↑/↓ select", "enter continue", "esc back", "ctrl+c quit"}
+		suffix = m.cat.hintFirmware
 	case screenAddress:
 		if m.firmware == device.FirmwareAlpine {
-			parts = []string{"tab/shift+tab fields", "enter connect", "esc back"}
+			suffix = m.cat.hintAddressAlpine
 		} else {
-			parts = []string{"enter connect", "esc back"}
+			suffix = m.cat.hintAddressStock
 		}
 	case screenConfirm:
-		parts = []string{"i/enter install", "1/2/3 password", "j jingle", "a ack", "b back"}
-		if m.identityRequired {
-			parts = append(parts, "x identity")
+		if m.passEditing {
+			suffix = m.cat.hintFormEditing
+		} else {
+			suffix = m.cat.hintForm
 		}
+	case screenReview:
+		suffix = m.cat.hintSummary
 	case screenWorking:
-		parts = []string{"pgup/pgdn log", "esc stop", "ctrl+c stop"}
+		suffix = m.cat.hintWorking
 	case screenShowPassword:
-		parts = []string{"enter continue", "space confirm stored", "c copy", "n change"}
+		suffix = m.cat.hintPassword
 	case screenChangePassword:
-		parts = []string{"enter set password", "esc back"}
+		suffix = m.cat.hintChangePassword
 	case screenWiFi:
-		parts = []string{"enter join", "↑/↓ select", "m manual", "r rescan", "s skip", "esc back"}
+		suffix = m.cat.hintWiFi
 	case screenWiFiPass:
-		parts = []string{"enter join", "esc back"}
+		suffix = m.cat.hintWiFiPass
 	case screenWiFiManual:
-		parts = []string{"enter continue", "ctrl+o open network", "esc back"}
+		suffix = m.cat.hintWiFiManual
 	case screenApps:
-		parts = []string{"enter install", "space toggle", "a all", "n none", "s skip", "esc back"}
+		suffix = m.cat.hintApps
 	case screenMarusia:
-		parts = []string{"enter save token", "esc skip"}
+		suffix = m.cat.hintMarusia
 	case screenSummary:
-		parts = []string{"enter/q quit"}
+		suffix = m.cat.hintComplete
 	case screenError:
-		parts = []string{"↑/↓ choose", "enter run", "q quit"}
+		suffix = m.cat.hintError
 	case screenHostKey:
-		parts = []string{"y trust", "n refuse"}
+		suffix = m.cat.hintHostKey
 	case screenAbort:
-		parts = []string{"↑/↓ choose", "enter confirm", "ctrl+c stop now"}
+		suffix = m.cat.hintAbort
 	}
 	if overflow && m.screen != screenWorking {
-		parts = append(parts, "↕ pgup/pgdn")
+		suffix += " · " + m.cat.hintScroll
 	}
-	return footerStyle.Render(ansi.Truncate(strings.Join(parts, " · "), width, "…"))
+	return footerStyle.Render(ansi.Truncate(suffix, width, "…"))
+}
+
+func (m *model) firstRow(ix int, active bool, label, suffix string) string {
+	row := radio(active, label, suffix)
+	if ix == m.firstIx {
+		return "▸ " + row
+	}
+	return "  " + row
+}
+
+// wrapText wraps a paragraph to the content width.
+func (m *model) wrapText(s string) string {
+	w := m.bodyWidth
+	if w <= 0 {
+		w = 78
+	}
+	return ansi.Wordwrap(s, max(20, w-2), "")
+}
+
+// wrapIndented wraps a paragraph and aligns continuation lines under indent.
+func (m *model) wrapIndented(s string, indent int) string {
+	w := m.bodyWidth
+	if w <= 0 {
+		w = 78
+	}
+	wrapped := ansi.Wordwrap(s, max(10, w-indent), "/-_")
+	return strings.ReplaceAll(wrapped, "\n", "\n"+strings.Repeat(" ", indent))
 }
 
 func (m *model) viewDevice() string {
-	lines := []string{
-		titleStyle.Render("Select your device"),
-		"",
-		radio(m.deviceIx == 0, "Capsula (original)", "not supported"),
-		subtitleStyle.Render("    No maintained firmware image; this installer cannot prepare it."),
-		"",
-		radio(m.deviceIx == 1, "Capsula Mini", "supported"),
-		subtitleStyle.Render("    RK3308 (Rockchip) or A113X (Amlogic), on stock or Alpine."),
-		"",
-		subtitleStyle.Render("Capsula Mini is the only supported device."),
-	}
-	return strings.Join(lines, "\n")
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.cat.deviceHeading) + "\n\n")
+	b.WriteString(labelStyle.Render(m.cat.languageLabel) + "\n")
+	b.WriteString(m.firstRow(0, m.lang == langEN, m.cat.langEnglish, "") + "\n")
+	b.WriteString(m.firstRow(1, m.lang == langRU, m.cat.langRussian, "") + "\n\n")
+	b.WriteString(labelStyle.Render(m.cat.deviceLabel) + "\n")
+	b.WriteString(m.firstRow(2, false, m.cat.deviceOriginal, m.cat.notSupported) + "\n")
+	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.originalNote, 4)) + "\n\n")
+	b.WriteString(m.firstRow(3, true, m.cat.deviceMini, m.cat.supported) + "\n")
+	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.miniNote, 4)) + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.onlyMiniNote)))
+	return b.String()
 }
 
 func (m *model) viewFirmware() string {
-	lines := []string{
-		titleStyle.Render("How is the device running today?"),
-		"",
-		radio(m.firmwareIx == 0, "Jailbroken stock (capsula-jb)", ""),
-		subtitleStyle.Render("    Connects over ADB on port 5555. Rockchip RK3308 or Amlogic A113X."),
-		"",
-		radio(m.firmwareIx == 1, "Alpine Linux", ""),
-		subtitleStyle.Render("    Connects over SSH as root. Amlogic A113X."),
-		"",
-		subtitleStyle.Render("The board is discovered after connecting; the firmware decides the transport."),
-	}
-	return strings.Join(lines, "\n")
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.cat.firmwareHeading) + "\n\n")
+	b.WriteString(radio(m.firmwareIx == 0, m.cat.firmwareStock, "") + "\n")
+	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.firmwareStockNote, 4)) + "\n\n")
+	b.WriteString(radio(m.firmwareIx == 1, m.cat.firmwareAlpine, "") + "\n")
+	b.WriteString("    " + subtitleStyle.Render(m.wrapIndented(m.cat.firmwareAlpineNote, 4)) + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.firmwareBoardNote)))
+	return b.String()
 }
 
 func (m *model) viewAddress() string {
-	lines := []string{
-		titleStyle.Render("Device address"),
-		"",
-		labelStyle.Render("Address"),
-		m.field(0, &m.addrInput),
-		"",
-	}
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.cat.addressHeading) + "\n\n")
+	b.WriteString(labelStyle.Render(m.cat.addressLabel) + "\n")
+	b.WriteString(m.field(0, &m.addrInput) + "\n\n")
 	if m.firmware == device.FirmwareStock {
-		lines = append(lines,
-			subtitleStyle.Render("ADB connects to <address>:5555. Accept the on-device debugging prompt when it appears."),
-		)
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.addressStockNote)))
 	} else {
-		lines = append(lines,
-			labelStyle.Render("SSH user"),
-			m.field(1, &m.sshUserInput),
-			"",
-			labelStyle.Render("SSH password"),
-			m.field(2, &m.sshPassInput),
-			"",
-			labelStyle.Render("Private key (optional)"),
-			m.field(3, &m.sshKeyInput),
-			"",
-			subtitleStyle.Render("A password or a private key is required. The host key is pinned on first use."),
-		)
+		b.WriteString(labelStyle.Render(m.cat.sshUserLabel) + "\n")
+		b.WriteString(m.field(1, &m.sshUserInput) + "\n\n")
+		b.WriteString(labelStyle.Render(m.cat.sshPasswordLabel) + "\n")
+		b.WriteString(m.field(2, &m.sshPassInput) + "\n\n")
+		b.WriteString(labelStyle.Render(m.cat.keyLabel) + "\n")
+		b.WriteString(m.field(3, &m.sshKeyInput) + "\n\n")
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.addressAlpineNote)))
 	}
-	return strings.Join(lines, "\n")
+	return b.String()
 }
 
 func (m *model) field(ix int, in interface{ View() string }) string {
@@ -337,15 +365,21 @@ func (m *model) field(ix int, in interface{ View() string }) string {
 	return "  " + in.View()
 }
 
-func row(label, value string) string {
-	return labelStyle.Render(padRight(label, labelWidth)) + value
+func (m *model) row(label, value string) string {
+	w := m.cat.rowLabelWidth
+	return labelStyle.Render(padRight(label, w)) + value
+}
+
+func (m *model) indent() string {
+	return strings.Repeat(" ", m.cat.rowLabelWidth)
 }
 
 func padRight(s string, n int) string {
-	if len(s) >= n {
+	w := lipgloss.Width(s)
+	if w >= n {
 		return s
 	}
-	return s + strings.Repeat(" ", n-len(s))
+	return s + strings.Repeat(" ", n-w)
 }
 
 // wrapIndent word-wraps a long value under a labelled row, keeping
@@ -355,48 +389,74 @@ func wrapIndent(s string, width, indent int) string {
 	return strings.ReplaceAll(wrapped, "\n", "\n"+strings.Repeat(" ", indent))
 }
 
-func (m *model) viewConfirm(width int) string {
+func (m *model) viewForm(width int) string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.cat.optionsHeading) + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.passwordHeading) + "\n")
+	if !m.authState.Known {
+		b.WriteString(warnStyle.Render("  "+m.wrapIndented(m.cat.authUnknownNote, 2)) + "\n")
+	}
+
+	rows := m.formRows()
+	sel := rowContinue
+	if m.formIx >= 0 && m.formIx < len(rows) {
+		sel = rows[m.formIx]
+	}
+	line := func(k formRow, text string) string {
+		if sel == k {
+			return "▸ " + text
+		}
+		return "  " + text
+	}
+
+	b.WriteString(line(rowPassGenerate, radio(m.passMode == passGenerate, m.cat.passGenerate, m.cat.passRecommended)) + "\n")
+	b.WriteString(line(rowPassCustom, radio(m.passMode == passCustom, m.cat.passCustom, "")) + "\n")
+	if m.authState.Configured {
+		b.WriteString(line(rowPassKeep, radio(m.passMode == passKeep, m.cat.passKeep, "")) + "\n")
+	}
+	if m.passEditing {
+		b.WriteString("\n  " + m.customPass.View() + "\n")
+		b.WriteString(subtitleStyle.Render("  "+m.wrapIndented(m.cat.passCustomHint, 2)) + "\n")
+	}
+	b.WriteString("\n")
+
+	opt := func(k formRow, label, state string) string {
+		return line(k, fmt.Sprintf("%-*s %s", m.cat.optLabelWidth, label, state))
+	}
+	b.WriteString(opt(rowJingle, m.cat.optJingle, m.onOff(m.jingle)) + "\n")
+	if m.identityRequired {
+		b.WriteString(opt(rowIdentityAck, m.cat.optIdentity, checkbox(m.identityAck)) + "\n")
+	}
+	b.WriteString(opt(rowAcknowledge, m.cat.optAcknowledge, checkbox(m.acknowledged)) + "\n")
+	if m.space != nil && !m.space.OK {
+		b.WriteString(opt(rowForce, m.cat.optForce, checkbox(m.forceInstall)) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(line(rowContinue, selectedStyle.Render(m.cat.formContinue)) + "\n")
+	return b.String()
+}
+
+func (m *model) viewReview(width int) string {
 	det := m.det
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Review the installation") + "\n\n")
-	b.WriteString(row("Device", valueStyle.Render(det.Platform.Label()+" · "+cleanLine(det.Arch))) + "\n")
-	b.WriteString(row("Identity", valueStyle.Render(cleanLine(m.identity.String()))) + "\n")
+	b.WriteString(titleStyle.Render(m.cat.installSummaryHeading) + "\n\n")
+	b.WriteString(m.row(m.cat.labelDevice, valueStyle.Render(m.platformLabel(det.Platform)+" · "+cleanLine(det.Arch))) + "\n")
+	b.WriteString(m.row(m.cat.labelIdentity, valueStyle.Render(cleanLine(m.identity.String()))) + "\n")
 	if m.identityRequired {
-		b.WriteString("            " + warnStyle.Render(wrapIndent("No stable serial: ADB cannot authenticate this device across a reconnect.", width, labelWidth)) + "\n")
+		b.WriteString(m.indent() + warnStyle.Render(wrapIndent(m.cat.noStableSerialNote, width, m.cat.rowLabelWidth)) + "\n")
 	}
 	if m.backup != nil {
-		b.WriteString(row("Backup", valueStyle.Render(wrapIndent(cleanLine(m.backup.Path), width, labelWidth))) + "\n")
-		b.WriteString("            " + subtitleStyle.Render(fmt.Sprintf("%s · %d entries · verified",
+		b.WriteString(m.row(m.cat.labelBackup, valueStyle.Render(wrapIndent(cleanLine(m.backup.Path), width, m.cat.rowLabelWidth))) + "\n")
+		b.WriteString(m.indent() + subtitleStyle.Render(fmt.Sprintf(m.cat.backupDetailFormat,
 			install.BytesLabel(m.backup.Bytes), m.backup.Entries)) + "\n")
 	} else {
-		b.WriteString(row("Backup", valueStyle.Render("not needed on Alpine")) + "\n")
+		b.WriteString(m.row(m.cat.labelBackup, valueStyle.Render(m.cat.backupNotNeeded)) + "\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(m.spaceLines())
-	b.WriteString(titleStyle.Render("Administrator password") + "\n")
-	if !m.authState.Known {
-		b.WriteString(warnStyle.Render("  Existing password state could not be read; a new password will be created.") + "\n")
-	}
-	b.WriteString("  " + radio(m.passMode == passGenerate, "1  Generate a strong password", "recommended") + "\n")
-	b.WriteString("  " + radio(m.passMode == passCustom, "2  Set my own", "") + "\n")
-	if m.authState.Configured {
-		b.WriteString("  " + radio(m.passMode == passKeep, "3  Keep the existing password", "") + "\n")
-	}
-	if m.passMode == passCustom {
-		b.WriteString("\n  " + m.customPass.View() + "\n")
-		b.WriteString(subtitleStyle.Render("  Type the password, then press enter to capture it (esc cancels).") + "\n")
-	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "  %-3s %-36s %s\n", "j", "One-time installation jingle", onOff(m.jingle))
-	if m.identityRequired {
-		fmt.Fprintf(&b, "  %-3s %-36s %s\n", "x", "ADB cannot authenticate this device", checkbox(m.identityAck))
-	}
-	fmt.Fprintf(&b, "  %-3s %-36s %s\n", "a", "Nothing is deleted; vendor files stay", checkbox(m.acknowledged))
-	if m.space != nil && !m.space.OK {
-		fmt.Fprintf(&b, "  %-3s %-36s %s\n", "f", "Install despite low free space", checkbox(m.forceInstall))
-	}
-	b.WriteString(selectedStyle.Render("▸ Install capsulad") + subtitleStyle.Render("   press i or enter") + "\n")
-	b.WriteString(subtitleStyle.Render("Deploy is detached: ADB/SSH drops while the daemon stops, then reconnects."))
+	b.WriteString(selectedStyle.Render("▸ "+m.cat.installAction) + subtitleStyle.Render("   "+m.cat.installActionHint) + "\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.deployDetachedNote)))
 	return b.String()
 }
 
@@ -405,22 +465,21 @@ func (m *model) spaceLines() string {
 		return ""
 	}
 	s := m.space
-	var b strings.Builder
 	tone := okStyle
 	if !s.OK {
 		tone = warnStyle
 	}
-	b.WriteString(row("Space", tone.Render(install.BytesLabel(s.AvailableBytes))+" available, "+
-		tone.Render(install.BytesLabel(s.RequiredBytes))+" required") + "\n")
+	var b strings.Builder
+	b.WriteString(m.row(m.cat.labelSpace, tone.Render(fmt.Sprintf(m.cat.spaceFormat,
+		install.BytesLabel(s.AvailableBytes), install.BytesLabel(s.RequiredBytes)))) + "\n")
 	if s.StagedDaemon > 0 && !s.OK {
-		b.WriteString("            " + subtitleStyle.Render(fmt.Sprintf(
-			"= 8 MiB reserve + %s daemon growth (staged %s, installed %s)",
+		b.WriteString(m.indent() + subtitleStyle.Render(fmt.Sprintf(m.cat.spaceStagedFormat,
 			install.BytesLabel(s.RequiredBytes-s.ReserveBytes),
 			install.BytesLabel(s.StagedDaemon), install.BytesLabel(s.InstalledDaemon))) + "\n")
 	}
 	if !s.OK {
-		b.WriteString(warnStyle.Render("            Short by "+install.BytesLabel(s.RequiredBytes-s.AvailableBytes)+
-			". Nothing will be deleted.") + "\n")
+		b.WriteString(m.indent() + warnStyle.Render(fmt.Sprintf(m.cat.spaceShortFormat,
+			install.BytesLabel(s.RequiredBytes-s.AvailableBytes))) + "\n")
 		if len(m.spaceApps) > 0 {
 			var idle []string
 			for _, a := range m.spaceApps {
@@ -429,11 +488,11 @@ func (m *model) spaceLines() string {
 				}
 			}
 			if len(idle) > 0 {
-				b.WriteString(subtitleStyle.Render("            Installed apps not running (they may be relocated manually): "+
-					strings.Join(idle, ", ")) + "\n")
+				b.WriteString(m.indent() + subtitleStyle.Render(fmt.Sprintf(m.cat.spaceIdleAppsFormat,
+					strings.Join(idle, ", "))) + "\n")
 			}
 		}
-		b.WriteString(subtitleStyle.Render("            The deployer refuses rather than freeing space; press f to force or b to abort.") + "\n")
+		b.WriteString(m.indent() + subtitleStyle.Render(m.wrapIndented(m.cat.spaceDeployerNote, m.cat.rowLabelWidth)) + "\n")
 	}
 	return b.String()
 }
@@ -468,104 +527,103 @@ func shortDuration(d time.Duration) string {
 
 func (m *model) viewShowPassword() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Your administrator password") + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.passwordScreenHeading) + "\n\n")
 	pw := m.chosenPassword()
 	if pw == "" {
-		b.WriteString(valueStyle.Render("Keeping the existing administrator password.") + "\n\n")
-		b.WriteString(subtitleStyle.Render("Recover it with `capsulad-cli auth set-password` in the device shell.") + "\n")
+		b.WriteString(valueStyle.Render(m.cat.keepingPassword) + "\n\n")
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.recoverPassword)) + "\n")
 	} else {
 		b.WriteString(boxStyle.Copy().
 			BorderForeground(lipgloss.Color("42")).Padding(0, 2).MarginLeft(2).
 			Render(selectedStyle.Render(escapeControls(pw))) + "\n\n")
-		b.WriteString(subtitleStyle.Render("This is the only time it is shown. Store it in a password manager.") + "\n")
-		b.WriteString(subtitleStyle.Render("Recovery: `capsulad-cli auth set-password` in the device shell.") + "\n")
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.onlyTimeShown)) + "\n")
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.recoverPassword)) + "\n")
 		if m.copied {
-			b.WriteString(okStyle.Render("Copy requested (OSC 52); paste it into your password manager.") + "\n")
+			b.WriteString(okStyle.Render(m.cat.copyRequested) + "\n")
 		}
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "%s I have stored this password   %s\n", checkbox(m.passwordAcked), subtitleStyle.Render("(space)"))
+	fmt.Fprintf(&b, "%s %s   %s\n", checkbox(m.passwordAcked), m.cat.storedPassword, subtitleStyle.Render("(space)"))
 	return b.String()
 }
 
 func (m *model) viewChangePassword() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Set a new administrator password") + "\n\n")
-	b.WriteString(subtitleStyle.Render("It is sent to the device on stdin and never enters argv or the log.") + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.changePasswordHeading) + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.changePasswordNote)) + "\n\n")
 	b.WriteString("  " + m.customPass.View() + "\n")
 	return b.String()
 }
 
 func (m *model) viewWiFi() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Wi-Fi") + "\n\n")
-	fmt.Fprintf(&b, "%s\n", row("State", valueStyle.Render(orUnknown(m.wifi.State))))
+	b.WriteString(titleStyle.Render(m.cat.wifiHeading) + "\n\n")
+	fmt.Fprintf(&b, "%s\n", m.row(m.cat.wifiStateLabel, valueStyle.Render(m.orUnknown(m.wifi.State))))
 	if m.wifi.Connected() {
-		fmt.Fprintf(&b, "%s\n", row("Connected", valueStyle.Render(cleanLine(m.wifi.SSID)+" ("+cleanLine(m.wifi.IPAddress)+")")))
+		fmt.Fprintf(&b, "%s\n", m.row(m.cat.wifiConnectedLabel, valueStyle.Render(cleanLine(m.wifi.SSID)+" ("+cleanLine(m.wifi.IPAddress)+")")))
 	}
 	if m.wifi.APActive {
-		fmt.Fprintf(&b, "%s\n", row("Setup AP", valueStyle.Render(cleanLine(m.wifi.APSSID))))
+		fmt.Fprintf(&b, "%s\n", m.row(m.cat.wifiSetupAPLabel, valueStyle.Render(cleanLine(m.wifi.APSSID))))
 		if m.wifi.APPortalURL != "" {
-			fmt.Fprintf(&b, "%s\n", row("Portal", valueStyle.Render(cleanLine(m.wifi.APPortalURL))))
+			fmt.Fprintf(&b, "%s\n", m.row(m.cat.wifiPortalLabel, valueStyle.Render(cleanLine(m.wifi.APPortalURL))))
 		}
 		if m.wifi.APPasswordHint != "" {
-			fmt.Fprintf(&b, "%s\n", row("AP password", valueStyle.Render(cleanLine(m.wifi.APPasswordHint))))
+			fmt.Fprintf(&b, "%s\n", m.row(m.cat.wifiAPPasswordLabel, valueStyle.Render(cleanLine(m.wifi.APPasswordHint))))
 		}
 	}
 	b.WriteString("\n")
 	if len(m.networks) == 0 {
-		b.WriteString(subtitleStyle.Render("No scan results. Press m to enter a network name.") + "\n\n")
+		b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.wifiNoScan)) + "\n\n")
 	}
 	for i, n := range m.networks {
 		label := fmt.Sprintf("%s  %s  %d dBm  %s", cleanLine(n.SSID),
-			cleanLine(securityLabel(n.Security)), n.SignalDBM, signalLabel(n.SignalDBM))
+			m.securityLabel(n.Security), n.SignalDBM, m.signalLabel(n.SignalDBM))
 		b.WriteString(item(i == m.wifiIx, label) + "\n")
 	}
-	b.WriteString(item(m.wifiIx == len(m.networks), "Enter a network name manually") + "\n")
+	b.WriteString(item(m.wifiIx == len(m.networks), m.cat.wifiManual) + "\n")
 	return b.String()
 }
 
-func signalLabel(dbm int) string {
+func (m *model) signalLabel(dbm int) string {
 	switch {
 	case dbm >= -50:
-		return "excellent"
+		return m.cat.signalExcellent
 	case dbm >= -60:
-		return "good"
+		return m.cat.signalGood
 	case dbm >= -70:
-		return "fair"
+		return m.cat.signalFair
 	default:
-		return "weak"
+		return m.cat.signalWeak
 	}
 }
 
 func (m *model) viewWiFiPass() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Join "+cleanLine(m.selectedSSID())) + "\n\n")
-	b.WriteString(labelStyle.Render("Passphrase") + "\n")
-	b.WriteString("  " + m.wifiPassInput.View() + "\n")
-	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("The passphrase goes to the device over stdin; it never enters argv or logs."))
+	b.WriteString(titleStyle.Render(fmt.Sprintf(m.cat.wifiJoinFormat, cleanLine(m.selectedSSID()))) + "\n\n")
+	b.WriteString(labelStyle.Render(m.cat.wifiPassphraseLabel) + "\n")
+	b.WriteString("  " + m.wifiPassInput.View() + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.wifiPassphraseNote)))
 	return b.String()
 }
 
 func (m *model) viewWiFiManual() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Enter a Wi-Fi network") + "\n\n")
-	b.WriteString(labelStyle.Render("SSID") + "\n")
+	b.WriteString(titleStyle.Render(m.cat.wifiManualHeading) + "\n\n")
+	b.WriteString(labelStyle.Render(m.cat.wifiSSIDLabel) + "\n")
 	b.WriteString("  " + m.wifiSSIDInput.View() + "\n\n")
-	fmt.Fprintf(&b, "%s Open network (no passphrase)   %s\n", checkbox(m.wifiOpen), subtitleStyle.Render("(ctrl+o)"))
+	fmt.Fprintf(&b, "%s %s   %s\n", checkbox(m.wifiOpen), m.cat.wifiOpenNetwork, subtitleStyle.Render("(ctrl+o)"))
 	return b.String()
 }
 
 func (m *model) viewApps() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Choose first-party apps") + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.appsHeading) + "\n\n")
 	for i, a := range install.Catalogue {
 		mark := "[ ]"
 		if m.appSelected[a.ID] {
 			mark = "[x]"
 		}
-		line := fmt.Sprintf("%s %-18s %s", mark, a.Name, subtitleStyle.Render(a.Description))
+		line := fmt.Sprintf("%s %-18s %s", mark, a.Name, subtitleStyle.Render(m.appDescription(a)))
 		if i == m.appIx {
 			b.WriteString(selectedStyle.Render("▸ "+line) + "\n")
 		} else {
@@ -573,22 +631,22 @@ func (m *model) viewApps() string {
 		}
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "%s %d selected", labelStyle.Render("Selected:"), countSelected(m.appSelected))
+	fmt.Fprintf(&b, "%s", labelStyle.Render(fmt.Sprintf(m.cat.appsSelectedFormat, countSelected(m.appSelected))))
 	if m.inst != nil && m.inst.Provider != nil {
-		fmt.Fprintf(&b, " · release %s · platform %s", cleanLine(m.inst.Provider.Version()), m.inst.Platform)
+		fmt.Fprintf(&b, m.cat.appsReleaseFormat, cleanLine(m.inst.Provider.Version()), m.inst.Platform)
 	}
 	b.WriteString("\n")
 	if countSelected(m.appSelected) == 0 {
-		b.WriteString(warnStyle.Render("Nothing selected: enter installs no apps. Press a for all, or s to skip.") + "\n")
+		b.WriteString(warnStyle.Render(m.wrapText(m.cat.appsNoneNote)) + "\n")
 	}
 	return b.String()
 }
 
 func (m *model) viewMarusia() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Marusia needs a VK access token") + "\n\n")
-	b.WriteString(subtitleStyle.Render("No stock voice-agent session was found, so nothing could be migrated.") + "\n")
-	b.WriteString(subtitleStyle.Render("Paste a token (hidden) or skip; you can set it later in the Web UI.") + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.marusiaHeading) + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.marusiaNoSession)) + "\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.marusiaPaste)) + "\n\n")
 	b.WriteString("  " + m.marusiaToken.View() + "\n")
 	return b.String()
 }
@@ -596,33 +654,33 @@ func (m *model) viewMarusia() string {
 func (m *model) viewSummary(width int) string {
 	var b strings.Builder
 	if m.appError != "" {
-		b.WriteString(warnStyle.Render("Installation finished with errors") + "\n\n")
+		b.WriteString(warnStyle.Render(m.cat.finishedWithErrors) + "\n\n")
 		b.WriteString(errStyle.Render(ansi.Wordwrap(cleanLine(m.appError), max(20, width-2), "")) + "\n\n")
 	} else {
-		b.WriteString(okStyle.Render("Installation complete") + "\n\n")
+		b.WriteString(okStyle.Render(m.cat.completeHeading) + "\n\n")
 	}
 	if m.inst != nil {
 		base := cleanLine(install.HTTPSBase(m.addrInput.Value(), 8443))
-		b.WriteString(row("Web UI", valueStyle.Render(base)) + "\n")
+		b.WriteString(m.row(m.cat.labelWebUI, valueStyle.Render(base)) + "\n")
 		if m.fingerprint != "" {
-			b.WriteString(row("Cert SHA-256", valueStyle.Render(m.fingerprint)) + "\n")
+			b.WriteString(m.row(m.cat.labelCertFingerprint, valueStyle.Render(m.fingerprint)) + "\n")
 		}
-		b.WriteString(row("Download", valueStyle.Render(base+"/api/cert.pem")) + "\n")
-		b.WriteString(row("Verify", valueStyle.Render("capsulad-cli cert status")) + "\n")
-		b.WriteString(subtitleStyle.Render("            Trust the certificate after comparing the fingerprint; the Web UI is self-signed.") + "\n")
+		b.WriteString(m.row(m.cat.labelDownload, valueStyle.Render(base+"/api/cert.pem")) + "\n")
+		b.WriteString(m.row(m.cat.labelVerify, valueStyle.Render("capsulad-cli cert status")) + "\n")
+		b.WriteString(m.indent() + subtitleStyle.Render(m.wrapIndented(m.cat.trustCertNote, m.cat.rowLabelWidth)) + "\n")
 	}
 	if m.chosenPassword() != "" {
-		b.WriteString(row("Admin", valueStyle.Render("password set (shown after deployment)")) + "\n")
+		b.WriteString(m.row(m.cat.labelAdmin, valueStyle.Render(m.cat.adminSet)) + "\n")
 	} else {
-		b.WriteString(row("Admin", valueStyle.Render("existing password kept")) + "\n")
+		b.WriteString(m.row(m.cat.labelAdmin, valueStyle.Render(m.cat.adminKept)) + "\n")
 	}
 	if m.wifiSkip {
-		b.WriteString(row("Wi-Fi", warnStyle.Render("skipped")) + "\n")
+		b.WriteString(m.row(m.cat.labelWiFi, warnStyle.Render(m.cat.wifiSkipped)) + "\n")
 	} else if m.wifi.Connected() {
-		b.WriteString(row("Wi-Fi", valueStyle.Render(cleanLine(m.wifi.SSID)+" ("+cleanLine(m.wifi.IPAddress)+")")) + "\n")
+		b.WriteString(m.row(m.cat.labelWiFi, valueStyle.Render(cleanLine(m.wifi.SSID)+" ("+cleanLine(m.wifi.IPAddress)+")")) + "\n")
 	}
 	if len(m.appResults) > 0 {
-		b.WriteString("\n" + titleStyle.Render("Apps") + "\n")
+		b.WriteString("\n" + titleStyle.Render(m.cat.appsSectionHeading) + "\n")
 		for _, r := range m.appResults {
 			line := cleanLine(r.Name)
 			if r.Status == "installed" {
@@ -633,29 +691,29 @@ func (m *model) viewSummary(width int) string {
 		}
 	}
 	if m.marusia.Migrated && marusiaInstalled(m.appResults) {
-		b.WriteString(row("Marusia", valueStyle.Render("stock session migrated; vendor file left in place")) + "\n")
+		b.WriteString(m.row(m.cat.labelMarusia, valueStyle.Render(m.cat.marusiaMigrated)) + "\n")
 	} else if m.marusia.TokenSet && marusiaInstalled(m.appResults) {
-		b.WriteString(row("Marusia", valueStyle.Render("VK access token stored")) + "\n")
+		b.WriteString(m.row(m.cat.labelMarusia, valueStyle.Render(m.cat.marusiaTokenSet)) + "\n")
 	} else if m.appSelected["org.capsulad.marusia"] && marusiaInstalled(m.appResults) {
-		b.WriteString(row("Marusia", warnStyle.Render("installed without a token")) + "\n")
+		b.WriteString(m.row(m.cat.labelMarusia, warnStyle.Render(m.cat.marusiaNoToken)) + "\n")
 	}
 	if m.backup != nil {
-		b.WriteString(row("Backup", valueStyle.Render(wrapIndent(cleanLine(m.backup.Path), width, labelWidth))) + "\n")
+		b.WriteString(m.row(m.cat.labelBackup, valueStyle.Render(wrapIndent(cleanLine(m.backup.Path), width, m.cat.rowLabelWidth))) + "\n")
 	}
 	if m.inst != nil {
-		b.WriteString(row("Rollback", valueStyle.Render(wrapIndent(m.inst.Platform.Rollback(), width, labelWidth))) + "\n")
+		b.WriteString(m.row(m.cat.labelRollback, valueStyle.Render(wrapIndent(m.inst.Platform.Rollback(), width, m.cat.rowLabelWidth))) + "\n")
 	}
-	b.WriteString("\n" + valueStyle.Render(ansi.Wordwrap("Nothing was deleted. Vendor software and files are preserved; the boot hook can be disabled.", max(20, width-2), "")) + "\n")
+	b.WriteString("\n" + valueStyle.Render(ansi.Wordwrap(m.cat.nothingDeleted, max(20, width-2), "")) + "\n")
 	return b.String()
 }
 
 func (m *model) viewError(width int) string {
 	var b strings.Builder
-	b.WriteString(errStyle.Render("Installation stopped") + "\n\n")
+	b.WriteString(errStyle.Render(m.cat.errorHeading) + "\n\n")
 	b.WriteString(valueStyle.Render(ansi.Wordwrap(cleanLine(m.errText), max(20, width-2), "")) + "\n\n")
 
 	// The recovery choices come first: they are the reason this screen exists.
-	b.WriteString(titleStyle.Render("What next?") + "\n")
+	b.WriteString(titleStyle.Render(m.cat.whatNextHeading) + "\n")
 	acts := m.errorActions()
 	sel := min(m.errIx, len(acts)-1)
 	for i, a := range acts {
@@ -666,62 +724,61 @@ func (m *model) viewError(width int) string {
 			b.WriteString("  " + itemStyle.Render(line) + "\n")
 		}
 	}
-	b.WriteString("\n" + titleStyle.Render("Details") + "\n")
+	b.WriteString("\n" + titleStyle.Render(m.cat.detailsHeading) + "\n")
 	wrap := func(s string) string {
 		return ansi.Wordwrap(cleanText(s), max(20, width-2), "")
 	}
 	if m.errOp == opDeploy {
-		b.WriteString(subtitleStyle.Render(wrap("The device may be part-way through. Reconnect and inspect /tmp/capsulad-installer/deploy.log before retrying.")) + "\n")
-		b.WriteString(subtitleStyle.Render(wrap(device.RecoveryAdvice(cleanLine(m.addrInput.Value()), cleanLine(m.wifi.APSSID), cleanLine(m.wifi.APPasswordHint)))) + "\n")
+		b.WriteString(subtitleStyle.Render(wrap(m.cat.deployPartialNote)) + "\n")
+		b.WriteString(subtitleStyle.Render(wrap(m.recoveryAdvice(cleanLine(m.addrInput.Value()), cleanLine(m.wifi.APSSID), cleanLine(m.wifi.APPasswordHint)))) + "\n")
 		if m.deployTail != "" {
-			b.WriteString("\n" + titleStyle.Render("Deploy log (verbatim, last lines)") + "\n")
+			b.WriteString("\n" + titleStyle.Render(m.cat.deployLogHeading) + "\n")
 			b.WriteString(logStyle.Render(cleanText(device.LogTail(m.deployTail, 40))))
 			b.WriteString("\n")
 		}
 	} else if m.errOp == opWiFiStatus || m.errOp == opWiFiConnect {
-		b.WriteString(subtitleStyle.Render(wrap(device.RecoveryAdvice(cleanLine(m.addrInput.Value()), cleanLine(m.wifi.APSSID), cleanLine(m.wifi.APPasswordHint)))) + "\n")
+		b.WriteString(subtitleStyle.Render(wrap(m.recoveryAdvice(cleanLine(m.addrInput.Value()), cleanLine(m.wifi.APSSID), cleanLine(m.wifi.APPasswordHint)))) + "\n")
 	} else if m.errOp == opApps {
-		b.WriteString(subtitleStyle.Render(wrap("Some selected apps may already be installed; the summary lists each result. Retrying reinstalls the selection.")) + "\n")
+		b.WriteString(subtitleStyle.Render(wrap(m.cat.appsErrorNote)) + "\n")
 	} else {
-		b.WriteString(subtitleStyle.Render(wrap("No deployment was started by this step; the device is unchanged.")) + "\n")
+		b.WriteString(subtitleStyle.Render(wrap(m.cat.noDeployNote)) + "\n")
 	}
 	return b.String()
 }
 
 func (m *model) viewHostKey() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("New SSH host key") + "\n\n")
+	b.WriteString(titleStyle.Render(m.cat.hostKeyHeading) + "\n\n")
 	if m.hostKey == nil {
-		b.WriteString(subtitleStyle.Render("Waiting for the host key...") + "\n")
+		b.WriteString(subtitleStyle.Render(m.cat.hostKeyWaiting) + "\n")
 		return b.String()
 	}
-	b.WriteString(row("Host", valueStyle.Render(cleanLine(m.hostKey.host))) + "\n")
-	b.WriteString(row("SHA-256", selectedStyle.Render(cleanLine(m.hostKey.fingerprint))) + "\n\n")
-	b.WriteString(subtitleStyle.Render("Trust on first use pins this key under your config directory.") + "\n")
-	b.WriteString(subtitleStyle.Render("A later mismatch is a hard failure.") + "\n\n")
-	b.WriteString(selectedStyle.Render("▸ [y] Trust and continue") + "\n")
-	b.WriteString("  " + itemStyle.Render("[n] Refuse") + "\n")
+	b.WriteString(m.row(m.cat.hostLabel, valueStyle.Render(cleanLine(m.hostKey.host))) + "\n")
+	b.WriteString(m.row(m.cat.fingerprintLabel, selectedStyle.Render(cleanLine(m.hostKey.fingerprint))) + "\n\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.hostKeyTOFU)) + "\n")
+	b.WriteString(subtitleStyle.Render(m.wrapText(m.cat.hostKeyMismatch)) + "\n\n")
+	b.WriteString(selectedStyle.Render("▸ [y] "+m.cat.trustContinue) + "\n")
+	b.WriteString("  " + itemStyle.Render("[n] "+m.cat.refuse) + "\n")
 	return b.String()
 }
 
 func (m *model) viewAbort() string {
 	var b strings.Builder
-	b.WriteString(errStyle.Render("Stop the installation?") + "\n\n")
-	if m.op == opDeploy {
-		b.WriteString("Current step: deploying capsulad.\n\n")
-		b.WriteString("The deployment runs detached on the device, because the daemon owns Wi-Fi.\n")
-		b.WriteString("Leaving now stops this interface, not that script; the device may finish or fail on its own.\n\n")
-		b.WriteString(subtitleStyle.Render("Check later with: cat /tmp/capsulad-installer/deploy.log") + "\n\n")
-	} else {
-		step := cleanLine(m.status)
-		if strings.TrimSpace(step) == "" {
-			step = "a device step"
-		}
-		b.WriteString("Current step: " + step + ".\n\n")
-		b.WriteString("This cancels the current step before any deployment starts.\n")
-		b.WriteString("The device is left as it was; the last completed step is in the log.\n\n")
+	b.WriteString(errStyle.Render(m.cat.abortHeading) + "\n\n")
+	step := m.cat.abortStepFallback
+	if m.op != opNone {
+		step = m.opLabel(m.op)
 	}
-	options := []string{"[n] Keep waiting", "[y] Stop and quit"}
+	fmt.Fprintf(&b, m.cat.abortCurrentStepFormat+"\n\n", step)
+	if m.op == opDeploy {
+		b.WriteString(m.wrapText(m.cat.abortDeployLine1) + "\n")
+		b.WriteString(m.wrapText(m.cat.abortDeployLine2) + "\n\n")
+		b.WriteString(subtitleStyle.Render(m.cat.abortCheckLog) + "\n\n")
+	} else {
+		b.WriteString(m.wrapText(m.cat.abortOtherLine1) + "\n")
+		b.WriteString(m.wrapText(m.cat.abortOtherLine2) + "\n\n")
+	}
+	options := []string{m.cat.abortKeepWaiting, m.cat.abortStopQuit}
 	for i, label := range options {
 		if i == m.abortIx {
 			b.WriteString(selectedStyle.Render("▸ "+label) + "\n")
@@ -730,6 +787,27 @@ func (m *model) viewAbort() string {
 		}
 	}
 	return b.String()
+}
+
+func (m *model) onOff(on bool) string {
+	if on {
+		return m.cat.onOn
+	}
+	return m.cat.onOff
+}
+
+func (m *model) orUnknown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return m.cat.wifiUnknown
+	}
+	return cleanLine(s)
+}
+
+func (m *model) securityLabel(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return m.cat.securityOpen
+	}
+	return strings.ToUpper(s)
 }
 
 func radio(active bool, label, suffix string) string {
@@ -761,13 +839,6 @@ func checkbox(on bool) string {
 	return "[ ]"
 }
 
-func onOff(on bool) string {
-	if on {
-		return "on"
-	}
-	return "off"
-}
-
 func countSelected(sel map[string]bool) int {
 	n := 0
 	for _, on := range sel {
@@ -776,20 +847,6 @@ func countSelected(sel map[string]bool) int {
 		}
 	}
 	return n
-}
-
-func securityLabel(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "open"
-	}
-	return strings.ToUpper(s)
-}
-
-func orUnknown(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "unknown"
-	}
-	return cleanLine(s)
 }
 
 func marusiaInstalled(results []install.AppResult) bool {
