@@ -270,7 +270,7 @@ func (s *Server) installArchive(ctx context.Context, body io.Reader, filename st
 	if err := stream.Send(&frameworkv1.InstallApplicationRequest{
 		Chunk: &frameworkv1.InstallApplicationRequest_Open{Open: &frameworkv1.InstallApplicationOpen{FileName: filename}},
 	}); err != nil {
-		return nil, err
+		return nil, installSendError(stream, err)
 	}
 	buf := make([]byte, packageUploadChunk)
 	for {
@@ -279,7 +279,7 @@ func (s *Server) installArchive(ctx context.Context, body io.Reader, filename st
 			if err := stream.Send(&frameworkv1.InstallApplicationRequest{
 				Chunk: &frameworkv1.InstallApplicationRequest_Content{Content: buf[:n]},
 			}); err != nil {
-				return nil, err
+				return nil, installSendError(stream, err)
 			}
 		}
 		if readErr == io.EOF {
@@ -293,6 +293,20 @@ func (s *Server) installArchive(ctx context.Context, body io.Reader, filename st
 		}
 	}
 	return stream.CloseAndRecv()
+}
+
+// installSendError returns the daemon's status when a send fails because the
+// daemon already ended the stream. A client-streaming Send reports io.EOF once
+// the server has answered, and a daemon that refuses before reading the
+// archive (a running app, an invalid package) does exactly that: the real
+// status is carried by CloseAndRecv. Reporting the bare send error would show
+// the administrator a bogus truncated upload instead of the refusal and its
+// remedy.
+func installSendError(stream frameworkv1.ApplicationService_InstallApplicationClient, sendErr error) error {
+	if _, err := stream.CloseAndRecv(); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return sendErr
 }
 
 // removeApp removes one installed package. Settings are deliberately retained.
