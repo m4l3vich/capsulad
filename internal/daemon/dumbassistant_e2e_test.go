@@ -757,19 +757,18 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 	defer resume()
 	frames, unsubscribe := d.audio.SubscribeFrames(8192)
 	defer unsubscribe()
-	const burstFrames = 16000 * 120
+	// The burst only has to exceed the paused assistant's transport window so
+	// the daemon drops a long run of voiced audio: that is the gap the app must
+	// not treat as end of speech. Twenty seconds is far beyond the window (a
+	// one-second pre-roll plus a 64-chunk live queue), and it still drains
+	// inside the microphone watchdog's visible-indication grace while the
+	// process is stopped. Draining a 120 s burst under the race detector
+	// outlasted that grace, so the capture was retired before the app could
+	// observe the gap. The deadline below still bounds a source that never
+	// delivers the burst.
+	const burstFrames = 16000 * 20
 	sim.InjectPCM(repeatPCM(speechPCMFrames(16000, 16000*2), burstFrames))
 	drained := 0
-	// The injected burst is large enough to exceed the paused assistant's
-	// transport window. Keeping the process stopped until the whole burst has
-	// drained would outlast the microphone watchdog's visible-indication grace
-	// (5 s) on a slow, race-instrumented runner, which retires the capture
-	// before the gap ever reaches the app. Instead, wait until the daemon has
-	// dropped a substantive run of frames (proof the transport is full and the
-	// app will see a discontinuity), then let it read again while the rest of
-	// the burst drains. The bounded drain deadline still catches a source that
-	// never delivers.
-	const gapFrames = 16000 * 2
 	deadline := time.After(20 * time.Second)
 	for drained < burstFrames {
 		select {
@@ -777,9 +776,6 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 			drained += len(f.PCM) / 2
 		case <-deadline:
 			t.Fatal("capture source did not deliver the queued burst")
-		}
-		if paused && d.audio.CaptureDroppedFrames(appID) >= gapFrames {
-			resume()
 		}
 	}
 	resume()

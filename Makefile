@@ -587,7 +587,7 @@ test-race:
 # The native crate is the only test suite that exercises the real ABI; the
 # C++ example proves the shipped header still compiles.
 test-sdk: check-sdk-abi
-	cd sdk/go && $(CGO_GO_ENV) $(GO) test ./...
+	cd sdk/go && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 	$(CARGO) test --locked --manifest-path sdk/rust/Cargo.toml $(NATIVE_CARGO_MODE) $(NATIVE_CARGO_TARGET)
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST) $(NATIVE_CARGO_MODE) $(NATIVE_CARGO_TARGET)
 	mkdir -p $(BINDIR)
@@ -597,7 +597,7 @@ check-sdk-abi:
 	sh sdk/go/regenerate-abi.sh --check
 
 test-dumbassistant:
-	cd apps/dumbassistant && $(CGO_GO_ENV) $(GO) test ./...
+	cd apps/dumbassistant && $(CGO_GO_ENV) $(GO) test -ldflags "$(HOST_GO_LINKMODE)" ./...
 
 # Tests run on the build host, so the host link mode applies: a darwin host
 # needs the external linker for LC_UUID. No test reaches the network; the
