@@ -13,6 +13,7 @@ import (
 	"capsulad/internal/presentations"
 	"capsulad/internal/routing"
 	"capsulad/internal/settings"
+	"capsulad/internal/supervisor"
 )
 
 // feedbackTestDaemon builds the routing/presentation surface the framework
@@ -297,28 +298,42 @@ func TestTimezoneChangeKeepsBuiltinClockState(t *testing.T) {
 	}
 }
 
-// TestRingAppStopStartRestoresBaseline covers the compiled-in ring app being
-// stopped and launched again: the new run must reopen and reassert a baseline
-// presentation that routing selects, not stay silent after the old one closed.
+// TestRingAppStopStartRestoresBaseline covers the selected compiled-in ring app
+// being stopped and recovered in place: the stopped run's baseline closes and
+// the new run must reopen a baseline presentation that routing selects, not
+// stay silent after the old one closed. The recovery is the observable state:
+// a stopped selected provider is restarted by the daemon, so waiting for a
+// momentarily empty selection races the in-place restart and misses it on a
+// fast machine.
 func TestRingAppStopStartRestoresBaseline(t *testing.T) {
 	d := startEmptyDaemon(t, shortTempDir(t))
 	waitForAppSelection(t, d, "light.ring.main", ringAppID)
+	before := d.router.Current("light.ring.main")
+	if before.SelectedPresentation == "" {
+		t.Fatal("ring baseline is not selected before stop")
+	}
+	firstRun, ok := d.sup.Get(d.SystemAppRunID(ringAppID))
+	if !ok {
+		t.Fatal("initial ring run is missing")
+	}
 
-	runID := d.SystemAppRunID(ringAppID)
-	if !d.Stop(runID) {
+	if !d.Stop(firstRun.RunID) {
 		t.Fatal("ring run was not stopped")
 	}
-	waitFor(t, 5*time.Second, "ring baseline released", func() bool {
-		return d.router.Current("light.ring.main").SelectedAppID != ringAppID
-	})
-
-	if _, _, _, err := d.Launch(ringAppID, nil); err != nil {
-		t.Fatalf("relaunch ring app: %v", err)
-	}
-	waitForAppSelection(t, d, "light.ring.main", ringAppID)
-	waitFor(t, 5*time.Second, "ring baseline presentation ready", func() bool {
+	waitFor(t, 5*time.Second, "ring baseline reopened by the recovered run", func() bool {
+		run, ok := d.sup.Get(firstRun.RunID)
+		if !ok || run.State != supervisor.Ready || run.StartedNS <= firstRun.StartedNS {
+			return false
+		}
 		sel := d.router.Current("light.ring.main")
+		if sel.SelectedAppID != ringAppID || sel.SelectedPresentation == "" ||
+			sel.SelectedPresentation == before.SelectedPresentation {
+			return false
+		}
 		p, ok := d.pres.Get(sel.SelectedPresentation)
 		return ok && p.Ready()
 	})
+	if _, ok := d.pres.Get(before.SelectedPresentation); ok {
+		t.Fatal("the stopped run's baseline presentation survived")
+	}
 }
