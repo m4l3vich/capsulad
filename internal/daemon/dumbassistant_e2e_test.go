@@ -745,21 +745,31 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	paused := true
-	defer func() {
-		if paused {
-			_ = process.Signal(syscall.SIGCONT)
+	resume := func() {
+		if !paused {
+			return
 		}
-	}()
+		if err := process.Signal(syscall.SIGCONT); err != nil {
+			t.Fatal(err)
+		}
+		paused = false
+	}
+	defer resume()
 	frames, unsubscribe := d.audio.SubscribeFrames(8192)
 	defer unsubscribe()
 	const burstFrames = 16000 * 120
 	sim.InjectPCM(repeatPCM(speechPCMFrames(16000, 16000*2), burstFrames))
 	drained := 0
-	// The full 120 s burst must still be drained: that is what overflows the
-	// paused assistant's transport and produces the drop/gap assertion. The
-	// processed capture tap and the race detector both add per-chunk dispatch
-	// cost, so the old 2 s deadline measured the fixture's throughput rather
-	// than the product. This remains a bounded wait, not an unbounded one.
+	// The injected burst is large enough to exceed the paused assistant's
+	// transport window. Keeping the process stopped until the whole burst has
+	// drained would outlast the microphone watchdog's visible-indication grace
+	// (5 s) on a slow, race-instrumented runner, which retires the capture
+	// before the gap ever reaches the app. Instead, wait until the daemon has
+	// dropped a substantive run of frames (proof the transport is full and the
+	// app will see a discontinuity), then let it read again while the rest of
+	// the burst drains. The bounded drain deadline still catches a source that
+	// never delivers.
+	const gapFrames = 16000 * 2
 	deadline := time.After(20 * time.Second)
 	for drained < burstFrames {
 		select {
@@ -768,11 +778,11 @@ func TestDumbAssistantAudioGapDoesNotReply(t *testing.T) {
 		case <-deadline:
 			t.Fatal("capture source did not deliver the queued burst")
 		}
+		if paused && d.audio.CaptureDroppedFrames(appID) >= gapFrames {
+			resume()
+		}
 	}
-	if err := process.Signal(syscall.SIGCONT); err != nil {
-		t.Fatal(err)
-	}
-	paused = false
+	resume()
 	resumed := startSpeechInjector(t, d)
 	defer resumed()
 	gapDeadline := time.Now().Add(3 * time.Second)
