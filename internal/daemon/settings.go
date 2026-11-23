@@ -398,8 +398,13 @@ func (d *Daemon) armMicIndicatorLocked(values settings.UserSettings) {
 			delay = 30 * time.Second
 		}
 		gen := d.micGen
-		var timer *time.Timer
-		timer = time.AfterFunc(delay, func() { d.expireMicIndicator(timer, gen) })
+		// The timer cannot be captured by the callback: AfterFunc may run the
+		// function before this assignment completes. Hand the identity over a
+		// channel instead so the callback and the arming path never share a
+		// mutable variable.
+		ready := make(chan *time.Timer, 1)
+		timer := time.AfterFunc(delay, func() { d.expireMicIndicator(<-ready, gen) })
+		ready <- timer
 		d.micTimer = timer
 	}
 }
