@@ -123,11 +123,11 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
+          notes="Это rolling release для приложений. Непосредственно capsulad и его установщик можно найти ниже."
           if gh release view apps >/dev/null 2>&1; then
-            gh release edit apps --draft=false --prerelease --title "App channel"
+            gh release edit apps --draft=false --prerelease --title "App channel" --notes "$notes"
           else
-            gh release create apps --prerelease --title "App channel" \
-              --notes "Rolling first-party app packages. Core firmware is released under v* tags."
+            gh release create apps --prerelease --title "App channel" --notes "$notes"
           fi
           # Archives first, then manifests, then checksums. A client that reads
           # during the upload still sees the previous apps.json pointing at

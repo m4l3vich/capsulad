@@ -109,6 +109,11 @@ Both release workflows build on native arm64 runners inside the pinned builder i
 stages the flat GitHub assets. The app channel is marked prerelease so `latest/download/`
 continues to resolve the core release.
 
+The core release is titled `capsulad v<version>` and its body is the annotated tag message
+(or `TODO` for a tag without one) followed by the six installer download links. The `apps`
+prerelease body is a fixed rolling-release notice; it does not repeat the tag message.
+
+
 ## Cross build for the device
 
 The Capsula Mini rev 4 (RK3308) is aarch64 with glibc 2.33. The Amlogic A113X Mini is

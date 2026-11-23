@@ -131,20 +131,54 @@ jobs:
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: "dist/*"
-      - name: Publish core release
+      - name: Compose core release notes
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          body=
+          if [ "$(git cat-file -t "$tag" 2>/dev/null)" = "tag" ]; then
+            subject=$(git tag -l --format='%(contents:subject)' "$tag")
+            detail=$(git tag -l --format='%(contents:body)' "$tag" |
+              sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+            if [ -n "$detail" ]; then
+              body=$(printf '%s\n\n%s' "$subject" "$detail")
+            else
+              body=$subject
+            fi
+          fi
+          [ -n "$body" ] || body=TODO
+          downloads="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          {
+            printf '## Что нового:\n\n'
+            printf '%s\n\n' "$body"
+            printf '## Скачать установщик capsulad\n\n'
+            printf -- '- [Windows (x86-64)](%s/capsulad-installer_%s_windows_amd64.zip)\n' "$downloads" "$VERSION"
+            printf -- '- [Windows (ARM)](%s/capsulad-installer_%s_windows_arm64.zip)\n' "$downloads" "$VERSION"
+            printf -- '- [Linux (amd64)](%s/capsulad-installer_%s_linux_amd64.tar.gz)\n' "$downloads" "$VERSION"
+            printf -- '- [Linux (arm64)](%s/capsulad-installer_%s_linux_arm64.tar.gz)\n' "$downloads" "$VERSION"
+            printf -- '- [macOS (Intel)](%s/capsulad-installer_%s_darwin_amd64.tar.gz)\n' "$downloads" "$VERSION"
+            printf -- '- [macOS (Apple Silicon)](%s/capsulad-installer_%s_darwin_arm64.tar.gz)\n' "$downloads" "$VERSION"
+          } > release-notes.md
+
+      - name: Publish core release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          title="capsulad v${VERSION}"
           if gh release view "$tag" >/dev/null 2>&1; then
             draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
             [ "$draft" = "true" ] || {
               echo "release $tag is already published; cut a new tag" >&2
               exit 1
             }
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md
           else
-            gh release create "$tag" --draft --title "$tag" --generate-notes
+            gh release create "$tag" --draft --title "$title" --notes-file release-notes.md
           fi
           gh release upload "$tag" dist/* --clobber
           gh release view "$tag" --json assets --jq '.assets[].name' | sort > /tmp/remote-assets
