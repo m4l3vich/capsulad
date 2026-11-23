@@ -19,6 +19,24 @@ import (
 
 func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 	s := k.String()
+	// Screens taller than the terminal scroll as whole-body pages; screens with
+	// their own cursor keep up/down for selection.
+	if m.screen != screenWorking {
+		switch s {
+		case "pgup":
+			m.scrollBy(-m.pageStep())
+			return true, nil
+		case "pgdown":
+			m.scrollBy(m.pageStep())
+			return true, nil
+		case "home":
+			m.scroll = 0
+			return true, nil
+		case "end":
+			m.scroll = 1 << 20
+			return true, nil
+		}
+	}
 	switch m.screen {
 	case screenHostKey:
 		switch s {
@@ -37,13 +55,17 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 
 	case screenAbort:
 		switch s {
-		case "y", "Y", "enter":
-			m.aborted = true
-			m.cancel()
-			return true, tea.Quit
+		case "up", "k", "down", "j":
+			m.abortIx = 1 - m.abortIx
+		case "y", "Y":
+			return true, m.stopAndQuit()
+		case "enter":
+			if m.abortIx == 1 {
+				return true, m.stopAndQuit()
+			}
+			m.screen = m.prevScreen
 		case "n", "N", "esc":
 			m.screen = m.prevScreen
-			return true, nil
 		}
 		return true, nil
 
@@ -65,7 +87,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 				return true, nil
 			}
 			m.screen = screenFirmware
-		case "esc":
+		case "esc", "q":
 			return true, tea.Quit
 		}
 		return true, nil
@@ -202,6 +224,11 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.viewport, cmd = m.viewport.Update(k)
 			return true, cmd
 		}
+		if s == "esc" {
+			m.prevScreen = screenWorking
+			m.abortIx = 0
+			m.screen = screenAbort
+		}
 		return true, nil
 
 	case screenShowPassword:
@@ -334,6 +361,7 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 			m.wifiSecurity = ""
 			m.wifiPassInput.SetValue("")
 			m.screen = screenWiFiPass
+			return true, nil
 		case "esc":
 			m.screen = screenWiFi
 		}
@@ -382,36 +410,101 @@ func (m *model) key(k tea.KeyMsg) (bool, tea.Cmd) {
 
 	case screenSummary:
 		switch s {
-		case "enter", "q":
+		case "enter", "q", "esc":
 			return true, tea.Quit
 		}
 		return true, nil
 
 	case screenError:
+		acts := m.errorActions()
 		switch s {
-		case "r":
-			if m.errOp != opNone {
-				return true, m.startOp(m.errOp)
+		case "up", "k":
+			if m.errIx > 0 {
+				m.errIx--
 			}
-		case "b":
-			if m.errCanBack {
-				m.screen = m.backScreen
+		case "down", "j":
+			if m.errIx < len(acts)-1 {
+				m.errIx++
 			}
-		case "a":
-			if m.errCanAddr {
-				m.screen = screenAddress
-				m.status = "Re-enter the address the device has now; then continue."
+		case "enter":
+			if m.errIx < len(acts) {
+				return m.runErrAction(acts[m.errIx].key)
 			}
-		case "s":
-			if m.errCanSkip {
-				m.screen = screenSummary
-			}
-		case "q":
-			return true, tea.Quit
+		case "r", "b", "a", "s", "q":
+			return m.runErrAction(s)
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// errAction is one selectable recovery step on the error screen.
+type errAction struct {
+	key   string
+	label string
+}
+
+// errorActions lists the safe recovery choices for the step that failed. The
+// first entry is the primary action and the last is always Quit.
+func (m *model) errorActions() []errAction {
+	var acts []errAction
+	if m.errOp != opNone {
+		acts = append(acts, errAction{"r", "Retry this step"})
+	}
+	switch m.errOp {
+	case opWiFiStatus, opWiFiConnect:
+		if m.errCanAddr {
+			acts = append(acts, errAction{"a", "Change the device address"})
+		}
+		if m.errCanSkip {
+			acts = append(acts, errAction{"s", "Skip Wi-Fi and continue"})
+		}
+	case opApps:
+		if m.errCanBack {
+			acts = append(acts, errAction{"b", "Back to the app selection"})
+		}
+		if m.errCanSkip {
+			acts = append(acts, errAction{"s", "Skip to the summary"})
+		}
+	case opMarusiaProbe, opMarusiaToken:
+		if m.errCanSkip {
+			acts = append(acts, errAction{"s", "Skip to the summary"})
+		}
+	default:
+		if m.errCanAddr {
+			acts = append(acts, errAction{"a", "Change the device address"})
+		}
+		if m.errCanBack {
+			acts = append(acts, errAction{"b", "Back"})
+		}
+	}
+	return append(acts, errAction{"q", "Quit the installer"})
+}
+
+func (m *model) runErrAction(key string) (bool, tea.Cmd) {
+	switch key {
+	case "r":
+		if m.errOp != opNone {
+			return true, m.startOp(m.errOp)
+		}
+	case "b":
+		if m.errCanBack {
+			m.screen = m.backScreen
+		}
+	case "a":
+		if m.errCanAddr {
+			m.fieldIx = 0
+			m.screen = screenAddress
+			m.status = "Re-enter the address the device has now; then continue."
+		}
+	case "s":
+		if m.errCanSkip {
+			m.screen = screenSummary
+		}
+	case "q":
+		return true, tea.Quit
+	}
+	return true, nil
 }
 
 func (m *model) selectedSSID() string {
@@ -442,6 +535,7 @@ func osc52(s string) string {
 func (m *model) startOp(kind opKind) tea.Cmd {
 	m.busy = true
 	m.op = kind
+	m.opStart = time.Now()
 	m.screen = screenWorking
 	m.status = opLabel(kind)
 	m.progress = ""
@@ -470,6 +564,7 @@ func (m *model) startOp(kind opKind) tea.Cmd {
 func (m *model) startWiFiConnect(ssid, security, pass string) tea.Cmd {
 	m.busy = true
 	m.op = opWiFiConnect
+	m.opStart = time.Now()
 	m.screen = screenWorking
 	m.status = "Connecting to Wi-Fi"
 	return m.wifiConnectCmd(ssid, security, pass)
@@ -837,7 +932,19 @@ func (m *model) changePasswordCmd() tea.Cmd {
 }
 
 func (m *model) handleOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
+	wasAbort := m.screen == screenAbort
+	model, cmd := m.applyOpDone(msg)
+	// A step can finish while the user is deciding whether to stop. Keep the
+	// result rather than silently yanking them back to the stop dialog.
+	if wasAbort && msg.err == nil && m.screen != screenWorking {
+		m.status = "That step finished before it could be stopped; nothing was cancelled."
+	}
+	return model, cmd
+}
+
+func (m *model) applyOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
 	m.busy = false
+	m.opStart = time.Time{}
 	m.status = ""
 	m.progress = ""
 	if msg.inst != nil {
@@ -946,6 +1053,7 @@ func (m *model) handleOpDone(msg opDoneMsg) (tea.Model, tea.Cmd) {
 func (m *model) showError(msg opDoneMsg) {
 	m.errText = msg.err.Error()
 	m.errOp = msg.kind
+	m.errIx = 0
 	m.status = ""
 	m.progress = ""
 	m.errCanBack = false

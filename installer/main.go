@@ -1,4 +1,4 @@
-// Command capsulad-installer installs Capsula OS on a Capsula Mini over ADB
+// Command capsulad-installer installs capsulad on a Capsula Mini over ADB
 // (jailbroken stock) or SSH (Alpine).
 package main
 
@@ -96,8 +96,10 @@ func main() {
 	})
 	if err != nil {
 		if errors.Is(err, ui.ErrAborted) {
-			fmt.Fprintln(os.Stderr, "capsulad-installer: stopped by the user.")
-			fmt.Fprintln(os.Stderr, "The device-side deploy is detached; reconnect and read /tmp/capsulad-installer/deploy.log, then retry or run /etc/init.d/S99btctl.sh start (stock) / rc-service capsulad start (Alpine).")
+			fmt.Fprintln(os.Stderr, "capsulad-installer: stopped by the user; the current step was cancelled.")
+			if errors.Is(err, ui.ErrAbortedDuringDeploy) {
+				fmt.Fprintln(os.Stderr, "The device-side deploy is detached; reconnect and read /tmp/capsulad-installer/deploy.log, then retry or run /etc/init.d/S99btctl.sh start (stock) / rc-service capsulad start (Alpine).")
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "capsulad-installer: %v\n", err)
 		}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -32,8 +33,13 @@ type Options struct {
 	CacheDir     string
 }
 
-// ErrAborted is returned when the user confirms an abort during a deployment.
-var ErrAborted = errors.New("installation aborted; the device may be mid-deployment")
+// ErrAborted is returned when the user stops the installer while a device step
+// is in flight.
+var ErrAborted = errors.New("installation stopped by the user")
+
+// ErrAbortedDuringDeploy is wrapped by ErrAborted when the detached deployment
+// had already been launched, so the device may still be changing.
+var ErrAbortedDuringDeploy = errors.New("the detached deployment may still be running")
 
 type screen int
 
@@ -123,12 +129,14 @@ type model struct {
 	screen        screen
 	prevScreen    screen
 	cursor        int
+	scroll        int
 
 	spinner  spinner.Model
 	logs     []string
 	progress string
 	busy     bool
 	op       opKind
+	opStart  time.Time
 	status   string
 
 	addrInput     textinput.Model
@@ -187,14 +195,17 @@ type model struct {
 
 	errText    string
 	errOp      opKind
+	errIx      int
 	errCanBack bool
 	errCanSkip bool
 	errCanAddr bool
 	backScreen screen
 
-	hostKey  *hostKeyMsg
-	aborted  bool
-	viewport viewport.Model
+	hostKey       *hostKeyMsg
+	abortIx       int
+	aborted       bool
+	abortedDeploy bool
+	viewport      viewport.Model
 }
 
 func newModel(opts Options) *model {
@@ -234,23 +245,30 @@ func newInput(placeholder string, secret bool, width int) textinput.Model {
 	return ti
 }
 
-// Run starts the interface and blocks until it exits.
+// Run starts the interface and blocks until it exits. The caller's context
+// belongs to the program (signals); device work gets a child context so
+// cancelling an operation does not tear down the Bubble Tea event loop.
 func Run(ctx context.Context, opts Options) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	m := newModel(opts)
-	m.ctx = ctx
-	m.cancel = cancel
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	defer m.cancel()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	m.prog = p
 	final, err := p.Run()
 	if err != nil {
+		if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
+			return ErrAborted
+		}
 		return err
 	}
-	if fm, ok := final.(*model); ok && fm.aborted {
-		return ErrAborted
+	fm, ok := final.(*model)
+	if !ok || !fm.aborted {
+		return nil
 	}
-	return nil
+	if fm.abortedDeploy {
+		return fmt.Errorf("%w: %w", ErrAborted, ErrAbortedDuringDeploy)
+	}
+	return ErrAborted
 }
 
 func (m *model) Init() tea.Cmd {
@@ -290,29 +308,23 @@ func (m *model) hostKeyPrompt(host, fingerprint string) bool {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	prev := m.screen
+	model, cmd := m.update(msg)
+	if m.screen != prev {
+		m.scroll = 0
+		m.focusField()
+	}
+	return model, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.viewport.Width = max(20, msg.Width-6)
-		m.viewport.Height = max(5, msg.Height-12)
 		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
-			if m.hostKey != nil {
-				m.hostKey.reply <- false
-				m.hostKey = nil
-				m.aborted = true
-				m.cancel()
-				return m, tea.Quit
-			}
-			if m.busy || m.screen == screenAbort {
-				if m.screen != screenAbort {
-					m.prevScreen = m.screen
-					m.screen = screenAbort
-				}
-				return m, nil
-			}
-			return m, tea.Quit
+			return m.ctrlC()
 		}
 		if handled, cmd := m.key(msg); handled {
 			m.focusField()
@@ -353,6 +365,39 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// ctrlC is the universal escape hatch. While a device step is in flight the
+// first press opens the stop dialog; pressing it again on that dialog stops
+// immediately. On an idle screen it simply quits.
+func (m *model) ctrlC() (tea.Model, tea.Cmd) {
+	if m.hostKey != nil {
+		m.hostKey.reply <- false
+		m.hostKey = nil
+		return m, m.stopAndQuit()
+	}
+	if m.screen == screenAbort {
+		return m, m.stopAndQuit()
+	}
+	if m.busy {
+		m.prevScreen = m.screen
+		m.abortIx = 0
+		m.screen = screenAbort
+		return m, nil
+	}
+	return m, tea.Quit
+}
+
+// stopAndQuit cancels the in-flight operation and ends the program. It never
+// cancels the program context itself: doing so made Bubble Tea return
+// ErrProgramKilled before the aborted model could be inspected.
+func (m *model) stopAndQuit() tea.Cmd {
+	m.aborted = true
+	m.abortedDeploy = m.busy && m.op == opDeploy
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return tea.Quit
 }
 
 func (m *model) appendLog(line string) {

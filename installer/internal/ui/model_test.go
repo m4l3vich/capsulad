@@ -132,7 +132,7 @@ func TestOpDoneTransitions(t *testing.T) {
 	if m.generated == "" {
 		t.Fatal("prepare did not generate a password")
 	}
-	if !strings.Contains(m.View(), "Ready to install") {
+	if !strings.Contains(m.View(), "Install capsulad") {
 		t.Fatal("confirm view missing")
 	}
 
@@ -323,7 +323,7 @@ func TestSanitizesUntrustedTerminalText(t *testing.T) {
 	}
 }
 
-func TestDoubleCtrlCKeepsPreAbortScreen(t *testing.T) {
+func TestSecondCtrlCStopsImmediately(t *testing.T) {
 	m := newModel(Options{})
 	m.width, m.height = 100, 40
 	m.busy = true
@@ -332,11 +332,163 @@ func TestDoubleCtrlCKeepsPreAbortScreen(t *testing.T) {
 	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); m.screen != screenAbort || m.prevScreen != screenWorking {
 		t.Fatalf("first ctrl+c: screen=%v prev=%v", m.screen, m.prevScreen)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); m.screen != screenAbort || m.prevScreen != screenWorking {
-		t.Fatalf("second ctrl+c: screen=%v prev=%v", m.screen, m.prevScreen)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil || !m.aborted {
+		t.Fatalf("second ctrl+c should stop immediately: aborted=%v cmd=%v", m.aborted, cmd)
 	}
-	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}); m.screen != screenWorking {
-		t.Fatalf("n/esc returned to %v", m.screen)
+	if m.abortedDeploy {
+		t.Fatal("a non-deploy step must not be reported as a detached deployment")
+	}
+}
+
+func TestManualSSIDThenPassphraseTyping(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.screen = screenWiFi
+	m.networks = nil
+	m.wifiIx = 0
+
+	// Enter on the synthetic "manual" row opens the SSID form.
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenWiFiManual {
+		t.Fatalf("screen = %v, want manual SSID", m.screen)
+	}
+	if m.focusedInput() != &m.wifiSSIDInput {
+		t.Fatal("SSID field is not focused")
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("HomeNet")})
+	if m.wifiSSIDInput.Value() != "HomeNet" {
+		t.Fatalf("SSID value = %q", m.wifiSSIDInput.Value())
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenWiFiPass {
+		t.Fatalf("screen = %v, want passphrase", m.screen)
+	}
+	// Regression: the passphrase field must receive focus after the manual
+	// SSID form, otherwise every typed character is dropped.
+	if m.focusedInput() != &m.wifiPassInput {
+		t.Fatal("passphrase field is not focused after manual SSID entry")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("secret-pass")})
+	if m.wifiPassInput.Value() != "secret-pass" {
+		t.Fatalf("passphrase value = %q", m.wifiPassInput.Value())
+	}
+}
+
+func TestConfirmViewFitsSmallTerminal(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 80, 24
+	m.screen = screenConfirm
+	m.det = device.Detection{Platform: device.PlatformRockchipStock, Arch: "aarch64"}
+	m.authState = install.AuthState{Configured: true, Known: true}
+	m.generated = "generated-password-1234"
+	m.passwordReady = true
+	m.passMode = passGenerate
+	m.space = &install.SpaceCheck{
+		AvailableBytes: 1 << 30, RequiredBytes: 8 << 20, OK: true,
+		ReserveBytes: 8 << 20, BundleBytes: 24 << 20, AppBytes: 40 << 20,
+	}
+
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > m.height {
+		t.Fatalf("view is %d lines, terminal is %d", len(lines), m.height)
+	}
+	if !strings.Contains(lines[len(lines)-1], "install") {
+		t.Fatalf("primary action missing from the fixed footer: %q", lines[len(lines)-1])
+	}
+	// The required acknowledgement and the install action must be visible
+	// without scrolling on a stock 80x24 terminal.
+	for _, want := range []string{"Nothing is deleted", "Install capsulad"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("review screen hides %q at 24 rows", want)
+		}
+	}
+
+	// A shorter terminal does clip, and then says how to scroll.
+	m.height = 12
+	view = m.View()
+	if lines := strings.Split(view, "\n"); len(lines) > m.height {
+		t.Fatalf("short view is %d lines, terminal is %d", len(lines), m.height)
+	}
+	if !strings.Contains(strings.Split(view, "\n")[len(strings.Split(view, "\n"))-1], "pgup/pgdn") {
+		t.Fatalf("clipped view has no scroll hint: %q", view)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown}); m.scroll == 0 {
+		t.Fatal("pgdown did not scroll the body")
+	}
+}
+
+func TestErrorScreenMenuSelectsAction(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.showError(opDoneMsg{kind: opDeploy, err: errors.New("boom")})
+	if m.screen != screenError {
+		t.Fatalf("screen = %v, want error", m.screen)
+	}
+	acts := m.errorActions()
+	if acts[0].key != "r" {
+		t.Fatalf("first action = %q, want retry", acts[0].key)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}); acts[m.errIx].key != "a" {
+		t.Fatalf("after down: %q, want change-address", acts[m.errIx].key)
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenAddress || m.fieldIx != 0 {
+		t.Fatalf("enter on change-address: screen=%v field=%d", m.screen, m.fieldIx)
+	}
+}
+
+func TestAbortMenuDefaultsToContinue(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.screen = screenWorking
+	m.busy = true
+	m.op = opWiFiStatus
+	m.cancel = func() {}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); m.screen != screenAbort {
+		t.Fatalf("screen = %v, want abort", m.screen)
+	}
+	// The safe option is selected, so a stray enter does not stop the install.
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}); m.screen != screenWorking {
+		t.Fatalf("enter on default option: screen = %v, want working", m.screen)
+	}
+	if m.aborted {
+		t.Fatal("aborted without selecting the stop option")
+	}
+}
+
+func TestDeployAbortIsTagged(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.screen = screenWorking
+	m.busy = true
+	m.op = opDeploy
+	m.cancel = func() {}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}); m.screen != screenAbort {
+		t.Fatalf("esc on working: screen = %v, want abort", m.screen)
+	}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}); cmd == nil {
+		t.Fatal("y did not return a quit command")
+	}
+	if !m.aborted || !m.abortedDeploy {
+		t.Fatalf("aborted=%v abortedDeploy=%v", m.aborted, m.abortedDeploy)
+	}
+}
+
+func TestAddressTabMovesInputFocus(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height = 100, 40
+	m.screen = screenAddress
+	m.firmware = device.FirmwareAlpine
+	m.focusField()
+	if m.focusedInput() != &m.addrInput {
+		t.Fatal("address field is not focused on entry")
+	}
+	if _, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}); m.fieldIx != 1 || m.focusedInput() != &m.sshUserInput {
+		t.Fatalf("tab: field=%d focused=%v", m.fieldIx, m.focusedInput() == &m.sshUserInput)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if m.sshUserInput.Value() == "root" {
+		t.Fatalf("typing went to the wrong field: ssh user = %q", m.sshUserInput.Value())
 	}
 }
 

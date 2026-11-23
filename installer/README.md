@@ -149,7 +149,12 @@ core `release.json` for compatibility with older combined releases.
     path and the exact rollback command. It states that nothing was deleted.
 
 Every step keeps a running log, and back/retry is available where returning is
-safe. Ctrl-C during a deployment asks before aborting.
+safe. Each screen has a fixed header showing the current step, a body sized to
+the terminal, and a footer that lists the keys for that screen; tall bodies
+scroll with PgUp/PgDn and the primary action stays in the footer. Ctrl-C (or Esc
+while a step is running) opens a stop dialog; stopping cancels the step and
+exits. Ctrl-C again on that dialog stops immediately. Stopping a detached
+deployment still leaves the device-side script running, as described above.
 
 ## Cleanup is retire-only
 
