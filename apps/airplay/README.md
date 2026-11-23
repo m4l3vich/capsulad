@@ -482,10 +482,8 @@ See the app's [limits](#not-implemented-and-what-it-means) and
 ## Licensing and notices
 
 This repository has no project-wide licence (there is no root `LICENSE` or
-`COPYING`), and upstream attribution for the reference receiver
-capsula-mini-airplay2 is pending the author's agreement, so nothing in this
-package grants redistribution rights beyond the notices below. The full notices
-ship as [`NOTICE`](NOTICE), staged next to the binary by `apps/airplay/build.sh`:
+`COPYING`). The full notices ship as [`NOTICE`](NOTICE), staged next to
+the binary by `apps/airplay/build.sh`:
 
 - The four `/fp-setup` reply constants reproduced in
   `internal/session/fairplay.go` come from Shairport Sync's `rtsp.c`

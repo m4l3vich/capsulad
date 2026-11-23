@@ -42,6 +42,11 @@ func newTestUserStore(t *testing.T, logs *logbus.Bus) *settings.UserStore {
 // tap and a wakeword manager.
 func newWakewordTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
+	return newWakewordTestDaemonAt(t, t.TempDir())
+}
+
+func newWakewordTestDaemonAt(t *testing.T, dataDir string) *Daemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	clock := ids.NewClock()
@@ -55,7 +60,7 @@ func newWakewordTestDaemon(t *testing.T) *Daemon {
 	t.Cleanup(mgr.Close)
 	pres := presentations.NewManager(clock, logs, nil)
 	d := &Daemon{
-		ctx: ctx, cfg: Config{DataDir: t.TempDir()},
+		ctx: ctx, cfg: Config{DataDir: dataDir},
 		clock: clock, logs: logs, audio: mgr, dev: sim,
 		pres: pres, router: routing.New(clock, logs, pres),
 	}
@@ -151,6 +156,108 @@ func TestLegacyModelMigratesOnFirstScan(t *testing.T) {
 	}
 	if model.Threshold != 0.59 {
 		t.Fatalf("threshold = %v", model.Threshold)
+	}
+}
+
+// A word compiled into the daemon is installed byte for byte on a device that
+// has never had a wakeword store, and is live under the legacy default (global
+// switch on, bound to the selected assistant) with no training run.
+func TestBundledWakewordInstalledOnFirstStart(t *testing.T) {
+	d := newWakewordTestDaemon(t)
+	d.startWakewordEngine()
+	artifacts, err := wakeword.BundledArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) == 0 {
+		t.Fatal("no wakeword is bundled into the daemon")
+	}
+	for _, artifact := range artifacts {
+		model := modelByID(t, d, artifact.ID)
+		if !model.Available || !model.Enabled || model.AppID != "" {
+			t.Fatalf("bundled %s = %+v, want available, live and unbound", artifact.ID, model)
+		}
+		got, err := os.ReadFile(d.classifierPath(artifact.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(artifact.Raw) {
+			t.Fatalf("bundled %s was rewritten during seeding", artifact.ID)
+		}
+		if _, ok := d.wake.Trigger("wakeword", artifact.ID); !ok {
+			t.Fatalf("bundled %s is listed but cannot activate", artifact.ID)
+		}
+	}
+	// The simulator's manual hook is a framework capability, not an artifact.
+	modelByID(t, d, "sim.wakeword.manual")
+}
+
+// Deleting the bundled word leaves the models directory behind, and that
+// directory is authoritative: the next start must not reinstall the word.
+func TestBundledWakewordDeletionSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	d := newWakewordTestDaemonAt(t, dir)
+	d.startWakewordEngine()
+	modelByID(t, d, "word.personal")
+
+	if err := d.DeleteWakewordClassifier("word.personal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(d.classifierPath("word.personal")); !os.IsNotExist(err) {
+		t.Fatalf("deleted artifact is still present: %v", err)
+	}
+
+	restarted := newWakewordTestDaemonAt(t, dir)
+	restarted.startWakewordEngine()
+	for _, model := range restarted.wake.Models() {
+		if model.ID == "word.personal" {
+			t.Fatalf("the deleted bundled word came back after restart: %+v", model)
+		}
+	}
+}
+
+// An explicit per-word list is an operator decision about what this device
+// runs. It also suppresses seeding, so a device configured with no word stays
+// that way even when its store does not exist yet.
+func TestExplicitEmptyWakewordListSuppressesBundledWord(t *testing.T) {
+	d := newWakewordTestDaemon(t)
+	setWakewords(t, d, []settings.WakewordBinding{})
+	d.startWakewordEngine()
+
+	if _, err := os.Stat(d.wakewordStore().Dir()); !os.IsNotExist(err) {
+		t.Fatalf("the store was seeded despite an explicit empty list: %v", err)
+	}
+	for _, model := range d.wake.Models() {
+		if model.ID == "word.personal" {
+			t.Fatalf("bundled word is listed despite an explicit empty list: %+v", model)
+		}
+	}
+}
+
+// A legacy single artifact owns the device's word. The bundled default must not
+// be installed next to it, and the legacy file must keep migrating untouched.
+func TestLegacyArtifactWinsOverBundledWord(t *testing.T) {
+	d := newWakewordTestDaemon(t)
+	clf := wakeword.NewClassifier("word.custom", "Custom", "en", 3)
+	raw, err := json.Marshal(clf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := d.legacyClassifierPath()
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.startWakewordEngine()
+
+	modelByID(t, d, "word.custom")
+	for _, model := range d.wake.Models() {
+		if model.ID == "word.personal" {
+			t.Fatalf("the bundled word was seeded beside the legacy artifact: %+v", model)
+		}
 	}
 }
 

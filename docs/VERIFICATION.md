@@ -235,6 +235,10 @@ physical timing, brightness/gamma, recognition accuracy or peer-device behavior.
 - Multi-word detection is covered at the model store (import, per-word enablement and binding), the
   ensemble (single-model score parity, deterministic arbitration, one global cooldown) and delivery
   (a bound app, no rerouting when it is unready).
+- A word compiled into the daemon is seeded byte-identically into a fresh model store, advertised
+  live and unbound, refused when the store already exists, suppressed by an explicit `wakewords`
+  list or a legacy artifact, and not resurrected after deletion and restart. These are host tests;
+  no device run of the bundled artifact has been recorded.
 - Live package install, replace and remove through the daemon, and the browser Apps page, are
   exercised on the simulator/host, including the running-app refusal and the stopped-daemon
   on-disk fallback. Device installation is recorded above with its own proof level.

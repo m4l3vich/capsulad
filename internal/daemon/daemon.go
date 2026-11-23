@@ -765,12 +765,19 @@ func touchCaps(t backend.TouchDevice) backend.TouchCaps {
 	return t.Caps()
 }
 
+// simulatorManualWakeModel is the virtual backend's manual trigger. It is a
+// framework test hook rather than an installed artifact, so it stays advertised
+// alongside any bundled or trained word on the simulator.
+func simulatorManualWakeModel() wakeword.Model {
+	return wakeword.Model{
+		ID: "sim.wakeword.manual", DisplayName: "Manual trigger (simulator)",
+		Language: "any", EngineID: "sim.manual", Available: true, Enabled: true,
+	}
+}
+
 func (d *Daemon) wakeModels() []wakeword.Model {
 	if d.dev.Platform() == backend.PlatformSimulator {
-		return []wakeword.Model{{
-			ID: "sim.wakeword.manual", DisplayName: "Manual trigger (simulator)",
-			Language: "any", EngineID: "sim.manual", Available: true, Enabled: true,
-		}}
+		return []wakeword.Model{simulatorManualWakeModel()}
 	}
 	return []wakeword.Model{{
 		ID: "word.personal", DisplayName: "Record a personal wakeword",

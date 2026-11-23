@@ -88,10 +88,7 @@ LGPL obligations for this link — **the branch is static**:
 This repository has no project-wide licence: there is no root LICENSE or
 COPYING, and apps/airplay carries no licence of its own beyond the notices
 above. The upstream project this app was compared against and derives its
-protocol facts from, capsula-mini-airplay2, is attributed only as a reference;
-explicit attribution, and any redistribution terms for that project, are
-pending agreement with its author. Consequently nothing in this file grants
-redistribution rights beyond the specific notices reproduced above.
+protocol facts from, capsula-mini-airplay2, is attributed only as a reference
 
 
 ## Relinking the statically linked decoder (LGPL-2.1+ obligation)

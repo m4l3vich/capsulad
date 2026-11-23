@@ -101,6 +101,16 @@ error rather than reinterpreted.
   validated against `^[a-z0-9][a-z0-9._-]{0,63}$`. A corrupt or mismatched artifact is **reported and
   skipped**, never silently replaced or deleted. A missing or invalid artifact is unavailable, not a
   functioning fallback.
+- **Bundled words.** A build may compile version-3 artifacts into the daemon (again one JSON file per
+  id). On the first scan they are installed **byte for byte** into a `models` directory that does not
+  exist yet, so a fresh device has a working word without a training run. They are live under the
+  legacy default: the global switch decides and they are bound to the selected assistant. The
+  directory is the initialization marker, not the file: an existing directory — including an empty
+  one left after deleting the bundled word — is authoritative, so a restart never resurrects a
+  deletion. An explicit `wakewords` list or an existing legacy `model.json` also suppresses seeding;
+  restoring the store directory (or deleting the whole `wakeword` directory) is the deliberate reset
+  that seeds again. A bundled artifact without `input_audio` provenance keeps the unverified-threshold
+  rule above; its bytes and calibration are never relabelled.
 
 ## Numerical and device evidence
 

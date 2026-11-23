@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	frameworkv1 "capsulad/gen/go/capsulad/framework/v1"
+	"capsulad/internal/backend"
 	"capsulad/internal/settings"
 	"capsulad/internal/uichanges"
 	"capsulad/internal/wakeword"
@@ -81,6 +85,7 @@ func (d *Daemon) scanWakewordsLocked() {
 	}
 	store := d.wakewordStore()
 	legacyPath := d.legacyClassifierPath()
+	d.seedBundledWakewords(store, legacyPath)
 	var refusedLegacy *wakeword.InvalidModel
 	if migrated, err := store.Migrate(legacyPath); err != nil {
 		// The legacy artifact stays where it is and is reported as unusable,
@@ -107,6 +112,46 @@ func (d *Daemon) scanWakewordsLocked() {
 	}
 	d.wkArtifacts.valid, d.wkArtifacts.invalid = valid, invalid
 	d.wkArtifacts.scanned = true
+}
+
+// seedBundledWakewords installs the artifacts compiled into the daemon when the
+// device has never had a wakeword store. The models directory is the marker: an
+// existing directory is authoritative even when it is empty, so deleting the
+// bundled word is never undone by a restart. An explicit `wakewords` list and an
+// existing legacy single artifact also mean the operator already decided what
+// this device runs, so neither is seeded over.
+func (d *Daemon) seedBundledWakewords(store *wakeword.ModelStore, legacyPath string) {
+	if d.user != nil && d.user.Get().Values.Wakewords != nil {
+		return
+	}
+	if _, err := os.Stat(legacyPath); err == nil {
+		return
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		if d.logs != nil {
+			d.logs.Warnf("wakeword", "", "checking legacy artifact %s: %v; the bundled wakeword was not installed", legacyPath, err)
+		}
+		return
+	}
+	artifacts, err := wakeword.BundledArtifacts()
+	if err != nil {
+		if d.logs != nil {
+			d.logs.Warnf("wakeword", "", "the bundled wakeword is unusable: %v", err)
+		}
+		return
+	}
+	seeded, err := store.SeedDefaults(artifacts)
+	if err != nil {
+		if d.logs != nil {
+			d.logs.Warnf("wakeword", "", "installing the bundled wakeword into %s: %v", store.Dir(), err)
+		}
+		return
+	}
+	if !seeded || d.logs == nil {
+		return
+	}
+	for _, artifact := range artifacts {
+		d.logs.Infof("wakeword", "", "installed the bundled wakeword %s", artifact.ID)
+	}
 }
 
 // legacyArtifactID names the refused legacy artifact by its file name stem, the
@@ -264,6 +309,13 @@ func (d *Daemon) applyWakewordModels(valid []wakeword.StoredModel, invalid []wak
 			models[i].Enabled = false
 			models[i].Detail = unavailableDetail
 		}
+	}
+	if d.dev != nil && d.dev.Platform() == backend.PlatformSimulator {
+		// The simulator's manual trigger is a framework hook, not an installed
+		// artifact: it stays available alongside a bundled or trained word and
+		// is not subject to an artifact's unavailable reason.
+		models = append(models, simulatorManualWakeModel())
+		sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	}
 	previous := d.wake.Models()
 	changed := !sameWakewordModels(previous, models)

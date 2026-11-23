@@ -211,13 +211,10 @@ func (m *Classifier) InputProcessingTap() (tap string, declared bool) {
 	return tap, true
 }
 
-// LoadClassifier reads and validates a model file. Legacy files fail with a
-// retrain message rather than being reinterpreted.
-func LoadClassifier(path string) (*Classifier, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+// DecodeClassifier parses and validates one artifact held in memory. It is the
+// same contract LoadClassifier applies to a file, used for the words compiled
+// into the daemon.
+func DecodeClassifier(raw []byte) (*Classifier, error) {
 	// Inspect the version before decoding version-specific tensor shapes:
 	// legacy b2 is a scalar, whereas v3 b2 is a vector.
 	var header struct {
@@ -237,4 +234,14 @@ func LoadClassifier(path string) (*Classifier, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// LoadClassifier reads and validates a model file. Legacy files fail with a
+// retrain message rather than being reinterpreted.
+func LoadClassifier(path string) (*Classifier, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeClassifier(raw)
 }

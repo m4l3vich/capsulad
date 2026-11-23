@@ -12,8 +12,7 @@ example [apps/airplay/NOTICE](../apps/airplay/NOTICE) and
   latency intent, the cover-art ring rendering and the single-volume transport interaction.
   Upstream packages Shairport Sync 5.6.2 and NQPTP 1.2.9 plus its own installers; none of that
   is included or redistributed here, and [apps/airplay](../apps/airplay) is an independent Go
-  implementation. **Attribution to the upstream author is explicitly pending exact agreement with
-  that author**; this repository claims no affiliation with or endorsement by the project.
+  implementation.
 - **Shairport Sync** (https://github.com/mikebrady/shairport-sync) and **NQPTP**
   (https://github.com/mikebrady/nqptp) — the reference for AirPlay wire behaviour (RTSP method
   handling, HAP pairing key derivation, RTP/RTCP and timing packet layouts, PTP message layout).
